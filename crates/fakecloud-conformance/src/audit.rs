@@ -2,33 +2,99 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Map from service_name (as used in service-map.json) to the list of source files
-/// containing `supported_actions()`.
-fn service_source_files(project_root: &Path) -> Vec<(String, Vec<PathBuf>)> {
-    // service_name -> (crate_suffix, list of source filenames)
+/// One entry in the audit's service mapping.
+///
+/// * `service_name` — the logical audit key (unique per mapping entry).
+/// * `source_files` — candidate paths to the crate's `supported_actions()` body.
+/// * `test_service_tags` — the service tags we accept on `#[test_action("tag", "Action", ...)]`
+///   when looking for coverage. Usually one tag (same as `service_name`), but services that
+///   share one crate and one `supported_actions()` list across several AWS service tags
+///   (e.g. `bedrock` control plane + `bedrock-runtime` data plane) supply multiple tags so
+///   tests annotated under any of them count as coverage.
+pub struct AuditMapping {
+    pub service_name: String,
+    pub source_files: Vec<PathBuf>,
+    pub test_service_tags: Vec<String>,
+}
+
+/// Mapping from each audited crate to its `supported_actions()` source files and the
+/// `#[test_action(...)]` service tags that count as coverage for it.
+fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
+    // (service_name, crate_suffix, source_files, test_service_tags)
     // For each service, try both `src/<name>.rs` and `src/<name>/mod.rs` to
     // handle services that have been split into sub-module directories.
-    let mappings: &[(&str, &str, &[&str])] = &[
-        ("sqs", "sqs", &["service.rs"]),
-        ("sns", "sns", &["service.rs"]),
-        ("events", "eventbridge", &["service.rs"]),
-        ("iam", "iam", &["iam_service/mod.rs", "iam_service.rs"]),
-        ("sts", "iam", &["sts_service.rs"]),
-        ("ssm", "ssm", &["service/mod.rs", "service.rs"]),
-        ("s3", "s3", &["service/mod.rs", "service.rs"]),
-        ("dynamodb", "dynamodb", &["service/mod.rs", "service.rs"]),
-        ("lambda", "lambda", &["service.rs"]),
-        ("secretsmanager", "secretsmanager", &["service.rs"]),
-        ("logs", "logs", &["service/mod.rs", "service.rs"]),
-        ("kms", "kms", &["service.rs"]),
-        ("cloudformation", "cloudformation", &["service.rs"]),
-        ("ses", "ses", &["service/mod.rs", "service.rs"]),
-        ("cognito-idp", "cognito", &["service/mod.rs", "service.rs"]),
+    let mappings: &[(&str, &str, &[&str], &[&str])] = &[
+        ("sqs", "sqs", &["service.rs"], &["sqs"]),
+        ("sns", "sns", &["service.rs"], &["sns"]),
+        ("events", "eventbridge", &["service.rs"], &["events"]),
+        (
+            "iam",
+            "iam",
+            &["iam_service/mod.rs", "iam_service.rs"],
+            &["iam"],
+        ),
+        ("sts", "iam", &["sts_service.rs"], &["sts"]),
+        ("ssm", "ssm", &["service/mod.rs", "service.rs"], &["ssm"]),
+        ("s3", "s3", &["service/mod.rs", "service.rs"], &["s3"]),
+        (
+            "dynamodb",
+            "dynamodb",
+            &["service/mod.rs", "service.rs"],
+            &["dynamodb"],
+        ),
+        ("lambda", "lambda", &["service.rs"], &["lambda"]),
+        (
+            "secretsmanager",
+            "secretsmanager",
+            &["service.rs"],
+            &["secretsmanager"],
+        ),
+        ("logs", "logs", &["service/mod.rs", "service.rs"], &["logs"]),
+        ("kms", "kms", &["service.rs"], &["kms"]),
+        (
+            "cloudformation",
+            "cloudformation",
+            &["service.rs"],
+            &["cloudformation"],
+        ),
+        ("ses", "ses", &["service/mod.rs", "service.rs"], &["ses"]),
+        (
+            "cognito-idp",
+            "cognito",
+            &["service/mod.rs", "service.rs"],
+            &["cognito-idp"],
+        ),
+        ("rds", "rds", &["service.rs"], &["rds"]),
+        ("kinesis", "kinesis", &["service.rs"], &["kinesis"]),
+        (
+            "elasticache",
+            "elasticache",
+            &["service.rs"],
+            &["elasticache"],
+        ),
+        // Step Functions tests historically tagged `sfn`; Smithy / service-map uses `states`.
+        (
+            "states",
+            "stepfunctions",
+            &["service.rs"],
+            &["states", "sfn"],
+        ),
+        ("scheduler", "scheduler", &["service.rs"], &["scheduler"]),
+        // bedrock crate implements both control-plane (`bedrock`) and data-plane
+        // (`bedrock-runtime`) AWS services from a single `supported_actions()` list.
+        // Tests for data-plane ops are tagged `bedrock-runtime`, control-plane tests
+        // are tagged `bedrock`; either counts.
+        (
+            "bedrock",
+            "bedrock",
+            &["service.rs"],
+            &["bedrock", "bedrock-runtime"],
+        ),
     ];
 
     mappings
         .iter()
-        .map(|(service, crate_suffix, files)| {
+        .map(|(service, crate_suffix, files, tags)| {
             let paths: Vec<PathBuf> = files
                 .iter()
                 .map(|f| {
@@ -39,7 +105,11 @@ fn service_source_files(project_root: &Path) -> Vec<(String, Vec<PathBuf>)> {
                         .join(f)
                 })
                 .collect();
-            (service.to_string(), paths)
+            AuditMapping {
+                service_name: service.to_string(),
+                source_files: paths,
+                test_service_tags: tags.iter().map(|t| t.to_string()).collect(),
+            }
         })
         .collect()
 }
@@ -53,14 +123,14 @@ pub fn scan_implemented_actions(
     let re = Regex::new(r#""([^"]+)""#).unwrap();
     let mut result = HashMap::new();
 
-    for (service_name, source_files) in service_source_files(project_root) {
+    for mapping in service_source_files(project_root) {
         let mut actions = Vec::new();
 
-        for path in &source_files {
+        for path in &mapping.source_files {
             if !path.exists() {
                 eprintln!(
                     "Warning: source file not found for {}: {}",
-                    service_name,
+                    mapping.service_name,
                     path.display()
                 );
                 continue;
@@ -118,11 +188,20 @@ pub fn scan_implemented_actions(
 
         if !actions.is_empty() {
             actions.sort();
-            result.insert(service_name, actions);
+            result.insert(mapping.service_name, actions);
         }
     }
 
     Ok(result)
+}
+
+/// Map each logical audit-service key to the list of `#[test_action("tag", ...)]` tags
+/// that count as coverage for it. Derived from `service_source_files`.
+pub fn audit_service_tags(project_root: &Path) -> HashMap<String, Vec<String>> {
+    service_source_files(project_root)
+        .into_iter()
+        .map(|m| (m.service_name, m.test_service_tags))
+        .collect()
 }
 
 /// Scan conformance test files for `#[test_action("service", "Action", ...)]` annotations.
@@ -203,6 +282,8 @@ pub fn run_audit(project_root: &Path) -> bool {
         }
     };
 
+    let tag_map = audit_service_tags(project_root);
+
     println!("=== Conformance Audit ===");
     println!();
 
@@ -215,7 +296,14 @@ pub fn run_audit(project_root: &Path) -> bool {
 
     for service in &services {
         let actions = &implemented[*service];
-        let covered_actions = covered.get(*service).cloned().unwrap_or_default();
+        let tags = tag_map
+            .get(*service)
+            .cloned()
+            .unwrap_or_else(|| vec![service.to_string()]);
+        let covered_actions: Vec<String> = tags
+            .iter()
+            .flat_map(|tag| covered.get(tag).cloned().unwrap_or_default())
+            .collect();
 
         let covered_count = actions
             .iter()

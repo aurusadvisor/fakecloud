@@ -1204,3 +1204,89 @@ async fn elasticache_delete_serverless_cache_snapshot() {
     assert_eq!(snapshot.serverless_cache_snapshot_name(), Some("snap-3"));
     assert_eq!(snapshot.status(), Some("deleting"));
 }
+
+#[test_action("elasticache", "FailoverGlobalReplicationGroup", checksum = "264b8166")]
+#[tokio::test]
+async fn elasticache_failover_global_replication_group() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("failover-primary-rg")
+        .replication_group_description("Primary for failover test")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .create_global_replication_group()
+        .global_replication_group_id_suffix("failover-a")
+        .primary_replication_group_id("failover-primary-rg")
+        .global_replication_group_description("For failover test")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .failover_global_replication_group()
+        .global_replication_group_id("fc-us-east-1-failover-a")
+        .primary_region("us-east-1")
+        .primary_replication_group_id("failover-primary-rg")
+        .send()
+        .await
+        .unwrap();
+
+    let group = response
+        .global_replication_group()
+        .expect("global replication group");
+    assert_eq!(
+        group.global_replication_group_id(),
+        Some("fc-us-east-1-failover-a")
+    );
+}
+
+#[test_action(
+    "elasticache",
+    "DisassociateGlobalReplicationGroup",
+    checksum = "095e0e05"
+)]
+#[tokio::test]
+async fn elasticache_disassociate_global_replication_group() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("disassoc-primary-rg")
+        .replication_group_description("Primary for disassociate test")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .create_global_replication_group()
+        .global_replication_group_id_suffix("disassoc-a")
+        .primary_replication_group_id("disassoc-primary-rg")
+        .global_replication_group_description("For disassociate test")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .disassociate_global_replication_group()
+        .global_replication_group_id("fc-us-east-1-disassoc-a")
+        .replication_group_id("disassoc-primary-rg")
+        .replication_group_region("us-east-1")
+        .send()
+        .await
+        .unwrap();
+
+    let group = response
+        .global_replication_group()
+        .expect("global replication group");
+    assert_eq!(
+        group.global_replication_group_id(),
+        Some("fc-us-east-1-disassoc-a")
+    );
+}
