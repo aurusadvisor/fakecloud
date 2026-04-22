@@ -1095,3 +1095,28 @@ async fn rds_describe_db_subnet_groups_pagination() {
     assert_eq!(response2.db_subnet_groups().len(), 1);
     assert!(response2.marker().is_none());
 }
+
+#[test_action("rds", "ModifyDBParameterGroup", checksum = "a86b7ae4")]
+#[tokio::test]
+async fn rds_modify_db_parameter_group() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_parameter_group()
+        .db_parameter_group_name("conf-modify-pg")
+        .db_parameter_group_family("postgres16")
+        .description("Original description")
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .modify_db_parameter_group()
+        .db_parameter_group_name("conf-modify-pg")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.db_parameter_group_name(), Some("conf-modify-pg"));
+}

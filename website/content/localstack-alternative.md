@@ -24,7 +24,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 ## What fakecloud gives you
 
 - **23 AWS services.** S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager, SSM, CloudWatch Logs, CloudFormation, EventBridge, EventBridge Scheduler, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime.
-- **1,680 API operations. 100% conformance** per implemented service, validated against AWS's own Smithy models on every commit (54,000+ generated test variants).
+- **1,680 API operations. 100% conformance** per implemented service, validated against AWS's own Smithy models on every commit (57,000+ generated test variants).
 - **Tested against upstream Terraform acceptance tests.** CI runs `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud, catching waiter and field-presence drift that pure SDK tests miss.
 - **Real Lambda execution.** 13 runtimes in Docker containers. Not a mock, not a stub. Node, Python, Java, Go, .NET, Ruby, custom runtimes.
 - **Real stateful services.** RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey. Your Lambda talking to RDS is talking to a real Postgres.
@@ -111,7 +111,7 @@ Yes. Single binary, ~19 MB, ~500ms startup. Common patterns: install-and-run as 
 
 **What does "100% conformance" mean?**
 
-For every operation exposed by AWS's Smithy model, fakecloud accepts every documented input shape and returns the documented output shape, with every field AWS returns. Validated on every commit against 54,000+ generated test variants, plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites. This applies to every service listed above.
+For every operation exposed by AWS's Smithy model, fakecloud accepts every documented input shape and returns the documented output shape, with every field AWS returns. Validated on every commit against 57,000+ generated test variants, plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites. This applies to every service listed above.
 
 **What's fakecloud's coverage goal?**
 

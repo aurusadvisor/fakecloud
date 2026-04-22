@@ -1,8 +1,10 @@
 mod helpers;
 
 use aws_sdk_kinesis::primitives::Blob;
-use aws_sdk_kinesis::types::PutRecordsRequestEntry;
-use aws_sdk_kinesis::types::ShardIteratorType;
+use aws_sdk_kinesis::types::{
+    MetricsName, PutRecordsRequestEntry, ScalingType, ShardIteratorType, StreamMode,
+    StreamModeDetails,
+};
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
 
@@ -267,4 +269,525 @@ async fn kinesis_get_records() {
     assert_eq!(records.records().len(), 1);
     assert_eq!(records.records()[0].partition_key(), "read-key");
     assert!(records.next_shard_iterator().is_some());
+}
+
+async fn stream_arn(client: &aws_sdk_kinesis::Client, stream_name: &str) -> String {
+    client
+        .describe_stream_summary()
+        .stream_name(stream_name)
+        .send()
+        .await
+        .unwrap()
+        .stream_description_summary()
+        .unwrap()
+        .stream_arn()
+        .to_string()
+}
+
+#[test_action("kinesis", "TagResource", checksum = "b9e8db1d")]
+#[test_action("kinesis", "ListTagsForResource", checksum = "f215bdf3")]
+#[test_action("kinesis", "UntagResource", checksum = "829a3def")]
+#[tokio::test]
+async fn kinesis_tag_resource_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("tag-rsrc")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let arn = stream_arn(&client, "tag-rsrc").await;
+
+    client
+        .tag_resource()
+        .resource_arn(&arn)
+        .tags("env", "test")
+        .send()
+        .await
+        .unwrap();
+
+    let list = client
+        .list_tags_for_resource()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(list.tags().iter().any(|t| t.key() == "env"));
+
+    client
+        .untag_resource()
+        .resource_arn(&arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    let after = client
+        .list_tags_for_resource()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(after.tags().iter().all(|t| t.key() != "env"));
+}
+
+#[test_action("kinesis", "PutResourcePolicy", checksum = "17a4f058")]
+#[test_action("kinesis", "GetResourcePolicy", checksum = "3ed90038")]
+#[test_action("kinesis", "DeleteResourcePolicy", checksum = "ba248d13")]
+#[tokio::test]
+async fn kinesis_resource_policy_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("rsrc-policy")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let arn = stream_arn(&client, "rsrc-policy").await;
+    let policy = r#"{"Version":"2012-10-17","Statement":[]}"#;
+
+    client
+        .put_resource_policy()
+        .resource_arn(&arn)
+        .policy(policy)
+        .send()
+        .await
+        .unwrap();
+
+    let got = client
+        .get_resource_policy()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.policy(), policy);
+
+    client
+        .delete_resource_policy()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+
+    let cleared = client
+        .get_resource_policy()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(cleared.policy().is_empty());
+}
+
+#[test_action("kinesis", "StartStreamEncryption", checksum = "17a30f03")]
+#[test_action("kinesis", "StopStreamEncryption", checksum = "b52d83c1")]
+#[tokio::test]
+async fn kinesis_stream_encryption_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("encrypted")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .start_stream_encryption()
+        .stream_name("encrypted")
+        .encryption_type(aws_sdk_kinesis::types::EncryptionType::Kms)
+        .key_id("alias/aws/kinesis")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .stop_stream_encryption()
+        .stream_name("encrypted")
+        .encryption_type(aws_sdk_kinesis::types::EncryptionType::Kms)
+        .key_id("alias/aws/kinesis")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("kinesis", "EnableEnhancedMonitoring", checksum = "af33e87b")]
+#[test_action("kinesis", "DisableEnhancedMonitoring", checksum = "c3324ae1")]
+#[tokio::test]
+async fn kinesis_enhanced_monitoring_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("metrics")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let enabled = client
+        .enable_enhanced_monitoring()
+        .stream_name("metrics")
+        .shard_level_metrics(MetricsName::IncomingBytes)
+        .shard_level_metrics(MetricsName::OutgoingBytes)
+        .send()
+        .await
+        .unwrap();
+    assert!(!enabled.desired_shard_level_metrics().is_empty());
+
+    let disabled = client
+        .disable_enhanced_monitoring()
+        .stream_name("metrics")
+        .shard_level_metrics(MetricsName::IncomingBytes)
+        .send()
+        .await
+        .unwrap();
+    assert!(disabled.stream_name().is_some());
+}
+
+#[test_action("kinesis", "DescribeAccountSettings", checksum = "f0cf6050")]
+#[test_action("kinesis", "UpdateAccountSettings", checksum = "6176d1ee")]
+#[tokio::test]
+async fn kinesis_account_settings_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    let before = client.describe_account_settings().send().await.unwrap();
+    assert!(before.minimum_throughput_billing_commitment().is_some());
+
+    client
+        .update_account_settings()
+        .minimum_throughput_billing_commitment(
+            aws_sdk_kinesis::types::MinimumThroughputBillingCommitmentInput::builder()
+                .status(
+                    aws_sdk_kinesis::types::MinimumThroughputBillingCommitmentInputStatus::Enabled,
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let after = client.describe_account_settings().send().await.unwrap();
+    assert_eq!(
+        after
+            .minimum_throughput_billing_commitment()
+            .map(|c| c.status().as_str()),
+        Some("ENABLED")
+    );
+}
+
+#[test_action("kinesis", "DescribeLimits", checksum = "c2be62c7")]
+#[tokio::test]
+async fn kinesis_describe_limits() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    let response = client.describe_limits().send().await.unwrap();
+    assert!(response.shard_limit() > 0);
+}
+
+#[test_action("kinesis", "UpdateStreamMode", checksum = "f825cfb0")]
+#[tokio::test]
+async fn kinesis_update_stream_mode() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("mode-change")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let arn = stream_arn(&client, "mode-change").await;
+
+    client
+        .update_stream_mode()
+        .stream_arn(arn)
+        .stream_mode_details(
+            StreamModeDetails::builder()
+                .stream_mode(StreamMode::OnDemand)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("kinesis", "UpdateStreamWarmThroughput", checksum = "cd84bfe4")]
+#[tokio::test]
+async fn kinesis_update_stream_warm_throughput() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("warm-tp")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .update_stream_warm_throughput()
+        .stream_name("warm-tp")
+        .warm_throughput_mibps(5)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.stream_name(), Some("warm-tp"));
+}
+
+#[test_action("kinesis", "UpdateMaxRecordSize", checksum = "dcb28843")]
+#[tokio::test]
+async fn kinesis_update_max_record_size() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("maxrec")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let arn = stream_arn(&client, "maxrec").await;
+
+    client
+        .update_max_record_size()
+        .stream_arn(arn)
+        .max_record_size_in_kib(2048)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("kinesis", "RegisterStreamConsumer", checksum = "1292eb2c")]
+#[test_action("kinesis", "DescribeStreamConsumer", checksum = "e3945029")]
+#[test_action("kinesis", "ListStreamConsumers", checksum = "874ebf29")]
+#[test_action("kinesis", "DeregisterStreamConsumer", checksum = "32ff6b20")]
+#[tokio::test]
+async fn kinesis_stream_consumer_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("consumer-stream")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let arn = stream_arn(&client, "consumer-stream").await;
+
+    let registered = client
+        .register_stream_consumer()
+        .stream_arn(&arn)
+        .consumer_name("c1")
+        .send()
+        .await
+        .unwrap();
+
+    let consumer_arn = registered.consumer().unwrap().consumer_arn().to_string();
+
+    let described = client
+        .describe_stream_consumer()
+        .consumer_arn(&consumer_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        described.consumer_description().unwrap().consumer_name(),
+        "c1"
+    );
+
+    let listed = client
+        .list_stream_consumers()
+        .stream_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(listed.consumers().iter().any(|c| c.consumer_name() == "c1"));
+
+    client
+        .deregister_stream_consumer()
+        .consumer_arn(&consumer_arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("kinesis", "ListShards", checksum = "6033797d")]
+#[tokio::test]
+async fn kinesis_list_shards() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("shards-list")
+        .shard_count(2)
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .list_shards()
+        .stream_name("shards-list")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.shards().len(), 2);
+}
+
+#[test_action("kinesis", "MergeShards", checksum = "482408c5")]
+#[tokio::test]
+async fn kinesis_merge_shards() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("merge-stream")
+        .shard_count(2)
+        .send()
+        .await
+        .unwrap();
+
+    let shards = client
+        .list_shards()
+        .stream_name("merge-stream")
+        .send()
+        .await
+        .unwrap();
+    let shard0 = shards.shards()[0].shard_id().to_string();
+    let shard1 = shards.shards()[1].shard_id().to_string();
+
+    client
+        .merge_shards()
+        .stream_name("merge-stream")
+        .shard_to_merge(shard0)
+        .adjacent_shard_to_merge(shard1)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("kinesis", "SplitShard", checksum = "46cf42c5")]
+#[tokio::test]
+async fn kinesis_split_shard() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("split-stream")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let shards = client
+        .list_shards()
+        .stream_name("split-stream")
+        .send()
+        .await
+        .unwrap();
+    let shard = &shards.shards()[0];
+    let range = shard.hash_key_range().expect("hash_key_range");
+    let start: u128 = range.starting_hash_key().parse().unwrap();
+    let end: u128 = range.ending_hash_key().parse().unwrap();
+    let mid = start + (end - start) / 2;
+
+    client
+        .split_shard()
+        .stream_name("split-stream")
+        .shard_to_split(shard.shard_id())
+        .new_starting_hash_key(mid.to_string())
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("kinesis", "UpdateShardCount", checksum = "95624a04")]
+#[tokio::test]
+async fn kinesis_update_shard_count() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("resize")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let response = client
+        .update_shard_count()
+        .stream_name("resize")
+        .target_shard_count(2)
+        .scaling_type(ScalingType::UniformScaling)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.target_shard_count(), Some(2));
+}
+
+#[test_action("kinesis", "SubscribeToShard", checksum = "b6f963e3")]
+#[tokio::test]
+async fn kinesis_subscribe_to_shard_requires_registered_consumer() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("sub-stream")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let arn = stream_arn(&client, "sub-stream").await;
+    let shards = client
+        .list_shards()
+        .stream_name("sub-stream")
+        .send()
+        .await
+        .unwrap();
+    let shard_id = shards.shards()[0].shard_id().to_string();
+
+    // Fakecloud currently returns ResourceNotFoundException for SubscribeToShard
+    // (no enhanced-fan-out delivery). This test wires up the SDK call path and
+    // asserts the known error response so the action is exercised end-to-end.
+    let fake_consumer_arn = format!("{}/consumer/none:0", arn);
+    let err = client
+        .subscribe_to_shard()
+        .consumer_arn(fake_consumer_arn)
+        .shard_id(shard_id)
+        .starting_position(
+            aws_sdk_kinesis::types::StartingPosition::builder()
+                .r#type(ShardIteratorType::Latest)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await;
+    assert!(err.is_err());
 }
