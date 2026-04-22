@@ -651,6 +651,13 @@ fn resolve_path(
     item: &HashMap<String, AttributeValue>,
     expr_attr_names: &HashMap<String, String>,
 ) -> Option<Value> {
+    // Fast path: a single-segment expression (no `.` and no `[` in the raw
+    // input) refers to a top-level attribute by its literal name, even if the
+    // resolved alias contains a `.`. Without this, `#sw` -> `Safety.Warning`
+    // would be misread as the nested path `Safety` -> `Warning`.
+    if !path.contains('.') && !path.contains('[') {
+        return item.get(&resolve_attr_name(path, expr_attr_names)).cloned();
+    }
     let resolved = resolve_projection_path(path, expr_attr_names);
     resolve_nested_path(item, &resolved)
 }
@@ -770,14 +777,22 @@ fn project_item(
     match projection {
         Some(proj) if !proj.is_empty() => {
             let expr_attr_names = parse_expression_attribute_names(body);
-            let attrs: Vec<String> = proj
-                .split(',')
-                .map(|s| resolve_projection_path(s.trim(), &expr_attr_names))
-                .collect();
             let mut result = HashMap::new();
-            for attr in &attrs {
-                if let Some(v) = resolve_nested_path(item, attr) {
-                    insert_nested_value(&mut result, attr, v);
+            for raw in proj.split(',') {
+                let raw = raw.trim();
+                // Single-segment: treat as literal top-level attribute even if
+                // the alias resolves to a name containing `.` (e.g. `#sw` ->
+                // `Safety.Warning`).
+                if !raw.contains('.') && !raw.contains('[') {
+                    let key = resolve_attr_name(raw, &expr_attr_names);
+                    if let Some(v) = item.get(&key) {
+                        result.insert(key, v.clone());
+                    }
+                } else {
+                    let resolved = resolve_projection_path(raw, &expr_attr_names);
+                    if let Some(v) = resolve_nested_path(item, &resolved) {
+                        insert_nested_value(&mut result, &resolved, v);
+                    }
                 }
             }
             result
@@ -2015,8 +2030,7 @@ fn resolve_ref_or_path(
     if reference.starts_with(':') {
         return expr_attr_values.get(reference).cloned();
     }
-    let resolved = resolve_projection_path(reference, expr_attr_names);
-    resolve_nested_path(item, &resolved)
+    resolve_path(reference, item, expr_attr_names)
 }
 
 /// True if `path` targets a nested key inside an M-typed attribute. Bracketed
@@ -3043,6 +3057,48 @@ mod tests {
 
         let result = resolve_nested_path(&item, "items[0].sku");
         assert_eq!(result, Some(json!({"S": "ABC"})));
+    }
+
+    #[test]
+    fn test_resolve_path_alias_with_dot_is_top_level_attr() {
+        // Top-level attribute name literally contains a dot; user aliases it
+        // via ExpressionAttributeNames and references the alias. Must resolve
+        // to the top-level attribute, NOT be walked as a nested path.
+        let mut item = HashMap::new();
+        item.insert("Safety.Warning".to_string(), json!({"S": "high"}));
+        let mut names = HashMap::new();
+        names.insert("#sw".to_string(), "Safety.Warning".to_string());
+
+        let result = resolve_path("#sw", &item, &names);
+        assert_eq!(result, Some(json!({"S": "high"})));
+    }
+
+    #[test]
+    fn test_resolve_path_dotted_expression_still_walks_nested() {
+        // When the expression itself contains `.`, we still walk the nested
+        // path (the dot is a path separator, not part of an attribute name).
+        let mut item = HashMap::new();
+        item.insert("profile".to_string(), json!({"M": {"email": {"S": "x@y"}}}));
+        let names = HashMap::new();
+
+        let result = resolve_path("profile.email", &item, &names);
+        assert_eq!(result, Some(json!({"S": "x@y"})));
+    }
+
+    #[test]
+    fn test_project_item_alias_with_dot_is_top_level_attr() {
+        // Same invariant must hold for ProjectionExpression.
+        let mut item = HashMap::new();
+        item.insert("Safety.Warning".to_string(), json!({"S": "high"}));
+        item.insert("other".to_string(), json!({"S": "ignored"}));
+        let body = json!({
+            "ProjectionExpression": "#sw",
+            "ExpressionAttributeNames": {"#sw": "Safety.Warning"},
+        });
+
+        let projected = project_item(&item, &body);
+        assert_eq!(projected.get("Safety.Warning"), Some(&json!({"S": "high"})));
+        assert!(!projected.contains_key("other"));
     }
 
     // -- Integration-style tests using DynamoDbService --
