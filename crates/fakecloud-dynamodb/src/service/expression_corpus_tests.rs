@@ -320,16 +320,19 @@ fn filter_sdk_compound_shapes() {
 }
 
 #[test]
-#[ignore = "known gap: `size(X)` (no space) inside a comparison isn't matched by the size-function branch"]
 fn filter_functions_with_sdk_space_before_paren() {
-    // aws-sdk-go-v2 emits a space before the open-paren for these 5 functions:
+    // aws-sdk-go-v2 emits a space before the open-paren for these 6 functions:
     //   attribute_exists (X), attribute_not_exists (X), attribute_type (X, Y),
     //   begins_with (X, Y), contains (X, Y), size (X).
     // Hand-crafted callers usually omit the space. Both must work.
+    //
+    // `count` is a length-10 string so size() returns 10; size() on an N-type
+    // attribute is invalid per AWS and must evaluate to false (see
+    // filter_size_on_numeric_is_invalid).
     let it = item(&[
         ("name", s("widget-42")),
         ("tags", ss(&["red", "blue"])),
-        ("count", n("10")),
+        ("count", s("1234567890")),
     ]);
     let names = HashMap::new();
     let values = values(&[
@@ -360,6 +363,30 @@ fn filter_functions_with_sdk_space_before_paren() {
             evaluate_filter_expression(expr, &it, &names, &values),
             expected,
             "filter fn-shape '{label}' failed for `{expr}`"
+        );
+    }
+}
+
+#[test]
+fn filter_size_on_numeric_is_invalid() {
+    // size() is defined for S, B, SS, NS, BS, L, M per AWS docs; calling it on
+    // N, BOOL, or NULL is a type error that evaluates to false (matching AWS's
+    // silent filter-out semantics in FilterExpression context).
+    let it = item(&[("count", n("10")), ("active", b(true))]);
+    let names = HashMap::new();
+    let values = values(&[(":ten", n("10")), (":one", n("1"))]);
+
+    let cases = [
+        ("size-on-n-eq", "size(count) = :ten", false),
+        ("size-on-n-gt", "size(count) > :one", false),
+        ("size-on-bool", "size(active) = :one", false),
+        ("size-on-missing", "size(ghost) = :one", false),
+    ];
+    for (label, expr, expected) in cases {
+        assert_eq!(
+            evaluate_filter_expression(expr, &it, &names, &values),
+            expected,
+            "size-invalid '{label}' failed for `{expr}`"
         );
     }
 }
