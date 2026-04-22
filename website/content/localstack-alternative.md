@@ -15,6 +15,12 @@ fakecloud
 
 Point any AWS SDK or CLI at `http://localhost:4566` with dummy credentials. That is the whole setup.
 
+## Goal: 100% AWS, 100% conformance, 100% integrations
+
+fakecloud aims at every AWS service, each at 100% behavioral conformance, including every cross-service integration. Services land depth-first: a service is supported when it matches real AWS across every documented operation and cross-service wire-up — not when the API surface looks filled in. 23 services are there today (see below); the rest are on the roadmap, prioritized by real-project demand.
+
+This is why fakecloud runs real Lambda code in real runtime containers, runs real PostgreSQL/MySQL/MariaDB for RDS, runs real Redis/Valkey for ElastiCache, fires real S3 -> Lambda and SES inbound -> S3/SNS/Lambda flows, and validates every operation against AWS's own Smithy models on every commit.
+
 ## What fakecloud gives you
 
 - **23 AWS services.** S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager, SSM, CloudWatch Logs, CloudFormation, EventBridge, EventBridge Scheduler, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime.
@@ -103,13 +109,13 @@ SAM Local and serverless-offline only run Lambda (and a limited HTTP/API Gateway
 
 Yes. Single binary, ~19 MB, ~500ms startup. Common patterns: install-and-run as a background step in GitHub Actions / GitLab CI / CircleCI, or pull `ghcr.io/faiscadev/fakecloud:latest` as a service container. See [integration testing AWS in CI](/blog/integration-testing-aws-in-ci/) for copy-paste configs.
 
-**Which services are implemented at 100% conformance?**
+**What does "100% conformance" mean?**
 
-Every service listed above. Conformance means: for every operation exposed by AWS's Smithy model, fakecloud accepts every documented input shape and returns the documented output shape, with every field AWS returns. Validated on every commit against 54,000+ generated test variants.
+For every operation exposed by AWS's Smithy model, fakecloud accepts every documented input shape and returns the documented output shape, with every field AWS returns. Validated on every commit against 54,000+ generated test variants, plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites. This applies to every service listed above.
 
-**What's not implemented?**
+**What's fakecloud's coverage goal?**
 
-EC2, ECS, ECR, CloudFront, SQS extended client encryption, AppSync, Athena, Glue, SageMaker. If you need one of these, open an issue — the roadmap is driven by real-project demand.
+100% of AWS services, each at 100% conformance with 100% of cross-service integrations. fakecloud adds services depth-first: a service only lands when it matches real AWS behavior across every documented operation and cross-service wire-up, not when the surface area looks filled in. If a service isn't on the list above, [open an issue](https://github.com/faiscadev/fakecloud/issues) — the roadmap is driven by real-project demand.
 
 **Is this a fork of LocalStack?**
 

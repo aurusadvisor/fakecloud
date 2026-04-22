@@ -288,11 +288,11 @@ aws --endpoint-url http://localhost:4566 lambda invoke \
 
 If both print what you expect, migration is done.
 
-## When fakecloud is not the right choice
+## A note on coverage
 
-- You need EC2, ECS, ECR, CloudFront, AppSync, Athena, Glue, or SageMaker. Those are not implemented yet. Vote with an issue.
-- You need 100% production parity for mission-critical pre-prod validation. No emulator replaces real AWS for that.
-- Your team is already paying for LocalStack Pro and happy with it. Migration is not urgent.
+fakecloud's goal is every AWS service at 100% conformance, including every cross-service integration. Services land depth-first: a service is supported when it passes the Smithy-model test variants and the cross-service wire-ups that matter for it — not when the API surface looks filled in. The current 23 services (1,680 operations) are what's done today; more are on the roadmap, prioritized by real-project demand. If a service you need isn't on the list, [open an issue](https://github.com/faiscadev/fakecloud/issues) and it'll get weighed into the queue.
+
+For mission-critical pre-prod validation where you need the full production-parity surface, run against real AWS — that's true of any emulator, not a fakecloud gap specifically.
 
 ## Links
 
