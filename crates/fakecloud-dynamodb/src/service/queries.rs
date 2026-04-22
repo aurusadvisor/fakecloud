@@ -83,14 +83,7 @@ impl DynamoDbService {
             .iter()
             .filter(|item| {
                 if let Some(kc) = key_condition {
-                    evaluate_key_condition(
-                        kc,
-                        item,
-                        &hash_key_name,
-                        range_key_name.as_deref(),
-                        &expr_attr_names,
-                        &expr_attr_values,
-                    )
+                    evaluate_key_condition(kc, item, &expr_attr_names, &expr_attr_values)
                 } else {
                     true
                 }

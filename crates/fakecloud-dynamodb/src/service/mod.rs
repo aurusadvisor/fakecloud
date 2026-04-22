@@ -1,4 +1,6 @@
 mod batch;
+#[cfg(test)]
+mod expression_corpus_tests;
 mod global_tables;
 mod items;
 mod queries;
@@ -987,25 +989,24 @@ fn extract_function_arg<'a>(expr: &'a str, func_name: &str) -> Option<&'a str> {
 fn evaluate_key_condition(
     expr: &str,
     item: &HashMap<String, AttributeValue>,
-    hash_key_name: &str,
-    _range_key_name: Option<&str>,
     expr_attr_names: &HashMap<String, String>,
     expr_attr_values: &HashMap<String, Value>,
 ) -> bool {
-    let parts: Vec<&str> = split_on_and(expr);
-    for part in &parts {
-        let part = part.trim();
-        if !evaluate_single_key_condition(
-            part,
-            item,
-            hash_key_name,
-            expr_attr_names,
-            expr_attr_values,
-        ) {
-            return false;
-        }
+    let trimmed = expr.trim();
+
+    let parts = split_on_and(trimmed);
+    if parts.len() > 1 {
+        return parts.iter().all(|part| {
+            evaluate_key_condition(part.trim(), item, expr_attr_names, expr_attr_values)
+        });
     }
-    true
+
+    let stripped = strip_outer_parens(trimmed);
+    if stripped != trimmed {
+        return evaluate_key_condition(stripped, item, expr_attr_names, expr_attr_values);
+    }
+
+    evaluate_single_key_condition(trimmed, item, expr_attr_names, expr_attr_values)
 }
 
 /// Split a DynamoDB condition expression on a top-level keyword (``" AND "``,
@@ -1053,7 +1054,6 @@ fn split_on_or(expr: &str) -> Vec<&str> {
 fn evaluate_single_key_condition(
     part: &str,
     item: &HashMap<String, AttributeValue>,
-    _hash_key_name: &str,
     expr_attr_names: &HashMap<String, String>,
     expr_attr_values: &HashMap<String, Value>,
 ) -> bool {
@@ -1407,7 +1407,7 @@ fn evaluate_single_filter_condition(
         return evaluate_in_match(actual, &value_refs, expr_attr_values);
     }
 
-    evaluate_single_key_condition(part, item, "", expr_attr_names, expr_attr_values)
+    evaluate_single_key_condition(part, item, expr_attr_names, expr_attr_values)
 }
 
 /// `begins_with(path, :val)` — only S (string) operands. Returns false on
@@ -1695,6 +1695,20 @@ fn apply_set_assignment(
     };
 
     let left_trimmed = left.trim();
+    let right = right.trim();
+
+    // Dotted paths like `#web.#tab_id` or `profile.email` target a nested
+    // key inside an M-typed attribute. Only plain-value RHS is supported for
+    // now (no `if_not_exists` / `list_append` / arithmetic into a nested
+    // path — those shapes aren't common and can be added when needed).
+    // An unresolvable RHS is a ValidationException, not a silent no-op —
+    // silent drops are exactly the class of bug this file already fights.
+    if is_dotted_path(left_trimmed) {
+        let v = resolve_value(right, item, expr_attr_names, expr_attr_values)
+            .ok_or_else(invalid_document_path)?;
+        return assign_nested_path(item, left_trimmed, expr_attr_names, v);
+    }
+
     // Split off a trailing `[N]` list-index suffix so we can resolve the
     // attribute name ref on its own. Without this, `resolve_attr_name` sees
     // "#items[0]" as a whole and misses the `#items` → `items` mapping.
@@ -1703,7 +1717,6 @@ fn apply_set_assignment(
         None => (left_trimmed, None),
     };
     let attr = resolve_attr_name(attr_ref, expr_attr_names);
-    let right = right.trim();
 
     if let Some(rest) = right
         .strip_prefix("if_not_exists(")
@@ -1891,31 +1904,27 @@ fn assign_list_index(
     value: Value,
 ) -> Result<(), AwsServiceError> {
     let Some(existing) = item.get_mut(attr) else {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "The document path provided in the update expression is invalid for update",
-        ));
+        return Err(invalid_document_path());
     };
     let Some(list) = existing.get_mut("L").and_then(|l| l.as_array_mut()) else {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "The document path provided in the update expression is invalid for update",
-        ));
+        return Err(invalid_document_path());
     };
     if idx < list.len() {
         list[idx] = value;
     } else if idx == list.len() {
         list.push(value);
     } else {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "The document path provided in the update expression is invalid for update",
-        ));
+        return Err(invalid_document_path());
     }
     Ok(())
+}
+
+fn invalid_document_path() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ValidationException",
+        "The document path provided in the update expression is invalid for update",
+    )
 }
 
 fn resolve_value(
@@ -1931,6 +1940,52 @@ fn resolve_value(
         let attr_name = resolve_attr_name(reference, expr_attr_names);
         item.get(&attr_name).cloned()
     }
+}
+
+/// True if `path` targets a nested key inside an M-typed attribute. Bracketed
+/// list indices (`a[0]`, `a.b[0]`) are not supported by the nested-SET writer.
+fn is_dotted_path(path: &str) -> bool {
+    path.contains('.') && !path.contains('[')
+}
+
+/// Write `value` at a dotted path inside an M-typed attribute.
+///
+/// Resolves each `#name` segment through `expr_attr_names`. The top-level
+/// attribute and every intermediate segment must already exist as a Map —
+/// DynamoDB rejects writes through missing parents with ValidationException.
+fn assign_nested_path(
+    item: &mut HashMap<String, AttributeValue>,
+    path: &str,
+    expr_attr_names: &HashMap<String, String>,
+    value: Value,
+) -> Result<(), AwsServiceError> {
+    let mut segments: Vec<String> = path
+        .split('.')
+        .map(|seg| resolve_attr_name(seg.trim(), expr_attr_names))
+        .collect();
+    if segments.len() < 2 {
+        return Err(invalid_document_path());
+    }
+
+    let leaf = segments.pop().expect("len >= 2");
+    let top = segments.remove(0);
+
+    let top_attr = item.get_mut(&top).ok_or_else(invalid_document_path)?;
+    let mut current = top_attr
+        .get_mut("M")
+        .and_then(|m| m.as_object_mut())
+        .ok_or_else(invalid_document_path)?;
+
+    for seg in &segments {
+        current = current
+            .get_mut(seg)
+            .and_then(|v| v.get_mut("M"))
+            .and_then(|m| m.as_object_mut())
+            .ok_or_else(invalid_document_path)?;
+    }
+
+    current.insert(leaf, value);
+    Ok(())
 }
 
 fn extract_number(val: &Option<Value>) -> Option<f64> {
@@ -2776,8 +2831,6 @@ mod tests {
         assert!(evaluate_key_condition(
             "pk = :pk",
             &item,
-            "pk",
-            Some("sk"),
             &HashMap::new(),
             &expr_values,
         ));
@@ -4934,7 +4987,7 @@ mod tests {
         let values: HashMap<String, Value> = HashMap::new();
 
         assert!(
-            !evaluate_single_key_condition("GARBAGE NONSENSE", &item, "", &names, &values),
+            !evaluate_single_key_condition("GARBAGE NONSENSE", &item, &names, &values),
             "unrecognized expression must return false"
         );
     }

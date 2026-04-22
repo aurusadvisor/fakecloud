@@ -3357,3 +3357,201 @@ async fn dynamodb_stream_specification_lifecycle() {
     let label2 = reenabled.latest_stream_label().unwrap();
     assert_stream_label_format(label2);
 }
+
+// End-to-end guard for the expression-evaluator bugs fixed in PR #660.
+//
+// The unit corpus at `fakecloud_dynamodb::service::expression_corpus_tests`
+// exercises the grammar at the evaluator boundary. These two tests run the
+// exact SDK-emitted shapes through serde + routing + evaluator, so any
+// regression anywhere in that chain trips the suite.
+
+/// Query with parenthesised KeyCondition clauses — the shape every
+/// `aws-sdk-go-v2` KeyConditionBuilder emits (`(#0 = :0) AND (#1 > :1)`).
+/// Before the fix this returned zero items; real DynamoDB returns all
+/// matching rows.
+#[tokio::test]
+async fn dynamodb_query_paren_wrapped_key_condition() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("ParenOrders")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("store_id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("order_id")
+                .key_type(KeyType::Range)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("store_id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("order_id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    for i in 1..=3 {
+        client
+            .put_item()
+            .table_name("ParenOrders")
+            .item("store_id", AttributeValue::S("s".to_string()))
+            .item("order_id", AttributeValue::S(format!("order{i}")))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Baseline: unparenthesised expression returns all 3.
+    let bare = client
+        .query()
+        .table_name("ParenOrders")
+        .key_condition_expression("store_id = :s AND order_id > :a")
+        .expression_attribute_values(":s", AttributeValue::S("s".to_string()))
+        .expression_attribute_values(":a", AttributeValue::S("aaa".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bare.count(), 3, "bare KeyCondition baseline");
+
+    // SDK-builder shape: each clause wrapped in parens. Must match baseline.
+    let paren = client
+        .query()
+        .table_name("ParenOrders")
+        .key_condition_expression("(store_id = :s) AND (order_id > :a)")
+        .expression_attribute_values(":s", AttributeValue::S("s".to_string()))
+        .expression_attribute_values(":a", AttributeValue::S("aaa".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        paren.count(),
+        3,
+        "parenthesised KeyCondition must return same rows as bare"
+    );
+
+    // Placeholder shape the SDK actually emits on the wire.
+    let placeholder = client
+        .query()
+        .table_name("ParenOrders")
+        .key_condition_expression("(#0 = :0) AND (#1 > :1)")
+        .expression_attribute_names("#0", "store_id")
+        .expression_attribute_names("#1", "order_id")
+        .expression_attribute_values(":0", AttributeValue::S("s".to_string()))
+        .expression_attribute_values(":1", AttributeValue::S("aaa".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        placeholder.count(),
+        3,
+        "SDK placeholder-shape KeyCondition must return same rows"
+    );
+}
+
+/// UpdateItem with a dotted-path SET target — `SET #a.#b = :v`. Before the
+/// fix this silently created a top-level `"#a.#b"` attribute instead of
+/// updating the nested map; sibling keys under the parent were preserved by
+/// accident. The guard here covers both: nested write lands, siblings stay.
+#[tokio::test]
+async fn dynamodb_update_nested_set_path() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("NestedSet")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let mut initial_web = HashMap::new();
+    initial_web.insert(
+        "tab_id".to_string(),
+        AttributeValue::S("old-tab".to_string()),
+    );
+    initial_web.insert(
+        "keep_me".to_string(),
+        AttributeValue::S("sibling".to_string()),
+    );
+
+    client
+        .put_item()
+        .table_name("NestedSet")
+        .item("id", AttributeValue::S("row1".to_string()))
+        .item("web", AttributeValue::M(initial_web))
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .update_item()
+        .table_name("NestedSet")
+        .key("id", AttributeValue::S("row1".to_string()))
+        .update_expression("SET #web.#tab_id = :tab")
+        .expression_attribute_names("#web", "web")
+        .expression_attribute_names("#tab_id", "tab_id")
+        .expression_attribute_values(":tab", AttributeValue::S("new-tab".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_item()
+        .table_name("NestedSet")
+        .key("id", AttributeValue::S("row1".to_string()))
+        .send()
+        .await
+        .unwrap();
+    let item = resp.item().unwrap();
+
+    let web = item.get("web").unwrap().as_m().unwrap();
+    assert_eq!(
+        web.get("tab_id").unwrap().as_s().unwrap(),
+        "new-tab",
+        "nested SET must update the child key in place"
+    );
+    assert_eq!(
+        web.get("keep_me").unwrap().as_s().unwrap(),
+        "sibling",
+        "nested SET must leave sibling keys untouched"
+    );
+    assert!(
+        item.get("#web.#tab_id").is_none(),
+        "nested SET must not leak a literal dotted-name top-level attribute"
+    );
+}

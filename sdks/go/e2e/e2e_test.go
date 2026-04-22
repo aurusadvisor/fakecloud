@@ -830,6 +830,181 @@ func TestE2EBedrockFaults(t *testing.T) {
 	}
 }
 
+// ── DynamoDB expression regressions (PR #660) ─────────────────────
+
+// Query with parenthesised KeyCondition clauses — the exact shape
+// aws-sdk-go-v2's KeyConditionBuilder emits (e.g. `(#0 = :0) AND (#1 > :1)`).
+// Before the fix this returned zero items against a populated table; real
+// DynamoDB returns every matching row.
+func TestE2EDynamoDBParenKeyCondition(t *testing.T) {
+	resetState(t)
+	ctx := context.Background()
+	cfg := awsConfig(t)
+
+	cli := dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
+		o.BaseEndpoint = aws.String(fakecloudURL)
+	})
+
+	tbl := "sdk-go-paren-keycond"
+	_, err := cli.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName: aws.String(tbl),
+		KeySchema: []dbtypes.KeySchemaElement{
+			{AttributeName: aws.String("store_id"), KeyType: dbtypes.KeyTypeHash},
+			{AttributeName: aws.String("order_id"), KeyType: dbtypes.KeyTypeRange},
+		},
+		AttributeDefinitions: []dbtypes.AttributeDefinition{
+			{AttributeName: aws.String("store_id"), AttributeType: dbtypes.ScalarAttributeTypeS},
+			{AttributeName: aws.String("order_id"), AttributeType: dbtypes.ScalarAttributeTypeS},
+		},
+		BillingMode: dbtypes.BillingModePayPerRequest,
+	})
+	if err != nil {
+		t.Fatalf("CreateTable failed: %v", err)
+	}
+
+	for i := 1; i <= 3; i++ {
+		_, err := cli.PutItem(ctx, &dynamodb.PutItemInput{
+			TableName: aws.String(tbl),
+			Item: map[string]dbtypes.AttributeValue{
+				"store_id": &dbtypes.AttributeValueMemberS{Value: "s"},
+				"order_id": &dbtypes.AttributeValueMemberS{Value: fmt.Sprintf("order%d", i)},
+			},
+		})
+		if err != nil {
+			t.Fatalf("PutItem %d failed: %v", i, err)
+		}
+	}
+
+	cases := []struct {
+		name string
+		expr string
+	}{
+		{"bare", "store_id = :s AND order_id > :a"},
+		{"parens", "(store_id = :s) AND (order_id > :a)"},
+		{"sdk-placeholders", "(#0 = :0) AND (#1 > :1)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := &dynamodb.QueryInput{
+				TableName:              aws.String(tbl),
+				KeyConditionExpression: aws.String(tc.expr),
+			}
+			if tc.name == "sdk-placeholders" {
+				input.ExpressionAttributeNames = map[string]string{
+					"#0": "store_id",
+					"#1": "order_id",
+				}
+				input.ExpressionAttributeValues = map[string]dbtypes.AttributeValue{
+					":0": &dbtypes.AttributeValueMemberS{Value: "s"},
+					":1": &dbtypes.AttributeValueMemberS{Value: "aaa"},
+				}
+			} else {
+				input.ExpressionAttributeValues = map[string]dbtypes.AttributeValue{
+					":s": &dbtypes.AttributeValueMemberS{Value: "s"},
+					":a": &dbtypes.AttributeValueMemberS{Value: "aaa"},
+				}
+			}
+			resp, err := cli.Query(ctx, input)
+			if err != nil {
+				t.Fatalf("Query(%s) failed: %v", tc.name, err)
+			}
+			if len(resp.Items) != 3 {
+				t.Errorf("Query(%s) returned %d items, want 3", tc.name, len(resp.Items))
+			}
+		})
+	}
+}
+
+// UpdateItem with a dotted-path SET target (`SET #a.#b = :v`). Before the
+// fix this silently created a top-level `"#a.#b"` attribute instead of
+// updating the nested map; sibling keys under the parent were preserved by
+// accident. Guard: nested write lands, siblings stay, no literal dotted key.
+func TestE2EDynamoDBNestedSetPath(t *testing.T) {
+	resetState(t)
+	ctx := context.Background()
+	cfg := awsConfig(t)
+
+	cli := dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
+		o.BaseEndpoint = aws.String(fakecloudURL)
+	})
+
+	tbl := "sdk-go-nested-set"
+	_, err := cli.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName: aws.String(tbl),
+		KeySchema: []dbtypes.KeySchemaElement{
+			{AttributeName: aws.String("id"), KeyType: dbtypes.KeyTypeHash},
+		},
+		AttributeDefinitions: []dbtypes.AttributeDefinition{
+			{AttributeName: aws.String("id"), AttributeType: dbtypes.ScalarAttributeTypeS},
+		},
+		BillingMode: dbtypes.BillingModePayPerRequest,
+	})
+	if err != nil {
+		t.Fatalf("CreateTable failed: %v", err)
+	}
+
+	_, err = cli.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(tbl),
+		Item: map[string]dbtypes.AttributeValue{
+			"id": &dbtypes.AttributeValueMemberS{Value: "row1"},
+			"web": &dbtypes.AttributeValueMemberM{Value: map[string]dbtypes.AttributeValue{
+				"tab_id":  &dbtypes.AttributeValueMemberS{Value: "old-tab"},
+				"keep_me": &dbtypes.AttributeValueMemberS{Value: "sibling"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PutItem failed: %v", err)
+	}
+
+	_, err = cli.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(tbl),
+		Key: map[string]dbtypes.AttributeValue{
+			"id": &dbtypes.AttributeValueMemberS{Value: "row1"},
+		},
+		UpdateExpression: aws.String("SET #web.#tab_id = :tab"),
+		ExpressionAttributeNames: map[string]string{
+			"#web":    "web",
+			"#tab_id": "tab_id",
+		},
+		ExpressionAttributeValues: map[string]dbtypes.AttributeValue{
+			":tab": &dbtypes.AttributeValueMemberS{Value: "new-tab"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateItem failed: %v", err)
+	}
+
+	got, err := cli.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(tbl),
+		Key: map[string]dbtypes.AttributeValue{
+			"id": &dbtypes.AttributeValueMemberS{Value: "row1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GetItem failed: %v", err)
+	}
+	if got.Item == nil {
+		t.Fatalf("GetItem returned no item")
+	}
+
+	webAttr, ok := got.Item["web"].(*dbtypes.AttributeValueMemberM)
+	if !ok {
+		t.Fatalf("web attribute missing or wrong type: %T", got.Item["web"])
+	}
+	tabID, _ := webAttr.Value["tab_id"].(*dbtypes.AttributeValueMemberS)
+	if tabID == nil || tabID.Value != "new-tab" {
+		t.Errorf("nested SET must update child key: got web.tab_id=%v", webAttr.Value["tab_id"])
+	}
+	keepMe, _ := webAttr.Value["keep_me"].(*dbtypes.AttributeValueMemberS)
+	if keepMe == nil || keepMe.Value != "sibling" {
+		t.Errorf("nested SET must leave siblings alone: got web.keep_me=%v", webAttr.Value["keep_me"])
+	}
+	if _, leaked := got.Item["#web.#tab_id"]; leaked {
+		t.Error("nested SET must not leak a literal dotted-name top-level attribute")
+	}
+}
+
 // ── Scheduler (EventBridge Scheduler) ─────────────────────────────────
 
 func schedulerClient(t *testing.T) *scheduler.Client {
