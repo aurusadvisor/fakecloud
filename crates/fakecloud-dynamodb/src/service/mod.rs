@@ -1009,33 +1009,60 @@ fn evaluate_key_condition(
     evaluate_single_key_condition(trimmed, item, expr_attr_names, expr_attr_values)
 }
 
-/// Split a DynamoDB condition expression on a top-level keyword (``" AND "``,
-/// ``" OR "``), case-insensitively. Parenthesised groups are skipped so only
-/// unparenthesised occurrences of the keyword act as separators.
+/// Split a DynamoDB condition expression on a top-level keyword (``AND`` /
+/// ``OR``), case-insensitive, with ASCII-whitespace word boundaries so
+/// ``:s\tAND\t:o`` and ``:s\nAND\n:o`` split the same as ``:s AND :o``.
+///
+/// Parenthesised groups are skipped so only unparenthesised occurrences of the
+/// keyword act as separators. When splitting on ``AND``, each top-level
+/// ``BETWEEN`` keyword consumes the next top-level ``AND`` as its own inner
+/// separator (``x BETWEEN :lo AND :hi``) rather than letting it split the
+/// expression.
 fn split_on_top_level_keyword<'a>(expr: &'a str, keyword: &str) -> Vec<&'a str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let len = expr.len();
-    let mut i = 0;
-    let mut depth = 0;
+    let bytes = expr.as_bytes();
+    let len = bytes.len();
+    let kw = keyword.as_bytes();
+    let is_and = keyword.eq_ignore_ascii_case("AND");
+
+    let mut parts: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    let mut depth: i32 = 0;
+    let mut between_skip: u32 = 0;
+    let mut i = 0usize;
+
     while i < len {
-        let ch = expr.as_bytes()[i];
+        let ch = bytes[i];
         if ch == b'(' {
             depth += 1;
-        } else if ch == b')' {
+            i += 1;
+            continue;
+        }
+        if ch == b')' {
             if depth > 0 {
                 depth -= 1;
             }
-        } else if depth == 0
-            && i + keyword.len() <= len
-            && expr.is_char_boundary(i)
-            && expr.is_char_boundary(i + keyword.len())
-            && expr[i..i + keyword.len()].eq_ignore_ascii_case(keyword)
-        {
-            parts.push(&expr[start..i]);
-            start = i + keyword.len();
-            i = start;
+            i += 1;
             continue;
+        }
+        if depth == 0 {
+            if is_and {
+                if let Some(end) = match_keyword(bytes, i, b"BETWEEN") {
+                    between_skip = between_skip.saturating_add(1);
+                    i = end;
+                    continue;
+                }
+            }
+            if let Some(end) = match_keyword(bytes, i, kw) {
+                if is_and && between_skip > 0 {
+                    between_skip -= 1;
+                    i = end;
+                    continue;
+                }
+                parts.push(&expr[start..i]);
+                start = end;
+                i = end;
+                continue;
+            }
         }
         i += 1;
     }
@@ -1043,12 +1070,40 @@ fn split_on_top_level_keyword<'a>(expr: &'a str, keyword: &str) -> Vec<&'a str> 
     parts
 }
 
+/// Case-insensitive keyword match. For alphanumeric keywords (``AND``,
+/// ``OR``, ``BETWEEN``) the match also requires ASCII-whitespace word
+/// boundaries so substrings of identifiers are not mistaken for keywords.
+/// Punctuation keywords (``,``) match literally.
+fn match_keyword(bytes: &[u8], i: usize, keyword: &[u8]) -> Option<usize> {
+    let end = i + keyword.len();
+    if end > bytes.len() {
+        return None;
+    }
+    for k in 0..keyword.len() {
+        if !bytes[i + k].eq_ignore_ascii_case(&keyword[k]) {
+            return None;
+        }
+    }
+    let needs_word_boundary = keyword.iter().all(|b| b.is_ascii_alphanumeric());
+    if needs_word_boundary {
+        let left_ok = i == 0 || bytes[i - 1].is_ascii_whitespace();
+        if !left_ok {
+            return None;
+        }
+        let right_ok = end == bytes.len() || bytes[end].is_ascii_whitespace();
+        if !right_ok {
+            return None;
+        }
+    }
+    Some(end)
+}
+
 fn split_on_and(expr: &str) -> Vec<&str> {
-    split_on_top_level_keyword(expr, " AND ")
+    split_on_top_level_keyword(expr, "AND")
 }
 
 fn split_on_or(expr: &str) -> Vec<&str> {
-    split_on_top_level_keyword(expr, " OR ")
+    split_on_top_level_keyword(expr, "OR")
 }
 
 fn evaluate_single_key_condition(
@@ -6734,5 +6789,50 @@ mod tests {
         let resp = svc.list_global_tables(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert!(body["GlobalTables"].is_array());
+    }
+
+    #[test]
+    fn split_on_top_level_keyword_between_swallows_inner_and() {
+        let parts = split_on_top_level_keyword("x = :a AND y BETWEEN :lo AND :hi", "AND");
+        assert_eq!(
+            parts.len(),
+            2,
+            "BETWEEN's inner AND must not split; got parts = {parts:?}"
+        );
+    }
+
+    #[test]
+    fn split_on_top_level_keyword_between_nested_parens() {
+        let parts = split_on_top_level_keyword("(x = :a) AND (y BETWEEN :lo AND :hi)", "AND");
+        assert_eq!(parts.len(), 2);
+    }
+
+    #[test]
+    fn split_on_top_level_keyword_whitespace_variants() {
+        for expr in [
+            "x = :a AND y = :b",
+            "x=:a AND y=:b",
+            "  x = :a   AND   y = :b  ",
+            "x\t=\t:a\tAND\ty\t=\t:b",
+            "x = :a\nAND\ny = :b",
+        ] {
+            let parts = split_on_top_level_keyword(expr, "AND");
+            assert_eq!(parts.len(), 2, "whitespace variant failed: {expr:?}");
+        }
+    }
+
+    #[test]
+    fn split_on_top_level_keyword_case_insensitive() {
+        let parts = split_on_top_level_keyword("x = :a and y = :b", "AND");
+        assert_eq!(parts.len(), 2);
+        let parts = split_on_top_level_keyword("x = :a OR y = :b", "OR");
+        assert_eq!(parts.len(), 2);
+    }
+
+    #[test]
+    fn split_on_top_level_keyword_does_not_match_inside_identifiers() {
+        // `land` contains "AND" but isn't word-bounded — must not split.
+        let parts = split_on_top_level_keyword("land = :a", "AND");
+        assert_eq!(parts.len(), 1);
     }
 }
