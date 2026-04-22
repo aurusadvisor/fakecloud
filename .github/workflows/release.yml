@@ -165,6 +165,7 @@ jobs:
           publish fakecloud-sqs
           publish fakecloud-sns
           publish fakecloud-iam
+          publish fakecloud-organizations  # depends on core only
           publish fakecloud-lambda
           publish fakecloud-secretsmanager
           publish fakecloud-logs
@@ -174,6 +175,7 @@ jobs:
           publish fakecloud-rds
           publish fakecloud-elasticache
           publish fakecloud-kinesis
+          publish fakecloud-scheduler      # depends on aws + core + persistence
           publish fakecloud-apigatewayv2   # depends on core only
           publish fakecloud-bedrock        # depends on aws + core
 
