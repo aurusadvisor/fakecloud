@@ -307,6 +307,10 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          # Don't persist the default GITHUB_TOKEN as a git credential helper,
+          # otherwise `git push` to the mirror repo ignores our PAT and uses
+          # the default token (which can't push to faiscadev/fakecloud-php).
+          persist-credentials: false
 
       - name: Verify tag matches composer.json version
         working-directory: sdks/php
