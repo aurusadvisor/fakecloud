@@ -1,16 +1,18 @@
 # fakecloud — Full Documentation
 
-> fakecloud is a free, open-source local AWS cloud emulator written in Rust. It runs on a single port (4566), requires no account or auth token, and aims for 100% behavioral parity with real AWS on every service it implements. It is an open-source alternative to LocalStack, which went proprietary in March 2026.
+> fakecloud is a free, open-source local AWS cloud emulator written in Rust. It runs on a single port (4566), requires no account or auth token, and aims for 100% behavioral parity with real AWS across every service, every operation, and every cross-service integration. It is an open-source alternative to LocalStack, which went proprietary in March 2026.
 
 ## Overview
 
-fakecloud emulates 23 AWS services (1,680 operations) locally for integration testing and development. It is a single Rust binary (~19 MB, ~500ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
+fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~500ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
+
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 23 services (1,680 operations) are shipped today; more land progressively as they hit the bar.
 
 Key design principles:
-- **Correctness over coverage**: Every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models (54,000+ generated test variants). CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
-- **Zero friction**: No auth tokens, no accounts, no config files needed
-- **Cross-service integration**: 30+ service-to-service integrations — S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more
-- **Real execution for stateful services**: Lambda runs function code in Docker across 13 runtimes. RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey.
+- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models (54,000+ generated test variants). CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
+- **Real cross-service integrations**: 30+ service-to-service integrations wire up end-to-end — S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more. Not stubs — the downstream service actually executes.
+- **Real execution for stateful services**: Lambda runs function code in real Lambda runtime containers across 13 runtimes. RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey.
+- **Zero friction**: no auth tokens, no accounts, no config files needed
 - **Test-assertion SDKs** for TypeScript, Python, Go, PHP, Java, Rust, wrapping `/_fakecloud/*` introspection endpoints
 
 fakecloud is NOT a production-ready cloud replacement. It is for integration testing and local development.

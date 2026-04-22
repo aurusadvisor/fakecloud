@@ -1,9 +1,10 @@
 # fakecloud
 
-> fakecloud is a free, open-source local AWS cloud emulator written in Rust. It runs on a single port (4566), requires no account or auth token, and aims for 100% behavioral parity with real AWS on every service it implements. It is an open-source alternative to LocalStack, which went proprietary in March 2026.
+> fakecloud is a free, open-source local AWS cloud emulator written in Rust. It runs on a single port (4566), requires no account or auth token, and aims for 100% behavioral parity with real AWS across every service, every operation, and every cross-service integration. It is an open-source alternative to LocalStack, which went proprietary in March 2026.
 
+- **Goal:** 100% of AWS services, each at 100% conformance, with 100% of cross-service integrations. Approach is depth-first — a service is added when it passes the full Smithy-model test variants and cross-service wire-ups, not when the API surface looks filled in.
 - Single static binary (~19 MB), ~500ms startup, ~10 MiB idle memory, no Docker required to run fakecloud itself
-- **23 AWS services, 1,680 operations, 100% conformance per implemented service** — validated against AWS's own Smithy models on every commit (54,000+ generated test variants)
+- **23 AWS services shipped today, 1,680 operations, 100% conformance per implemented service** — validated against AWS's own Smithy models on every commit (54,000+ generated test variants). More services land as they hit the conformance bar; roadmap is driven by real-project demand.
 - Services: S3, SQS, SNS, EventBridge, EventBridge Scheduler, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime
 - 30+ cross-service integrations: S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more
 - Real Lambda execution via Docker across 13 runtimes (Node.js 18/20/22, Python 3.9-3.12, Java 11/17/21, .NET 6/8, Ruby 3.2, Go, custom `provided.al2` / `provided.al2023`)
