@@ -77,6 +77,22 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 
 Per-service docs and feature matrices: [fakecloud.dev/docs/services](https://fakecloud.dev/docs/services).
 
+## Common use cases
+
+| What you want to do                        | Command                                                                        |
+| ------------------------------------------ | ------------------------------------------------------------------------------ |
+| **Test Lambda locally**                    | `fakecloud` then `aws --endpoint-url http://localhost:4566 lambda invoke …`    |
+| **Mock DynamoDB in tests**                 | `fakecloud` then point boto3/aws-sdk at `http://localhost:4566`                |
+| **Local S3 for integration tests**         | `fakecloud` then use any S3 SDK with `endpoint_url=http://localhost:4566`      |
+| **Fake AWS server for tests**              | `fakecloud` — single binary on port 4566, any AWS SDK works                    |
+| **Replace LocalStack in CI**               | `curl … install.sh`, then `fakecloud &` as a background step                   |
+| **Terraform local dev**                    | Point the `aws` provider `endpoints` block at `http://localhost:4566`          |
+| **CDK local testing**                      | `cdklocal deploy --endpoint-url http://localhost:4566`                         |
+| **Moto equivalent for Go/Java/Node**       | `fakecloud` — real HTTP server, every AWS SDK works, no language lock-in       |
+| **Integration test AWS in GitHub Actions** | Install or pull `ghcr.io/faiscadev/fakecloud`, run as service container        |
+
+Full guides: [fakecloud.dev/docs/guides](https://fakecloud.dev/docs/guides).
+
 ## Compared to LocalStack Community
 
 | Feature             | fakecloud                                          | LocalStack Community (post-March 2026)                                         |
