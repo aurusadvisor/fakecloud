@@ -1240,9 +1240,15 @@ fn key_cond_simple_comparison(
 }
 
 /// Returns the "size" of a DynamoDB attribute value per AWS docs:
-/// S → character count, N → always 0 (AWS returns size of internal representation, we approximate),
-/// B → byte count, SS/NS/BS → element count, L → element count, M → element count,
-/// BOOL/NULL → 1.
+/// - S → character count
+/// - B → decoded byte count
+/// - SS/NS/BS → element count
+/// - L → element count
+/// - M → element count
+///
+/// `size()` is not valid on N, BOOL, or NULL per AWS; returns None for those so
+/// the enclosing comparison evaluates to false (matching AWS's behavior of
+/// silently filtering type-mismatched rows in FilterExpression context).
 fn attribute_size(val: &Value) -> Option<usize> {
     if let Some(s) = val.get("S").and_then(|v| v.as_str()) {
         return Some(s.len());
@@ -1269,13 +1275,6 @@ fn attribute_size(val: &Value) -> Option<usize> {
     }
     if let Some(obj) = val.get("M").and_then(|v| v.as_object()) {
         return Some(obj.len());
-    }
-    if val.get("N").is_some() {
-        // AWS returns numeric representation size; approximate with string length
-        return val.get("N").and_then(|v| v.as_str()).map(|s| s.len());
-    }
-    if val.get("BOOL").is_some() || val.get("NULL").is_some() {
-        return Some(1);
     }
     None
 }
