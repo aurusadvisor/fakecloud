@@ -1,0 +1,56 @@
++++
+title = "fakecloud vs MiniStack"
+description = "How fakecloud compares to MiniStack. Both free, open-source AWS emulators that surfaced after LocalStack's March 2026 proprietary transition."
+template = "page.html"
++++
+
+MiniStack is one of the free, open-source AWS emulators that gained momentum after LocalStack replaced its Community Edition with a proprietary image in March 2026. fakecloud is another.
+
+This page is honest positioning. I maintain fakecloud, so the bias is declared. What follows is architectural — what each project *is* — rather than fabricated side-by-side benchmarks (the surest way to get out of date in days).
+
+## Both solve the same general problem
+
+Free, open-source, local AWS emulation. Real HTTP server speaking the AWS wire protocol on port 4566. Any AWS SDK in any language works. Both are drop-in replacements for LocalStack Community for the services each covers.
+
+## The positioning difference
+
+**MiniStack's approach** (check their repo for current details — it's moving fast): positions as a free LocalStack replacement. Evaluate their service coverage and architecture directly against your test suite.
+
+**fakecloud's approach:** depth-first, explicit goal. 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Services land one at a time; a service is added when it passes the full Smithy-model test variants and cross-service wire-ups, not when the API surface looks filled in. 23 services shipped today; more progressively. Built around real Lambda execution, real stateful backends (Postgres/MySQL/MariaDB/Redis/Valkey via Docker), and real cross-service wiring, validated on every commit against AWS's own Smithy models (54,000+ generated test variants) plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites.
+
+These are philosophies, not rankings. Breadth-first and depth-first are different tradeoffs. A team whose tests lean lightly on many services will prefer breadth. A team whose tests exercise real cross-service flows or need real code execution will prefer depth.
+
+## How to pick
+
+1. **Open your test suite.** Count the AWS services it actually calls.
+2. **Check each tool's current supported-services list** against that set.
+3. **For the services you use, check depth:** does the tool actually execute Lambda code? Actually run Postgres? Actually fire S3 -> Lambda notifications end-to-end?
+4. **Run your actual tests against each option you're considering.** That's the only benchmark that matters for your codebase.
+
+## fakecloud specifics
+
+| Feature | fakecloud |
+|---|---|
+| Language | Rust |
+| Distribution | Single static binary (~19 MB) + Docker image |
+| Startup | ~500ms |
+| Idle memory | ~10 MiB |
+| Services covered today | 23 (1,680 ops) at 100% conformance |
+| Lambda execution | Real, 13 runtimes in Docker |
+| RDS | Real PostgreSQL/MySQL/MariaDB via Docker |
+| ElastiCache | Real Redis/Valkey via Docker |
+| Conformance methodology | Smithy-validated, 54k+ test variants on every commit |
+| Terraform TestAcc CI | Yes (upstream suites run against fakecloud) |
+| Test-assertion SDKs | TypeScript, Python, Go, PHP, Java, Rust |
+| License | AGPL-3.0 |
+
+## Install fakecloud
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
+fakecloud
+```
+
+- **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
+- **LocalStack alternative landing:** [/localstack-alternative/](/localstack-alternative/)
+- **Four-way comparison:** [/blog/localstack-alternatives-compared/](/blog/localstack-alternatives-compared/)
