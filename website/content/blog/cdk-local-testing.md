@@ -125,6 +125,7 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
           fakecloud &
           for i in $(seq 1 30); do curl -sf http://localhost:4566/_fakecloud/health && break; sleep 1; done
+          curl -sf http://localhost:4566/_fakecloud/health
 
       - run: npm ci
       - run: npx cdk bootstrap

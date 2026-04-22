@@ -130,5 +130,5 @@ If you need multi-language, free, real Lambda triggers, depth-first conformance:
 
 - **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
-- **DynamoDB docs:** [fakecloud.dev/docs/services/dynamodb](/docs/services/)
+- **DynamoDB docs:** [fakecloud.dev/docs/services/dynamodb](/docs/services/dynamodb/)
 - **Related:** [Fake AWS server for tests](/fake-aws-server/), [Test Lambda locally](/test-lambda-locally/), [Integration testing AWS in CI](/blog/integration-testing-aws-in-ci/)

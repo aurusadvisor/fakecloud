@@ -161,6 +161,10 @@ resource "aws_s3_bucket_notification" "uploads_to_sqs" {
     events    = ["s3:ObjectCreated:*"]
   }
 }
+
+output "bucket_id" {
+  value = aws_s3_bucket.uploads.id
+}
 ```
 
 Apply it against fakecloud:
@@ -198,6 +202,7 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
           fakecloud &
           for i in $(seq 1 30); do curl -sf http://localhost:4566/_fakecloud/health && break; sleep 1; done
+          curl -sf http://localhost:4566/_fakecloud/health
 
       - name: terraform init
         run: terraform init
