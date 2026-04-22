@@ -18,6 +18,12 @@ pub struct Operation {
     pub input_shape: Option<String>,
     pub output_shape: Option<String>,
     pub error_shapes: Vec<String>,
+    /// HTTP method from `smithy.api#http` if present (`GET`, `POST`, …).
+    pub http_method: Option<String>,
+    /// URI template from `smithy.api#http`, e.g. `/v2/apis/{ApiId}/routes/{RouteId}`.
+    pub http_uri: Option<String>,
+    /// Success HTTP status code from `smithy.api#http` (`code`).
+    pub http_code: Option<u16>,
 }
 
 /// A parsed shape definition.
@@ -101,6 +107,14 @@ pub struct ShapeTraits {
     pub http_error: Option<u16>,
     pub default_value: Option<Value>,
     pub examples: Vec<OperationExample>,
+    /// `smithy.api#httpLabel` — member value substitutes into the URI template.
+    pub http_label: bool,
+    /// `smithy.api#httpQuery("name")` — query parameter name.
+    pub http_query: Option<String>,
+    /// `smithy.api#httpHeader("name")` — HTTP request header name.
+    pub http_header: Option<String>,
+    /// `smithy.api#httpPayload` — member is sent as the raw request/response body.
+    pub http_payload: bool,
 }
 
 /// An example from `smithy.api#examples` trait on operations.
@@ -194,21 +208,30 @@ pub fn parse_model(path: &Path) -> Result<ServiceModel, String> {
                 })
                 .unwrap_or_default();
 
+            let (http_method, http_uri, http_code) = shape_def
+                .get("traits")
+                .and_then(|v| v.as_object())
+                .and_then(|t| t.get("smithy.api#http"))
+                .map(|h| {
+                    let method = h
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let uri = h.get("uri").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let code = h.get("code").and_then(|v| v.as_u64()).map(|c| c as u16);
+                    (method, uri, code)
+                })
+                .unwrap_or((None, None, None));
+
             let op = Operation {
                 name,
                 input_shape,
                 output_shape,
                 error_shapes,
+                http_method,
+                http_uri,
+                http_code,
             };
-
-            // Extract examples from operation traits
-            if let Some(traits) = shape_def.get("traits").and_then(|v| v.as_object()) {
-                if let Some(examples) = traits.get("smithy.api#examples").and_then(|v| v.as_array())
-                {
-                    // Store examples on the operation (we'll reference them from shapes too)
-                    let _ = examples; // examples are stored in the shape's traits
-                }
-            }
 
             operations.push(op);
         }
@@ -465,6 +488,22 @@ fn parse_traits(raw: Option<&serde_json::Map<String, Value>>) -> ShapeTraits {
         traits.http_error = Some(http_error as u16);
     }
 
+    if raw.contains_key("smithy.api#httpLabel") {
+        traits.http_label = true;
+    }
+
+    if let Some(name) = raw.get("smithy.api#httpQuery").and_then(|v| v.as_str()) {
+        traits.http_query = Some(name.to_string());
+    }
+
+    if let Some(name) = raw.get("smithy.api#httpHeader").and_then(|v| v.as_str()) {
+        traits.http_header = Some(name.to_string());
+    }
+
+    if raw.contains_key("smithy.api#httpPayload") {
+        traits.http_payload = true;
+    }
+
     if let Some(default) = raw.get("smithy.api#default") {
         traits.default_value = Some(default.clone());
     }
@@ -669,5 +708,48 @@ mod tests {
 
         // Check SQS is present
         assert!(models.iter().any(|(name, _)| name == "sqs"));
+    }
+
+    #[test]
+    fn parse_http_trait_on_operation() {
+        // Lambda GetFunction has `@http(method: GET, uri: "/2015-03-31/functions/{FunctionName}")`.
+        let dir = models_dir();
+        let path = dir.join("lambda.json");
+        let model = parse_model(&path).unwrap();
+        let op = model
+            .operations
+            .iter()
+            .find(|op| op.name == "GetFunction")
+            .expect("GetFunction present");
+        assert_eq!(op.http_method.as_deref(), Some("GET"));
+        let uri = op.http_uri.as_deref().unwrap();
+        assert!(uri.contains("{FunctionName}"), "uri contains label: {uri}");
+    }
+
+    #[test]
+    fn parse_http_label_on_member() {
+        // Lambda GetFunction's input has `FunctionName` marked `@httpLabel`.
+        let dir = models_dir();
+        let path = dir.join("lambda.json");
+        let model = parse_model(&path).unwrap();
+        let op = model
+            .operations
+            .iter()
+            .find(|op| op.name == "GetFunction")
+            .unwrap();
+        let input_id = op.input_shape.as_deref().unwrap();
+        let input = model.shapes.get(input_id).unwrap();
+        let members = match &input.shape_type {
+            ShapeType::Structure { members } => members,
+            other => panic!("expected structure, got {other:?}"),
+        };
+        let fn_name = members.iter().find(|m| m.name == "FunctionName").unwrap();
+        let target_traits = &model.shapes[&fn_name.target].traits;
+        // http_label can sit on either the member or the target shape. Pragma:
+        // we parse it onto whichever shape the trait lives on — check both.
+        assert!(
+            fn_name.traits.http_label || target_traits.http_label,
+            "FunctionName carries @httpLabel"
+        );
     }
 }
