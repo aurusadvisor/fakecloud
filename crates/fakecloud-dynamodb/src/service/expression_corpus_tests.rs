@@ -473,28 +473,56 @@ fn filter_deep_nested_parentheses() {
 }
 
 #[test]
-#[ignore = "known gap: Filter comparison LHS does not resolve dot-notation paths"]
 fn filter_nested_map_path() {
-    // Projection-style nested paths inside filter — dot notation.
+    // Projection-style nested paths inside filter — dot notation, including
+    // multi-level traversal, missing intermediates, placeholder segments, and
+    // dotted paths inside function arguments.
     let it = item(&[(
         "profile",
-        m(&[("email", s("a@b.com")), ("verified", b(true))]),
+        m(&[
+            ("email", s("a@b.com")),
+            ("verified", b(true)),
+            ("address", m(&[("city", s("Lisbon")), ("zip", s("1000"))])),
+        ]),
     )]);
-    let names = HashMap::new();
-    let values = values(&[(":e", s("a@b.com"))]);
+    let names = names(&[("#p", "profile"), ("#e", "email")]);
+    let values = values(&[
+        (":e", s("a@b.com")),
+        (":wrong", s("x@y.com")),
+        (":city", s("Lisbon")),
+    ]);
 
     let cases = [
         ("dot-equal", "profile.email = :e", true),
+        ("dot-equal-miss", "profile.email = :wrong", false),
         (
             "dot-attribute-exists",
             "attribute_exists(profile.email)",
             true,
         ),
         (
-            "dot-attribute-not-exists",
+            "dot-attribute-not-exists-leaf",
             "attribute_not_exists(profile.missing)",
             true,
         ),
+        (
+            "dot-attribute-exists-missing-parent",
+            "attribute_exists(ghost.email)",
+            false,
+        ),
+        ("three-level-equal", "profile.address.city = :city", true),
+        (
+            "three-level-attribute-exists",
+            "attribute_exists(profile.address.city)",
+            true,
+        ),
+        (
+            "three-level-attribute-not-exists",
+            "attribute_not_exists(profile.address.country)",
+            true,
+        ),
+        ("placeholder-dotted", "#p.#e = :e", true),
+        ("begins-with-nested", "begins_with(profile.email, :e)", true),
     ];
     for (label, expr, expected) in cases {
         assert_eq!(
