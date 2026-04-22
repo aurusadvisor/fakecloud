@@ -39,7 +39,7 @@ These are philosophies, not rankings. Breadth-first and depth-first are differen
 | Lambda execution | Real, 13 runtimes in Docker |
 | RDS | Real PostgreSQL/MySQL/MariaDB via Docker |
 | ElastiCache | Real Redis/Valkey via Docker |
-| Conformance methodology | Smithy-validated, 54k+ test variants on every commit |
+| Conformance methodology | Smithy-validated, 57k+ test variants on every commit |
 | Terraform TestAcc CI | Yes (upstream suites run against fakecloud) |
 | Test-assertion SDKs | TypeScript, Python, Go, PHP, Java, Rust |
 | License | AGPL-3.0 |
