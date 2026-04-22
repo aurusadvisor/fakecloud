@@ -2,6 +2,42 @@
 
 {% block title %}{{ page.title }} - {{ config.title }}{% endblock %}
 {% block description %}{{ page.description | default(value=config.description) }}{% endblock %}
+{% block og_title %}{{ page.title }}{% endblock %}
+{% block og_description %}{{ page.description | default(value=config.description) }}{% endblock %}
+{% block og_url %}{{ page.permalink }}{% endblock %}
+{% block canonical %}<link rel="canonical" href="{{ page.permalink }}">{% endblock %}
+
+{% block structured_data %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": {{ page.title | json_encode | safe }},
+  "description": {{ page.description | default(value=config.description) | json_encode | safe }},
+  "author": {
+    "@type": "Person",
+    "name": "Lucas Vieira",
+    "url": "https://github.com/vieiralucas"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "fakecloud",
+    "url": "https://fakecloud.dev"
+  },
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "{{ page.permalink }}"
+  },
+  "url": "{{ page.permalink }}",
+  "about": {
+    "@type": "SoftwareApplication",
+    "name": "fakecloud",
+    "applicationCategory": "DeveloperApplication",
+    "url": "https://fakecloud.dev"
+  }
+}
+</script>
+{% endblock %}
 
 {% block content %}
 <article class="blog-article">

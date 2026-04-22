@@ -2,6 +2,39 @@
 
 {% block title %}{{ page.title }} - {{ config.title }}{% endblock %}
 {% block description %}{{ page.description }}{% endblock %}
+{% block og_title %}{{ page.title }}{% endblock %}
+{% block og_description %}{{ page.description }}{% endblock %}
+{% block og_type %}article{% endblock %}
+{% block og_url %}{{ page.permalink }}{% endblock %}
+{% block canonical %}<link rel="canonical" href="{{ page.permalink }}">{% endblock %}
+
+{% block structured_data %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": {{ page.title | json_encode | safe }},
+  "description": {{ page.description | json_encode | safe }},
+  "datePublished": "{{ page.date | date(format='%Y-%m-%d') }}",
+  "dateModified": "{{ page.date | date(format='%Y-%m-%d') }}",
+  "author": {
+    "@type": "Person",
+    "name": "{{ page.extra.author | default(value='Lucas Vieira') }}",
+    "url": "https://github.com/vieiralucas"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "fakecloud",
+    "url": "https://fakecloud.dev"
+  },
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "{{ page.permalink }}"
+  },
+  "url": "{{ page.permalink }}"
+}
+</script>
+{% endblock %}
 
 {% block content %}
 <article class="blog-article">

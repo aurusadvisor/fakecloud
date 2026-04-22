@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}{{ config.title }}{% endblock %}</title>
 <meta name="description" content="{% block description %}{{ config.description }}{% endblock %}">
+<meta property="og:title" content="{% block og_title %}{{ config.title }}{% endblock %}">
+<meta property="og:description" content="{% block og_description %}{{ config.description }}{% endblock %}">
+<meta property="og:type" content="{% block og_type %}website{% endblock %}">
+<meta property="og:url" content="{% block og_url %}{{ current_url | default(value=config.base_url) }}{% endblock %}">
+<meta property="og:site_name" content="fakecloud">
+<meta name="twitter:card" content="summary">
+{% block canonical %}{% if current_url %}<link rel="canonical" href="{{ current_url }}">{% endif %}{% endblock %}
 <link rel="help" href="/llms.txt" type="text/markdown" title="LLM documentation">
 {% if config.generate_feeds %}
 <link rel="alternate" type="application/rss+xml" title="fakecloud blog" href="{{ get_url(path='rss.xml') }}">
@@ -12,6 +19,7 @@
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="icon" type="image/png" href="/favicon.ico">
 <link rel="stylesheet" href="/style.css">
+{% block structured_data %}{% endblock %}
 <script>
   (function() {
     var t = localStorage.getItem('theme');
