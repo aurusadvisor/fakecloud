@@ -8,7 +8,7 @@
   <div class="container">
     <h1>fake<span>cloud</span></h1>
     <p class="tagline">Local AWS cloud emulator for integration tests. Run your app with normal AWS clients, stay fully local, and use fakecloud SDKs when your tests need deeper visibility.</p>
-    <p class="hero-proof">22 services. 1155 operations. 100% conformance across implemented APIs.</p>
+    <p class="hero-proof">23 services. 1,680 operations. 100% conformance across implemented APIs.</p>
     <div class="btn-group">
       <a href="#quickstart" class="btn">Get Started</a>
       <a href="#compare" class="btn btn-outline">Why fakecloud</a>
@@ -47,13 +47,13 @@
       </div>
       <div class="feature">
         <div class="label">Coverage</div>
-        <h3>22 AWS services</h3>
-        <p>S3, SQS, SNS, EventBridge, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES, Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock, and Bedrock Runtime.</p>
+        <h3>23 AWS services</h3>
+        <p>S3, SQS, SNS, EventBridge, EventBridge Scheduler, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES, Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock, and Bedrock Runtime.</p>
       </div>
       <div class="feature">
         <div class="label">Tested</div>
         <h3>Conformance tested</h3>
-        <p>100% conformance across all 1155 implemented API operations, backed by model-driven conformance coverage plus end-to-end tests against the official AWS SDKs.</p>
+        <p>100% conformance across all 1,680 implemented API operations, backed by 54,000+ Smithy-model-generated test variants plus end-to-end tests against the official AWS SDKs.</p>
       </div>
       <div class="feature">
         <div class="label">Real behavior</div>
@@ -142,13 +142,15 @@
           <tr><td>Startup time</td><td class="check">~500ms</td><td class="cross">~3s</td></tr>
           <tr><td>Idle memory</td><td class="check">~10 MiB</td><td class="cross">~150 MiB</td></tr>
           <tr><td>Install size</td><td class="check">~19 MB binary</td><td class="cross">~1 GB Docker image</td></tr>
-          <tr><td>AWS services</td><td>22</td><td>30+</td></tr>
+          <tr><td>AWS services</td><td>23</td><td>30+</td></tr>
           <tr><td>Test assertion SDKs</td><td class="check">TypeScript, Python, Go, PHP, Java, Rust</td><td>Python, Java</td></tr>
-          <tr><td>Cognito User Pools</td><td class="check">80 operations</td><td class="cross">Paid only</td></tr>
-          <tr><td>SES v2</td><td class="check">97 operations</td><td class="cross">Paid only</td></tr>
+          <tr><td>Cognito User Pools</td><td class="check">122 operations</td><td class="cross">Paid only</td></tr>
+          <tr><td>SES v2</td><td class="check">110 operations</td><td class="cross">Paid only</td></tr>
           <tr><td>SES inbound email</td><td class="check">Real receipt rule actions</td><td class="cross">Stored but never executed</td></tr>
-          <tr><td>RDS</td><td class="check">22 operations, PostgreSQL/MySQL/MariaDB via Docker</td><td class="cross">Paid only</td></tr>
-          <tr><td>ElastiCache</td><td class="check">44 operations, Redis and Valkey via Docker</td><td class="cross">Paid only</td></tr>
+          <tr><td>RDS</td><td class="check">163 operations, PostgreSQL/MySQL/MariaDB via Docker</td><td class="cross">Paid only</td></tr>
+          <tr><td>ElastiCache</td><td class="check">75 operations, Redis and Valkey via Docker</td><td class="cross">Paid only</td></tr>
+          <tr><td>API Gateway v2</td><td class="check">28 operations, HTTP APIs + JWT/Lambda authorizers</td><td class="cross">Paid only</td></tr>
+          <tr><td>Bedrock</td><td class="check">111 operations (control plane + runtime)</td><td class="cross">Not available</td></tr>
         </tbody>
       </table>
     </div>
@@ -164,6 +166,7 @@
       <div class="service"><div class="name">SQS</div><div class="proto">Query protocol &middot; XML</div></div>
       <div class="service"><div class="name">SNS</div><div class="proto">Query protocol &middot; XML</div></div>
       <div class="service"><div class="name">EventBridge</div><div class="proto">JSON protocol</div></div>
+      <div class="service"><div class="name">EventBridge Scheduler</div><div class="proto">JSON protocol</div></div>
       <div class="service"><div class="name">SSM Parameter Store</div><div class="proto">JSON protocol</div></div>
       <div class="service"><div class="name">DynamoDB</div><div class="proto">JSON protocol</div></div>
       <div class="service"><div class="name">IAM / STS</div><div class="proto">Query protocol</div></div>
