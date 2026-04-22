@@ -245,13 +245,9 @@ jobs:
 
 ~500ms startup. A whole Lambda-integration test suite completes in seconds on a cold runner.
 
-## When this is not the right tool
+## Correctness vs performance
 
-- **Cold-start latency benchmarking.** fakecloud's containers have different cold-start characteristics than real Lambda. Don't benchmark cold starts here.
-- **Provisioned concurrency / reserved concurrency scheduling.** fakecloud runs functions when invoked; it does not simulate AWS's concurrency accounting.
-- **Production VPC networking.** fakecloud runs Lambdas in local containers, not inside a VPC.
-
-For those, test against real AWS. For every other "does my Lambda code plus its triggers actually work" question, fakecloud is the tool.
+fakecloud runs your function code in the real AWS Lambda runtime containers, so behavior matches real Lambda. What it doesn't replicate is AWS's distributed infrastructure timing: cold-start latency, concurrency-accounting scheduling, and VPC networking come from AWS's own implementation, not from a local process, so numbers on those will not match real AWS. Use real AWS for those measurements, use fakecloud for everything correctness-related.
 
 ## Links
 

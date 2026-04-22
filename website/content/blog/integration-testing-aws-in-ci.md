@@ -222,12 +222,11 @@ SDK available in TypeScript, Python, Go, PHP, Java, Rust. Docs: [fakecloud.dev/d
 - **Pin the image tag** in CI (`ghcr.io/faiscadev/fakecloud:0.10.1`) if you want deterministic behavior across builds. `latest` is fine for most teams.
 - **Don't mix fakecloud with mocks.** Pick one per test. If you mock inside a test that also talks to fakecloud, you will get confusing failures.
 
-## When this is not right
+## One call-out
 
-- **Contract testing against real AWS behavior that fakecloud does not yet implement.** Check the [supported services list](https://github.com/faiscadev/fakecloud#supported-services). If a critical service is missing, file an issue — the roadmap is demand-driven.
-- **Performance benchmarking.** fakecloud and AWS have different performance characteristics. Benchmark against AWS.
+**Performance benchmarking** is different from correctness testing. fakecloud and AWS have different performance characteristics (by design — fakecloud is a local process, AWS is a distributed global system). Benchmark performance against real AWS. Benchmark correctness and behavior against fakecloud.
 
-For every other "does my AWS integration actually work" test, fakecloud in CI is the fast path.
+fakecloud's goal is every AWS service at 100% conformance with 100% of cross-service integrations. If a service your tests hit isn't in the [supported list](https://github.com/faiscadev/fakecloud#supported-services) yet, [file an issue](https://github.com/faiscadev/fakecloud/issues) — the roadmap is demand-driven and services land one at a time with the full conformance target, not a partial-surface-first approach.
 
 ## Links
 
