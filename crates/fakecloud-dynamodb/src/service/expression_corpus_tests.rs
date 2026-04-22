@@ -174,7 +174,6 @@ fn key_condition_begins_with_both_spacings() {
 }
 
 #[test]
-#[ignore = "known gap: split_on_and grabs BETWEEN's inner AND; needs BETWEEN-aware tokenization"]
 fn key_condition_between() {
     let it = item(&[("store_id", s("s1")), ("order_id", n("50"))]);
     let names = HashMap::new();
@@ -193,7 +192,6 @@ fn key_condition_between() {
 }
 
 #[test]
-#[ignore = "known gap: split_on_and does literal ` AND ` match; any non-space whitespace breaks it"]
 fn key_condition_whitespace_variations() {
     let it = item(&[("store_id", s("s1")), ("order_id", s("o1"))]);
     let names = HashMap::new();
@@ -399,7 +397,6 @@ fn filter_in_operator() {
 }
 
 #[test]
-#[ignore = "known gap: FilterExpression AND splitter grabs BETWEEN's inner AND"]
 fn filter_between() {
     let it = item(&[("x", n("50"))]);
     let names = HashMap::new();
