@@ -1,15 +1,19 @@
 # fakecloud — Full Documentation
 
-> fakecloud is a free, open-source local AWS cloud emulator written in Rust. It runs on a single port (4566), requires no account or auth token, and aims for 100% behavioral parity with real AWS on every service it implements. It is an open-source alternative to LocalStack, which went proprietary in March 2026.
+> fakecloud is a free, open-source local AWS cloud emulator written in Rust. It runs on a single port (4566), requires no account or auth token, and aims for 100% behavioral parity with real AWS across every service, every operation, and every cross-service integration. It is an open-source alternative to LocalStack, which went proprietary in March 2026.
 
 ## Overview
 
-fakecloud emulates 22 AWS services locally for integration testing and development. It is a single Rust binary — no Docker required, no signup, starts in under 100ms. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
+fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~500ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
+
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 23 services (1,680 operations) are shipped today; more land progressively as they hit the bar.
 
 Key design principles:
-- **Correctness over coverage**: Every implemented service targets 100% behavioral parity with real AWS, verified by automated conformance tests against AWS Smithy models
-- **Zero friction**: No auth tokens, no accounts, no config files needed
-- **Cross-service integration**: 30+ service-to-service integrations — S3 notifications, SNS fanout, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway → Lambda, Step Functions task integrations, and more
+- **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models (54,000+ generated test variants). CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
+- **Real cross-service integrations**: 30+ service-to-service integrations wire up end-to-end — S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more. Not stubs — the downstream service actually executes.
+- **Real execution for stateful services**: Lambda runs function code in real Lambda runtime containers across 13 runtimes. RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey.
+- **Zero friction**: no auth tokens, no accounts, no config files needed
+- **Test-assertion SDKs** for TypeScript, Python, Go, PHP, Java, Rust, wrapping `/_fakecloud/*` introspection endpoints
 
 fakecloud is NOT a production-ready cloud replacement. It is for integration testing and local development.
 
@@ -160,7 +164,7 @@ client := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
 
 ## Supported Services — Full Reference
 
-### SQS (20 actions)
+### SQS (23 actions)
 
 CreateQueue, DeleteQueue, ListQueues, GetQueueUrl, GetQueueAttributes, SetQueueAttributes, SendMessage, SendMessageBatch, ReceiveMessage, DeleteMessage, DeleteMessageBatch, PurgeQueue, ChangeMessageVisibility, ChangeMessageVisibilityBatch, ListQueueTags, TagQueue, UntagQueue, AddPermission, RemovePermission, ListDeadLetterSourceQueues
 
@@ -168,7 +172,7 @@ Features: real MD5 hashing, long polling (WaitTimeSeconds), FIFO queues with mes
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
-### SNS (34 actions)
+### SNS (42 actions)
 
 **Topics:** CreateTopic, DeleteTopic, ListTopics, GetTopicAttributes, SetTopicAttributes
 **Subscriptions:** Subscribe, ConfirmSubscription, Unsubscribe, ListSubscriptions, ListSubscriptionsByTopic, GetSubscriptionAttributes, SetSubscriptionAttributes
@@ -200,7 +204,15 @@ Features: pattern-based rules (nested fields, numeric comparisons, prefix, exist
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### IAM / STS (135 actions)
+### EventBridge Scheduler (12 actions)
+
+CreateSchedule, GetSchedule, UpdateSchedule, DeleteSchedule, ListSchedules, CreateScheduleGroup, GetScheduleGroup, DeleteScheduleGroup, ListScheduleGroups, TagResource, UntagResource, ListTagsForResource.
+
+Features: `at`, `rate`, and `cron` expressions; SQS targets; DLQ routing; one-shot schedules with self-delete.
+
+Protocol: REST + JSON
+
+### IAM (176 actions) + STS (11 actions)
 
 **Users:** CreateUser, GetUser, DeleteUser, ListUsers, UpdateUser, TagUser, UntagUser, ListUserTags, CreateAccessKey, DeleteAccessKey, ListAccessKeys, UpdateAccessKey, GetAccessKeyLastUsed, CreateLoginProfile, GetLoginProfile, UpdateLoginProfile, DeleteLoginProfile, AttachUserPolicy, DetachUserPolicy, ListAttachedUserPolicies, PutUserPolicy, GetUserPolicy, DeleteUserPolicy, ListUserPolicies
 **Roles:** CreateRole, GetRole, DeleteRole, ListRoles, UpdateRole, UpdateRoleDescription, UpdateAssumeRolePolicy, TagRole, UntagRole, ListRoleTags, PutRolePermissionsBoundary, DeleteRolePermissionsBoundary, AttachRolePolicy, DetachRolePolicy, ListAttachedRolePolicies, PutRolePolicy, GetRolePolicy, DeleteRolePolicy, ListRolePolicies, CreateServiceLinkedRole, DeleteServiceLinkedRole, GetServiceLinkedRoleDeletionStatus
@@ -229,7 +241,7 @@ Features: String/StringList/SecureString types, automatic versioning, parameter 
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### S3 (74 actions)
+### S3 (107 actions)
 
 **Buckets:** ListBuckets, CreateBucket, DeleteBucket, HeadBucket, GetBucketLocation
 **Objects:** PutObject, GetObject, DeleteObject, HeadObject, CopyObject, DeleteObjects, ListObjectsV2, ListObjects, ListObjectVersions, GetObjectAttributes, RestoreObject
@@ -241,13 +253,13 @@ Features: path-style addressing, prefix/delimiter listing, pagination, user meta
 
 Protocol: REST (HTTP method + path-based routing, XML responses)
 
-### DynamoDB
+### DynamoDB (57 actions)
 
-Table and item operations with support for key schemas, secondary indexes, and standard DynamoDB JSON wire format.
+Tables, items, transactions (TransactWriteItems, TransactGetItems), PartiQL (ExecuteStatement, BatchExecuteStatement), backups, global tables, streams, secondary indexes. Standard DynamoDB JSON wire format.
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### Lambda (10 actions)
+### Lambda (85 actions)
 
 CreateFunction, GetFunction, DeleteFunction, ListFunctions, Invoke, PublishVersion, CreateEventSourceMapping, ListEventSourceMappings, GetEventSourceMapping, DeleteEventSourceMapping
 
@@ -279,7 +291,7 @@ Features: real envelope encryption, key enable/disable/deletion scheduling, alia
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### CloudFormation (8 actions)
+### CloudFormation (90 actions)
 
 CreateStack, DeleteStack, DescribeStacks, ListStacks, ListStackResources, DescribeStackResources, UpdateStack, GetTemplate
 
@@ -289,7 +301,7 @@ Supported resource types: AWS::SQS::Queue, AWS::SNS::Topic, AWS::SNS::Subscripti
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
-### SES (111 actions)
+### SES (110 actions)
 
 **SES v2** (97 actions, REST protocol): identities, templates, configuration sets, contact lists, contacts, send email, tagging, suppression list, event destinations, identity policies, DKIM/feedback/mail-from attributes, config set options, custom verification email templates, template rendering, dedicated IP pools and IPs, multi-region endpoints, account settings, import/export jobs.
 
@@ -297,7 +309,7 @@ Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
 Features: email event fanout to SNS topics and EventBridge buses via configured event destinations, mailbox simulator (bounce@simulator.amazonses.com, complaint@, suppressionlist@), inbound email pipeline via /_fakecloud/ses/inbound endpoint that evaluates receipt rules and executes S3/SNS/Lambda actions.
 
-### Cognito User Pools (80 actions)
+### Cognito User Pools (122 actions)
 
 User pool management, app clients, user management, groups, authentication flows, password and session management, MFA/software tokens, identity providers, resource servers, domains, device management, tags, and import jobs.
 
@@ -305,7 +317,7 @@ Features: user pools with configurable policies, app client CRUD, user signup/co
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### Kinesis (14 actions)
+### Kinesis (39 actions)
 
 CreateStream, DescribeStream, DescribeStreamSummary, ListStreams, DeleteStream, GetRecords, GetShardIterator, PutRecord, PutRecords, AddTagsToStream, ListTagsForStream, RemoveTagsFromStream, IncreaseStreamRetentionPeriod, DecreaseStreamRetentionPeriod
 
@@ -313,7 +325,7 @@ Features: stream creation and deletion, shard iterators and record reads, batche
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### RDS (22 actions)
+### RDS (163 actions)
 
 AddTagsToResource, CreateDBInstance, CreateDBInstanceReadReplica, CreateDBParameterGroup, CreateDBSnapshot, CreateDBSubnetGroup, DeleteDBInstance, DeleteDBParameterGroup, DeleteDBSnapshot, DeleteDBSubnetGroup, DescribeDBEngineVersions, DescribeDBInstances, DescribeDBParameterGroups, DescribeDBSnapshots, DescribeDBSubnetGroups, DescribeOrderableDBInstanceOptions, ListTagsForResource, ModifyDBInstance, ModifyDBParameterGroup, RebootDBInstance, RemoveTagsFromResource, RestoreDBInstanceFromDBSnapshot
 
@@ -321,7 +333,7 @@ Features: DB instance lifecycle (PostgreSQL, MySQL, MariaDB via Docker), read re
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
-### ElastiCache (44 actions)
+### ElastiCache (75 actions)
 
 AddTagsToResource, CreateCacheCluster, CreateGlobalReplicationGroup, CreateCacheSubnetGroup, CreateReplicationGroup, CreateServerlessCache, CreateServerlessCacheSnapshot, CreateSnapshot, CreateUser, CreateUserGroup, DecreaseReplicaCount, DeleteCacheCluster, DeleteGlobalReplicationGroup, DeleteCacheSubnetGroup, DeleteReplicationGroup, DeleteServerlessCache, DeleteServerlessCacheSnapshot, DeleteSnapshot, DeleteUser, DeleteUserGroup, DescribeCacheClusters, DescribeCacheEngineVersions, DescribeGlobalReplicationGroups, DescribeCacheParameterGroups, DescribeReservedCacheNodes, DescribeReservedCacheNodesOfferings, DescribeCacheSubnetGroups, DescribeEngineDefaultParameters, DescribeReplicationGroups, DescribeServerlessCaches, DescribeServerlessCacheSnapshots, DescribeSnapshots, DescribeUserGroups, DescribeUsers, DisassociateGlobalReplicationGroup, FailoverGlobalReplicationGroup, IncreaseReplicaCount, ListTagsForResource, ModifyCacheSubnetGroup, ModifyGlobalReplicationGroup, ModifyReplicationGroup, ModifyServerlessCache, RemoveTagsFromResource, TestFailover
 
@@ -329,7 +341,7 @@ Features: cache clusters, replication groups, global replication groups, serverl
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 
-### Step Functions (14 actions)
+### Step Functions (37 actions)
 
 CreateStateMachine, DeleteStateMachine, DescribeStateMachine, DescribeStateMachineForExecution, ListStateMachines, UpdateStateMachine, TagResource, UntagResource, ListTagsForResource, StartExecution, DescribeExecution, GetExecutionHistory, ListExecutions, StopExecution
 
