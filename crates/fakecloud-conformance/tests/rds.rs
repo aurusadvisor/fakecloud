@@ -1114,6 +1114,13 @@ async fn rds_modify_db_parameter_group() {
     let response = client
         .modify_db_parameter_group()
         .db_parameter_group_name("conf-modify-pg")
+        .parameters(
+            aws_sdk_rds::types::Parameter::builder()
+                .parameter_name("max_connections")
+                .parameter_value("100")
+                .apply_method(aws_sdk_rds::types::ApplyMethod::PendingReboot)
+                .build(),
+        )
         .send()
         .await
         .unwrap();
