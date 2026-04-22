@@ -207,17 +207,19 @@ cdklocal deploy --endpoint-url http://localhost:4566
 
 Or set `AWS_ENDPOINT_URL=http://localhost:4566` in your shell and use plain `cdk`.
 
-## Step 8: Serverless Framework — serverless-offline
+## Step 8: Serverless Framework
 
-If you used `serverless-localstack`, the simplest migration is to drop it and rely on the AWS SDK endpoint override instead. fakecloud's API Gateway v2 + Lambda integration handles the flow directly:
+If you used `serverless-localstack`, the simplest migration is to drop the plugin and set `AWS_ENDPOINT_URL` before running `serverless`:
 
-```yaml
-# serverless.yml
-custom:
-  endpoints:
-    - aws:
-        endpoint: http://localhost:4566
+```sh
+export AWS_ENDPOINT_URL=http://localhost:4566
+export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
+export AWS_REGION=us-east-1
+serverless deploy
 ```
+
+AWS SDK v3 (which Serverless Framework uses internally on recent versions) respects `AWS_ENDPOINT_URL` automatically — no plugin or custom config required. If you're on an older version that doesn't, configure the endpoint through whatever per-service override your current plugin exposes.
 
 ## Things that may need attention
 

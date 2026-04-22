@@ -102,5 +102,5 @@ The honest test for any of these: run your actual test suite against each. Every
 - fakecloud: [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - Moto: [github.com/getmoto/moto](https://github.com/getmoto/moto)
 - LocalStack: [localstack.cloud](https://localstack.cloud)
-- fakecloud install: `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
+- fakecloud install options: [fakecloud.dev/docs/getting-started](/docs/getting-started/)
 - fakecloud migration guide: [Migrating from LocalStack to fakecloud](/blog/migrate-from-localstack/)
