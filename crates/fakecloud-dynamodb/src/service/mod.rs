@@ -1759,15 +1759,21 @@ fn apply_set_assignment(
     let left_trimmed = left.trim();
     let right = right.trim();
 
-    // Dotted paths like `#web.#tab_id` or `profile.email` target a nested
-    // key inside an M-typed attribute. Only plain-value RHS is supported for
-    // now (no `if_not_exists` / `list_append` / arithmetic into a nested
-    // path — those shapes aren't common and can be added when needed).
-    // An unresolvable RHS is a ValidationException, not a silent no-op —
-    // silent drops are exactly the class of bug this file already fights.
+    // One RHS evaluator used for every LHS shape so `SET a.b = a.b + :d`,
+    // `SET a.b = list_append(a.b, :list)`, and `SET a.b = if_not_exists(a.b, :v)`
+    // all work against nested paths, not just top-level attributes. The evaluator
+    // returns Ok(None) when the RHS is a no-op (if_not_exists where the target
+    // already has a value, or an unresolvable plain reference).
+    let new_value = evaluate_set_rhs(right, item, expr_attr_names, expr_attr_values)?;
+
     if is_dotted_path(left_trimmed) {
-        let v = resolve_value(right, item, expr_attr_names, expr_attr_values)
-            .ok_or_else(invalid_document_path)?;
+        // A None value is a no-op (if_not_exists skip, or unresolvable plain
+        // ref) — matches top-level SET's silent-skip behavior for the same
+        // shapes. Structural errors (missing parent map, non-map intermediate)
+        // surface from assign_nested_path itself.
+        let Some(v) = new_value else {
+            return Ok(());
+        };
         return assign_nested_path(item, left_trimmed, expr_attr_names, v);
     }
 
@@ -1780,124 +1786,132 @@ fn apply_set_assignment(
     };
     let attr = resolve_attr_name(attr_ref, expr_attr_names);
 
+    let Some(v) = new_value else {
+        return Ok(());
+    };
+    match list_index {
+        Some(idx) => assign_list_index(item, &attr, idx, v),
+        None => {
+            item.insert(attr, v);
+            Ok(())
+        }
+    }
+}
+
+/// Evaluate the RHS of a `SET` assignment without writing it anywhere.
+/// Returns `Ok(Some(value))` with the computed value, `Ok(None)` for
+/// no-op cases (if_not_exists where the target already has a value, or
+/// an unresolvable plain reference in dotted-path context), or
+/// `Err(ValidationException)` for type-mismatched arithmetic.
+fn evaluate_set_rhs(
+    right: &str,
+    item: &HashMap<String, AttributeValue>,
+    expr_attr_names: &HashMap<String, String>,
+    expr_attr_values: &HashMap<String, Value>,
+) -> Result<Option<Value>, AwsServiceError> {
     if let Some(rest) = right
         .strip_prefix("if_not_exists(")
         .or_else(|| right.strip_prefix("if_not_exists ("))
     {
-        apply_set_if_not_exists(item, &attr, rest, expr_attr_names, expr_attr_values);
-        return Ok(());
+        return Ok(evaluate_if_not_exists_rhs(
+            rest,
+            item,
+            expr_attr_names,
+            expr_attr_values,
+        ));
     }
 
     if let Some(rest) = right
         .strip_prefix("list_append(")
         .or_else(|| right.strip_prefix("list_append ("))
     {
-        apply_set_list_append(item, &attr, rest, expr_attr_names, expr_attr_values);
-        return Ok(());
+        return Ok(evaluate_list_append_rhs(
+            rest,
+            item,
+            expr_attr_names,
+            expr_attr_values,
+        ));
     }
 
     if let Some((arith_left, arith_right, is_add)) = parse_arithmetic(right) {
-        return apply_set_arithmetic(
-            item,
-            &attr,
+        return evaluate_arithmetic_rhs(
             arith_left,
             arith_right,
             is_add,
+            item,
             expr_attr_names,
             expr_attr_values,
         );
     }
 
-    let val = resolve_value(right, item, expr_attr_names, expr_attr_values);
-    if let Some(v) = val {
-        match list_index {
-            Some(idx) => assign_list_index(item, &attr, idx, v)?,
-            None => {
-                item.insert(attr, v);
+    Ok(resolve_ref_or_path(
+        right,
+        item,
+        expr_attr_names,
+        expr_attr_values,
+    ))
+}
+
+/// `if_not_exists(path, :val)` — evaluates to nothing when `path` already
+/// resolves to a value, and to the default ref otherwise. `path` may be a
+/// top-level attribute, a placeholder, or a dotted path inside an M-typed
+/// attribute.
+fn evaluate_if_not_exists_rhs(
+    rest: &str,
+    item: &HashMap<String, AttributeValue>,
+    expr_attr_names: &HashMap<String, String>,
+    expr_attr_values: &HashMap<String, Value>,
+) -> Option<Value> {
+    let inner = rest.strip_suffix(')')?;
+    let mut split = inner.splitn(2, ',');
+    let (check, default) = (split.next()?, split.next()?);
+    if resolve_ref_or_path(check.trim(), item, expr_attr_names, expr_attr_values).is_some() {
+        return None;
+    }
+    resolve_ref_or_path(default.trim(), item, expr_attr_names, expr_attr_values)
+}
+
+/// `list_append(a, b)` — concatenate the L arrays of two list operands.
+/// Either operand may be missing or non-list, in which case it contributes
+/// nothing. Both operands may be value refs (`:list`) or document paths
+/// (top-level or dotted).
+fn evaluate_list_append_rhs(
+    rest: &str,
+    item: &HashMap<String, AttributeValue>,
+    expr_attr_names: &HashMap<String, String>,
+    expr_attr_values: &HashMap<String, Value>,
+) -> Option<Value> {
+    let inner = rest.strip_suffix(')')?;
+    let mut split = inner.splitn(2, ',');
+    let (a_ref, b_ref) = (split.next()?, split.next()?);
+    let a_val = resolve_ref_or_path(a_ref.trim(), item, expr_attr_names, expr_attr_values);
+    let b_val = resolve_ref_or_path(b_ref.trim(), item, expr_attr_names, expr_attr_values);
+
+    let mut merged = Vec::new();
+    for v in [&a_val, &b_val].iter().copied().flatten() {
+        if let Value::Object(obj) = v {
+            if let Some(Value::Array(arr)) = obj.get("L") {
+                merged.extend(arr.clone());
             }
         }
     }
-
-    Ok(())
+    Some(json!({ "L": merged }))
 }
 
-/// SET ... = if_not_exists(other_attr, :val) — write `:val` into `attr`
-/// only when `other_attr` is missing from the item. The lookup uses
-/// `other_attr`, not the SET target, which is what makes it useful as a
-/// 'create-or-keep' primitive.
-fn apply_set_if_not_exists(
-    item: &mut HashMap<String, AttributeValue>,
-    attr: &str,
-    rest: &str,
-    expr_attr_names: &HashMap<String, String>,
-    expr_attr_values: &HashMap<String, Value>,
-) {
-    let Some(inner) = rest.strip_suffix(')') else {
-        return;
-    };
-    let mut split = inner.splitn(2, ',');
-    let (Some(check_attr), Some(default_ref)) = (split.next(), split.next()) else {
-        return;
-    };
-    let check_name = resolve_attr_name(check_attr.trim(), expr_attr_names);
-    if item.contains_key(&check_name) {
-        return;
-    }
-    if let Some(val) = expr_attr_values.get(default_ref.trim()) {
-        item.insert(attr.to_string(), val.clone());
-    }
-}
-
-/// SET ... = list_append(a, b) — concatenate the L arrays of two list
-/// operands. Either operand may be missing or non-list, in which case
-/// it contributes nothing.
-fn apply_set_list_append(
-    item: &mut HashMap<String, AttributeValue>,
-    attr: &str,
-    rest: &str,
-    expr_attr_names: &HashMap<String, String>,
-    expr_attr_values: &HashMap<String, Value>,
-) {
-    let Some(inner) = rest.strip_suffix(')') else {
-        return;
-    };
-    let mut split = inner.splitn(2, ',');
-    let (Some(a_ref), Some(b_ref)) = (split.next(), split.next()) else {
-        return;
-    };
-    let a_val = resolve_value(a_ref.trim(), item, expr_attr_names, expr_attr_values);
-    let b_val = resolve_value(b_ref.trim(), item, expr_attr_names, expr_attr_values);
-
-    let mut merged = Vec::new();
-    if let Some(Value::Object(obj)) = &a_val {
-        if let Some(Value::Array(arr)) = obj.get("L") {
-            merged.extend(arr.clone());
-        }
-    }
-    if let Some(Value::Object(obj)) = &b_val {
-        if let Some(Value::Array(arr)) = obj.get("L") {
-            merged.extend(arr.clone());
-        }
-    }
-
-    item.insert(attr.to_string(), json!({"L": merged}));
-}
-
-/// SET ... = `<arith_left> +/- <arith_right>` — both operands must
-/// resolve to N values (or the LHS may be missing, in which case it's
-/// treated as 0). Anything else is rejected with the same
-/// `ValidationException` AWS returns.
-fn apply_set_arithmetic(
-    item: &mut HashMap<String, AttributeValue>,
-    attr: &str,
+/// `<arith_left> +/- <arith_right>` — both operands must resolve to N values
+/// (or the LHS may be missing, in which case it's treated as 0). Anything
+/// else is rejected with the same `ValidationException` AWS returns.
+fn evaluate_arithmetic_rhs(
     arith_left: &str,
     arith_right: &str,
     is_add: bool,
+    item: &HashMap<String, AttributeValue>,
     expr_attr_names: &HashMap<String, String>,
     expr_attr_values: &HashMap<String, Value>,
-) -> Result<(), AwsServiceError> {
-    let left_val = resolve_value(arith_left.trim(), item, expr_attr_names, expr_attr_values);
-    let right_val = resolve_value(arith_right.trim(), item, expr_attr_names, expr_attr_values);
+) -> Result<Option<Value>, AwsServiceError> {
+    let left_val = resolve_ref_or_path(arith_left.trim(), item, expr_attr_names, expr_attr_values);
+    let right_val =
+        resolve_ref_or_path(arith_right.trim(), item, expr_attr_names, expr_attr_values);
 
     let left_num = match extract_number(&left_val) {
         Some(n) => n,
@@ -1930,8 +1944,7 @@ fn apply_set_arithmetic(
         format!("{result}")
     };
 
-    item.insert(attr.to_string(), json!({"N": num_str}));
-    Ok(())
+    Ok(Some(json!({ "N": num_str })))
 }
 
 /// Parse a trailing `[N]` list-index suffix off the LHS of a SET assignment.
@@ -1989,7 +2002,10 @@ fn invalid_document_path() -> AwsServiceError {
     )
 }
 
-fn resolve_value(
+/// Resolve a SET-RHS operand that may be either a value placeholder
+/// (``:foo``) or a document path (top-level attribute, ``#name``, or a
+/// dotted path like ``profile.email`` / ``#web.#count``).
+fn resolve_ref_or_path(
     reference: &str,
     item: &HashMap<String, AttributeValue>,
     expr_attr_names: &HashMap<String, String>,
@@ -1997,11 +2013,10 @@ fn resolve_value(
 ) -> Option<Value> {
     let reference = reference.trim();
     if reference.starts_with(':') {
-        expr_attr_values.get(reference).cloned()
-    } else {
-        let attr_name = resolve_attr_name(reference, expr_attr_names);
-        item.get(&attr_name).cloned()
+        return expr_attr_values.get(reference).cloned();
     }
+    let resolved = resolve_projection_path(reference, expr_attr_names);
+    resolve_nested_path(item, &resolved)
 }
 
 /// True if `path` targets a nested key inside an M-typed attribute. Bracketed

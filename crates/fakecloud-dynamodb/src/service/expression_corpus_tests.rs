@@ -824,44 +824,71 @@ fn update_set_nested_path_missing_parent_errors() {
 }
 
 #[test]
-fn update_set_nested_path_complex_rhs_errors_cleanly() {
-    // Until nested-path SET supports complex RHS (see the ignored
-    // `update_set_nested_path_complex_rhs` below), the evaluator must reject
-    // with ValidationException instead of silently dropping the write.
-    // Silent drop is exactly the bug class fixed elsewhere in this file.
-    let mut it = item(&[("web", m(&[("count", n("5"))]))]);
-    let nmap = names(&[("#web", "web"), ("#count", "count")]);
-    let vmap = values(&[(":d", n("3"))]);
-
-    let err = apply_update_expression(&mut it, "SET #web.#count = #web.#count + :d", &nmap, &vmap);
-    assert!(
-        err.is_err(),
-        "complex RHS into nested path must error, not silently drop"
-    );
-    assert_eq!(
-        it.get("web"),
-        Some(&m(&[("count", n("5"))])),
-        "parent map must be untouched on error"
-    );
-}
-
-#[test]
-#[ignore = "known gap: nested-path SET supports only plain-value RHS — no if_not_exists/list_append/arithmetic into a dotted target"]
 fn update_set_nested_path_complex_rhs() {
     // Real DynamoDB allows any SET RHS against any SET LHS, including dotted
-    // paths. The nested-path writer currently resolves only plain `:value`
-    // and attr-ref RHS; `if_not_exists`, `list_append`, and arithmetic into
-    // a dotted target fall through to `resolve_value` -> None, which the
-    // fix surfaces as ValidationException rather than silently dropping.
-    // Wire a real evaluator through `assign_nested_path` and this test flips.
+    // paths: arithmetic, list_append, and if_not_exists must all be valid
+    // RHS shapes even when the LHS is a nested M-typed path.
+
+    // Arithmetic into a nested N: web.count = web.count + :d
     let mut it = item(&[("web", m(&[("count", n("5"))]))]);
     let nmap = names(&[("#web", "web"), ("#count", "count")]);
     let vmap = values(&[(":d", n("3"))]);
-
     apply_update_expression(&mut it, "SET #web.#count = #web.#count + :d", &nmap, &vmap)
         .expect("arithmetic RHS into nested path should succeed");
-
     assert_eq!(it.get("web"), Some(&m(&[("count", n("8"))])));
+
+    // Subtraction variant with plain dotted path.
+    let mut it = item(&[("web", m(&[("count", n("10"))]))]);
+    let nmap = HashMap::new();
+    let vmap = values(&[(":d", n("3"))]);
+    apply_update_expression(&mut it, "SET web.count = web.count - :d", &nmap, &vmap)
+        .expect("subtraction RHS into nested path should succeed");
+    assert_eq!(it.get("web"), Some(&m(&[("count", n("7"))])));
+
+    // list_append into a nested L.
+    let mut it = item(&[("web", m(&[("items", l(vec![s("a"), s("b")]))]))]);
+    let nmap = HashMap::new();
+    let vmap = values(&[(":new", l(vec![s("c")]))]);
+    apply_update_expression(
+        &mut it,
+        "SET web.items = list_append(web.items, :new)",
+        &nmap,
+        &vmap,
+    )
+    .expect("list_append RHS into nested path should succeed");
+    assert_eq!(
+        it.get("web"),
+        Some(&m(&[("items", l(vec![s("a"), s("b"), s("c")]))]))
+    );
+
+    // if_not_exists: existing leaf → RHS is a no-op, original value preserved.
+    let mut it = item(&[("web", m(&[("count", n("42"))]))]);
+    let nmap = HashMap::new();
+    let vmap = values(&[(":default", n("0"))]);
+    apply_update_expression(
+        &mut it,
+        "SET web.count = if_not_exists(web.count, :default)",
+        &nmap,
+        &vmap,
+    )
+    .expect("if_not_exists should skip when the leaf already has a value");
+    assert_eq!(it.get("web"), Some(&m(&[("count", n("42"))])));
+
+    // if_not_exists: missing leaf → default is written through the nested path.
+    let mut it = item(&[("web", m(&[("other", s("keep"))]))]);
+    let nmap = HashMap::new();
+    let vmap = values(&[(":default", n("7"))]);
+    apply_update_expression(
+        &mut it,
+        "SET web.count = if_not_exists(web.count, :default)",
+        &nmap,
+        &vmap,
+    )
+    .expect("if_not_exists should write default when leaf missing");
+    assert_eq!(
+        it.get("web"),
+        Some(&m(&[("other", s("keep")), ("count", n("7"))]))
+    );
 }
 
 #[test]
