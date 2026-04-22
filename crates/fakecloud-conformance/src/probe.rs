@@ -732,7 +732,10 @@ fn probe_rest(
         req = req.header(name.as_str(), value.as_str());
     }
 
-    let has_body_method = matches!(method, reqwest::Method::POST | reqwest::Method::PUT);
+    let has_body_method = !matches!(
+        method,
+        reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::DELETE
+    );
     if let Some(body) = body {
         if has_body_method {
             let content_type = headers
@@ -1443,6 +1446,31 @@ mod tests {
         let input = serde_json::json!({"Tags": ["a", "b"]});
         let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
         assert_eq!(url, "/foo?tag=a&tag=b");
+    }
+
+    #[test]
+    fn patch_method_keeps_body() {
+        // APIGWv2 Update* ops use PATCH. Regression guard for the
+        // `has_body_method` check: don't treat PATCH as bodyless.
+        let op = op_with_http("X", "PATCH", "/foo/{Id}", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape(
+                    "#Input",
+                    vec![
+                        member("Id", "#String", label_traits()),
+                        member("Description", "#String", ShapeTraits::default()),
+                    ],
+                ),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"Id": "abc", "Description": "updated"});
+        let (method, _, _, body) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(method, reqwest::Method::PATCH);
+        let body: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"Description": "updated"}));
     }
 
     #[test]
