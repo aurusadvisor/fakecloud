@@ -3,6 +3,54 @@
 {% block title %}fakecloud - Local AWS Cloud Emulator{% endblock %}
 {% block description %}fakecloud is a free, open-source local AWS cloud emulator. Single binary, no auth required, no paid tier, plus first-party SDKs for test assertions.{% endblock %}
 
+{% block structured_data %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "fakecloud",
+  "applicationCategory": "DeveloperApplication",
+  "applicationSubCategory": "CloudTestingTool",
+  "operatingSystem": "Linux, macOS, Windows",
+  "description": "Free, open-source local AWS cloud emulator. 23 services, 1,680 operations, 100% conformance per implemented service. Single binary, no account, no auth token.",
+  "url": "https://fakecloud.dev",
+  "downloadUrl": "https://github.com/faiscadev/fakecloud/releases",
+  "codeRepository": "https://github.com/faiscadev/fakecloud",
+  "programmingLanguage": "Rust",
+  "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+  "isAccessibleForFree": true,
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  },
+  "author": {
+    "@type": "Person",
+    "name": "Lucas Vieira",
+    "url": "https://github.com/vieiralucas"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "faisca",
+    "url": "https://faisca.dev"
+  }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "name": "fakecloud",
+  "url": "https://fakecloud.dev",
+  "description": "Free, open-source local AWS cloud emulator written in Rust.",
+  "publisher": {
+    "@type": "Organization",
+    "name": "faisca"
+  }
+}
+</script>
+{% endblock %}
+
 {% block content %}
 <section class="hero">
   <div class="container">
