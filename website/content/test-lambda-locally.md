@@ -13,7 +13,7 @@ fakecloud
 
 ## What you get
 
-- **All 13 AWS Lambda runtimes** — Node 18/20/22, Python 3.9-3.12, Java 11/17/21, .NET 6/8, Ruby 3.2, Go, custom (`provided.al2`, `provided.al2023`).
+- **All 13 AWS Lambda runtimes** — Node 18/20/22, Python 3.11/3.12/3.13, Java 17/21, .NET 8, Ruby 3.3/3.4, custom (`provided.al2`, `provided.al2023`).
 - **Real code execution.** fakecloud pulls the AWS Lambda runtime container and runs your handler. Not a stub, not a simulated response.
 - **Real event triggers.** S3 -> Lambda, SQS -> Lambda, SNS -> Lambda, EventBridge -> Lambda, DynamoDB Streams -> Lambda, API Gateway v2 -> Lambda. All wired end-to-end.
 - **Real event source mappings.** fakecloud polls SQS/Kinesis, batches events, invokes your Lambda, handles success/failure/DLQ the way AWS does.
