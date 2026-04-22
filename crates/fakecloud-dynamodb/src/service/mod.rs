@@ -641,6 +641,20 @@ fn resolve_attr_name(name: &str, expr_attr_names: &HashMap<String, String>) -> S
     }
 }
 
+/// Resolve a (possibly dotted, possibly `#name`-containing) document path to
+/// the leaf `AttributeValue` inside `item`. Single-segment paths (`foo`,
+/// `#foo`) resolve to a top-level attribute. Dotted paths (`profile.email`,
+/// `#p.#e`, `items[0].sku`) walk into `M`/`L` containers. Returns `None` if
+/// any segment is missing or the intermediate value isn't a map/list.
+fn resolve_path(
+    path: &str,
+    item: &HashMap<String, AttributeValue>,
+    expr_attr_names: &HashMap<String, String>,
+) -> Option<Value> {
+    let resolved = resolve_projection_path(path, expr_attr_names);
+    resolve_nested_path(item, &resolved)
+}
+
 fn extract_key(
     table: &DynamoTable,
     item: &HashMap<String, AttributeValue>,
@@ -1202,9 +1216,9 @@ fn key_cond_simple_comparison(
         };
         let left = part[..pos].trim();
         let right = part[pos + op.len()..].trim();
-        let attr_name = resolve_attr_name(left, expr_attr_names);
+        let actual_owned = resolve_path(left, item, expr_attr_names);
+        let actual = actual_owned.as_ref();
         let expected = expr_attr_values.get(right);
-        let actual = item.get(&attr_name);
 
         return match *op {
             "=" => actual == expected,
@@ -1296,9 +1310,8 @@ fn evaluate_size_comparison(
         return None;
     };
 
-    let attr_name = resolve_attr_name(path, expr_attr_names);
-    let actual = item.get(&attr_name)?;
-    let size = attribute_size(actual)? as f64;
+    let actual_owned = resolve_path(path, item, expr_attr_names)?;
+    let size = attribute_size(&actual_owned)? as f64;
 
     let expected = extract_number(&expr_attr_values.get(val_ref).cloned())?;
 
@@ -1418,13 +1431,11 @@ fn evaluate_single_filter_condition(
     expr_attr_values: &HashMap<String, Value>,
 ) -> bool {
     if let Some(inner) = extract_function_arg(part, "attribute_exists") {
-        let attr = resolve_attr_name(inner, expr_attr_names);
-        return item.contains_key(&attr);
+        return resolve_path(inner, item, expr_attr_names).is_some();
     }
 
     if let Some(inner) = extract_function_arg(part, "attribute_not_exists") {
-        let attr = resolve_attr_name(inner, expr_attr_names);
-        return !item.contains_key(&attr);
+        return resolve_path(inner, item, expr_attr_names).is_none();
     }
 
     if let Some(rest) = part
@@ -1481,10 +1492,9 @@ fn eval_begins_with(
     let (Some(attr_ref), Some(val_ref)) = (split.next(), split.next()) else {
         return false;
     };
-    let attr_name = resolve_attr_name(attr_ref.trim(), expr_attr_names);
+    let actual = resolve_path(attr_ref.trim(), item, expr_attr_names);
     let expected = expr_attr_values.get(val_ref.trim());
-    let actual = item.get(&attr_name);
-    match (actual, expected) {
+    match (actual.as_ref(), expected) {
         (Some(a), Some(e)) => {
             let a_str = a.get("S").and_then(|v| v.as_str());
             let e_str = e.get("S").and_then(|v| v.as_str());
@@ -1510,10 +1520,9 @@ fn eval_contains(
     let (Some(attr_ref), Some(val_ref)) = (split.next(), split.next()) else {
         return false;
     };
-    let attr_name = resolve_attr_name(attr_ref.trim(), expr_attr_names);
+    let actual = resolve_path(attr_ref.trim(), item, expr_attr_names);
     let expected = expr_attr_values.get(val_ref.trim());
-    let actual = item.get(&attr_name);
-    let (Some(a), Some(e)) = (actual, expected) else {
+    let (Some(a), Some(e)) = (actual.as_ref(), expected) else {
         return false;
     };
 
@@ -1560,13 +1569,12 @@ fn eval_attribute_type(
     let (Some(attr_ref), Some(val_ref)) = (split.next(), split.next()) else {
         return false;
     };
-    let attr_name = resolve_attr_name(attr_ref.trim(), expr_attr_names);
+    let actual = resolve_path(attr_ref.trim(), item, expr_attr_names);
     let expected_type = expr_attr_values
         .get(val_ref.trim())
         .and_then(|v| v.get("S"))
         .and_then(|v| v.as_str());
-    let actual = item.get(&attr_name);
-    let (Some(val), Some(t)) = (actual, expected_type) else {
+    let (Some(val), Some(t)) = (actual.as_ref(), expected_type) else {
         return false;
     };
     match t {
