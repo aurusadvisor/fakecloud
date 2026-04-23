@@ -95,6 +95,9 @@ fn is_mutating_action(action: &str) -> bool {
             | "AssumeRoleWithSAML"
             | "GetSessionToken"
             | "GetFederationToken"
+            | "AssumeRoot"
+            | "GetDelegatedAccessToken"
+            | "GetWebIdentityToken"
     )
 }
 
@@ -115,6 +118,9 @@ impl AwsService for StsService {
             "GetFederationToken" => self.get_federation_token(&req),
             "GetAccessKeyInfo" => self.get_access_key_info(&req),
             "DecodeAuthorizationMessage" => self.decode_authorization_message(&req),
+            "AssumeRoot" => self.assume_root(&req),
+            "GetDelegatedAccessToken" => self.get_delegated_access_token(&req),
+            "GetWebIdentityToken" => self.get_web_identity_token(&req),
             _ => Err(AwsServiceError::action_not_implemented("sts", &req.action)),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
@@ -138,6 +144,9 @@ impl AwsService for StsService {
             "GetFederationToken",
             "GetAccessKeyInfo",
             "DecodeAuthorizationMessage",
+            "AssumeRoot",
+            "GetDelegatedAccessToken",
+            "GetWebIdentityToken",
         ]
     }
 
@@ -163,12 +172,20 @@ impl AwsService for StsService {
             "GetFederationToken" => "GetFederationToken",
             "GetAccessKeyInfo" => "GetAccessKeyInfo",
             "DecodeAuthorizationMessage" => "DecodeAuthorizationMessage",
+            "AssumeRoot" => "AssumeRoot",
+            "GetDelegatedAccessToken" => "GetDelegatedAccessToken",
+            "GetWebIdentityToken" => "GetWebIdentityToken",
             _ => return None,
         };
         let resource = match action {
             "AssumeRole" | "AssumeRoleWithWebIdentity" | "AssumeRoleWithSAML" => request
                 .query_params
                 .get("RoleArn")
+                .cloned()
+                .unwrap_or_else(|| "*".to_string()),
+            "AssumeRoot" => request
+                .query_params
+                .get("TargetPrincipal")
                 .cloned()
                 .unwrap_or_else(|| "*".to_string()),
             _ => "*".to_string(),
@@ -717,7 +734,7 @@ impl StsService {
         let state = accounts.get_or_create(&req.account_id);
         let (principal_arn, user_id, account_id) =
             if let Some(akid) = extract_access_key(req).as_deref() {
-                if let Some(lookup) = state.credential_secret(akid) {
+                if let Some(lookup) = state.credential_secret_readonly(akid) {
                     (lookup.principal_arn, lookup.user_id, lookup.account_id)
                 } else {
                     (
@@ -903,6 +920,271 @@ impl StsService {
         let xml = xml_responses::get_access_key_info_response(&account_id, &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
+
+    /// AssumeRoot: returns short-lived privileged credentials scoped to a
+    /// member-account root principal. Caller must be from the management
+    /// account; we mint and persist credentials so subsequent calls under
+    /// them resolve to the target account's root identity.
+    fn assume_root(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let target_principal = req.query_params.get("TargetPrincipal").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                "The request must contain the parameter TargetPrincipal",
+            )
+        })?;
+        let task_policy_arn = req
+            .query_params
+            .get("TaskPolicyArn.arn")
+            .or_else(|| req.query_params.get("TaskPolicyArn"))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MissingParameter",
+                    "The request must contain the parameter TaskPolicyArn",
+                )
+            })?;
+        validate_string_length("taskPolicyArn", task_policy_arn, 20, 2048)?;
+
+        if let Some(ds) = req.query_params.get("DurationSeconds") {
+            let v = ds.parse::<i64>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!(
+                        "Value '{}' at 'durationSeconds' failed to satisfy constraint: \
+                         Member must be a valid integer",
+                        ds
+                    ),
+                )
+            })?;
+            validate_range_i64("durationSeconds", v, 0, 900)?;
+        }
+
+        // Target principal can be an ARN (arn:aws:iam::123:root) or a 12-digit
+        // account id; normalize to (account_id, principal_arn).
+        let partition = partition_for_region(&req.region);
+        let (target_account, target_arn) = if target_principal.starts_with("arn:") {
+            let acct = extract_account_from_arn(target_principal).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    "TargetPrincipal ARN is malformed",
+                )
+            })?;
+            (acct, target_principal.to_string())
+        } else if target_principal.len() == 12
+            && target_principal.chars().all(|c| c.is_ascii_digit())
+        {
+            (
+                target_principal.to_string(),
+                format!("arn:{}:iam::{}:root", partition, target_principal),
+            )
+        } else {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                "TargetPrincipal must be a member account ID or root ARN",
+            ));
+        };
+
+        let expiration_at = compute_expiration_at(req, 900)?;
+        let expiration = format_expiration(expiration_at);
+        let creds = StsCredentials::generate();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&target_account);
+        state.credential_identities.insert(
+            creds.access_key_id.clone(),
+            CredentialIdentity {
+                arn: target_arn.clone(),
+                user_id: target_account.clone(),
+                account_id: target_account.clone(),
+            },
+        );
+        state.sts_temp_credentials.insert(
+            creds.access_key_id.clone(),
+            StsTempCredential {
+                access_key_id: creds.access_key_id.clone(),
+                secret_access_key: creds.secret_access_key.clone(),
+                session_token: creds.session_token.clone(),
+                principal_arn: target_arn.clone(),
+                user_id: target_account.clone(),
+                account_id: target_account.clone(),
+                expiration: expiration_at,
+                session_policies: Vec::new(),
+            },
+        );
+
+        let source_identity = req.query_params.get("SourceIdentity").map(|s| s.as_str());
+        let xml = xml_responses::assume_root_response(
+            &creds,
+            &expiration,
+            source_identity,
+            &req.request_id,
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
+    /// GetDelegatedAccessToken: trades an opaque token for short-lived
+    /// credentials bound to the caller's principal. We accept any non-empty
+    /// trade-in token (the emulator does not issue verifiable trade-in tokens
+    /// upstream), mint fresh STS credentials, and tie them to the caller's
+    /// access key (or account root when unauthenticated).
+    fn get_delegated_access_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let trade_in = req.query_params.get("TradeInToken").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                "The request must contain the parameter TradeInToken",
+            )
+        })?;
+        validate_string_length("tradeInToken", trade_in, 1, 4096)?;
+
+        let partition = partition_for_region(&req.region);
+        let expiration_at = compute_expiration_at(req, DEFAULT_SESSION_TOKEN_DURATION)?;
+        let expiration = format_expiration(expiration_at);
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let (assumed_principal, user_id, account_id) =
+            if let Some(akid) = extract_access_key(req).as_deref() {
+                if let Some(lookup) = state.credential_secret_readonly(akid) {
+                    (lookup.principal_arn, lookup.user_id, lookup.account_id)
+                } else {
+                    (
+                        format!("arn:{}:iam::{}:root", partition, state.account_id),
+                        state.account_id.clone(),
+                        state.account_id.clone(),
+                    )
+                }
+            } else {
+                (
+                    format!("arn:{}:iam::{}:root", partition, state.account_id),
+                    state.account_id.clone(),
+                    state.account_id.clone(),
+                )
+            };
+
+        let creds = StsCredentials::generate();
+        state.credential_identities.insert(
+            creds.access_key_id.clone(),
+            CredentialIdentity {
+                arn: assumed_principal.clone(),
+                user_id: user_id.clone(),
+                account_id: account_id.clone(),
+            },
+        );
+        state.sts_temp_credentials.insert(
+            creds.access_key_id.clone(),
+            StsTempCredential {
+                access_key_id: creds.access_key_id.clone(),
+                secret_access_key: creds.secret_access_key.clone(),
+                session_token: creds.session_token.clone(),
+                principal_arn: assumed_principal.clone(),
+                user_id,
+                account_id,
+                expiration: expiration_at,
+                session_policies: Vec::new(),
+            },
+        );
+
+        let xml = xml_responses::get_delegated_access_token_response(
+            &creds,
+            &expiration,
+            &assumed_principal,
+            &req.request_id,
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
+    /// GetWebIdentityToken: issues a signed JWT representing the caller. We
+    /// produce an unsigned JWT (alg "none"-style) since the emulator has no
+    /// signing key material; the structure matches AWS so client decoders
+    /// see standard JWT claims.
+    fn get_web_identity_token(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Audience.member.N (Query protocol). Required.
+        let mut audiences: Vec<String> = Vec::new();
+        for i in 1..=12 {
+            let key = format!("Audience.member.{i}");
+            match req.query_params.get(&key) {
+                Some(a) => audiences.push(a.clone()),
+                None => break,
+            }
+        }
+        if audiences.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                "The request must contain the parameter Audience",
+            ));
+        }
+
+        let signing = req.query_params.get("SigningAlgorithm").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                "The request must contain the parameter SigningAlgorithm",
+            )
+        })?;
+        if signing != "RS256" && signing != "ES384" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                "SigningAlgorithm must be one of RS256, ES384",
+            ));
+        }
+
+        let duration = req
+            .query_params
+            .get("DurationSeconds")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(300);
+        if !(60..=3600).contains(&duration) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                "durationSeconds must be between 60 and 3600",
+            ));
+        }
+
+        let partition = partition_for_region(&req.region);
+        let accounts = self.state.read();
+        let empty = IamState::new(&req.account_id);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let subject = if let Some(akid) = extract_access_key(req).as_deref() {
+            state
+                .credential_secret_readonly(akid)
+                .map(|l| l.principal_arn)
+                .unwrap_or_else(|| format!("arn:{}:iam::{}:root", partition, state.account_id))
+        } else {
+            format!("arn:{}:iam::{}:root", partition, state.account_id)
+        };
+
+        let now = chrono::Utc::now().timestamp();
+        let exp = now + duration;
+        let header = base64_url(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = serde_json::json!({
+            "iss": format!("https://sts.{}.amazonaws.com", req.region),
+            "sub": subject,
+            "aud": audiences,
+            "iat": now,
+            "exp": exp,
+        });
+        let payload_b64 = base64_url(payload.to_string().as_bytes());
+        let token = format!("{}.{}.", header, payload_b64);
+        let expiration =
+            format_expiration(chrono::Utc::now() + chrono::Duration::seconds(duration));
+
+        let xml =
+            xml_responses::get_web_identity_token_response(&token, &expiration, &req.request_id);
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+}
+
+fn base64_url(input: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input)
 }
 
 /// Extract account ID from an ARN like `arn:aws:iam::123456789012:role/name`.
