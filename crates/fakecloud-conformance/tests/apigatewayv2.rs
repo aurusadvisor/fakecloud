@@ -480,7 +480,7 @@ async fn apigwv2_closure_routes_exist() {
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let mapping_id = body["ApiMappingId"].as_str().unwrap().to_string();
+    let mapping_id = body["apiMappingId"].as_str().unwrap().to_string();
     let resp = apigw_request(
         &server,
         reqwest::Method::GET,
@@ -531,7 +531,7 @@ async fn apigwv2_closure_routes_exist() {
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let vpc_id = body["VpcLinkId"].as_str().unwrap().to_string();
+    let vpc_id = body["vpcLinkId"].as_str().unwrap().to_string();
     apigw_request(&server, reqwest::Method::GET, "/v2/vpclinks", "").await;
     apigw_request(
         &server,
@@ -555,35 +555,48 @@ async fn apigwv2_closure_routes_exist() {
     )
     .await;
 
-    // Routing rules.
-    let resp = apigw_request(
+    // Routing rules (nested under a domain name per Smithy).
+    apigw_request(
         &server,
         reqwest::Method::POST,
-        "/v2/routingrules",
+        "/v2/domainnames",
         r#"{"DomainName":"example.com"}"#,
     )
     .await;
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        "/v2/domainnames/example.com/routingrules",
+        r#"{}"#,
+    )
+    .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let rule_id = body["RoutingRuleId"].as_str().unwrap().to_string();
-    apigw_request(&server, reqwest::Method::GET, "/v2/routingrules", "").await;
+    let rule_id = body["routingRuleId"].as_str().unwrap().to_string();
     apigw_request(
         &server,
         reqwest::Method::GET,
-        &format!("/v2/routingrules/{rule_id}"),
+        "/v2/domainnames/example.com/routingrules",
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/domainnames/example.com/routingrules/{rule_id}"),
         "",
     )
     .await;
     apigw_request(
         &server,
         reqwest::Method::PUT,
-        &format!("/v2/routingrules/{rule_id}"),
-        r#"{"DomainName":"example.com"}"#,
+        &format!("/v2/domainnames/example.com/routingrules/{rule_id}"),
+        r#"{}"#,
     )
     .await;
     apigw_request(
         &server,
         reqwest::Method::DELETE,
-        &format!("/v2/routingrules/{rule_id}"),
+        &format!("/v2/domainnames/example.com/routingrules/{rule_id}"),
         "",
     )
     .await;
@@ -620,7 +633,7 @@ async fn apigwv2_closure_routes_exist() {
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let model_id = body["ModelId"].as_str().unwrap().to_string();
+    let model_id = body["modelId"].as_str().unwrap().to_string();
     apigw_request(
         &server,
         reqwest::Method::GET,
@@ -668,7 +681,7 @@ async fn apigwv2_closure_routes_exist() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let integ_id = body["integrationId"]
         .as_str()
-        .or_else(|| body["IntegrationId"].as_str())
+        .or_else(|| body["integrationId"].as_str())
         .unwrap()
         .to_string();
     let resp = apigw_request(
@@ -679,7 +692,7 @@ async fn apigwv2_closure_routes_exist() {
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let ir_id = body["IntegrationResponseId"].as_str().unwrap().to_string();
+    let ir_id = body["integrationResponseId"].as_str().unwrap().to_string();
     apigw_request(
         &server,
         reqwest::Method::GET,
@@ -720,7 +733,7 @@ async fn apigwv2_closure_routes_exist() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let route_id = body["routeId"]
         .as_str()
-        .or_else(|| body["RouteId"].as_str())
+        .or_else(|| body["routeId"].as_str())
         .unwrap()
         .to_string();
     let resp = apigw_request(
@@ -731,7 +744,7 @@ async fn apigwv2_closure_routes_exist() {
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let rr_id = body["RouteResponseId"]
+    let rr_id = body["routeResponseId"]
         .as_str()
         .unwrap_or("rr1")
         .to_string();
@@ -820,7 +833,7 @@ async fn apigwv2_closure_routes_exist() {
     let body: serde_json::Value = dep_resp.json().await.unwrap();
     let dep_id = body["deploymentId"]
         .as_str()
-        .or_else(|| body["DeploymentId"].as_str())
+        .or_else(|| body["deploymentId"].as_str())
         .unwrap_or("dep1")
         .to_string();
     apigw_request(
@@ -870,7 +883,7 @@ async fn apigwv2_closure_routes_exist() {
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let portal_id = body["PortalId"].as_str().unwrap().to_string();
+    let portal_id = body["portalId"].as_str().unwrap().to_string();
     apigw_request(&server, reqwest::Method::GET, "/v2/portals", "").await;
     apigw_request(
         &server,
@@ -888,8 +901,8 @@ async fn apigwv2_closure_routes_exist() {
     .await;
     apigw_request(
         &server,
-        reqwest::Method::POST,
-        &format!("/v2/portals/{portal_id}/disable"),
+        reqwest::Method::DELETE,
+        &format!("/v2/portals/{portal_id}/publish"),
         "",
     )
     .await;
@@ -923,7 +936,7 @@ async fn apigwv2_closure_routes_exist() {
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let pp_id = body["PortalProductId"].as_str().unwrap().to_string();
+    let pp_id = body["portalProductId"].as_str().unwrap().to_string();
     apigw_request(&server, reqwest::Method::GET, "/v2/portalproducts", "").await;
     apigw_request(
         &server,
@@ -942,21 +955,21 @@ async fn apigwv2_closure_routes_exist() {
     apigw_request(
         &server,
         reqwest::Method::PUT,
-        &format!("/v2/portalproducts/{pp_id}/sharing-policy"),
+        &format!("/v2/portalproducts/{pp_id}/sharingpolicy"),
         r#"{}"#,
     )
     .await;
     apigw_request(
         &server,
         reqwest::Method::GET,
-        &format!("/v2/portalproducts/{pp_id}/sharing-policy"),
+        &format!("/v2/portalproducts/{pp_id}/sharingpolicy"),
         "",
     )
     .await;
     apigw_request(
         &server,
         reqwest::Method::DELETE,
-        &format!("/v2/portalproducts/{pp_id}/sharing-policy"),
+        &format!("/v2/portalproducts/{pp_id}/sharingpolicy"),
         "",
     )
     .await;
@@ -964,37 +977,37 @@ async fn apigwv2_closure_routes_exist() {
     let resp = apigw_request(
         &server,
         reqwest::Method::POST,
-        &format!("/v2/portalproducts/{pp_id}/pages"),
+        &format!("/v2/portalproducts/{pp_id}/productpages"),
         r#"{"Name":"p"}"#,
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let page_id = body["Id"].as_str().unwrap().to_string();
+    let page_id = body["id"].as_str().unwrap().to_string();
     apigw_request(
         &server,
         reqwest::Method::GET,
-        &format!("/v2/portalproducts/{pp_id}/pages"),
+        &format!("/v2/portalproducts/{pp_id}/productpages"),
         "",
     )
     .await;
     apigw_request(
         &server,
         reqwest::Method::GET,
-        &format!("/v2/portalproducts/{pp_id}/pages/{page_id}"),
+        &format!("/v2/portalproducts/{pp_id}/productpages/{page_id}"),
         "",
     )
     .await;
     apigw_request(
         &server,
         reqwest::Method::PATCH,
-        &format!("/v2/portalproducts/{pp_id}/pages/{page_id}"),
+        &format!("/v2/portalproducts/{pp_id}/productpages/{page_id}"),
         r#"{}"#,
     )
     .await;
     apigw_request(
         &server,
         reqwest::Method::DELETE,
-        &format!("/v2/portalproducts/{pp_id}/pages/{page_id}"),
+        &format!("/v2/portalproducts/{pp_id}/productpages/{page_id}"),
         "",
     )
     .await;
@@ -1002,37 +1015,37 @@ async fn apigwv2_closure_routes_exist() {
     let resp = apigw_request(
         &server,
         reqwest::Method::POST,
-        &format!("/v2/portalproducts/{pp_id}/rest-endpoint-pages"),
+        &format!("/v2/portalproducts/{pp_id}/productrestendpointpages"),
         r#"{"Name":"p"}"#,
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let rep_id = body["Id"].as_str().unwrap().to_string();
+    let rep_id = body["id"].as_str().unwrap().to_string();
     apigw_request(
         &server,
         reqwest::Method::GET,
-        &format!("/v2/portalproducts/{pp_id}/rest-endpoint-pages"),
+        &format!("/v2/portalproducts/{pp_id}/productrestendpointpages"),
         "",
     )
     .await;
     apigw_request(
         &server,
         reqwest::Method::GET,
-        &format!("/v2/portalproducts/{pp_id}/rest-endpoint-pages/{rep_id}"),
+        &format!("/v2/portalproducts/{pp_id}/productrestendpointpages/{rep_id}"),
         "",
     )
     .await;
     apigw_request(
         &server,
         reqwest::Method::PATCH,
-        &format!("/v2/portalproducts/{pp_id}/rest-endpoint-pages/{rep_id}"),
+        &format!("/v2/portalproducts/{pp_id}/productrestendpointpages/{rep_id}"),
         r#"{}"#,
     )
     .await;
     apigw_request(
         &server,
         reqwest::Method::DELETE,
-        &format!("/v2/portalproducts/{pp_id}/rest-endpoint-pages/{rep_id}"),
+        &format!("/v2/portalproducts/{pp_id}/productrestendpointpages/{rep_id}"),
         "",
     )
     .await;

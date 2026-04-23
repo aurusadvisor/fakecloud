@@ -11,12 +11,68 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::service::ApiGatewayV2Service;
 use crate::state::ApiGatewayV2State;
 
+/// Lowercase the first letter of a key — Smithy's `@jsonName` default for
+/// apigatewayv2 shapes (e.g. `ApiId` -> `apiId`).
+fn lower_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Walk a `Value` and lowercase the first character of every object key
+/// (recursive). Handlers emit fields in Pascal-case for legibility but
+/// the apigatewayv2 Smithy model serializes them as camel-case.
+fn to_camel(v: Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                out.insert(lower_first(&k), to_camel(val));
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(to_camel).collect()),
+        other => other,
+    }
+}
+
+/// Parse the request body as JSON. Keep incoming case-as-is; handlers
+/// read fields in Pascal-case for legibility, but SDK clients send
+/// camel-case per Smithy — so we also merge a Pascal-case copy.
 fn body(req: &AwsRequest) -> Value {
-    serde_json::from_slice(&req.body).unwrap_or_else(|_| Value::Object(Default::default()))
+    let raw: Value =
+        serde_json::from_slice(&req.body).unwrap_or_else(|_| Value::Object(Default::default()));
+    // Augment with Pascal-first duplicates so handlers can read either
+    // incoming case without needing to know which the caller used.
+    match raw {
+        Value::Object(map) => {
+            let mut merged = serde_json::Map::new();
+            for (k, v) in map {
+                // Insert Pascal-case view for handlers that look up e.g. `body["ApiId"]`
+                let mut chars = k.chars();
+                let pascal = match chars.next() {
+                    Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+                    None => String::new(),
+                };
+                // If pascal differs from the original key, add both
+                if pascal != k {
+                    merged.insert(pascal, v.clone());
+                }
+                merged.insert(k, v);
+            }
+            Value::Object(merged)
+        }
+        other => other,
+    }
 }
 
 fn ok(body: Value) -> Result<AwsResponse, AwsServiceError> {
-    Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    Ok(AwsResponse::json(
+        StatusCode::OK,
+        to_camel(body).to_string(),
+    ))
 }
 
 fn empty_ok() -> Result<AwsResponse, AwsServiceError> {
@@ -259,14 +315,13 @@ impl ApiGatewayV2Service {
             "GetRouteResponses" => self.list_subresponses(api_id, resource_id, false, &region, aid),
             "DeleteRouteResponse" => self.delete_subresponse(req, api_id, resource_id, false),
 
-            // ── Routing rules ──
-            "CreateRoutingRule" | "PutRoutingRule" => {
-                let body = body(req);
-                let domain = body["DomainName"]
-                    .as_str()
+            // ── Routing rules (nested under /v2/domainnames/{name}) ──
+            "CreateRoutingRule" => {
+                let domain = resource_id
                     .ok_or_else(|| missing("DomainName"))?
                     .to_string();
-                let id = resource_id.map(String::from).unwrap_or_else(rand_id);
+                let body = body(req);
+                let id = rand_id();
                 let entry = json!({
                     "RoutingRuleId": id,
                     "DomainName": domain,
@@ -282,32 +337,60 @@ impl ApiGatewayV2Service {
                     .insert(id.clone(), entry.clone());
                 ok(entry)
             }
+            "PutRoutingRule" => {
+                let domain = resource_id
+                    .ok_or_else(|| missing("DomainName"))?
+                    .to_string();
+                let id = api_id.ok_or_else(|| missing("RoutingRuleId"))?.to_string();
+                let body = body(req);
+                let entry = json!({
+                    "RoutingRuleId": id,
+                    "DomainName": domain,
+                    "Conditions": body.get("Conditions").cloned().unwrap_or(json!([])),
+                    "Actions": body.get("Actions").cloned().unwrap_or(json!([])),
+                });
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(aid);
+                state
+                    .routing_rules
+                    .entry(domain)
+                    .or_default()
+                    .insert(id, entry.clone());
+                ok(entry)
+            }
             "GetRoutingRule" => {
-                let id = resource_id.ok_or_else(|| missing("RoutingRuleId"))?;
+                let domain = resource_id.ok_or_else(|| missing("DomainName"))?;
+                let id = api_id.ok_or_else(|| missing("RoutingRuleId"))?;
                 self.read_state(aid, &region, |state| {
                     state
                         .routing_rules
-                        .values()
-                        .find_map(|m| m.get(id))
+                        .get(domain)
+                        .and_then(|m| m.get(id))
                         .cloned()
                         .map(ok)
                         .unwrap_or_else(|| Err(not_found("RoutingRule", id)))
                 })
             }
-            "ListRoutingRules" => self.read_state(aid, &region, |state| {
-                let items: Vec<&Value> = state
-                    .routing_rules
-                    .values()
-                    .flat_map(|m| m.values())
-                    .collect();
-                ok(json!({"Items": items}))
-            }),
+            "ListRoutingRules" => {
+                let domain = resource_id.ok_or_else(|| missing("DomainName"))?;
+                self.read_state(aid, &region, |state| {
+                    let items: Vec<Value> = state
+                        .routing_rules
+                        .get(domain)
+                        .map(|m| m.values().cloned().collect())
+                        .unwrap_or_default();
+                    ok(json!({"Items": items}))
+                })
+            }
             "DeleteRoutingRule" => {
-                let id = resource_id.ok_or_else(|| missing("RoutingRuleId"))?;
+                let domain = resource_id
+                    .ok_or_else(|| missing("DomainName"))?
+                    .to_string();
+                let id = api_id.ok_or_else(|| missing("RoutingRuleId"))?.to_string();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
-                for map in state.routing_rules.values_mut() {
-                    map.remove(id);
+                if let Some(m) = state.routing_rules.get_mut(&domain) {
+                    m.remove(&id);
                 }
                 no_content()
             }
@@ -1023,18 +1106,18 @@ mod tests {
         run(
             &s,
             "CreateRoutingRule",
-            r#"{"DomainName":"d"}"#,
-            &["v2", "routingrules"],
+            r#"{}"#,
+            &["v2", "domainnames", "d", "routingrules"],
             None,
-            None,
+            Some("d"),
         );
         run(
             &s,
             "ListRoutingRules",
             "",
-            &["v2", "routingrules"],
+            &["v2", "domainnames", "d", "routingrules"],
             None,
-            None,
+            Some("d"),
         );
         run(
             &s,
