@@ -1034,18 +1034,7 @@ impl StepFunctionsService {
         let routing_cfg = body["routingConfiguration"]
             .as_array()
             .ok_or_else(|| missing("routingConfiguration"))?;
-        let routes: Vec<crate::state::AliasRoute> = routing_cfg
-            .iter()
-            .filter_map(|r| {
-                Some(crate::state::AliasRoute {
-                    state_machine_version_arn: r["stateMachineVersionArn"].as_str()?.to_string(),
-                    weight: r["weight"].as_i64().unwrap_or(0) as i32,
-                })
-            })
-            .collect();
-        if routes.is_empty() {
-            return Err(missing("routingConfiguration"));
-        }
+        let routes = parse_routing_configuration(routing_cfg)?;
         let parent_arn = routes[0]
             .state_machine_version_arn
             .rsplit_once(':')
@@ -1110,10 +1099,13 @@ impl StepFunctionsService {
         let accounts = self.state.read();
         let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        // Anchor the prefix on the alias separator so a state machine
+        // named `foo` doesn't pull in aliases for `foobar`.
+        let parent_prefix = format!("{parent}:");
         let mut aliases: Vec<&crate::state::StateMachineAlias> = state
             .state_machine_aliases
             .values()
-            .filter(|a| a.arn.starts_with(&parent))
+            .filter(|a| a.arn.starts_with(&parent_prefix))
             .collect();
         aliases.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(AwsResponse::ok_json(json!({
@@ -1140,17 +1132,7 @@ impl StepFunctionsService {
             alias.description = d.to_string();
         }
         if let Some(routes) = body["routingConfiguration"].as_array() {
-            alias.routing_configuration = routes
-                .iter()
-                .filter_map(|r| {
-                    Some(crate::state::AliasRoute {
-                        state_machine_version_arn: r["stateMachineVersionArn"]
-                            .as_str()?
-                            .to_string(),
-                        weight: r["weight"].as_i64().unwrap_or(0) as i32,
-                    })
-                })
-                .collect();
+            alias.routing_configuration = parse_routing_configuration(routes)?;
         }
         alias.update_date = chrono::Utc::now();
         Ok(AwsResponse::ok_json(json!({
@@ -1253,6 +1235,13 @@ impl StepFunctionsService {
             .ok_or_else(|| missing("stateMachineArn"))?
             .to_string();
         let input = body["input"].as_str().unwrap_or("{}").to_string();
+        if serde_json::from_str::<serde_json::Value>(&input).is_err() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidExecutionInput",
+                "Execution input is not valid JSON.",
+            ));
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let sm = state
@@ -1423,6 +1412,61 @@ fn resource_not_found(arn: &str) -> AwsServiceError {
         "ResourceNotFound",
         format!("Resource not found: '{arn}'"),
     )
+}
+
+/// Parse + validate an alias `routingConfiguration` array.
+///
+/// AWS rules: 1 or 2 routes; weights are 0-100 and sum to 100; each
+/// route must include `stateMachineVersionArn`.
+fn parse_routing_configuration(
+    routes: &[serde_json::Value],
+) -> Result<Vec<crate::state::AliasRoute>, AwsServiceError> {
+    if routes.is_empty() || routes.len() > 2 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "routingConfiguration must contain 1 or 2 routes.",
+        ));
+    }
+    let parsed: Vec<crate::state::AliasRoute> = routes
+        .iter()
+        .map(|r| {
+            let arn = r["stateMachineVersionArn"].as_str().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "routingConfiguration entries must contain stateMachineVersionArn.",
+                )
+            })?;
+            let weight = r["weight"].as_i64().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "routingConfiguration entries must contain a numeric weight.",
+                )
+            })?;
+            if !(0..=100).contains(&weight) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("Invalid routing weight {weight}; must be 0-100."),
+                ));
+            }
+            Ok(crate::state::AliasRoute {
+                state_machine_version_arn: arn.to_string(),
+                weight: weight as i32,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let total: i32 = parsed.iter().map(|r| r.weight).sum();
+    if total != 100 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            format!("routingConfiguration weights must sum to 100, got {total}."),
+        ));
+    }
+    Ok(parsed)
 }
 
 fn validate_name(name: &str) -> Result<(), AwsServiceError> {
