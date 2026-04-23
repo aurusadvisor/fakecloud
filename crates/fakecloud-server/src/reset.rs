@@ -113,10 +113,7 @@ impl ResetState {
                 }
             }
             "ecr" => {
-                let mut accounts = self.ecr.write();
-                for (_, state) in accounts.iter_mut() {
-                    state.reset();
-                }
+                self.ecr.write().reset();
             }
             "states" | "stepfunctions" => {
                 self.stepfunctions.write().reset();
@@ -337,12 +334,7 @@ impl ResetState {
             let rt = rt.clone();
             tokio::spawn(async move { rt.stop_all().await });
         }
-        {
-            let mut accounts = self.ecr.write();
-            for (_, state) in accounts.iter_mut() {
-                state.reset();
-            }
-        }
+        self.ecr.write().reset();
         self.stepfunctions.write().reset();
         self.scheduler.write().reset();
         self.apigatewayv2.write().reset();

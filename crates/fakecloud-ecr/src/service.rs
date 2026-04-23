@@ -169,33 +169,56 @@ fn repository_policy_not_found(name: &str) -> AwsServiceError {
     )
 }
 
-/// Validate ECR repository name: 2-256 chars, lowercase alphanum +
-/// `/`, `_`, `-`, `.` per AWS docs. Also must not start with a
-/// separator.
+/// Validate ECR repository name against AWS pattern:
+/// `(?:[a-z0-9]+(?:[._-][a-z0-9]+)*/)*[a-z0-9]+(?:[._-][a-z0-9]+)*`, length 2–256.
+/// Each `/`-separated segment starts and ends with `[a-z0-9]` and uses
+/// `[._-]` only between alphanum runs.
 fn validate_repository_name(name: &str) -> Result<(), AwsServiceError> {
-    if name.len() < 2 || name.len() > 256 {
-        return Err(invalid_parameter(
-            "Invalid parameter at 'repositoryName' failed to satisfy constraint: \
+    let invalid = || {
+        invalid_parameter(format!(
+            "Invalid parameter at 'repositoryName': '{name}' failed to satisfy constraint: \
              'must satisfy regular expression pattern: (?:[a-z0-9]+(?:[._-][a-z0-9]+)*/)*[a-z0-9]+(?:[._-][a-z0-9]+)*'",
-        ));
+        ))
+    };
+    if name.len() < 2 || name.len() > 256 {
+        return Err(invalid());
     }
-    let first = name.as_bytes()[0];
-    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
-        return Err(invalid_parameter(
-            "Invalid parameter at 'repositoryName' failed to satisfy constraint: \
-             'must start with a letter or digit'",
-        ));
-    }
-    for b in name.bytes() {
-        let ok =
-            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'/' | b'_' | b'-' | b'.');
-        if !ok {
-            return Err(invalid_parameter(format!(
-                "Invalid repository name '{name}': contains invalid character"
-            )));
+    // Segments split by `/`. Empty segment (e.g. `foo/`, `foo//bar`,
+    // leading/trailing slash) is disallowed.
+    for segment in name.split('/') {
+        if segment.is_empty() {
+            return Err(invalid());
+        }
+        // Segment := alphanum+ ([._-] alphanum+)*
+        let bytes = segment.as_bytes();
+        let mut i = 0usize;
+        // Leading alphanum run (at least 1 byte).
+        if !is_alnum(bytes[0]) {
+            return Err(invalid());
+        }
+        while i < bytes.len() && is_alnum(bytes[i]) {
+            i += 1;
+        }
+        while i < bytes.len() {
+            // Separator.
+            if !matches!(bytes[i], b'.' | b'_' | b'-') {
+                return Err(invalid());
+            }
+            i += 1;
+            // Required alphanum run after each separator.
+            if i >= bytes.len() || !is_alnum(bytes[i]) {
+                return Err(invalid());
+            }
+            while i < bytes.len() && is_alnum(bytes[i]) {
+                i += 1;
+            }
         }
     }
     Ok(())
+}
+
+fn is_alnum(b: u8) -> bool {
+    b.is_ascii_lowercase() || b.is_ascii_digit()
 }
 
 fn parse_tags(body: &Value) -> Vec<(String, String)> {
@@ -355,15 +378,24 @@ impl EcrService {
 
     fn describe_repositories(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
-        if let Some(max_results) = body.get("maxResults").and_then(|v| v.as_i64()) {
-            // Smithy @range(min=1, max=1000) on DescribeRepositories.maxResults.
-            if !(1..=1000).contains(&max_results) {
-                return Err(invalid_parameter(format!(
-                    "Value '{max_results}' at 'maxResults' failed to satisfy constraint: \
-                     Member must have value between 1 and 1000",
-                )));
+        let max_results = match body.get("maxResults").and_then(|v| v.as_i64()) {
+            Some(n) => {
+                // Smithy @range(min=1, max=1000) on DescribeRepositories.maxResults.
+                if !(1..=1000).contains(&n) {
+                    return Err(invalid_parameter(format!(
+                        "Value '{n}' at 'maxResults' failed to satisfy constraint: \
+                         Member must have value between 1 and 1000",
+                    )));
+                }
+                Some(n as usize)
             }
-        }
+            None => None,
+        };
+        let offset = body
+            .get("nextToken")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
         let names: Vec<String> = body
             .get("repositoryNames")
             .and_then(|v| v.as_array())
@@ -379,9 +411,19 @@ impl EcrService {
             return Ok(AwsResponse::ok_json(json!({ "repositories": [] })));
         };
         let mut out: Vec<Value> = Vec::new();
+        let mut next_token: Option<String> = None;
         if names.is_empty() {
-            for repo in state.repositories.values() {
+            let all: Vec<&Repository> = state.repositories.values().collect();
+            let start = offset.min(all.len());
+            let end = match max_results {
+                Some(limit) => (start + limit).min(all.len()),
+                None => all.len(),
+            };
+            for repo in &all[start..end] {
                 out.push(repository_to_json(repo));
+            }
+            if end < all.len() {
+                next_token = Some(end.to_string());
             }
         } else {
             for n in &names {
@@ -392,7 +434,11 @@ impl EcrService {
                 out.push(repository_to_json(repo));
             }
         }
-        Ok(AwsResponse::ok_json(json!({ "repositories": out })))
+        let mut response = json!({ "repositories": out });
+        if let Some(token) = next_token {
+            response["nextToken"] = json!(token);
+        }
+        Ok(AwsResponse::ok_json(response))
     }
 
     fn put_image_tag_mutability(
@@ -593,5 +639,51 @@ impl EcrService {
             .map(|(k, v)| json!({ "Key": k, "Value": v }))
             .collect();
         Ok(AwsResponse::ok_json(json!({ "tags": tags })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_repository_name;
+
+    #[track_caller]
+    fn ok(n: &str) {
+        validate_repository_name(n).unwrap_or_else(|_| panic!("expected '{n}' to validate"));
+    }
+    #[track_caller]
+    fn bad(n: &str) {
+        assert!(
+            validate_repository_name(n).is_err(),
+            "expected '{n}' to be rejected",
+        );
+    }
+
+    #[test]
+    fn accepts_valid_names() {
+        ok("foo");
+        ok("foo-bar");
+        ok("foo.bar");
+        ok("foo_bar");
+        ok("foo/bar");
+        ok("team/svc");
+        ok("a/b/c");
+        ok("foo123/bar-baz.qux_q");
+    }
+
+    #[test]
+    fn rejects_invalid_names() {
+        bad("");
+        bad("a");
+        bad("/foo");
+        bad("foo/");
+        bad("foo//bar");
+        bad("-foo");
+        bad("foo-");
+        bad("foo--bar");
+        bad("foo..bar");
+        bad("foo__bar");
+        bad("Foo");
+        bad("foo bar");
+        bad("foo!");
     }
 }

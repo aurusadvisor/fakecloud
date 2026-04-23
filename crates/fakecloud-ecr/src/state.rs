@@ -147,11 +147,20 @@ impl Default for EncryptionConfiguration {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegistryScanningConfiguration {
     /// `BASIC` or `ENHANCED`.
     pub scan_type: String,
     pub rules: Vec<RegistryScanningRule>,
+}
+
+impl Default for RegistryScanningConfiguration {
+    fn default() -> Self {
+        Self {
+            scan_type: "BASIC".to_string(),
+            rules: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
