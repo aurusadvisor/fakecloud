@@ -1,10 +1,10 @@
 +++
-title = "Mock SES for tests"
-description = "Mock AWS SES locally for integration tests with fakecloud. 110 SES operations, v2 send + templates + DKIM, real receipt rule execution for inbound email. Free, no account required."
+title = "SES emulator for tests"
+description = "Run AWS SES locally for integration tests with fakecloud. 110 SES operations, v2 send + templates + DKIM, real receipt rule execution for inbound email. Free, no account required."
 template = "page.html"
 +++
 
-Need to mock AWS SES for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud).
+Need a SES emulator for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud). Not a mock library — a real server that speaks the SES wire protocol.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
