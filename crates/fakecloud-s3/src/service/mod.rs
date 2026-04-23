@@ -322,7 +322,14 @@ impl AwsService for S3Service {
 
         let mut result = match (&req.method, bucket, key.as_deref()) {
             // ListBuckets: GET /
-            (&Method::GET, None, None) => self.list_buckets(account_id, &req),
+            (&Method::GET, None, None) => {
+                if req.query_params.get("x-id").map(|s| s.as_str()) == Some("ListDirectoryBuckets")
+                {
+                    self.list_directory_buckets(account_id, &req)
+                } else {
+                    self.list_buckets(account_id, &req)
+                }
+            }
 
             // Bucket-level operations (no key)
             (&Method::PUT, Some(b), None) => {
@@ -358,6 +365,20 @@ impl AwsService for S3Service {
                     self.put_bucket_ownership_controls(account_id, &req, b)
                 } else if req.query_params.contains_key("inventory") {
                     self.put_bucket_inventory(account_id, &req, b)
+                } else if req.query_params.contains_key("analytics") {
+                    self.put_bucket_analytics_config(account_id, &req, b)
+                } else if req.query_params.contains_key("intelligent-tiering") {
+                    self.put_bucket_intelligent_tiering_config(account_id, &req, b)
+                } else if req.query_params.contains_key("metrics") {
+                    self.put_bucket_metrics_config(account_id, &req, b)
+                } else if req.query_params.contains_key("requestPayment") {
+                    self.put_bucket_request_payment(account_id, &req, b)
+                } else if req.query_params.contains_key("abac") {
+                    self.put_bucket_abac(account_id, &req, b)
+                } else if req.query_params.contains_key("metadataInventoryTable") {
+                    self.update_bucket_metadata_inventory_table(account_id, &req, b)
+                } else if req.query_params.contains_key("metadataJournalTable") {
+                    self.update_bucket_metadata_journal_table(account_id, &req, b)
                 } else {
                     self.create_bucket(account_id, &req, b)
                 }
@@ -383,6 +404,16 @@ impl AwsService for S3Service {
                     self.delete_bucket_ownership_controls(account_id, b)
                 } else if req.query_params.contains_key("inventory") {
                     self.delete_bucket_inventory(account_id, &req, b)
+                } else if req.query_params.contains_key("analytics") {
+                    self.delete_bucket_analytics_config(account_id, &req, b)
+                } else if req.query_params.contains_key("intelligent-tiering") {
+                    self.delete_bucket_intelligent_tiering_config(account_id, &req, b)
+                } else if req.query_params.contains_key("metrics") {
+                    self.delete_bucket_metrics_config(account_id, &req, b)
+                } else if req.query_params.contains_key("metadataConfiguration") {
+                    self.delete_bucket_metadata_config(account_id, b)
+                } else if req.query_params.contains_key("metadataTable") {
+                    self.delete_bucket_metadata_table_config(account_id, b)
                 } else {
                     self.delete_bucket(account_id, &req, b)
                 }
@@ -429,6 +460,36 @@ impl AwsService for S3Service {
                     } else {
                         self.list_bucket_inventory_configurations(account_id, b)
                     }
+                } else if req.query_params.contains_key("analytics") {
+                    if req.query_params.contains_key("id") {
+                        self.get_bucket_analytics_config(account_id, &req, b)
+                    } else {
+                        self.list_bucket_analytics_configurations(account_id, b)
+                    }
+                } else if req.query_params.contains_key("intelligent-tiering") {
+                    if req.query_params.contains_key("id") {
+                        self.get_bucket_intelligent_tiering_config(account_id, &req, b)
+                    } else {
+                        self.list_bucket_intelligent_tiering_configurations(account_id, b)
+                    }
+                } else if req.query_params.contains_key("metrics") {
+                    if req.query_params.contains_key("id") {
+                        self.get_bucket_metrics_config(account_id, &req, b)
+                    } else {
+                        self.list_bucket_metrics_configurations(account_id, b)
+                    }
+                } else if req.query_params.contains_key("requestPayment") {
+                    self.get_bucket_request_payment(account_id, b)
+                } else if req.query_params.contains_key("abac") {
+                    self.get_bucket_abac(account_id, b)
+                } else if req.query_params.contains_key("policyStatus") {
+                    self.get_bucket_policy_status(account_id, b)
+                } else if req.query_params.contains_key("metadataConfiguration") {
+                    self.get_bucket_metadata_config(account_id, b)
+                } else if req.query_params.contains_key("metadataTable") {
+                    self.get_bucket_metadata_table_config(account_id, b)
+                } else if req.query_params.contains_key("session") {
+                    self.create_session(account_id, &req, b)
                 } else if req.query_params.get("list-type").map(|s| s.as_str()) == Some("2") {
                     self.list_objects_v2(account_id, &req, b)
                 } else if req.query_params.is_empty() {
@@ -474,6 +535,10 @@ impl AwsService for S3Service {
                     self.put_object_retention(account_id, &req, b, k)
                 } else if req.query_params.contains_key("legal-hold") {
                     self.put_object_legal_hold(account_id, &req, b, k)
+                } else if req.query_params.contains_key("renameObject") {
+                    self.rename_object(account_id, &req, b, k)
+                } else if req.query_params.contains_key("encryption") {
+                    self.update_object_encryption(account_id, &req, b, k)
                 } else if req.headers.contains_key("x-amz-copy-source") {
                     self.copy_object(account_id, &req, b, k)
                 } else {
@@ -491,6 +556,8 @@ impl AwsService for S3Service {
                     self.get_object_legal_hold(account_id, &req, b, k)
                 } else if req.query_params.contains_key("attributes") {
                     self.get_object_attributes(account_id, &req, b, k)
+                } else if req.query_params.contains_key("torrent") {
+                    self.get_object_torrent(account_id, &req, b, k)
                 } else {
                     let result = self.get_object(account_id, &req, b, k);
                     // If object not found and bucket has website config, serve error document
@@ -539,6 +606,22 @@ impl AwsService for S3Service {
             // POST /{bucket}?delete — batch delete
             (&Method::POST, Some(b), None) if req.query_params.contains_key("delete") => {
                 self.delete_objects(account_id, &req, b)
+            }
+            (&Method::POST, Some(b), None)
+                if req.query_params.contains_key("metadataConfiguration") =>
+            {
+                self.create_bucket_metadata_config(account_id, &req, b)
+            }
+            (&Method::POST, Some(b), None) if req.query_params.contains_key("metadataTable") => {
+                self.create_bucket_metadata_table_config(account_id, &req, b)
+            }
+            (&Method::POST, Some(b), Some(k))
+                if req.query_params.get("select-type").map(|s| s.as_str()) == Some("2") =>
+            {
+                self.select_object_content(account_id, &req, b, k)
+            }
+            (&Method::POST, Some("WriteGetObjectResponse"), None) => {
+                self.write_get_object_response(account_id, &req)
             }
 
             _ => Err(AwsServiceError::aws_error(
@@ -686,6 +769,39 @@ impl AwsService for S3Service {
             "PutBucketInventoryConfiguration",
             "GetBucketInventoryConfiguration",
             "DeleteBucketInventoryConfiguration",
+            "ListBucketInventoryConfigurations",
+            "PutBucketAnalyticsConfiguration",
+            "GetBucketAnalyticsConfiguration",
+            "DeleteBucketAnalyticsConfiguration",
+            "ListBucketAnalyticsConfigurations",
+            "PutBucketIntelligentTieringConfiguration",
+            "GetBucketIntelligentTieringConfiguration",
+            "DeleteBucketIntelligentTieringConfiguration",
+            "ListBucketIntelligentTieringConfigurations",
+            "PutBucketMetricsConfiguration",
+            "GetBucketMetricsConfiguration",
+            "DeleteBucketMetricsConfiguration",
+            "ListBucketMetricsConfigurations",
+            "PutBucketRequestPayment",
+            "GetBucketRequestPayment",
+            "PutBucketAbac",
+            "GetBucketAbac",
+            "GetBucketPolicyStatus",
+            "CreateBucketMetadataConfiguration",
+            "GetBucketMetadataConfiguration",
+            "DeleteBucketMetadataConfiguration",
+            "CreateBucketMetadataTableConfiguration",
+            "GetBucketMetadataTableConfiguration",
+            "DeleteBucketMetadataTableConfiguration",
+            "UpdateBucketMetadataInventoryTableConfiguration",
+            "UpdateBucketMetadataJournalTableConfiguration",
+            "GetObjectTorrent",
+            "RenameObject",
+            "SelectObjectContent",
+            "UpdateObjectEncryption",
+            "WriteGetObjectResponse",
+            "ListDirectoryBuckets",
+            "CreateSession",
             // Multipart uploads
             "CreateMultipartUpload",
             "UploadPart",
@@ -1070,6 +1186,71 @@ fn s3_detect_action(
                 "DELETE" => "DeleteBucketInventoryConfiguration",
                 _ => return None,
             });
+        }
+        if has("analytics") {
+            return Some(match method {
+                "GET" if has("id") => "GetBucketAnalyticsConfiguration",
+                "GET" => "ListBucketAnalyticsConfigurations",
+                "PUT" => "PutBucketAnalyticsConfiguration",
+                "DELETE" => "DeleteBucketAnalyticsConfiguration",
+                _ => return None,
+            });
+        }
+        if has("intelligent-tiering") {
+            return Some(match method {
+                "GET" if has("id") => "GetBucketIntelligentTieringConfiguration",
+                "GET" => "ListBucketIntelligentTieringConfigurations",
+                "PUT" => "PutBucketIntelligentTieringConfiguration",
+                "DELETE" => "DeleteBucketIntelligentTieringConfiguration",
+                _ => return None,
+            });
+        }
+        if has("metrics") {
+            return Some(match method {
+                "GET" if has("id") => "GetBucketMetricsConfiguration",
+                "GET" => "ListBucketMetricsConfigurations",
+                "PUT" => "PutBucketMetricsConfiguration",
+                "DELETE" => "DeleteBucketMetricsConfiguration",
+                _ => return None,
+            });
+        }
+        if has("requestPayment") {
+            return Some(match method {
+                "GET" => "GetBucketRequestPayment",
+                "PUT" => "PutBucketRequestPayment",
+                _ => return None,
+            });
+        }
+        if has("policyStatus") && is_get {
+            return Some("GetBucketPolicyStatus");
+        }
+        if has("metadataConfiguration") {
+            return Some(match method {
+                "GET" => "GetBucketMetadataConfiguration",
+                "POST" => "CreateBucketMetadataConfiguration",
+                "DELETE" => "DeleteBucketMetadataConfiguration",
+                _ => return None,
+            });
+        }
+        if has("metadataTable") {
+            return Some(match method {
+                "GET" => "GetBucketMetadataTableConfiguration",
+                "POST" => "CreateBucketMetadataTableConfiguration",
+                "DELETE" => "DeleteBucketMetadataTableConfiguration",
+                _ => return None,
+            });
+        }
+        if has("metadataInventoryTable") && is_put {
+            return Some("UpdateBucketMetadataInventoryTableConfiguration");
+        }
+        if has("metadataJournalTable") && is_put {
+            return Some("UpdateBucketMetadataJournalTableConfiguration");
+        }
+        if has("abac") && is_put {
+            return Some("PutBucketAbacConfiguration");
+        }
+        if has("renameObject") && is_put {
+            return Some("RenameObject");
         }
         if has("object-lock") {
             return Some(match method {
