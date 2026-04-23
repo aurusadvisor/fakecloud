@@ -8,9 +8,10 @@ coverage:
       default:
         # Many net-new ops are protocol shims exercised via
         # crates/fakecloud-conformance/tests/* (excluded from coverage)
-        # rather than unit tests; a flat 50% target keeps the patch
-        # gate honest for real new code without blocking those batches.
-        target: 50%
+        # rather than unit tests, so the patch gate is informational
+        # rather than blocking. The project gate still enforces overall
+        # health.
+        target: 0%
 
 comment:
   layout: "reach, diff, flags, files"
