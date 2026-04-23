@@ -1750,7 +1750,7 @@ async fn s3_get_bucket_policy_status() {
         .unwrap();
 }
 
-const S3_AUTH: &str = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/s3/aws4_request";
+const S3_AUTH: &str = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=0";
 
 async fn raw_put(server: &TestServer, path: &str, body: &str) {
     let resp = reqwest::Client::new()
