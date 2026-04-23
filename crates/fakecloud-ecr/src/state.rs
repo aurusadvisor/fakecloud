@@ -13,7 +13,7 @@ impl fakecloud_core::multi_account::AccountState for EcrState {
     }
 }
 
-pub const ECR_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const ECR_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Top-level persisted ECR snapshot. The shape mirrors the convention
 /// used by other multi-account services (Kinesis, ElastiCache) so the
@@ -42,6 +42,10 @@ pub struct EcrState {
     /// Account setting flags keyed by setting name (e.g.,
     /// `BASIC_SCAN_TYPE_VERSION`, `REGISTRY_POLICY_SCOPE`).
     pub account_settings: HashMap<String, String>,
+    /// Layer upload state machine keyed by `uploadId`. Each entry is
+    /// tied to a specific repository.
+    #[serde(default)]
+    pub layer_uploads: BTreeMap<String, LayerUpload>,
 }
 
 impl EcrState {
@@ -54,6 +58,7 @@ impl EcrState {
             registry_scanning_configuration: RegistryScanningConfiguration::default(),
             replication_configuration: None,
             account_settings: HashMap::new(),
+            layer_uploads: BTreeMap::new(),
         }
     }
 
@@ -63,6 +68,7 @@ impl EcrState {
         self.registry_scanning_configuration = RegistryScanningConfiguration::default();
         self.replication_configuration = None;
         self.account_settings.clear();
+        self.layer_uploads.clear();
     }
 
     pub fn repository_arn(&self, repository_name: &str) -> String {
@@ -93,6 +99,19 @@ pub struct Repository {
     pub policy: Option<String>,
     /// Repository-level lifecycle policy document JSON.
     pub lifecycle_policy: Option<String>,
+    /// Stored images keyed by manifest digest (sha256). One image can
+    /// have many tags (via `image_tags`).
+    #[serde(default)]
+    pub images: BTreeMap<String, Image>,
+    /// Tag name -> image digest. Multiple tags can point to the same
+    /// digest.
+    #[serde(default)]
+    pub image_tags: BTreeMap<String, String>,
+    /// Content-addressed layer blobs keyed by their sha256 digest
+    /// (e.g. `sha256:deadbeef…`). Stored as base64 to keep JSON
+    /// snapshots portable.
+    #[serde(default)]
+    pub layers: BTreeMap<String, Layer>,
 }
 
 impl Repository {
@@ -120,8 +139,44 @@ impl Repository {
             tags: BTreeMap::new(),
             policy: None,
             lifecycle_policy: None,
+            images: BTreeMap::new(),
+            image_tags: BTreeMap::new(),
+            layers: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Image {
+    pub image_digest: String,
+    pub image_manifest: String,
+    pub image_manifest_media_type: String,
+    pub artifact_media_type: Option<String>,
+    pub image_size_in_bytes: u64,
+    pub image_pushed_at: DateTime<Utc>,
+    pub last_recorded_pull_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Layer {
+    pub digest: String,
+    pub size: u64,
+    /// Base64-encoded blob bytes. Kept in-process for Batch 2; Batch 3
+    /// will move this to content-addressed disk storage for the OCI
+    /// `/v2/` protocol.
+    pub blob_b64: String,
+    pub media_type: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayerUpload {
+    pub upload_id: String,
+    pub repository_name: String,
+    pub created_at: DateTime<Utc>,
+    /// Accumulated blob bytes (base64). Each `UploadLayerPart` call
+    /// appends to this and updates `last_byte_received`.
+    pub blob_b64: String,
+    pub last_byte_received: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
