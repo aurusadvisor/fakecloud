@@ -1752,3 +1752,225 @@ async fn ses_batch_get_metric_data() {
     assert_eq!(resp.results()[0].id().unwrap(), "q1");
     assert!(resp.errors().is_empty());
 }
+
+#[test_action("ses", "GetDedicatedIpPool", checksum = "9406caf3")]
+#[tokio::test]
+async fn ses_get_dedicated_ip_pool() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    client
+        .create_dedicated_ip_pool()
+        .pool_name("test-pool")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .get_dedicated_ip_pool()
+        .pool_name("test-pool")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.dedicated_ip_pool().is_some());
+}
+
+#[test_action("ses", "GetDeliverabilityDashboardOptions", checksum = "418ec937")]
+#[tokio::test]
+async fn ses_get_deliverability_dashboard_options() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    let _ = client
+        .get_deliverability_dashboard_options()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ses", "PutDeliverabilityDashboardOption", checksum = "baea4aa5")]
+#[tokio::test]
+async fn ses_put_deliverability_dashboard_option() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    client
+        .put_deliverability_dashboard_option()
+        .dashboard_enabled(true)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ses", "CreateDeliverabilityTestReport", checksum = "eedc7378")]
+#[tokio::test]
+async fn ses_create_deliverability_test_report() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    let resp = client
+        .create_deliverability_test_report()
+        .from_email_address("noreply@example.com")
+        .content(
+            aws_sdk_sesv2::types::EmailContent::builder()
+                .simple(
+                    aws_sdk_sesv2::types::Message::builder()
+                        .subject(
+                            aws_sdk_sesv2::types::Content::builder()
+                                .data("test")
+                                .build()
+                                .unwrap(),
+                        )
+                        .body(
+                            aws_sdk_sesv2::types::Body::builder()
+                                .text(
+                                    aws_sdk_sesv2::types::Content::builder()
+                                        .data("body")
+                                        .build()
+                                        .unwrap(),
+                                )
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.report_id();
+}
+
+#[test_action("ses", "GetDeliverabilityTestReport", checksum = "cfdaf3ed")]
+#[tokio::test]
+async fn ses_get_deliverability_test_report() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    let report_id = client
+        .create_deliverability_test_report()
+        .from_email_address("noreply@example.com")
+        .content(
+            aws_sdk_sesv2::types::EmailContent::builder()
+                .simple(
+                    aws_sdk_sesv2::types::Message::builder()
+                        .subject(
+                            aws_sdk_sesv2::types::Content::builder()
+                                .data("hi")
+                                .build()
+                                .unwrap(),
+                        )
+                        .body(aws_sdk_sesv2::types::Body::builder().build())
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .report_id()
+        .to_string();
+    let _ = client
+        .get_deliverability_test_report()
+        .report_id(&report_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ses", "ListDeliverabilityTestReports", checksum = "2ff6966f")]
+#[tokio::test]
+async fn ses_list_deliverability_test_reports() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    let _ = client
+        .list_deliverability_test_reports()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ses", "GetBlacklistReports", checksum = "748e9215")]
+#[tokio::test]
+async fn ses_get_blacklist_reports() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    let _ = client
+        .get_blacklist_reports()
+        .blacklist_item_names("198.51.100.1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ses", "GetDomainDeliverabilityCampaign", checksum = "1e2c07e5")]
+#[tokio::test]
+async fn ses_get_domain_deliverability_campaign() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    let _ = client
+        .get_domain_deliverability_campaign()
+        .campaign_id("camp-1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ses", "GetDomainStatisticsReport", checksum = "03a79f80")]
+#[tokio::test]
+async fn ses_get_domain_statistics_report() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    let _ = client
+        .get_domain_statistics_report()
+        .domain("example.com")
+        .start_date(aws_sdk_sesv2::primitives::DateTime::from_secs(0))
+        .end_date(aws_sdk_sesv2::primitives::DateTime::from_secs(1))
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ses", "ListDomainDeliverabilityCampaigns", checksum = "4abf00ca")]
+#[tokio::test]
+async fn ses_list_domain_deliverability_campaigns() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    let _ = client
+        .list_domain_deliverability_campaigns()
+        .start_date(aws_sdk_sesv2::primitives::DateTime::from_secs(0))
+        .end_date(aws_sdk_sesv2::primitives::DateTime::from_secs(1))
+        .subscribed_domain("example.com")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ses", "GetEmailAddressInsights", checksum = "c0b9de1c")]
+#[tokio::test]
+async fn ses_get_email_address_insights() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    let _ = client
+        .get_email_address_insights()
+        .email_address("test@example.com")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ses", "GetMessageInsights", checksum = "d1a5d397")]
+#[tokio::test]
+async fn ses_get_message_insights() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    // No such message; expect a NotFoundException, route still wired.
+    let result = client
+        .get_message_insights()
+        .message_id("nonexistent")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[test_action("ses", "ListRecommendations", checksum = "fee1c0d4")]
+#[tokio::test]
+async fn ses_list_recommendations() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+    let _ = client.list_recommendations().send().await.unwrap();
+}

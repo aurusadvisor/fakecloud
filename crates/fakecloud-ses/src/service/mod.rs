@@ -210,6 +210,16 @@ impl SesV2Service {
             "metrics" if segs.len() == 4 && segs[3] == "batch" && *method == Method::POST => {
                 Some(("BatchGetMetricData", None, None))
             }
+            "deliverability-dashboard" => resolve_deliverability_dashboard_action(method, segs),
+            "email-address-insights" if segs.len() == 3 && *method == Method::POST => {
+                Some(("GetEmailAddressInsights", None, None))
+            }
+            "insights" if segs.len() == 4 && *method == Method::GET => {
+                Some(("GetMessageInsights", resource, None))
+            }
+            "vdm" if segs.len() == 4 && segs[3] == "recommendations" && *method == Method::POST => {
+                Some(("ListRecommendations", None, None))
+            }
             _ => None,
         }
     }
@@ -442,6 +452,43 @@ fn resolve_custom_verification_template_action(
     }
 }
 
+fn resolve_deliverability_dashboard_action(method: &Method, segs: &[String]) -> ResolvedAction {
+    match (method, segs.len()) {
+        (&Method::GET, 3) => Some(("GetDeliverabilityDashboardOptions", None, None)),
+        (&Method::PUT, 3) => Some(("PutDeliverabilityDashboardOption", None, None)),
+        (&Method::POST, 4) if segs[3] == "test" => {
+            Some(("CreateDeliverabilityTestReport", None, None))
+        }
+        (&Method::GET, 4) if segs[3] == "blacklist-report" => {
+            Some(("GetBlacklistReports", None, None))
+        }
+        (&Method::GET, 4) if segs[3] == "test-reports" => {
+            Some(("ListDeliverabilityTestReports", None, None))
+        }
+        (&Method::GET, 5) if segs[3] == "test-reports" => Some((
+            "GetDeliverabilityTestReport",
+            Some(decode_segment(&segs[4])),
+            None,
+        )),
+        (&Method::GET, 5) if segs[3] == "campaigns" => Some((
+            "GetDomainDeliverabilityCampaign",
+            Some(decode_segment(&segs[4])),
+            None,
+        )),
+        (&Method::GET, 5) if segs[3] == "statistics-report" => Some((
+            "GetDomainStatisticsReport",
+            Some(decode_segment(&segs[4])),
+            None,
+        )),
+        (&Method::GET, 6) if segs[3] == "domains" && segs[5] == "campaigns" => Some((
+            "ListDomainDeliverabilityCampaigns",
+            Some(decode_segment(&segs[4])),
+            None,
+        )),
+        _ => None,
+    }
+}
+
 fn resolve_dedicated_ip_pools_action(
     method: &Method,
     segs: &[String],
@@ -450,6 +497,7 @@ fn resolve_dedicated_ip_pools_action(
     match (method, segs.len()) {
         (&Method::POST, 3) => Some(("CreateDedicatedIpPool", None, None)),
         (&Method::GET, 3) => Some(("ListDedicatedIpPools", None, None)),
+        (&Method::GET, 4) => Some(("GetDedicatedIpPool", resource, None)),
         (&Method::DELETE, 4) => Some(("DeleteDedicatedIpPool", resource, None)),
         (&Method::PUT, 5) if segs[4] == "scaling" => {
             Some(("PutDedicatedIpPoolScalingAttributes", resource, None))
@@ -872,6 +920,21 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             }
             "UpdateReputationEntityPolicy" => self.update_reputation_entity_policy(res, sub, &req),
             "BatchGetMetricData" => self.batch_get_metric_data(&req),
+            "GetDedicatedIpPool" => self.get_dedicated_ip_pool(res, &req),
+            "GetDeliverabilityDashboardOptions" => self.get_deliverability_dashboard_options(&req),
+            "PutDeliverabilityDashboardOption" => self.put_deliverability_dashboard_option(&req),
+            "CreateDeliverabilityTestReport" => self.create_deliverability_test_report(&req),
+            "GetDeliverabilityTestReport" => self.get_deliverability_test_report(res, &req),
+            "ListDeliverabilityTestReports" => self.list_deliverability_test_reports(&req),
+            "GetBlacklistReports" => self.get_blacklist_reports(&req),
+            "GetDomainDeliverabilityCampaign" => self.get_domain_deliverability_campaign(res, &req),
+            "GetDomainStatisticsReport" => self.get_domain_statistics_report(res, &req),
+            "ListDomainDeliverabilityCampaigns" => {
+                self.list_domain_deliverability_campaigns(res, &req)
+            }
+            "GetEmailAddressInsights" => self.get_email_address_insights(&req),
+            "GetMessageInsights" => self.get_message_insights(res, &req),
+            "ListRecommendations" => self.list_recommendations(&req),
             _ => Err(AwsServiceError::action_not_implemented("ses", action)),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
@@ -979,6 +1042,19 @@ impl fakecloud_core::service::AwsService for SesV2Service {
             "UpdateReputationEntityCustomerManagedStatus",
             "UpdateReputationEntityPolicy",
             "BatchGetMetricData",
+            "GetDedicatedIpPool",
+            "GetDeliverabilityDashboardOptions",
+            "PutDeliverabilityDashboardOption",
+            "CreateDeliverabilityTestReport",
+            "GetDeliverabilityTestReport",
+            "ListDeliverabilityTestReports",
+            "GetBlacklistReports",
+            "GetDomainDeliverabilityCampaign",
+            "GetDomainStatisticsReport",
+            "ListDomainDeliverabilityCampaigns",
+            "GetEmailAddressInsights",
+            "GetMessageInsights",
+            "ListRecommendations",
             // NOTE: SES v1 receipt rule/filter actions are implemented (see v1.rs)
             // but excluded from the conformance audit because there is no SES v1
             // Smithy model (only sesv2.json exists) to generate checksums from.
