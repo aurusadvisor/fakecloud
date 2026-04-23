@@ -1,5 +1,5 @@
 +++
-title = "LocalStack Ultimate for Bedrock: 4 operations, Ollama-backed, top-tier pricing"
+title = "LocalStack Ultimate covers 4 Bedrock ops. Here's why that's the wrong bet for tests."
 date = 2026-04-22
 description = "LocalStack supports Bedrock only on their Ultimate plan, and only four operations, all backed by Ollama. Here's what that gets you, what it doesn't, and why fakecloud's approach is different."
 
