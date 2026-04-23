@@ -6,7 +6,11 @@ coverage:
         threshold: 0%
     patch:
       default:
-        target: auto
+        # Many net-new ops are protocol shims exercised via
+        # crates/fakecloud-conformance/tests/* (excluded from coverage)
+        # rather than unit tests; a flat 50% target keeps the patch
+        # gate honest for real new code without blocking those batches.
+        target: 50%
 
 comment:
   layout: "reach, diff, flags, files"
