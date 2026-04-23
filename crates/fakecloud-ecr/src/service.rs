@@ -788,6 +788,17 @@ impl EcrService {
         let account = target_account_id(request, &body);
 
         let computed_digest = sha256_digest(manifest.as_bytes());
+        if let Some(ref supplied) = supplied_digest {
+            if supplied != &computed_digest {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ImageDigestDoesNotMatchException",
+                    format!(
+                        "The imageDigest '{supplied}' does not match the digest of the uploaded manifest ('{computed_digest}')."
+                    ),
+                ));
+            }
+        }
         let digest = supplied_digest.unwrap_or_else(|| computed_digest.clone());
 
         let mut accounts = self.state.write();
@@ -1292,12 +1303,14 @@ impl EcrService {
         let state = accounts
             .get_mut(&account)
             .ok_or_else(|| repository_not_found(&name))?;
+        // Peek, validate, then commit — so a digest mismatch lets the
+        // caller retry CompleteLayerUpload with the correct digest
+        // instead of having to re-upload the entire blob.
         let upload = state
             .layer_uploads
-            .remove(&upload_id)
+            .get(&upload_id)
             .ok_or_else(|| upload_not_found(&upload_id))?;
         if upload.repository_name != name {
-            state.layer_uploads.insert(upload_id.clone(), upload);
             return Err(upload_not_found(&upload_id));
         }
         let blob_bytes = B64.decode(upload.blob_b64.as_bytes()).unwrap_or_default();
@@ -1312,6 +1325,7 @@ impl EcrService {
                 ),
             ));
         }
+        let upload = state.layer_uploads.remove(&upload_id).unwrap();
         let repo = state
             .repositories
             .get_mut(&name)

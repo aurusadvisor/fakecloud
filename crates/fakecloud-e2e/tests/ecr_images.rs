@@ -92,6 +92,81 @@ async fn layer_upload_round_trip() {
 }
 
 #[tokio::test]
+async fn complete_layer_upload_retry_after_bad_digest() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+
+    client
+        .create_repository()
+        .repository_name("retry-repo")
+        .send()
+        .await
+        .unwrap();
+    let init = client
+        .initiate_layer_upload()
+        .repository_name("retry-repo")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = init.upload_id().unwrap().to_string();
+    let blob = b"retry-bytes".to_vec();
+    let real_digest = sha256_digest(&blob);
+    client
+        .upload_layer_part()
+        .repository_name("retry-repo")
+        .upload_id(&upload_id)
+        .part_first_byte(0)
+        .part_last_byte((blob.len() as i64) - 1)
+        .layer_part_blob(Blob::new(blob))
+        .send()
+        .await
+        .unwrap();
+    // First complete with wrong digest — must fail WITHOUT dropping upload state.
+    client
+        .complete_layer_upload()
+        .repository_name("retry-repo")
+        .upload_id(&upload_id)
+        .layer_digests("sha256:deadbeef")
+        .send()
+        .await
+        .expect_err("wrong digest fails");
+    // Retry with the real digest using the same upload id.
+    client
+        .complete_layer_upload()
+        .repository_name("retry-repo")
+        .upload_id(&upload_id)
+        .layer_digests(&real_digest)
+        .send()
+        .await
+        .expect("retry with correct digest should succeed");
+}
+
+#[tokio::test]
+async fn put_image_rejects_mismatched_supplied_digest() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+
+    client
+        .create_repository()
+        .repository_name("digest-check-repo")
+        .send()
+        .await
+        .unwrap();
+    let err = client
+        .put_image()
+        .repository_name("digest-check-repo")
+        .image_manifest(r#"{"x":1}"#)
+        .image_digest("sha256:deadbeef")
+        .send()
+        .await
+        .expect_err("mismatched digest should fail");
+    assert!(
+        format!("{err:?}").contains("ImageDigestDoesNotMatch"),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
 async fn upload_layer_part_digest_mismatch_is_rejected() {
     let server = TestServer::start().await;
     let client = server.ecr_client().await;
