@@ -5,9 +5,9 @@ use serde_json::{json, Value};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
-    CustomVerificationEmailTemplate, DedicatedIp, DedicatedIpPool, ExportJob, ImportJob,
-    MultiRegionEndpoint, ReputationEntityState, SentEmail, SesState, Tenant,
-    TenantResourceAssociation,
+    CustomVerificationEmailTemplate, DedicatedIp, DedicatedIpPool, DeliverabilityTestReport,
+    ExportJob, ImportJob, MultiRegionEndpoint, ReputationEntityState, SentEmail, SesState,
+    SubscribedDomain, Tenant, TenantResourceAssociation, VdmRecommendation,
 };
 
 use super::SesV2Service;
@@ -1719,4 +1719,422 @@ impl SesV2Service {
         });
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }
+
+    pub(super) fn get_dedicated_ip_pool(
+        &self,
+        pool_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let empty = SesState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let pool = state.dedicated_ip_pools.get(pool_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("Dedicated IP pool {pool_name} not found."),
+            )
+        })?;
+        let body = json!({
+            "DedicatedIpPool": {
+                "PoolName": pool.pool_name,
+                "ScalingMode": pool.scaling_mode,
+            }
+        });
+        Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    }
+
+    pub(super) fn get_deliverability_dashboard_options(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let empty = SesState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let dash = &state.deliverability_dashboard;
+        let body = json!({
+            "DashboardEnabled": dash.enabled,
+            "SubscriptionExpiryDate": dash.subscription_expiry_date.map(|d| d.timestamp()),
+            "AccountStatus": if dash.enabled { "ACTIVE" } else { "DISABLED" },
+            "ActiveSubscribedDomains": dash.subscribed_domains.iter().map(subscribed_domain_json).collect::<Vec<_>>(),
+            "PendingExpirationSubscribedDomains": Vec::<Value>::new(),
+        });
+        Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    }
+
+    pub(super) fn put_deliverability_dashboard_option(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let enabled = body
+            .get("DashboardEnabled")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "DashboardEnabled is required",
+                )
+            })?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.deliverability_dashboard.enabled = enabled;
+        if let Some(domains) = body.get("SubscribedDomains").and_then(|v| v.as_array()) {
+            state.deliverability_dashboard.subscribed_domains = domains
+                .iter()
+                .filter_map(|d| {
+                    let domain = d.get("Domain").and_then(|v| v.as_str())?.to_string();
+                    Some(SubscribedDomain {
+                        domain,
+                        subscription_start_date: Utc::now(),
+                        inbox_placement_tracking_option_global: d
+                            .get("InboxPlacementTrackingOption")
+                            .and_then(|v| v.get("Global"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        inbox_placement_tracking_option_tracked_isps: d
+                            .get("InboxPlacementTrackingOption")
+                            .and_then(|v| v.get("TrackedIsps"))
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|s| s.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect();
+        }
+        Ok(AwsResponse::json(StatusCode::OK, "{}".to_string()))
+    }
+
+    pub(super) fn create_deliverability_test_report(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let report_name = body
+            .get("ReportName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("test-report")
+            .to_string();
+        let from_email = body
+            .get("FromEmailAddress")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "FromEmailAddress is required",
+                )
+            })?
+            .to_string();
+        let subject = body
+            .get("Content")
+            .and_then(|v| v.get("Simple"))
+            .and_then(|v| v.get("Subject"))
+            .and_then(|v| v.get("Data"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Predictive inbox placement test")
+            .to_string();
+        let tags = body
+            .get("Tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        let k = t.get("Key").and_then(|v| v.as_str())?.to_string();
+                        let v = t.get("Value").and_then(|v| v.as_str())?.to_string();
+                        Some((k, v))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let report_id = uuid::Uuid::new_v4().to_string();
+        let report = DeliverabilityTestReport {
+            report_id: report_id.clone(),
+            report_name,
+            subject,
+            from_email,
+            create_date: Utc::now(),
+            deliverability_test_status: "IN_PROGRESS".to_string(),
+            tags,
+        };
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state
+            .deliverability_test_reports
+            .insert(report_id.clone(), report);
+        let body = json!({
+            "ReportId": report_id,
+            "DeliverabilityTestStatus": "IN_PROGRESS",
+        });
+        Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    }
+
+    pub(super) fn get_deliverability_test_report(
+        &self,
+        report_id: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let empty = SesState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let report = state
+            .deliverability_test_reports
+            .get(report_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    format!("Deliverability test report {report_id} not found."),
+                )
+            })?;
+        let body = json!({
+            "DeliverabilityTestReport": deliverability_test_report_json(report),
+            "OverallPlacement": {
+                "InboxPercentage": 95.0,
+                "SpamPercentage": 5.0,
+                "MissingPercentage": 0.0,
+                "SpfPercentage": 100.0,
+                "DkimPercentage": 100.0,
+            },
+            "IspPlacements": [],
+            "Message": null,
+            "Tags": tags_json(&report.tags),
+        });
+        Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    }
+
+    pub(super) fn list_deliverability_test_reports(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let empty = SesState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let reports: Vec<Value> = state
+            .deliverability_test_reports
+            .values()
+            .map(deliverability_test_report_json)
+            .collect();
+        let body = json!({
+            "DeliverabilityTestReports": reports,
+            "NextToken": null,
+        });
+        Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    }
+
+    pub(super) fn get_blacklist_reports(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // Emulator has no blacklist data; return an empty map per the
+        // documented response shape.
+        let body = json!({ "BlacklistReport": {} });
+        Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    }
+
+    pub(super) fn get_domain_deliverability_campaign(
+        &self,
+        campaign_id: &str,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // No real campaigns to look up; return a synthetic record so SDKs
+        // can decode the response shape but no inflated metrics.
+        let body = json!({
+            "DomainDeliverabilityCampaign": {
+                "CampaignId": campaign_id,
+                "ImageUrl": null,
+                "Subject": null,
+                "FromAddress": null,
+                "SendingIps": [],
+                "FirstSeenDateTime": Utc::now().timestamp(),
+                "LastSeenDateTime": Utc::now().timestamp(),
+                "InboxCount": 0,
+                "SpamCount": 0,
+                "ReadRate": 0.0,
+                "DeleteRate": 0.0,
+                "ReadDeleteRate": 0.0,
+                "ProjectedVolume": 0,
+                "Esps": [],
+            }
+        });
+        Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    }
+
+    pub(super) fn get_domain_statistics_report(
+        &self,
+        _domain: &str,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = json!({
+            "OverallVolume": {
+                "VolumeStatistics": {
+                    "InboxRawCount": 0,
+                    "SpamRawCount": 0,
+                    "ProjectedInbox": 0,
+                    "ProjectedSpam": 0,
+                },
+                "ReadRatePercent": 0.0,
+                "DomainIspPlacements": [],
+            },
+            "DailyVolumes": [],
+        });
+        Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    }
+
+    pub(super) fn list_domain_deliverability_campaigns(
+        &self,
+        _domain: &str,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = json!({
+            "DomainDeliverabilityCampaigns": [],
+            "NextToken": null,
+        });
+        Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    }
+
+    pub(super) fn get_email_address_insights(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = Self::parse_body(req)?;
+        let email = body
+            .get("EmailAddress")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "EmailAddress is required",
+                )
+            })?
+            .to_string();
+        let accounts = self.state.read();
+        let empty = SesState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let suppressed = state.suppressed_destinations.get(&email);
+        let body = json!({
+            "EmailAddress": email,
+            "Insights": [],
+            "Suppression": suppressed.map(|s| json!({
+                "Status": s.reason,
+                "LastUpdateTime": s.last_update_time.timestamp(),
+            })),
+        });
+        Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    }
+
+    pub(super) fn get_message_insights(
+        &self,
+        message_id: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let empty = SesState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let sent = state
+            .sent_emails
+            .iter()
+            .find(|e| e.message_id == message_id);
+        if let Some(email) = sent {
+            let body = json!({
+                "MessageId": email.message_id,
+                "FromEmailAddress": email.from,
+                "Subject": email.subject,
+                "EmailTags": [],
+                "Insights": [],
+            });
+            Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+        } else {
+            Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NotFoundException",
+                format!("Message {message_id} not found."),
+            ))
+        }
+    }
+
+    pub(super) fn list_recommendations(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if state.vdm_recommendations.is_empty() {
+            // Lazy-seed with one realistic recommendation so consumers see
+            // a non-empty list shape; field values match real AWS data
+            // schema.
+            let now = Utc::now();
+            state.vdm_recommendations.push(VdmRecommendation {
+                resource_arn: format!(
+                    "arn:aws:ses:{}:{}:identity/example.com",
+                    req.region, req.account_id
+                ),
+                recommendation_type: "DKIM".to_string(),
+                description: "Configure DKIM signing for identity to improve deliverability."
+                    .to_string(),
+                status: "OPEN".to_string(),
+                created_timestamp: now,
+                last_updated_timestamp: now,
+                impact: "HIGH".to_string(),
+            });
+        }
+        let recs: Vec<Value> = state
+            .vdm_recommendations
+            .iter()
+            .map(|r| {
+                json!({
+                    "ResourceArn": r.resource_arn,
+                    "Type": r.recommendation_type,
+                    "Description": r.description,
+                    "Status": r.status,
+                    "CreatedTimestamp": r.created_timestamp.timestamp(),
+                    "LastUpdatedTimestamp": r.last_updated_timestamp.timestamp(),
+                    "Impact": r.impact,
+                })
+            })
+            .collect();
+        let body = json!({
+            "Recommendations": recs,
+            "NextToken": null,
+        });
+        Ok(AwsResponse::json(StatusCode::OK, body.to_string()))
+    }
+}
+
+fn subscribed_domain_json(d: &SubscribedDomain) -> Value {
+    json!({
+        "Domain": d.domain,
+        "SubscriptionStartDate": d.subscription_start_date.timestamp(),
+        "InboxPlacementTrackingOption": {
+            "Global": d.inbox_placement_tracking_option_global,
+            "TrackedIsps": d.inbox_placement_tracking_option_tracked_isps,
+        },
+    })
+}
+
+fn deliverability_test_report_json(r: &DeliverabilityTestReport) -> Value {
+    json!({
+        "ReportId": r.report_id,
+        "ReportName": r.report_name,
+        "Subject": r.subject,
+        "FromEmailAddress": r.from_email,
+        "CreateDate": r.create_date.timestamp(),
+        "DeliverabilityTestStatus": r.deliverability_test_status,
+    })
+}
+
+fn tags_json(tags: &[(String, String)]) -> Value {
+    let arr: Vec<Value> = tags
+        .iter()
+        .map(|(k, v)| json!({ "Key": k, "Value": v }))
+        .collect();
+    Value::Array(arr)
 }
