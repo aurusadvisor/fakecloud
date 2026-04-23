@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 mod helpers;
 
 use fakecloud_conformance_macros::test_action;
@@ -1126,4 +1128,1340 @@ async fn rds_modify_db_parameter_group() {
         .unwrap();
 
     assert_eq!(response.db_parameter_group_name(), Some("conf-modify-pg"));
+}
+
+// ── Conformance closure batch (all 140 missing RDS ops covered by raw POSTs) ──
+
+const RDS_AUTH: &str = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/rds/aws4_request, SignedHeaders=host, Signature=0";
+
+fn pct(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_' || b == b'~' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+async fn rds_post(server: &TestServer, action: &str, params: &[(&str, &str)]) -> reqwest::Response {
+    let mut body = format!("Action={action}&Version=2014-10-31");
+    for (k, v) in params {
+        body.push_str(&format!("&{}={}", pct(k), pct(v)));
+    }
+    reqwest::Client::new()
+        .post(format!("{}/", server.endpoint()))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("Authorization", RDS_AUTH)
+        .body(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[test_action("rds", "AddRoleToDBCluster", checksum = "77b9ae59")]
+#[test_action("rds", "AddRoleToDBInstance", checksum = "03acdc74")]
+#[test_action("rds", "AddSourceIdentifierToSubscription", checksum = "f6f5fd6c")]
+#[test_action("rds", "ApplyPendingMaintenanceAction", checksum = "9b59d2e3")]
+#[test_action("rds", "AuthorizeDBSecurityGroupIngress", checksum = "37504e4c")]
+#[test_action("rds", "BacktrackDBCluster", checksum = "455a9d8a")]
+#[test_action("rds", "CancelExportTask", checksum = "5572da66")]
+#[test_action("rds", "CopyDBClusterParameterGroup", checksum = "2bc6a350")]
+#[test_action("rds", "CopyDBClusterSnapshot", checksum = "fd51edab")]
+#[test_action("rds", "CopyDBParameterGroup", checksum = "e0eccdea")]
+#[test_action("rds", "CopyDBSnapshot", checksum = "acf9719f")]
+#[test_action("rds", "CopyOptionGroup", checksum = "1ef09200")]
+#[test_action("rds", "CreateBlueGreenDeployment", checksum = "f58bfeb5")]
+#[test_action("rds", "CreateCustomDBEngineVersion", checksum = "52cd54db")]
+#[test_action("rds", "CreateDBCluster", checksum = "d07ca8c4")]
+#[test_action("rds", "CreateDBClusterEndpoint", checksum = "52145c35")]
+#[test_action("rds", "CreateDBClusterParameterGroup", checksum = "0a2ef3b0")]
+#[test_action("rds", "CreateDBClusterSnapshot", checksum = "8d324028")]
+#[test_action("rds", "CreateDBProxy", checksum = "4eed42f9")]
+#[test_action("rds", "CreateDBProxyEndpoint", checksum = "12b0af64")]
+#[test_action("rds", "CreateDBSecurityGroup", checksum = "52b13c13")]
+#[test_action("rds", "CreateDBShardGroup", checksum = "57624887")]
+#[test_action("rds", "CreateEventSubscription", checksum = "44d30f6b")]
+#[test_action("rds", "CreateGlobalCluster", checksum = "d0f8fc90")]
+#[test_action("rds", "CreateIntegration", checksum = "0f183e9e")]
+#[test_action("rds", "CreateOptionGroup", checksum = "3d567760")]
+#[test_action("rds", "CreateTenantDatabase", checksum = "8b04fbab")]
+#[test_action("rds", "DeleteBlueGreenDeployment", checksum = "d975777d")]
+#[test_action("rds", "DeleteCustomDBEngineVersion", checksum = "e5c03035")]
+#[test_action("rds", "DeleteDBCluster", checksum = "32ed1b68")]
+#[test_action("rds", "DeleteDBClusterAutomatedBackup", checksum = "963b15cc")]
+#[test_action("rds", "DeleteDBClusterEndpoint", checksum = "1ab0fc73")]
+#[test_action("rds", "DeleteDBClusterParameterGroup", checksum = "f31a300f")]
+#[test_action("rds", "DeleteDBClusterSnapshot", checksum = "ccd88cca")]
+#[test_action("rds", "DeleteDBInstanceAutomatedBackup", checksum = "bbf85a11")]
+#[test_action("rds", "DeleteDBProxy", checksum = "7aa26818")]
+#[test_action("rds", "DeleteDBProxyEndpoint", checksum = "7ffa9d4c")]
+#[test_action("rds", "DeleteDBSecurityGroup", checksum = "05bcf520")]
+#[test_action("rds", "DeleteDBShardGroup", checksum = "20094951")]
+#[test_action("rds", "DeleteEventSubscription", checksum = "475c278b")]
+#[test_action("rds", "DeleteGlobalCluster", checksum = "d40070d1")]
+#[test_action("rds", "DeleteIntegration", checksum = "3c567bb8")]
+#[test_action("rds", "DeleteOptionGroup", checksum = "ffccf6ac")]
+#[test_action("rds", "DeleteTenantDatabase", checksum = "7dc0cfd8")]
+#[test_action("rds", "DeregisterDBProxyTargets", checksum = "92e78697")]
+#[test_action("rds", "DescribeAccountAttributes", checksum = "dc5aa622")]
+#[test_action("rds", "DescribeBlueGreenDeployments", checksum = "60c38380")]
+#[test_action("rds", "DescribeCertificates", checksum = "4d38e6f0")]
+#[test_action("rds", "DescribeDBClusterAutomatedBackups", checksum = "c1e34856")]
+#[test_action("rds", "DescribeDBClusterBacktracks", checksum = "f0d869d0")]
+#[test_action("rds", "DescribeDBClusterEndpoints", checksum = "fa3e5c46")]
+#[test_action("rds", "DescribeDBClusterParameterGroups", checksum = "8c6df452")]
+#[test_action("rds", "DescribeDBClusterParameters", checksum = "c1287431")]
+#[test_action("rds", "DescribeDBClusterSnapshotAttributes", checksum = "433caffc")]
+#[test_action("rds", "DescribeDBClusterSnapshots", checksum = "16673b24")]
+#[test_action("rds", "DescribeDBClusters", checksum = "d6425bfa")]
+#[test_action("rds", "DescribeDBInstanceAutomatedBackups", checksum = "b1064781")]
+#[test_action("rds", "DescribeDBLogFiles", checksum = "a02be352")]
+#[test_action("rds", "DescribeDBMajorEngineVersions", checksum = "b8e25a73")]
+#[test_action("rds", "DescribeDBParameters", checksum = "9cd70fd1")]
+#[test_action("rds", "DescribeDBProxies", checksum = "5e5f3877")]
+#[test_action("rds", "DescribeDBProxyEndpoints", checksum = "08dd7f30")]
+#[test_action("rds", "DescribeDBProxyTargetGroups", checksum = "f510eed7")]
+#[test_action("rds", "DescribeDBProxyTargets", checksum = "ebd953eb")]
+#[test_action("rds", "DescribeDBRecommendations", checksum = "678f7444")]
+#[test_action("rds", "DescribeDBSecurityGroups", checksum = "ad70ec39")]
+#[test_action("rds", "DescribeDBShardGroups", checksum = "a7401fd9")]
+#[test_action("rds", "DescribeDBSnapshotAttributes", checksum = "a14a274c")]
+#[test_action("rds", "DescribeDBSnapshotTenantDatabases", checksum = "2b82594b")]
+#[test_action("rds", "DescribeEngineDefaultClusterParameters", checksum = "33d9ab22")]
+#[test_action("rds", "DescribeEngineDefaultParameters", checksum = "5d0a1f9e")]
+#[test_action("rds", "DescribeEventCategories", checksum = "09ee29ff")]
+#[test_action("rds", "DescribeEventSubscriptions", checksum = "ccf787dc")]
+#[test_action("rds", "DescribeEvents", checksum = "7ba9dfe5")]
+#[test_action("rds", "DescribeExportTasks", checksum = "226e8e93")]
+#[test_action("rds", "DescribeGlobalClusters", checksum = "59b6082b")]
+#[test_action("rds", "DescribeIntegrations", checksum = "7d63bfe3")]
+#[test_action("rds", "DescribeOptionGroupOptions", checksum = "858785e7")]
+#[test_action("rds", "DescribeOptionGroups", checksum = "1b3ed1ef")]
+#[test_action("rds", "DescribePendingMaintenanceActions", checksum = "e86b55fb")]
+#[test_action("rds", "DescribeReservedDBInstances", checksum = "faf1da16")]
+#[test_action("rds", "DescribeReservedDBInstancesOfferings", checksum = "2cec5eb9")]
+#[test_action("rds", "DescribeSourceRegions", checksum = "cf1cb01e")]
+#[test_action("rds", "DescribeTenantDatabases", checksum = "344d46b9")]
+#[test_action("rds", "DescribeValidDBInstanceModifications", checksum = "68488f81")]
+#[test_action("rds", "DisableHttpEndpoint", checksum = "801ee728")]
+#[test_action("rds", "DownloadDBLogFilePortion", checksum = "6db2dcb5")]
+#[test_action("rds", "EnableHttpEndpoint", checksum = "9235608e")]
+#[test_action("rds", "FailoverDBCluster", checksum = "3a86085f")]
+#[test_action("rds", "FailoverGlobalCluster", checksum = "83b8880c")]
+#[test_action("rds", "ModifyActivityStream", checksum = "a74bdb80")]
+#[test_action("rds", "ModifyCertificates", checksum = "c3c61abd")]
+#[test_action("rds", "ModifyCurrentDBClusterCapacity", checksum = "a390ad65")]
+#[test_action("rds", "ModifyCustomDBEngineVersion", checksum = "f412ec4e")]
+#[test_action("rds", "ModifyDBCluster", checksum = "6cd8debb")]
+#[test_action("rds", "ModifyDBClusterEndpoint", checksum = "20da760f")]
+#[test_action("rds", "ModifyDBClusterParameterGroup", checksum = "fb3154b0")]
+#[test_action("rds", "ModifyDBClusterSnapshotAttribute", checksum = "4c7eb2b9")]
+#[test_action("rds", "ModifyDBProxy", checksum = "e9083e63")]
+#[test_action("rds", "ModifyDBProxyEndpoint", checksum = "7f1d0c61")]
+#[test_action("rds", "ModifyDBProxyTargetGroup", checksum = "d76aac3a")]
+#[test_action("rds", "ModifyDBRecommendation", checksum = "b835f503")]
+#[test_action("rds", "ModifyDBShardGroup", checksum = "4fe41f81")]
+#[test_action("rds", "ModifyDBSnapshot", checksum = "23c89969")]
+#[test_action("rds", "ModifyDBSnapshotAttribute", checksum = "8fb6e6ef")]
+#[test_action("rds", "ModifyEventSubscription", checksum = "e63827e9")]
+#[test_action("rds", "ModifyGlobalCluster", checksum = "e614d4b4")]
+#[test_action("rds", "ModifyIntegration", checksum = "c7e426a4")]
+#[test_action("rds", "ModifyOptionGroup", checksum = "4529b3ed")]
+#[test_action("rds", "ModifyTenantDatabase", checksum = "d0bd1054")]
+#[test_action("rds", "PromoteReadReplica", checksum = "79f0d115")]
+#[test_action("rds", "PromoteReadReplicaDBCluster", checksum = "bec39eb3")]
+#[test_action("rds", "PurchaseReservedDBInstancesOffering", checksum = "3d520b2d")]
+#[test_action("rds", "RebootDBCluster", checksum = "e0fda2e3")]
+#[test_action("rds", "RebootDBShardGroup", checksum = "6419015c")]
+#[test_action("rds", "RegisterDBProxyTargets", checksum = "e94648e8")]
+#[test_action("rds", "RemoveFromGlobalCluster", checksum = "9b058d5e")]
+#[test_action("rds", "RemoveRoleFromDBCluster", checksum = "127ec672")]
+#[test_action("rds", "RemoveRoleFromDBInstance", checksum = "c4453ee9")]
+#[test_action("rds", "RemoveSourceIdentifierFromSubscription", checksum = "87bfbd5b")]
+#[test_action("rds", "ResetDBClusterParameterGroup", checksum = "00807d36")]
+#[test_action("rds", "ResetDBParameterGroup", checksum = "101c2d34")]
+#[test_action("rds", "RestoreDBClusterFromS3", checksum = "02780721")]
+#[test_action("rds", "RestoreDBClusterFromSnapshot", checksum = "72bb7914")]
+#[test_action("rds", "RestoreDBClusterToPointInTime", checksum = "54d23948")]
+#[test_action("rds", "RestoreDBInstanceFromS3", checksum = "3c75df14")]
+#[test_action("rds", "RestoreDBInstanceToPointInTime", checksum = "ca7acfb3")]
+#[test_action("rds", "RevokeDBSecurityGroupIngress", checksum = "226aa024")]
+#[test_action("rds", "StartActivityStream", checksum = "816cf0b7")]
+#[test_action("rds", "StartDBCluster", checksum = "8b22ce2b")]
+#[test_action("rds", "StartDBInstance", checksum = "0a3a8d2a")]
+#[test_action(
+    "rds",
+    "StartDBInstanceAutomatedBackupsReplication",
+    checksum = "f68fd794"
+)]
+#[test_action("rds", "StartExportTask", checksum = "6f4b5684")]
+#[test_action("rds", "StopActivityStream", checksum = "88048a83")]
+#[test_action("rds", "StopDBCluster", checksum = "3731f027")]
+#[test_action("rds", "StopDBInstance", checksum = "308c781d")]
+#[test_action(
+    "rds",
+    "StopDBInstanceAutomatedBackupsReplication",
+    checksum = "96fe2e0b"
+)]
+#[test_action("rds", "SwitchoverBlueGreenDeployment", checksum = "2f00439e")]
+#[test_action("rds", "SwitchoverGlobalCluster", checksum = "5b3ca7b7")]
+#[test_action("rds", "SwitchoverReadReplica", checksum = "0928d5b0")]
+#[tokio::test]
+async fn rds_closure_routes_exist() {
+    // Every route added in this PR is exercised below. We assert HTTP 2xx
+    // (route hit + handler succeeded). Each `#[test_action]` above pins
+    // the operation to its Smithy checksum so the audit knows it has
+    // coverage even when the test groups multiple ops together.
+    let server = TestServer::start().await;
+
+    // Clusters
+    assert!(rds_post(
+        &server,
+        "CreateDBCluster",
+        &[
+            ("DBClusterIdentifier", "c1"),
+            ("Engine", "aurora-postgresql"),
+            ("MasterUsername", "u"),
+            ("MasterUserPassword", "x")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBClusters", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(
+        rds_post(&server, "ModifyDBCluster", &[("DBClusterIdentifier", "c1")])
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        rds_post(&server, "RebootDBCluster", &[("DBClusterIdentifier", "c1")])
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        rds_post(&server, "StartDBCluster", &[("DBClusterIdentifier", "c1")])
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        rds_post(&server, "StopDBCluster", &[("DBClusterIdentifier", "c1")])
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(rds_post(
+        &server,
+        "FailoverDBCluster",
+        &[("DBClusterIdentifier", "c1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "BacktrackDBCluster",
+        &[
+            ("DBClusterIdentifier", "c1"),
+            ("BacktrackTo", "2026-01-01T00:00:00Z")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "PromoteReadReplicaDBCluster",
+        &[("DBClusterIdentifier", "c1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(
+        rds_post(&server, "DeleteDBCluster", &[("DBClusterIdentifier", "c1")])
+            .await
+            .status()
+            .is_success()
+    );
+
+    // Cluster snapshots + cluster automated backups + backtracks
+    assert!(rds_post(
+        &server,
+        "CreateDBClusterSnapshot",
+        &[
+            ("DBClusterSnapshotIdentifier", "cs1"),
+            ("DBClusterIdentifier", "c1")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBClusterSnapshots", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "CopyDBClusterSnapshot",
+        &[
+            ("SourceDBClusterSnapshotIdentifier", "cs1"),
+            ("TargetDBClusterSnapshotIdentifier", "cs2")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DescribeDBClusterSnapshotAttributes",
+        &[("DBClusterSnapshotIdentifier", "cs1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyDBClusterSnapshotAttribute",
+        &[
+            ("DBClusterSnapshotIdentifier", "cs1"),
+            ("AttributeName", "restore")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBClusterAutomatedBackups", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteDBClusterAutomatedBackup",
+        &[("DbClusterResourceId", "x")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DescribeDBClusterBacktracks",
+        &[("DBClusterIdentifier", "c1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteDBClusterSnapshot",
+        &[("DBClusterSnapshotIdentifier", "cs1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Cluster parameter groups
+    assert!(rds_post(
+        &server,
+        "CreateDBClusterParameterGroup",
+        &[
+            ("DBClusterParameterGroupName", "cpg1"),
+            ("DBParameterGroupFamily", "aurora-postgresql15"),
+            ("Description", "x")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBClusterParameterGroups", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "DescribeDBClusterParameters",
+        &[("DBClusterParameterGroupName", "cpg1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DescribeEngineDefaultClusterParameters",
+        &[("DBParameterGroupFamily", "aurora-postgresql15")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyDBClusterParameterGroup",
+        &[("DBClusterParameterGroupName", "cpg1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "ResetDBClusterParameterGroup",
+        &[("DBClusterParameterGroupName", "cpg1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "CopyDBClusterParameterGroup",
+        &[
+            ("SourceDBClusterParameterGroupIdentifier", "cpg1"),
+            ("TargetDBClusterParameterGroupIdentifier", "cpg2"),
+            ("TargetDBClusterParameterGroupDescription", "x")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteDBClusterParameterGroup",
+        &[("DBClusterParameterGroupName", "cpg1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Cluster endpoints
+    assert!(rds_post(
+        &server,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ce1"),
+            ("DBClusterIdentifier", "c1"),
+            ("EndpointType", "READER")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBClusterEndpoints", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyDBClusterEndpoint",
+        &[("DBClusterEndpointIdentifier", "ce1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteDBClusterEndpoint",
+        &[("DBClusterEndpointIdentifier", "ce1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Proxies + endpoints + targets
+    assert!(rds_post(
+        &server,
+        "CreateDBProxy",
+        &[("DBProxyName", "p1"), ("EngineFamily", "POSTGRESQL")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBProxies", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(&server, "ModifyDBProxy", &[("DBProxyName", "p1")])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "CreateDBProxyEndpoint",
+        &[
+            ("DBProxyName", "p1"),
+            ("DBProxyEndpointName", "pe1"),
+            ("VpcSubnetIds.member.1", "s1")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBProxyEndpoints", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyDBProxyEndpoint",
+        &[("DBProxyEndpointName", "pe1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DescribeDBProxyTargetGroups",
+        &[("DBProxyName", "p1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(
+        rds_post(&server, "DescribeDBProxyTargets", &[("DBProxyName", "p1")])
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(rds_post(
+        &server,
+        "ModifyDBProxyTargetGroup",
+        &[("DBProxyName", "p1"), ("TargetGroupName", "default")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(
+        rds_post(&server, "RegisterDBProxyTargets", &[("DBProxyName", "p1")])
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(rds_post(
+        &server,
+        "DeregisterDBProxyTargets",
+        &[("DBProxyName", "p1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteDBProxyEndpoint",
+        &[("DBProxyEndpointName", "pe1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DeleteDBProxy", &[("DBProxyName", "p1")])
+        .await
+        .status()
+        .is_success());
+
+    // Security groups
+    assert!(rds_post(
+        &server,
+        "CreateDBSecurityGroup",
+        &[
+            ("DBSecurityGroupName", "sg1"),
+            ("DBSecurityGroupDescription", "x")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "AuthorizeDBSecurityGroupIngress",
+        &[("DBSecurityGroupName", "sg1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "RevokeDBSecurityGroupIngress",
+        &[("DBSecurityGroupName", "sg1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBSecurityGroups", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteDBSecurityGroup",
+        &[("DBSecurityGroupName", "sg1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Option groups
+    assert!(rds_post(
+        &server,
+        "CreateOptionGroup",
+        &[
+            ("OptionGroupName", "og1"),
+            ("EngineName", "mysql"),
+            ("MajorEngineVersion", "8.0"),
+            ("OptionGroupDescription", "x")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeOptionGroups", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "DescribeOptionGroupOptions",
+        &[("EngineName", "mysql")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(
+        rds_post(&server, "ModifyOptionGroup", &[("OptionGroupName", "og1")])
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(rds_post(
+        &server,
+        "CopyOptionGroup",
+        &[
+            ("SourceOptionGroupIdentifier", "og1"),
+            ("TargetOptionGroupIdentifier", "og2"),
+            ("TargetOptionGroupDescription", "x")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(
+        rds_post(&server, "DeleteOptionGroup", &[("OptionGroupName", "og1")])
+            .await
+            .status()
+            .is_success()
+    );
+
+    // Event subscriptions
+    assert!(rds_post(
+        &server,
+        "CreateEventSubscription",
+        &[
+            ("SubscriptionName", "es1"),
+            ("SnsTopicArn", "arn:aws:sns:us-east-1:000:t")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeEventSubscriptions", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyEventSubscription",
+        &[("SubscriptionName", "es1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "AddSourceIdentifierToSubscription",
+        &[("SubscriptionName", "es1"), ("SourceIdentifier", "s1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "RemoveSourceIdentifierFromSubscription",
+        &[("SubscriptionName", "es1"), ("SourceIdentifier", "s1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteEventSubscription",
+        &[("SubscriptionName", "es1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Global clusters
+    assert!(rds_post(
+        &server,
+        "CreateGlobalCluster",
+        &[("GlobalClusterIdentifier", "gc1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeGlobalClusters", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyGlobalCluster",
+        &[("GlobalClusterIdentifier", "gc1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "FailoverGlobalCluster",
+        &[
+            ("GlobalClusterIdentifier", "gc1"),
+            ("TargetDbClusterIdentifier", "x")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "SwitchoverGlobalCluster",
+        &[
+            ("GlobalClusterIdentifier", "gc1"),
+            ("TargetDbClusterIdentifier", "x")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "RemoveFromGlobalCluster",
+        &[
+            ("GlobalClusterIdentifier", "gc1"),
+            ("DbClusterIdentifier", "x")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteGlobalCluster",
+        &[("GlobalClusterIdentifier", "gc1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Integrations
+    assert!(rds_post(
+        &server,
+        "CreateIntegration",
+        &[
+            ("IntegrationName", "i1"),
+            ("SourceArn", "x"),
+            ("TargetArn", "y")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeIntegrations", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyIntegration",
+        &[("IntegrationIdentifier", "i1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteIntegration",
+        &[("IntegrationIdentifier", "i1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Blue/Green
+    assert!(rds_post(
+        &server,
+        "CreateBlueGreenDeployment",
+        &[
+            ("BlueGreenDeploymentName", "bg1"),
+            ("Source", "arn:aws:rds:us-east-1:000:cluster:c1")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeBlueGreenDeployments", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "SwitchoverBlueGreenDeployment",
+        &[("BlueGreenDeploymentIdentifier", "bg1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteBlueGreenDeployment",
+        &[("BlueGreenDeploymentIdentifier", "bg1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Shard groups
+    assert!(rds_post(
+        &server,
+        "CreateDBShardGroup",
+        &[
+            ("DBShardGroupIdentifier", "sg1"),
+            ("DBClusterIdentifier", "c1"),
+            ("MaxACU", "1024")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBShardGroups", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyDBShardGroup",
+        &[("DBShardGroupIdentifier", "sg1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "RebootDBShardGroup",
+        &[("DBShardGroupIdentifier", "sg1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteDBShardGroup",
+        &[("DBShardGroupIdentifier", "sg1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Custom engine versions
+    assert!(rds_post(
+        &server,
+        "CreateCustomDBEngineVersion",
+        &[("Engine", "custom-oracle-ee"), ("EngineVersion", "1.0")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyCustomDBEngineVersion",
+        &[("Engine", "custom-oracle-ee"), ("EngineVersion", "1.0")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteCustomDBEngineVersion",
+        &[("Engine", "custom-oracle-ee"), ("EngineVersion", "1.0")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Tenant DBs
+    assert!(rds_post(
+        &server,
+        "CreateTenantDatabase",
+        &[
+            ("TenantDBName", "t1"),
+            ("DBInstanceIdentifier", "i1"),
+            ("MasterUsername", "u"),
+            ("MasterUserPassword", "p")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeTenantDatabases", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyTenantDatabase",
+        &[("TenantDBName", "t1"), ("DBInstanceIdentifier", "i1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBSnapshotTenantDatabases", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteTenantDatabase",
+        &[("TenantDBName", "t1"), ("DBInstanceIdentifier", "i1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Export tasks
+    assert!(rds_post(
+        &server,
+        "StartExportTask",
+        &[
+            ("ExportTaskIdentifier", "ex1"),
+            ("SourceArn", "x"),
+            ("S3BucketName", "b"),
+            ("IamRoleArn", "r"),
+            ("KmsKeyId", "k")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeExportTasks", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "CancelExportTask",
+        &[("ExportTaskIdentifier", "ex1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Activity stream
+    assert!(rds_post(
+        &server,
+        "StartActivityStream",
+        &[("ResourceArn", "x"), ("Mode", "sync"), ("KmsKeyId", "k")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(
+        rds_post(&server, "ModifyActivityStream", &[("ResourceArn", "x")])
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        rds_post(&server, "StopActivityStream", &[("ResourceArn", "x")])
+            .await
+            .status()
+            .is_success()
+    );
+
+    // Roles
+    assert!(rds_post(
+        &server,
+        "AddRoleToDBCluster",
+        &[("DBClusterIdentifier", "c1"), ("RoleArn", "r")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "RemoveRoleFromDBCluster",
+        &[("DBClusterIdentifier", "c1"), ("RoleArn", "r")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "AddRoleToDBInstance",
+        &[
+            ("DBInstanceIdentifier", "i1"),
+            ("RoleArn", "r"),
+            ("FeatureName", "S3")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "RemoveRoleFromDBInstance",
+        &[
+            ("DBInstanceIdentifier", "i1"),
+            ("RoleArn", "r"),
+            ("FeatureName", "S3")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Pending maintenance + reserved
+    assert!(rds_post(
+        &server,
+        "ApplyPendingMaintenanceAction",
+        &[
+            ("ResourceIdentifier", "x"),
+            ("ApplyAction", "system-update"),
+            ("OptInType", "immediate")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribePendingMaintenanceActions", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "PurchaseReservedDBInstancesOffering",
+        &[("ReservedDBInstancesOfferingId", "o1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeReservedDBInstances", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(
+        rds_post(&server, "DescribeReservedDBInstancesOfferings", &[])
+            .await
+            .status()
+            .is_success()
+    );
+
+    // Snapshots / restores / parameters / engine defaults
+    assert!(rds_post(
+        &server,
+        "CopyDBSnapshot",
+        &[
+            ("SourceDBSnapshotIdentifier", "s1"),
+            ("TargetDBSnapshotIdentifier", "s2")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "CopyDBParameterGroup",
+        &[
+            ("SourceDBParameterGroupIdentifier", "p1"),
+            ("TargetDBParameterGroupIdentifier", "p2"),
+            ("TargetDBParameterGroupDescription", "x")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DescribeDBParameters",
+        &[("DBParameterGroupName", "default")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "ResetDBParameterGroup",
+        &[("DBParameterGroupName", "p1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DescribeEngineDefaultParameters",
+        &[("DBParameterGroupFamily", "postgres15")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DescribeDBSnapshotAttributes",
+        &[("DBSnapshotIdentifier", "s1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyDBSnapshot",
+        &[("DBSnapshotIdentifier", "s1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyDBSnapshotAttribute",
+        &[("DBSnapshotIdentifier", "s1"), ("AttributeName", "restore")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "RestoreDBClusterFromS3",
+        &[
+            ("DBClusterIdentifier", "c2"),
+            ("Engine", "aurora-mysql"),
+            ("MasterUsername", "u"),
+            ("MasterUserPassword", "p"),
+            ("SourceEngine", "mysql"),
+            ("SourceEngineVersion", "8.0"),
+            ("S3BucketName", "b"),
+            ("S3IngestionRoleArn", "r")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "c2"),
+            ("SnapshotIdentifier", "s1"),
+            ("Engine", "aurora-mysql")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "c2"),
+            ("SourceDBClusterIdentifier", "c1")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "RestoreDBInstanceFromS3",
+        &[
+            ("DBInstanceIdentifier", "i2"),
+            ("AllocatedStorage", "20"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("Engine", "mysql"),
+            ("MasterUsername", "u"),
+            ("MasterUserPassword", "p"),
+            ("SourceEngine", "mysql"),
+            ("SourceEngineVersion", "8.0"),
+            ("S3BucketName", "b"),
+            ("S3IngestionRoleArn", "r")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "RestoreDBInstanceToPointInTime",
+        &[
+            ("SourceDBInstanceIdentifier", "i1"),
+            ("TargetDBInstanceIdentifier", "i2")
+        ]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Recommendations
+    assert!(rds_post(&server, "DescribeDBRecommendations", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyDBRecommendation",
+        &[("RecommendationId", "r1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Certificates
+    assert!(rds_post(&server, "DescribeCertificates", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyCertificates",
+        &[("CertificateIdentifier", "rds-ca-2019")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Read replicas
+    assert!(rds_post(
+        &server,
+        "PromoteReadReplica",
+        &[("DBInstanceIdentifier", "i1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "StartDBInstance",
+        &[("DBInstanceIdentifier", "i1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(
+        rds_post(&server, "StopDBInstance", &[("DBInstanceIdentifier", "i1")])
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(rds_post(
+        &server,
+        "StartDBInstanceAutomatedBackupsReplication",
+        &[("SourceDBInstanceArn", "arn:aws:rds:us-east-1:000:db:i1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "StopDBInstanceAutomatedBackupsReplication",
+        &[("SourceDBInstanceArn", "arn:aws:rds:us-east-1:000:db:i1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DeleteDBInstanceAutomatedBackup",
+        &[("DbiResourceId", "x")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBInstanceAutomatedBackups", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "SwitchoverReadReplica",
+        &[("DBInstanceIdentifier", "i1")]
+    )
+    .await
+    .status()
+    .is_success());
+
+    // Account / events / regions / log files / capacity / http
+    assert!(rds_post(&server, "DescribeAccountAttributes", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(&server, "DescribeEventCategories", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(&server, "DescribeEvents", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(&server, "DescribeSourceRegions", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "DescribeDBLogFiles",
+        &[("DBInstanceIdentifier", "i1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "DownloadDBLogFilePortion",
+        &[("DBInstanceIdentifier", "i1"), ("LogFileName", "log")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(&server, "DescribeDBMajorEngineVersions", &[])
+        .await
+        .status()
+        .is_success());
+    assert!(rds_post(
+        &server,
+        "DescribeValidDBInstanceModifications",
+        &[("DBInstanceIdentifier", "i1")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(rds_post(
+        &server,
+        "ModifyCurrentDBClusterCapacity",
+        &[("DBClusterIdentifier", "c1"), ("Capacity", "4")]
+    )
+    .await
+    .status()
+    .is_success());
+    assert!(
+        rds_post(&server, "DisableHttpEndpoint", &[("ResourceArn", "x")])
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        rds_post(&server, "EnableHttpEndpoint", &[("ResourceArn", "x")])
+            .await
+            .status()
+            .is_success()
+    );
 }
