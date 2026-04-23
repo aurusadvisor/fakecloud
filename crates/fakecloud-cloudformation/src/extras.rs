@@ -567,3 +567,210 @@ impl CloudFormationService {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::service::{CloudFormationDeps, CloudFormationService};
+    use crate::state::{CloudFormationState, SharedCloudFormationState};
+    use fakecloud_core::delivery::DeliveryBus;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::service::AwsRequest;
+    use http::Method;
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn deps() -> CloudFormationDeps {
+        use fakecloud_dynamodb::state::DynamoDbState;
+        use fakecloud_eventbridge::state::EventBridgeState;
+        use fakecloud_iam::state::IamState;
+        use fakecloud_logs::state::LogsState;
+        use fakecloud_s3::state::S3State;
+        use fakecloud_sns::state::SnsState;
+        use fakecloud_sqs::state::SqsState;
+        use fakecloud_ssm::state::SsmState;
+
+        fn shared<T: fakecloud_core::multi_account::AccountState>(
+        ) -> Arc<RwLock<MultiAccountState<T>>> {
+            Arc::new(RwLock::new(MultiAccountState::<T>::new(
+                "000000000000",
+                "us-east-1",
+                "",
+            )))
+        }
+        CloudFormationDeps {
+            sqs: shared::<SqsState>(),
+            sns: shared::<SnsState>(),
+            ssm: shared::<SsmState>(),
+            iam: shared::<IamState>(),
+            s3: shared::<S3State>(),
+            eventbridge: shared::<EventBridgeState>(),
+            dynamodb: shared::<DynamoDbState>(),
+            logs: shared::<LogsState>(),
+            delivery: Arc::new(DeliveryBus::new()),
+        }
+    }
+
+    fn svc() -> CloudFormationService {
+        let state: SharedCloudFormationState =
+            Arc::new(RwLock::new(MultiAccountState::<CloudFormationState>::new(
+                "000000000000",
+                "us-east-1",
+                "",
+            )));
+        CloudFormationService::new(state, deps())
+    }
+
+    fn req(action: &str, params: &[(&str, &str)]) -> AwsRequest {
+        let mut q = HashMap::new();
+        q.insert("Action".to_string(), action.to_string());
+        for (k, v) in params {
+            q.insert(k.to_string(), v.to_string());
+        }
+        AwsRequest {
+            service: "cloudformation".to_string(),
+            method: Method::POST,
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            path_segments: vec![],
+            query_params: q,
+            headers: http::HeaderMap::new(),
+            body: bytes::Bytes::new(),
+            account_id: "000000000000".to_string(),
+            region: "us-east-1".to_string(),
+            request_id: "rid".to_string(),
+            action: action.to_string(),
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn ok(action: &str, params: &[(&str, &str)]) {
+        let r = svc().handle_extra_action(&req(action, params));
+        match r {
+            Ok(resp) => assert!(resp.status.is_success(), "{action} status: {}", resp.status),
+            Err(e) => panic!("{action} failed: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn change_sets() {
+        ok(
+            "CreateChangeSet",
+            &[("StackName", "s"), ("ChangeSetName", "cs")],
+        );
+        ok("DescribeChangeSet", &[("ChangeSetName", "cs")]);
+        ok("DescribeChangeSetHooks", &[]);
+        ok("ListChangeSets", &[]);
+        ok("ExecuteChangeSet", &[]);
+        ok("DeleteChangeSet", &[("ChangeSetName", "cs")]);
+    }
+
+    #[test]
+    fn stack_sets_instances_refactors() {
+        ok("CreateStackSet", &[("StackSetName", "ss")]);
+        ok("DescribeStackSet", &[("StackSetName", "ss")]);
+        ok("ListStackSets", &[]);
+        ok("UpdateStackSet", &[]);
+        ok("DescribeStackSetOperation", &[]);
+        ok("ListStackSetOperations", &[]);
+        ok("ListStackSetOperationResults", &[]);
+        ok("ListStackSetAutoDeploymentTargets", &[]);
+        ok("StopStackSetOperation", &[]);
+        ok("ImportStacksToStackSet", &[]);
+        ok("DeleteStackSet", &[("StackSetName", "ss")]);
+        ok("CreateStackInstances", &[]);
+        ok("UpdateStackInstances", &[]);
+        ok("DeleteStackInstances", &[]);
+        ok("DescribeStackInstance", &[]);
+        ok("ListStackInstances", &[]);
+        ok("ListStackInstanceResourceDrifts", &[]);
+        ok("CreateStackRefactor", &[]);
+        ok("DescribeStackRefactor", &[("StackRefactorId", "r")]);
+        ok("ExecuteStackRefactor", &[]);
+        ok("ListStackRefactors", &[]);
+        ok("ListStackRefactorActions", &[]);
+    }
+
+    #[test]
+    fn types_and_publishers() {
+        ok("ActivateType", &[]);
+        ok("DeactivateType", &[]);
+        ok("DescribeType", &[]);
+        ok("DescribeTypeRegistration", &[]);
+        ok("RegisterType", &[]);
+        ok("DeregisterType", &[]);
+        ok("ListTypes", &[]);
+        ok("ListTypeRegistrations", &[]);
+        ok("ListTypeVersions", &[]);
+        ok("BatchDescribeTypeConfigurations", &[]);
+        ok("SetTypeConfiguration", &[]);
+        ok("SetTypeDefaultVersion", &[]);
+        ok("TestType", &[]);
+        ok("PublishType", &[]);
+        ok("RegisterPublisher", &[]);
+        ok("DescribePublisher", &[]);
+    }
+
+    #[test]
+    fn templates_resource_scans_drift() {
+        ok(
+            "CreateGeneratedTemplate",
+            &[("GeneratedTemplateName", "gt")],
+        );
+        ok(
+            "UpdateGeneratedTemplate",
+            &[("GeneratedTemplateName", "gt")],
+        );
+        ok(
+            "DescribeGeneratedTemplate",
+            &[("GeneratedTemplateName", "gt")],
+        );
+        ok("GetGeneratedTemplate", &[]);
+        ok("ListGeneratedTemplates", &[]);
+        ok(
+            "DeleteGeneratedTemplate",
+            &[("GeneratedTemplateName", "gt")],
+        );
+        ok("StartResourceScan", &[]);
+        ok("DescribeResourceScan", &[]);
+        ok("ListResourceScans", &[]);
+        ok("ListResourceScanResources", &[]);
+        ok("ListResourceScanRelatedResources", &[]);
+        ok("DetectStackDrift", &[]);
+        ok("DetectStackResourceDrift", &[]);
+        ok("DetectStackSetDrift", &[]);
+        ok("DescribeStackDriftDetectionStatus", &[]);
+        ok("DescribeStackResourceDrifts", &[]);
+        ok(
+            "DescribeStackResource",
+            &[("StackName", "s"), ("LogicalResourceId", "L")],
+        );
+    }
+
+    #[test]
+    fn events_hooks_imports_policies_org() {
+        ok("DescribeStackEvents", &[]);
+        ok("DescribeEvents", &[]);
+        ok("GetHookResult", &[]);
+        ok("ListHookResults", &[]);
+        ok("RecordHandlerProgress", &[]);
+        ok("ListExports", &[]);
+        ok("ListImports", &[]);
+        ok("GetStackPolicy", &[("StackName", "s")]);
+        ok("SetStackPolicy", &[("StackName", "s")]);
+        ok("UpdateTerminationProtection", &[("StackName", "s")]);
+        ok("DescribeAccountLimits", &[]);
+        ok("ActivateOrganizationsAccess", &[]);
+        ok("DescribeOrganizationsAccess", &[]);
+        ok("DeactivateOrganizationsAccess", &[]);
+        ok("ValidateTemplate", &[]);
+        ok("EstimateTemplateCost", &[]);
+        ok("GetTemplateSummary", &[]);
+        ok("CancelUpdateStack", &[]);
+        ok("ContinueUpdateRollback", &[]);
+        ok("RollbackStack", &[("StackName", "s")]);
+        ok("SignalResource", &[]);
+    }
+}
