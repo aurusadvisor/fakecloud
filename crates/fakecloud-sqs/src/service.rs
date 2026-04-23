@@ -13,8 +13,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    MessageAttribute, RedrivePolicy, SharedSqsState, SqsMessage, SqsQueue, SqsSnapshot, SqsState,
-    SQS_SNAPSHOT_SCHEMA_VERSION,
+    MessageAttribute, MessageMoveTask, MessageMoveTaskStatus, RedrivePolicy, SharedSqsState,
+    SqsMessage, SqsQueue, SqsSnapshot, SqsState, SQS_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// Validate DelaySeconds (0–900) and MaximumMessageSize (1024–1 MiB) if
@@ -433,6 +433,8 @@ fn is_mutating_action(action: &str) -> bool {
             | "UntagQueue"
             | "AddPermission"
             | "RemovePermission"
+            | "StartMessageMoveTask"
+            | "CancelMessageMoveTask"
     )
 }
 
@@ -465,6 +467,9 @@ impl AwsService for SqsService {
             "AddPermission" => self.add_permission(&req),
             "RemovePermission" => self.remove_permission(&req),
             "ListDeadLetterSourceQueues" => self.list_dead_letter_source_queues(&req),
+            "StartMessageMoveTask" => self.start_message_move_task(&req),
+            "CancelMessageMoveTask" => self.cancel_message_move_task(&req),
+            "ListMessageMoveTasks" => self.list_message_move_tasks(&req),
             _ => Err(AwsServiceError::action_not_implemented("sqs", &req.action)),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
@@ -495,6 +500,9 @@ impl AwsService for SqsService {
             "AddPermission",
             "RemovePermission",
             "ListDeadLetterSourceQueues",
+            "StartMessageMoveTask",
+            "CancelMessageMoveTask",
+            "ListMessageMoveTasks",
         ]
     }
 
@@ -531,6 +539,9 @@ impl AwsService for SqsService {
             "AddPermission",
             "RemovePermission",
             "ListDeadLetterSourceQueues",
+            "StartMessageMoveTask",
+            "CancelMessageMoveTask",
+            "ListMessageMoveTasks",
         ];
         let action = ACTIONS.iter().copied().find(|a| *a == request.action)?;
         let body = parse_body(request);
@@ -639,6 +650,12 @@ fn sqs_resource_for(action: &str, account: &str, region: &str, body: &Value) -> 
             .and_then(|v| v.as_str())
             .map(queue_arn)
             .unwrap_or_else(|| "*".to_string()),
+        "StartMessageMoveTask" | "ListMessageMoveTasks" => body
+            .get("SourceArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "*".to_string()),
+        "CancelMessageMoveTask" => "*".to_string(),
         _ => body
             .get("QueueUrl")
             .and_then(|v| v.as_str())
@@ -777,6 +794,9 @@ fn sqs_response(action: &str, body: Value, request_id: &str, is_query: bool) -> 
             xml_id_only_success,
         ),
         "ListDeadLetterSourceQueues" => xml_dlq_sources(&body),
+        "StartMessageMoveTask" => xml_start_message_move_task(&body),
+        "CancelMessageMoveTask" => xml_cancel_message_move_task(&body),
+        "ListMessageMoveTasks" => xml_list_message_move_tasks(&body),
         // DeleteQueue, DeleteMessage, PurgeQueue, SetQueueAttributes, ChangeMessageVisibility
         _ => return xml_metadata_only(action, request_id),
     };
@@ -955,6 +975,67 @@ fn xml_dlq_sources(body: &Value) -> String {
         if let Some(u) = url.as_str() {
             inner.push_str(&format!("<QueueUrl>{}</QueueUrl>", xml_escape(u)));
         }
+    }
+    inner
+}
+
+fn xml_start_message_move_task(body: &Value) -> String {
+    let handle = body["TaskHandle"].as_str().unwrap_or("");
+    format!("<TaskHandle>{}</TaskHandle>", xml_escape(handle))
+}
+
+fn xml_cancel_message_move_task(body: &Value) -> String {
+    let n = body["ApproximateNumberOfMessagesMoved"]
+        .as_u64()
+        .unwrap_or(0);
+    format!("<ApproximateNumberOfMessagesMoved>{n}</ApproximateNumberOfMessagesMoved>")
+}
+
+fn xml_list_message_move_tasks(body: &Value) -> String {
+    let Some(results) = body["Results"].as_array() else {
+        return String::new();
+    };
+    let mut inner = String::new();
+    for r in results {
+        inner.push_str("<ListMessageMoveTasksResultEntry>");
+        if let Some(h) = r["TaskHandle"].as_str() {
+            inner.push_str(&format!("<TaskHandle>{}</TaskHandle>", xml_escape(h)));
+        }
+        if let Some(s) = r["Status"].as_str() {
+            inner.push_str(&format!("<Status>{}</Status>", xml_escape(s)));
+        }
+        if let Some(s) = r["SourceArn"].as_str() {
+            inner.push_str(&format!("<SourceArn>{}</SourceArn>", xml_escape(s)));
+        }
+        if let Some(d) = r["DestinationArn"].as_str() {
+            inner.push_str(&format!(
+                "<DestinationArn>{}</DestinationArn>",
+                xml_escape(d)
+            ));
+        }
+        if let Some(m) = r["MaxNumberOfMessagesPerSecond"].as_i64() {
+            inner.push_str(&format!(
+                "<MaxNumberOfMessagesPerSecond>{m}</MaxNumberOfMessagesPerSecond>"
+            ));
+        }
+        let moved = r["ApproximateNumberOfMessagesMoved"].as_u64().unwrap_or(0);
+        inner.push_str(&format!(
+            "<ApproximateNumberOfMessagesMoved>{moved}</ApproximateNumberOfMessagesMoved>"
+        ));
+        if let Some(t) = r["ApproximateNumberOfMessagesToMove"].as_u64() {
+            inner.push_str(&format!(
+                "<ApproximateNumberOfMessagesToMove>{t}</ApproximateNumberOfMessagesToMove>"
+            ));
+        }
+        if let Some(reason) = r["FailureReason"].as_str() {
+            inner.push_str(&format!(
+                "<FailureReason>{}</FailureReason>",
+                xml_escape(reason)
+            ));
+        }
+        let started = r["StartedTimestamp"].as_i64().unwrap_or(0);
+        inner.push_str(&format!("<StartedTimestamp>{started}</StartedTimestamp>"));
+        inner.push_str("</ListMessageMoveTasksResultEntry>");
     }
     inner
 }
@@ -2795,6 +2876,272 @@ impl SqsService {
         Ok(sqs_response(
             "ListDeadLetterSourceQueues",
             json!({ "queueUrls": source_urls }),
+            &req.request_id,
+            req.is_query_protocol,
+        ))
+    }
+
+    fn start_message_move_task(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let source_arn = body["SourceArn"]
+            .as_str()
+            .ok_or_else(|| missing_param("SourceArn"))?
+            .to_string();
+        let destination_arn = body["DestinationArn"].as_str().map(|s| s.to_string());
+        let max_per_sec = body["MaxNumberOfMessagesPerSecond"]
+            .as_i64()
+            .map(|n| n as i32);
+        if let Some(rate) = max_per_sec {
+            if !(1..=500).contains(&rate) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    "MaxNumberOfMessagesPerSecond must be between 1 and 500.",
+                ));
+            }
+        }
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+
+        let source_url = state
+            .queues
+            .values()
+            .find(|q| q.arn == source_arn)
+            .map(|q| q.queue_url.clone())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "The resource that you specified for the SourceArn parameter doesn't exist.",
+                )
+            })?;
+
+        // Source must be a DLQ (i.e. some other queue references it as redrive target).
+        let dlq_sources: Vec<String> = state
+            .queues
+            .values()
+            .filter(|q| {
+                q.redrive_policy
+                    .as_ref()
+                    .map(|rp| rp.dead_letter_target_arn == source_arn)
+                    .unwrap_or(false)
+            })
+            .map(|q| q.queue_url.clone())
+            .collect();
+        if dlq_sources.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AWS.SimpleQueueService.UnsupportedOperation",
+                "Source queue must be configured as a dead-letter queue.",
+            ));
+        }
+
+        // Validate destination if provided: must exist and be in same account.
+        if let Some(ref dest) = destination_arn {
+            if !state.queues.values().any(|q| &q.arn == dest) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "The resource that you specified for the DestinationArn parameter doesn't exist.",
+                ));
+            }
+        }
+
+        // Reject if there's already a RUNNING task for this source.
+        if state
+            .message_move_tasks
+            .iter()
+            .any(|t| t.source_arn == source_arn && t.status == MessageMoveTaskStatus::Running)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AWS.SimpleQueueService.UnsupportedOperation",
+                "There is already an active message movement task for the specified source queue.",
+            ));
+        }
+
+        // Move messages synchronously: drain source queue, redirect to destination
+        // (or to each redrive-source's queue if destination unspecified).
+        let source_messages: Vec<SqsMessage> = state
+            .queues
+            .get_mut(&source_url)
+            .map(|q| {
+                let drained: Vec<_> = q.messages.drain(..).collect();
+                q.inflight.clear();
+                drained
+            })
+            .unwrap_or_default();
+        let total = source_messages.len() as u64;
+
+        let mut moved: u64 = 0;
+        if let Some(ref dest) = destination_arn {
+            let dest_url = state
+                .queues
+                .values()
+                .find(|q| &q.arn == dest)
+                .map(|q| q.queue_url.clone());
+            if let Some(dest_url) = dest_url {
+                if let Some(dq) = state.queues.get_mut(&dest_url) {
+                    for msg in source_messages {
+                        let mut new_msg = msg;
+                        new_msg.visible_at = None;
+                        new_msg.receive_count = 0;
+                        dq.messages.push_back(new_msg);
+                        moved += 1;
+                    }
+                }
+            }
+        } else {
+            // Round-robin back to each source queue.
+            let targets = dlq_sources.clone();
+            for (idx, msg) in source_messages.into_iter().enumerate() {
+                if targets.is_empty() {
+                    break;
+                }
+                let target_url = &targets[idx % targets.len()];
+                if let Some(tq) = state.queues.get_mut(target_url) {
+                    let mut new_msg = msg;
+                    new_msg.visible_at = None;
+                    new_msg.receive_count = 0;
+                    tq.messages.push_back(new_msg);
+                    moved += 1;
+                }
+            }
+        }
+
+        let task_handle = format!("FakeCloudMessageMoveTask-{}", uuid::Uuid::new_v4().simple());
+        state.message_move_tasks.push(MessageMoveTask {
+            task_handle: task_handle.clone(),
+            source_arn,
+            destination_arn,
+            max_messages_per_second: max_per_sec,
+            status: MessageMoveTaskStatus::Completed,
+            messages_moved: moved,
+            messages_to_move: total,
+            started_timestamp: Utc::now().timestamp_millis(),
+            failure_reason: None,
+        });
+        // Cap retained tasks at 10 per source per AWS docs.
+        Ok(sqs_response(
+            "StartMessageMoveTask",
+            json!({ "TaskHandle": task_handle }),
+            &req.request_id,
+            req.is_query_protocol,
+        ))
+    }
+
+    fn cancel_message_move_task(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let task_handle = body["TaskHandle"]
+            .as_str()
+            .ok_or_else(|| missing_param("TaskHandle"))?
+            .to_string();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let task = state
+            .message_move_tasks
+            .iter_mut()
+            .find(|t| t.task_handle == task_handle)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "The specified task handle doesn't exist.",
+                )
+            })?;
+        let moved = task.messages_moved;
+        match task.status {
+            MessageMoveTaskStatus::Running => {
+                task.status = MessageMoveTaskStatus::Cancelled;
+            }
+            MessageMoveTaskStatus::Completed
+            | MessageMoveTaskStatus::Cancelled
+            | MessageMoveTaskStatus::Cancelling
+            | MessageMoveTaskStatus::Failed => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "AWS.SimpleQueueService.UnsupportedOperation",
+                    "The message movement task isn't in RUNNING status.",
+                ));
+            }
+        }
+
+        Ok(sqs_response(
+            "CancelMessageMoveTask",
+            json!({ "ApproximateNumberOfMessagesMoved": moved }),
+            &req.request_id,
+            req.is_query_protocol,
+        ))
+    }
+
+    fn list_message_move_tasks(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let source_arn = body["SourceArn"]
+            .as_str()
+            .ok_or_else(|| missing_param("SourceArn"))?
+            .to_string();
+        let max_results = body["MaxResults"]
+            .as_i64()
+            .map(|n| n.clamp(1, 10) as usize)
+            .unwrap_or(1);
+
+        let accounts = self.state.read();
+        let empty = crate::state::SqsState::new(&req.account_id, &req.region, "");
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        // Source queue must exist.
+        if !state.queues.values().any(|q| q.arn == source_arn) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "The resource that you specified for the SourceArn parameter doesn't exist.",
+            ));
+        }
+
+        let mut tasks: Vec<&MessageMoveTask> = state
+            .message_move_tasks
+            .iter()
+            .filter(|t| t.source_arn == source_arn)
+            .collect();
+        tasks.sort_by_key(|t| std::cmp::Reverse(t.started_timestamp));
+        tasks.truncate(max_results);
+
+        let results: Vec<Value> = tasks
+            .into_iter()
+            .map(|t| {
+                let mut entry = serde_json::Map::new();
+                if t.status == MessageMoveTaskStatus::Running {
+                    entry.insert("TaskHandle".to_string(), json!(t.task_handle));
+                }
+                entry.insert("Status".to_string(), json!(t.status.as_str()));
+                entry.insert("SourceArn".to_string(), json!(t.source_arn));
+                if let Some(ref d) = t.destination_arn {
+                    entry.insert("DestinationArn".to_string(), json!(d));
+                }
+                if let Some(m) = t.max_messages_per_second {
+                    entry.insert("MaxNumberOfMessagesPerSecond".to_string(), json!(m));
+                }
+                entry.insert(
+                    "ApproximateNumberOfMessagesMoved".to_string(),
+                    json!(t.messages_moved),
+                );
+                entry.insert(
+                    "ApproximateNumberOfMessagesToMove".to_string(),
+                    json!(t.messages_to_move),
+                );
+                if let Some(ref reason) = t.failure_reason {
+                    entry.insert("FailureReason".to_string(), json!(reason));
+                }
+                entry.insert("StartedTimestamp".to_string(), json!(t.started_timestamp));
+                Value::Object(entry)
+            })
+            .collect();
+
+        Ok(sqs_response(
+            "ListMessageMoveTasks",
+            json!({ "Results": results }),
             &req.request_id,
             req.is_query_protocol,
         ))
