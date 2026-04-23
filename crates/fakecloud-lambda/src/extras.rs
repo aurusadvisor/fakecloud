@@ -1748,3 +1748,124 @@ fn event_invoke_json(c: &EventInvokeConfig) -> Value {
         "LastModified": c.last_modified.timestamp(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::service::LambdaService;
+    use crate::state::{LambdaState, SharedLambdaState};
+    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::service::AwsRequest;
+    use http::Method;
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn svc() -> LambdaService {
+        let state: SharedLambdaState = Arc::new(RwLock::new(
+            MultiAccountState::<LambdaState>::new("000000000000", "us-east-1", ""),
+        ));
+        LambdaService::new(state)
+    }
+
+    fn req(action: &str, body: &str, segs: &[&str]) -> AwsRequest {
+        AwsRequest {
+            service: "lambda".to_string(),
+            method: Method::POST,
+            raw_path: format!("/{}", segs.join("/")),
+            raw_query: String::new(),
+            path_segments: segs.iter().map(|s| s.to_string()).collect(),
+            query_params: HashMap::new(),
+            headers: http::HeaderMap::new(),
+            body: bytes::Bytes::from(body.to_string()),
+            account_id: "000000000000".to_string(),
+            region: "us-east-1".to_string(),
+            request_id: "rid".to_string(),
+            action: action.to_string(),
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    async fn run(s: &LambdaService, action: &str, body: &str, res: Option<&str>, segs: &[&str]) {
+        let r = s.handle_extra(action, res, &req(action, body, segs)).await;
+        match r {
+            Ok(resp) => assert!(resp.status.is_success(), "{action} status: {}", resp.status),
+            Err(e) => panic!("{action} failed: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_listings_succeed_without_state() {
+        let s = svc();
+        run(&s, "GetAccountSettings", "", None, &[]).await;
+        run(&s, "InvokeAsync", r#"{}"#, Some("fn"), &[]).await;
+        run(&s, "InvokeWithResponseStream", r#"{}"#, Some("fn"), &[]).await;
+        run(&s, "ListLayers", "", None, &[]).await;
+        run(&s, "ListLayerVersions", "", Some("layer"), &[]).await;
+        run(&s, "ListCapacityProviders", "", None, &[]).await;
+    }
+
+    #[tokio::test]
+    async fn layers_lifecycle() {
+        let s = svc();
+        run(
+            &s,
+            "PublishLayerVersion",
+            r#"{"Content":{"ZipFile":""}}"#,
+            Some("layer1"),
+            &["2018-10-31", "layers", "layer1", "versions"],
+        )
+        .await;
+        run(&s, "ListLayers", "", None, &[]).await;
+        run(&s, "ListLayerVersions", "", Some("layer1"), &[]).await;
+    }
+
+    #[tokio::test]
+    async fn capacity_providers_lifecycle() {
+        let s = svc();
+        run(
+            &s,
+            "CreateCapacityProvider",
+            r#"{"CapacityProviderName":"cp1"}"#,
+            None,
+            &[],
+        )
+        .await;
+        run(&s, "GetCapacityProvider", "", Some("cp1"), &[]).await;
+        run(&s, "ListCapacityProviders", "", None, &[]).await;
+        run(&s, "UpdateCapacityProvider", r#"{}"#, Some("cp1"), &[]).await;
+        run(&s, "DeleteCapacityProvider", "", Some("cp1"), &[]).await;
+    }
+
+    #[tokio::test]
+    async fn durable_executions() {
+        let s = svc();
+        run(
+            &s,
+            "CheckpointDurableExecution",
+            r#"{"FunctionName":"fn"}"#,
+            Some("d1"),
+            &[],
+        )
+        .await;
+        run(&s, "GetDurableExecution", "", Some("d1"), &[]).await;
+        run(&s, "GetDurableExecutionHistory", "", Some("d1"), &[]).await;
+        run(&s, "GetDurableExecutionState", "", Some("d1"), &[]).await;
+        run(&s, "StopDurableExecution", "", Some("d1"), &[]).await;
+    }
+
+    #[tokio::test]
+    async fn code_signing_lifecycle() {
+        let s = svc();
+        run(
+            &s,
+            "CreateCodeSigningConfig",
+            r#"{"AllowedPublishers":{"SigningProfileVersionArns":[]}}"#,
+            None,
+            &[],
+        )
+        .await;
+        run(&s, "ListCodeSigningConfigs", "", None, &[]).await;
+    }
+}
