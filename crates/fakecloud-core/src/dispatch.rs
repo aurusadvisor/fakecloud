@@ -60,6 +60,15 @@ pub async fn dispatch(
                     action: String::new(),
                     protocol: AwsProtocol::Rest,
                 }
+            } else if parts.uri.path() == "/v2" || parts.uri.path().starts_with("/v2/") {
+                // OCI Distribution v2 protocol. Docker CLI / OCI clients
+                // use Basic auth (not SigV4) and GET /v2/ with no body,
+                // so this must be matched before the apigateway fallback.
+                protocol::DetectedRequest {
+                    service: "ecr".to_string(),
+                    action: String::new(),
+                    protocol: AwsProtocol::Rest,
+                }
             } else if !parts.uri.path().starts_with("/_") {
                 // Requests without AWS auth that don't match any service might be
                 // API Gateway execute API calls (plain HTTP without signatures).

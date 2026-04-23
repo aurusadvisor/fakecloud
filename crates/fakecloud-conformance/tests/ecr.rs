@@ -177,6 +177,16 @@ async fn ecr_delete_repository_policy() {
         .unwrap();
 }
 
+#[test_action("ecr", "GetAuthorizationToken", checksum = "af93b65b")]
+#[tokio::test]
+async fn ecr_get_authorization_token() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    let resp = client.get_authorization_token().send().await.unwrap();
+    assert_eq!(resp.authorization_data().len(), 1);
+    assert!(resp.authorization_data()[0].authorization_token().is_some());
+}
+
 #[test_action("ecr", "PutImage", checksum = "6e4bc561")]
 #[tokio::test]
 async fn ecr_put_image() {

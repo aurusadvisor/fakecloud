@@ -2308,6 +2308,7 @@ version = "0.10.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "fakecloud-core",
  "fakecloud-persistence",
