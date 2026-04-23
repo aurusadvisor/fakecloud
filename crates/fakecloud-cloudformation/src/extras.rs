@@ -22,13 +22,14 @@ use crate::service::CloudFormationService;
 const NS: &str = "http://cloudformation.amazonaws.com/doc/2010-05-15/";
 
 fn rand_id() -> String {
-    format!(
-        "{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    )
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:x}-{seq:x}")
 }
 
 fn xml_response(action: &str, inner: String, request_id: &str) -> AwsResponse {

@@ -673,6 +673,9 @@ impl AwsService for CloudFormationService {
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let action = req.action.as_str();
+        // Only ops whose handlers actually write to per-account state
+        // need to trigger snapshot persistence. Pass-through ops that
+        // return canned IDs but don't touch state are excluded.
         let mutates = matches!(
             action,
             "CreateStack"
@@ -680,42 +683,15 @@ impl AwsService for CloudFormationService {
                 | "UpdateStack"
                 | "CreateChangeSet"
                 | "DeleteChangeSet"
-                | "ExecuteChangeSet"
                 | "CreateStackSet"
                 | "DeleteStackSet"
-                | "UpdateStackSet"
-                | "ImportStacksToStackSet"
-                | "CreateStackInstances"
-                | "UpdateStackInstances"
-                | "DeleteStackInstances"
                 | "CreateStackRefactor"
-                | "ExecuteStackRefactor"
-                | "ActivateType"
-                | "DeactivateType"
-                | "RegisterType"
-                | "DeregisterType"
-                | "SetTypeConfiguration"
-                | "SetTypeDefaultVersion"
-                | "TestType"
-                | "PublishType"
-                | "RegisterPublisher"
                 | "CreateGeneratedTemplate"
-                | "UpdateGeneratedTemplate"
                 | "DeleteGeneratedTemplate"
-                | "StartResourceScan"
-                | "DetectStackDrift"
-                | "DetectStackResourceDrift"
-                | "DetectStackSetDrift"
                 | "SetStackPolicy"
                 | "UpdateTerminationProtection"
                 | "ActivateOrganizationsAccess"
                 | "DeactivateOrganizationsAccess"
-                | "RollbackStack"
-                | "CancelUpdateStack"
-                | "ContinueUpdateRollback"
-                | "SignalResource"
-                | "RecordHandlerProgress"
-                | "StopStackSetOperation"
         );
         let result = match action {
             "CreateStack" => self.create_stack(&req),
