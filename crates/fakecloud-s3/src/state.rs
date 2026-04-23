@@ -122,6 +122,20 @@ pub struct S3Bucket {
     pub inventory_configs: HashMap<String, String>,
     /// Whether EventBridge notifications are enabled for this bucket.
     pub eventbridge_enabled: bool,
+    /// Per-id analytics configurations (XML body).
+    pub analytics_configs: HashMap<String, String>,
+    /// Per-id intelligent-tiering configurations (XML body).
+    pub intelligent_tiering_configs: HashMap<String, String>,
+    /// Per-id metrics configurations (XML body).
+    pub metrics_configs: HashMap<String, String>,
+    /// Request payment configuration (XML body).
+    pub request_payment: Option<String>,
+    /// Per-bucket ABAC config (XML body) — see PutBucketAbac/GetBucketAbac.
+    pub abac_config: Option<String>,
+    /// Bucket-level metadata configuration (S3 metadata table v2).
+    pub metadata_configuration: Option<String>,
+    /// Bucket-level metadata table configuration (S3 metadata table v1).
+    pub metadata_table_configuration: Option<String>,
 }
 
 impl S3Bucket {
@@ -158,6 +172,13 @@ impl S3Bucket {
             ownership_controls: None,
             inventory_configs: HashMap::new(),
             eventbridge_enabled: false,
+            analytics_configs: HashMap::new(),
+            intelligent_tiering_configs: HashMap::new(),
+            metrics_configs: HashMap::new(),
+            request_payment: None,
+            abac_config: None,
+            metadata_configuration: None,
+            metadata_table_configuration: None,
         }
     }
 }

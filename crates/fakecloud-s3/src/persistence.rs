@@ -230,6 +230,13 @@ pub fn s3_bucket_from_snapshot(
         ownership_controls: None,
         inventory_configs: HashMap::new(),
         eventbridge_enabled: meta.eventbridge_enabled,
+        analytics_configs: HashMap::new(),
+        intelligent_tiering_configs: HashMap::new(),
+        metrics_configs: HashMap::new(),
+        request_payment: None,
+        abac_config: None,
+        metadata_configuration: None,
+        metadata_table_configuration: None,
     };
     for (key, lo) in objects {
         b.objects.insert(key, s3_object_from_loaded(lo));
@@ -282,6 +289,36 @@ pub fn s3_bucket_from_snapshot(
                     format!("failed to parse inventory.toml for bucket {name}: {e}")
                 })?;
                 b.inventory_configs = snap.configs;
+            }
+            "analytics.toml" => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                b.analytics_configs = toml::from_str(&text).unwrap_or_default();
+            }
+            "intelligent_tiering.toml" => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                b.intelligent_tiering_configs = toml::from_str(&text).unwrap_or_default();
+            }
+            "metrics.toml" => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                b.metrics_configs = toml::from_str(&text).unwrap_or_default();
+            }
+            "request_payment.toml" => {
+                b.request_payment = Some(text);
+            }
+            "abac.toml" => {
+                b.abac_config = Some(text);
+            }
+            "metadata_configuration.toml" => {
+                b.metadata_configuration = Some(text);
+            }
+            "metadata_table_configuration.toml" => {
+                b.metadata_table_configuration = Some(text);
             }
             _ => {}
         }
