@@ -5699,6 +5699,167 @@ mod tests {
     }
 
     #[test]
+    fn start_message_move_task_drains_to_explicit_destination() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "drain-dlq", "drain-src");
+        // Pre-stage a couple of messages on the DLQ.
+        let dlq_url = body_json(
+            svc.get_queue_url(&make_request(
+                "GetQueueUrl",
+                json!({ "QueueName": "drain-dlq" }),
+            ))
+            .unwrap(),
+        )["QueueUrl"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for body in ["m1", "m2"] {
+            svc.send_message(&make_request(
+                "SendMessage",
+                json!({ "QueueUrl": &dlq_url, "MessageBody": body }),
+            ))
+            .unwrap();
+        }
+        // Make a custom destination queue and grab its ARN.
+        let dest_url = create_queue_url(&svc, "drain-dest");
+        let dest_arn = body_json(
+            svc.get_queue_attributes(&make_request(
+                "GetQueueAttributes",
+                json!({ "QueueUrl": dest_url, "AttributeNames": ["QueueArn"] }),
+            ))
+            .unwrap(),
+        )["Attributes"]["QueueArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let resp = svc
+            .start_message_move_task(&make_request(
+                "StartMessageMoveTask",
+                json!({ "SourceArn": dlq_arn, "DestinationArn": dest_arn }),
+            ))
+            .unwrap();
+        assert!(body_json(resp)["TaskHandle"].as_str().is_some());
+        // Verify destination queue received both messages.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let recv = runtime
+            .block_on(svc.receive_message(&make_request(
+                "ReceiveMessage",
+                json!({ "QueueUrl": dest_url, "MaxNumberOfMessages": 10 }),
+            )))
+            .unwrap();
+        let body = body_json(recv);
+        assert_eq!(body["Messages"].as_array().map(|a| a.len()).unwrap_or(0), 2);
+    }
+
+    #[test]
+    fn start_message_move_task_unknown_destination_errors() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "ud-dlq", "ud-src");
+        let req = make_request(
+            "StartMessageMoveTask",
+            json!({
+                "SourceArn": dlq_arn,
+                "DestinationArn": "arn:aws:sqs:us-east-1:123456789012:no-such-dest"
+            }),
+        );
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[test]
+    fn start_message_move_task_blocks_concurrent_running() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "conc-dlq", "conc-src");
+        // First call completes synchronously (Completed). To exercise the
+        // "already running" guard, force a Running entry directly.
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("123456789012");
+            state.message_move_tasks.push(MessageMoveTask {
+                task_handle: "FakeCloudMessageMoveTask-stub".to_string(),
+                source_arn: dlq_arn.clone(),
+                destination_arn: None,
+                max_messages_per_second: None,
+                status: MessageMoveTaskStatus::Running,
+                messages_moved: 0,
+                messages_to_move: 0,
+                started_timestamp: 0,
+                failure_reason: None,
+            });
+        }
+        let req = make_request("StartMessageMoveTask", json!({ "SourceArn": dlq_arn }));
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "AWS.SimpleQueueService.UnsupportedOperation");
+    }
+
+    #[test]
+    fn cancel_message_move_task_cancels_running() {
+        let svc = make_service();
+        // Insert a Running task; cancellation should succeed and report
+        // ApproximateNumberOfMessagesMoved.
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("123456789012");
+            state.message_move_tasks.push(MessageMoveTask {
+                task_handle: "running-handle".to_string(),
+                source_arn: "arn:aws:sqs:us-east-1:123456789012:src".to_string(),
+                destination_arn: None,
+                max_messages_per_second: None,
+                status: MessageMoveTaskStatus::Running,
+                messages_moved: 7,
+                messages_to_move: 10,
+                started_timestamp: 0,
+                failure_reason: None,
+            });
+        }
+        let resp = svc
+            .cancel_message_move_task(&make_request(
+                "CancelMessageMoveTask",
+                json!({ "TaskHandle": "running-handle" }),
+            ))
+            .unwrap();
+        let body = body_json(resp);
+        assert_eq!(
+            body["ApproximateNumberOfMessagesMoved"].as_u64().unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn list_message_move_tasks_caps_at_max_and_excludes_running_handle() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "cap-dlq", "cap-src");
+        // Insert 12 tasks; ListMessageMoveTasks should cap MaxResults at 10.
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("123456789012");
+            for i in 0..12 {
+                state.message_move_tasks.push(MessageMoveTask {
+                    task_handle: format!("h{i}"),
+                    source_arn: dlq_arn.clone(),
+                    destination_arn: None,
+                    max_messages_per_second: None,
+                    status: MessageMoveTaskStatus::Completed,
+                    messages_moved: 0,
+                    messages_to_move: 0,
+                    started_timestamp: i,
+                    failure_reason: None,
+                });
+            }
+        }
+        let req = make_request(
+            "ListMessageMoveTasks",
+            json!({ "SourceArn": dlq_arn, "MaxResults": 50 }),
+        );
+        let body = body_json(svc.list_message_move_tasks(&req).unwrap());
+        assert_eq!(body["Results"].as_array().unwrap().len(), 10);
+        // Completed tasks must not include TaskHandle (per AWS docs).
+        for r in body["Results"].as_array().unwrap() {
+            assert!(r.get("TaskHandle").is_none());
+        }
+    }
+
+    #[test]
     fn send_message_batch_over_max_entries_errors() {
         let svc = make_service();
         svc.create_queue(&make_request("CreateQueue", json!({"QueueName": "smbo"})))
