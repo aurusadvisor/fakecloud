@@ -377,6 +377,8 @@ impl EcrService {
     }
 
     fn describe_repositories(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // AWS's documented default page size for DescribeRepositories.
+        const DEFAULT_PAGE_SIZE: usize = 100;
         let body = request.json_body();
         let max_results = match body.get("maxResults").and_then(|v| v.as_i64()) {
             Some(n) => {
@@ -387,15 +389,20 @@ impl EcrService {
                          Member must have value between 1 and 1000",
                     )));
                 }
-                Some(n as usize)
+                n as usize
             }
-            None => None,
+            None => DEFAULT_PAGE_SIZE,
         };
-        let offset = body
-            .get("nextToken")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0);
+        let offset = match body.get("nextToken").and_then(|v| v.as_str()) {
+            Some(raw) => raw.parse::<usize>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidContinuationTokenException",
+                    "The specified continuation token is not valid.",
+                )
+            })?,
+            None => 0,
+        };
         let names: Vec<String> = body
             .get("repositoryNames")
             .and_then(|v| v.as_array())
@@ -415,10 +422,7 @@ impl EcrService {
         if names.is_empty() {
             let all: Vec<&Repository> = state.repositories.values().collect();
             let start = offset.min(all.len());
-            let end = match max_results {
-                Some(limit) => (start + limit).min(all.len()),
-                None => all.len(),
-            };
+            let end = (start + max_results).min(all.len());
             for repo in &all[start..end] {
                 out.push(repository_to_json(repo));
             }

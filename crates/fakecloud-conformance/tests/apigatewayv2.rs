@@ -978,7 +978,7 @@ async fn apigwv2_closure_routes_exist() {
         &server,
         reqwest::Method::POST,
         &format!("/v2/portalproducts/{pp_id}/productpages"),
-        r#"{"Name":"p","DisplayContent":{}}"#,
+        r#"{"Name":"p","DisplayContent":{"Body":"b","Title":"t"}}"#,
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
@@ -1016,7 +1016,7 @@ async fn apigwv2_closure_routes_exist() {
         &server,
         reqwest::Method::POST,
         &format!("/v2/portalproducts/{pp_id}/productrestendpointpages"),
-        r#"{"Name":"p","RestEndpointIdentifier":{}}"#,
+        r#"{"Name":"p","RestEndpointIdentifier":{"IdentifierParts":{"Method":"GET","Path":"/","RestApiId":"r","Stage":"prod"}}}"#,
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
