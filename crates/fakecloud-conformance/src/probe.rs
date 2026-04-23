@@ -732,22 +732,20 @@ fn probe_rest(
         req = req.header(name.as_str(), value.as_str());
     }
 
-    let has_body_method = !matches!(
-        method,
-        reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::DELETE
-    );
+    // Trust the builder to decide whether to emit a body: both
+    // `build_http_request_from_model` and `legacy_rest_request` only return
+    // `Some(body)` when a body is appropriate for this op + method (including
+    // DELETE/GET with an explicit `@httpPayload` member, a case AWS models do
+    // use — e.g. `DeleteObjects` via POST-with-payload, plus streaming
+    // ingest-style APIs with payloads on non-POST methods).
     if let Some(body) = body {
-        if has_body_method {
-            let content_type = headers
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-                .is_none()
-                .then_some("application/json");
-            if let Some(ct) = content_type {
-                req = req.header("Content-Type", ct);
-            }
-            req = req.body(body);
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
+            req = req.header("Content-Type", "application/json");
         }
+        req = req.body(body);
     }
 
     let resp = req.send().map_err(|e| e.to_string())?;
@@ -1446,6 +1444,25 @@ mod tests {
         let input = serde_json::json!({"Tags": ["a", "b"]});
         let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
         assert_eq!(url, "/foo?tag=a&tag=b");
+    }
+
+    #[test]
+    fn delete_with_payload_keeps_body() {
+        // `@httpPayload` overrides the default "DELETE = bodyless" rule. Rare
+        // in practice but AWS models do use it for some delete-with-filter-doc
+        // shapes; ensure the builder emits a body in that case.
+        let op = op_with_http("X", "DELETE", "/foo", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape("#Input", vec![member("Body", "#String", payload_traits())]),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"Body": "delete-me"});
+        let (method, _, _, body) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(method, reqwest::Method::DELETE);
+        assert_eq!(body.unwrap(), "delete-me");
     }
 
     #[test]
