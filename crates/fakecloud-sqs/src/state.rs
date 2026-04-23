@@ -63,6 +63,40 @@ pub struct SqsQueue {
     pub receipt_handle_map: HashMap<String, Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MessageMoveTaskStatus {
+    Running,
+    Completed,
+    Cancelling,
+    Cancelled,
+    Failed,
+}
+
+impl MessageMoveTaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MessageMoveTaskStatus::Running => "RUNNING",
+            MessageMoveTaskStatus::Completed => "COMPLETED",
+            MessageMoveTaskStatus::Cancelling => "CANCELLING",
+            MessageMoveTaskStatus::Cancelled => "CANCELLED",
+            MessageMoveTaskStatus::Failed => "FAILED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageMoveTask {
+    pub task_handle: String,
+    pub source_arn: String,
+    pub destination_arn: Option<String>,
+    pub max_messages_per_second: Option<i32>,
+    pub status: MessageMoveTaskStatus,
+    pub messages_moved: u64,
+    pub messages_to_move: u64,
+    pub started_timestamp: i64,
+    pub failure_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SqsState {
     pub account_id: String,
@@ -70,6 +104,8 @@ pub struct SqsState {
     pub endpoint: String,
     pub queues: HashMap<String, SqsQueue>, // queue_url -> queue
     pub name_to_url: HashMap<String, String>, // queue_name -> queue_url
+    #[serde(default)]
+    pub message_move_tasks: Vec<MessageMoveTask>,
 }
 
 impl SqsState {
@@ -80,6 +116,7 @@ impl SqsState {
             endpoint: endpoint.to_string(),
             queues: HashMap::new(),
             name_to_url: HashMap::new(),
+            message_move_tasks: Vec::new(),
         }
     }
 }
@@ -88,6 +125,7 @@ impl SqsState {
     pub fn reset(&mut self) {
         self.queues.clear();
         self.name_to_url.clear();
+        self.message_move_tasks.clear();
     }
 }
 
