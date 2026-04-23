@@ -1290,3 +1290,471 @@ async fn elasticache_disassociate_global_replication_group() {
         Some("fc-us-east-1-disassoc-a")
     );
 }
+
+// ── Conformance closure batch ──
+
+#[test_action("elasticache", "CreateCacheParameterGroup", checksum = "0b7d959e")]
+#[test_action("elasticache", "DeleteCacheParameterGroup", checksum = "2c5a809a")]
+#[test_action("elasticache", "ModifyCacheParameterGroup", checksum = "62723a8d")]
+#[test_action("elasticache", "ResetCacheParameterGroup", checksum = "7feb08e4")]
+#[test_action("elasticache", "DescribeCacheParameters", checksum = "22653906")]
+#[tokio::test]
+async fn elasticache_parameter_group_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    client
+        .create_cache_parameter_group()
+        .cache_parameter_group_name("pg1")
+        .cache_parameter_group_family("redis7")
+        .description("test")
+        .send()
+        .await
+        .unwrap();
+    client
+        .modify_cache_parameter_group()
+        .cache_parameter_group_name("pg1")
+        .parameter_name_values(
+            aws_sdk_elasticache::types::ParameterNameValue::builder()
+                .parameter_name("maxmemory-policy")
+                .parameter_value("allkeys-lru")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .describe_cache_parameters()
+        .cache_parameter_group_name("pg1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .reset_cache_parameter_group()
+        .cache_parameter_group_name("pg1")
+        .reset_all_parameters(true)
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_cache_parameter_group()
+        .cache_parameter_group_name("pg1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticache", "CreateCacheSecurityGroup", checksum = "60b096bd")]
+#[test_action("elasticache", "DeleteCacheSecurityGroup", checksum = "1f8673d7")]
+#[test_action("elasticache", "DescribeCacheSecurityGroups", checksum = "2c1d0900")]
+#[test_action(
+    "elasticache",
+    "AuthorizeCacheSecurityGroupIngress",
+    checksum = "49798eef"
+)]
+#[test_action(
+    "elasticache",
+    "RevokeCacheSecurityGroupIngress",
+    checksum = "de58c51f"
+)]
+#[tokio::test]
+async fn elasticache_security_group_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    client
+        .create_cache_security_group()
+        .cache_security_group_name("sg1")
+        .description("test")
+        .send()
+        .await
+        .unwrap();
+    client
+        .authorize_cache_security_group_ingress()
+        .cache_security_group_name("sg1")
+        .ec2_security_group_name("ec2sg")
+        .ec2_security_group_owner_id("123456789012")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .describe_cache_security_groups()
+        .cache_security_group_name("sg1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .revoke_cache_security_group_ingress()
+        .cache_security_group_name("sg1")
+        .ec2_security_group_name("ec2sg")
+        .ec2_security_group_owner_id("123456789012")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_cache_security_group()
+        .cache_security_group_name("sg1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticache", "ModifyCacheCluster", checksum = "5ed36488")]
+#[test_action("elasticache", "RebootCacheCluster", checksum = "626579b2")]
+#[test_action(
+    "elasticache",
+    "ListAllowedNodeTypeModifications",
+    checksum = "4ac3def5"
+)]
+#[tokio::test]
+async fn elasticache_cluster_modify_reboot_list() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    client
+        .create_cache_cluster()
+        .cache_cluster_id("c1")
+        .engine("redis")
+        .cache_node_type("cache.t4g.micro")
+        .num_cache_nodes(1)
+        .send()
+        .await
+        .unwrap();
+    client
+        .modify_cache_cluster()
+        .cache_cluster_id("c1")
+        .num_cache_nodes(2)
+        .send()
+        .await
+        .unwrap();
+    client
+        .reboot_cache_cluster()
+        .cache_cluster_id("c1")
+        .cache_node_ids_to_reboot("0001")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .list_allowed_node_type_modifications()
+        .cache_cluster_id("c1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticache",
+    "ModifyReplicationGroupShardConfiguration",
+    checksum = "1f767f8f"
+)]
+#[tokio::test]
+async fn elasticache_modify_replication_group_shard_configuration() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    client
+        .create_replication_group()
+        .replication_group_id("rg1")
+        .replication_group_description("d")
+        .engine("redis")
+        .cache_node_type("cache.t4g.micro")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .modify_replication_group_shard_configuration()
+        .replication_group_id("rg1")
+        .node_group_count(2)
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticache",
+    "DecreaseNodeGroupsInGlobalReplicationGroup",
+    checksum = "a9aed6cb"
+)]
+#[test_action(
+    "elasticache",
+    "IncreaseNodeGroupsInGlobalReplicationGroup",
+    checksum = "1f8821e2"
+)]
+#[test_action(
+    "elasticache",
+    "RebalanceSlotsInGlobalReplicationGroup",
+    checksum = "708e8c3e"
+)]
+#[tokio::test]
+async fn elasticache_global_node_group_ops() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    client
+        .create_replication_group()
+        .replication_group_id("primary")
+        .replication_group_description("d")
+        .engine("redis")
+        .cache_node_type("cache.t4g.micro")
+        .send()
+        .await
+        .unwrap();
+    let global_id = client
+        .create_global_replication_group()
+        .global_replication_group_id_suffix("g1")
+        .primary_replication_group_id("primary")
+        .send()
+        .await
+        .unwrap()
+        .global_replication_group()
+        .unwrap()
+        .global_replication_group_id()
+        .unwrap()
+        .to_string();
+    let _ = client
+        .increase_node_groups_in_global_replication_group()
+        .global_replication_group_id(&global_id)
+        .node_group_count(2)
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .decrease_node_groups_in_global_replication_group()
+        .global_replication_group_id(&global_id)
+        .node_group_count(1)
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .rebalance_slots_in_global_replication_group()
+        .global_replication_group_id(&global_id)
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticache", "ModifyUser", checksum = "426e19a1")]
+#[tokio::test]
+async fn elasticache_modify_user() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    client
+        .create_user()
+        .user_id("u1")
+        .user_name("alice")
+        .engine("redis")
+        .access_string("on ~* +@all")
+        .no_password_required(true)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .modify_user()
+        .user_id("u1")
+        .access_string("on ~* +@read")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticache", "ModifyUserGroup", checksum = "5b65bca1")]
+#[tokio::test]
+async fn elasticache_modify_user_group() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    client
+        .create_user()
+        .user_id("u2")
+        .user_name("bob")
+        .engine("redis")
+        .access_string("on ~* +@all")
+        .no_password_required(true)
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_user_group()
+        .user_group_id("ug1")
+        .engine("redis")
+        .user_ids("u2")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .modify_user_group()
+        .user_group_id("ug1")
+        .user_ids_to_remove("u2")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticache",
+    "PurchaseReservedCacheNodesOffering",
+    checksum = "e2f01ee3"
+)]
+#[tokio::test]
+async fn elasticache_purchase_reserved_cache_nodes_offering() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    let offerings = client
+        .describe_reserved_cache_nodes_offerings()
+        .send()
+        .await
+        .unwrap();
+    let id = offerings
+        .reserved_cache_nodes_offerings()
+        .first()
+        .unwrap()
+        .reserved_cache_nodes_offering_id()
+        .unwrap()
+        .to_string();
+    let _ = client
+        .purchase_reserved_cache_nodes_offering()
+        .reserved_cache_nodes_offering_id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticache", "DescribeEvents", checksum = "d49004db")]
+#[test_action("elasticache", "DescribeServiceUpdates", checksum = "8b2082aa")]
+#[test_action("elasticache", "DescribeUpdateActions", checksum = "de0f8eff")]
+#[test_action("elasticache", "BatchApplyUpdateAction", checksum = "6434aa3c")]
+#[test_action("elasticache", "BatchStopUpdateAction", checksum = "cb77e050")]
+#[tokio::test]
+async fn elasticache_events_and_updates() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    let _ = client.describe_events().send().await.unwrap();
+    let _ = client.describe_service_updates().send().await.unwrap();
+    let _ = client.describe_update_actions().send().await.unwrap();
+    let _ = client
+        .batch_apply_update_action()
+        .service_update_name("svc-update-1")
+        .replication_group_ids("rg")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .batch_stop_update_action()
+        .service_update_name("svc-update-1")
+        .replication_group_ids("rg")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticache", "CopySnapshot", checksum = "34d69e9f")]
+#[tokio::test]
+async fn elasticache_copy_snapshot() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    client
+        .create_replication_group()
+        .replication_group_id("snaprg")
+        .replication_group_description("d")
+        .engine("redis")
+        .cache_node_type("cache.t4g.micro")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_snapshot()
+        .replication_group_id("snaprg")
+        .snapshot_name("snap1")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .copy_snapshot()
+        .source_snapshot_name("snap1")
+        .target_snapshot_name("snap1-copy")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticache", "CopyServerlessCacheSnapshot", checksum = "2ba3f993")]
+#[test_action("elasticache", "ExportServerlessCacheSnapshot", checksum = "827310e7")]
+#[tokio::test]
+async fn elasticache_serverless_cache_snapshot_copy_export() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    client
+        .create_serverless_cache()
+        .serverless_cache_name("slc1")
+        .engine("valkey")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_serverless_cache_snapshot()
+        .serverless_cache_snapshot_name("scs1")
+        .serverless_cache_name("slc1")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .copy_serverless_cache_snapshot()
+        .source_serverless_cache_snapshot_name("scs1")
+        .target_serverless_cache_snapshot_name("scs1-copy")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .export_serverless_cache_snapshot()
+        .serverless_cache_snapshot_name("scs1")
+        .s3_bucket_name("dest-bucket")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticache", "StartMigration", checksum = "09e9b62f")]
+#[test_action("elasticache", "CompleteMigration", checksum = "508de31d")]
+#[test_action("elasticache", "TestMigration", checksum = "2d1ccbf2")]
+#[tokio::test]
+async fn elasticache_migration_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+    client
+        .create_replication_group()
+        .replication_group_id("mg1")
+        .replication_group_description("m")
+        .engine("redis")
+        .cache_node_type("cache.t4g.micro")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .test_migration()
+        .replication_group_id("mg1")
+        .customer_node_endpoint_list(
+            aws_sdk_elasticache::types::CustomerNodeEndpoint::builder()
+                .address("10.0.0.1")
+                .port(6379)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .start_migration()
+        .replication_group_id("mg1")
+        .customer_node_endpoint_list(
+            aws_sdk_elasticache::types::CustomerNodeEndpoint::builder()
+                .address("10.0.0.1")
+                .port(6379)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .complete_migration()
+        .replication_group_id("mg1")
+        .send()
+        .await
+        .unwrap();
+}

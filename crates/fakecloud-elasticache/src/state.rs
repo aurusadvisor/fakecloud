@@ -263,6 +263,86 @@ pub struct ServerlessCacheSnapshot {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CacheSecurityGroup {
+    pub cache_security_group_name: String,
+    pub description: String,
+    pub owner_id: String,
+    pub arn: String,
+    pub ec2_security_groups: Vec<Ec2SecurityGroupAuth>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Ec2SecurityGroupAuth {
+    pub status: String,
+    pub ec2_security_group_name: String,
+    pub ec2_security_group_owner_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CacheParameter {
+    pub parameter_name: String,
+    pub parameter_value: String,
+    pub description: String,
+    pub source: String,
+    pub data_type: String,
+    pub allowed_values: String,
+    pub is_modifiable: bool,
+    pub minimum_engine_version: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CacheEvent {
+    pub source_identifier: String,
+    pub source_type: String,
+    pub message: String,
+    pub date: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServiceUpdate {
+    pub service_update_name: String,
+    pub service_update_release_date: String,
+    pub service_update_end_date: String,
+    pub service_update_severity: String,
+    pub service_update_status: String,
+    pub service_update_recommended_apply_by_date: String,
+    pub service_update_type: String,
+    pub engine: String,
+    pub engine_version: String,
+    pub auto_update_after_recommended_apply_by_date: bool,
+    pub estimated_update_time: String,
+    pub service_update_description: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UpdateAction {
+    pub replication_group_id: Option<String>,
+    pub cache_cluster_id: Option<String>,
+    pub service_update_name: String,
+    pub service_update_release_date: String,
+    pub service_update_severity: String,
+    pub service_update_status: String,
+    pub service_update_recommended_apply_by_date: String,
+    pub service_update_type: String,
+    pub update_action_available_date: String,
+    pub update_action_status: String,
+    pub nodes_updated: String,
+    pub update_action_status_modified_date: String,
+    pub sla_met: String,
+    pub estimated_update_time: String,
+    pub engine: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Migration {
+    pub replication_group_id: String,
+    pub customer_node_endpoint_address: String,
+    pub customer_node_endpoint_port: i32,
+    pub status: String,
+    pub started_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ElastiCacheState {
     pub account_id: String,
     pub region: String,
@@ -282,6 +362,15 @@ pub struct ElastiCacheState {
     in_progress_cache_cluster_ids: HashSet<String>,
     in_progress_replication_group_ids: HashSet<String>,
     in_progress_serverless_cache_names: HashSet<String>,
+    #[serde(default)]
+    pub security_groups: HashMap<String, CacheSecurityGroup>,
+    #[serde(default)]
+    pub parameter_group_parameters: HashMap<String, Vec<CacheParameter>>,
+    #[serde(default)]
+    pub events: Vec<CacheEvent>,
+    /// Active migrations keyed by replication group id.
+    #[serde(default)]
+    pub migrations: HashMap<String, Migration>,
 }
 
 impl ElastiCacheState {
@@ -315,6 +404,10 @@ impl ElastiCacheState {
             in_progress_cache_cluster_ids: HashSet::new(),
             in_progress_replication_group_ids: HashSet::new(),
             in_progress_serverless_cache_names: HashSet::new(),
+            security_groups: HashMap::new(),
+            parameter_group_parameters: HashMap::new(),
+            events: Vec::new(),
+            migrations: HashMap::new(),
         }
     }
 

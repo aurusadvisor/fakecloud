@@ -83,6 +83,37 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ModifyServerlessCache",
     "RemoveTagsFromResource",
     "TestFailover",
+    "AuthorizeCacheSecurityGroupIngress",
+    "RevokeCacheSecurityGroupIngress",
+    "CreateCacheSecurityGroup",
+    "DeleteCacheSecurityGroup",
+    "DescribeCacheSecurityGroups",
+    "CreateCacheParameterGroup",
+    "DeleteCacheParameterGroup",
+    "ModifyCacheParameterGroup",
+    "ResetCacheParameterGroup",
+    "DescribeCacheParameters",
+    "ModifyCacheCluster",
+    "RebootCacheCluster",
+    "ListAllowedNodeTypeModifications",
+    "ModifyReplicationGroupShardConfiguration",
+    "DecreaseNodeGroupsInGlobalReplicationGroup",
+    "IncreaseNodeGroupsInGlobalReplicationGroup",
+    "RebalanceSlotsInGlobalReplicationGroup",
+    "ModifyUser",
+    "ModifyUserGroup",
+    "PurchaseReservedCacheNodesOffering",
+    "DescribeEvents",
+    "DescribeServiceUpdates",
+    "DescribeUpdateActions",
+    "BatchApplyUpdateAction",
+    "BatchStopUpdateAction",
+    "CopySnapshot",
+    "CopyServerlessCacheSnapshot",
+    "ExportServerlessCacheSnapshot",
+    "StartMigration",
+    "CompleteMigration",
+    "TestMigration",
 ];
 
 pub struct ElastiCacheService {
@@ -154,6 +185,13 @@ fn is_mutating_action(action: &str) -> bool {
             | "DescribeUserGroups"
             | "DescribeUsers"
             | "ListTagsForResource"
+            | "DescribeCacheSecurityGroups"
+            | "DescribeCacheParameters"
+            | "DescribeEvents"
+            | "DescribeServiceUpdates"
+            | "DescribeUpdateActions"
+            | "ListAllowedNodeTypeModifications"
+            | "TestMigration"
     )
 }
 
@@ -216,6 +254,51 @@ impl AwsService for ElastiCacheService {
             "ModifyServerlessCache" => self.modify_serverless_cache(&request),
             "RemoveTagsFromResource" => self.remove_tags_from_resource(&request),
             "TestFailover" => self.test_failover(&request),
+            "AuthorizeCacheSecurityGroupIngress" => {
+                self.authorize_cache_security_group_ingress(&request)
+            }
+            "RevokeCacheSecurityGroupIngress" => self.revoke_cache_security_group_ingress(&request),
+            "CreateCacheSecurityGroup" => self.create_cache_security_group(&request),
+            "DeleteCacheSecurityGroup" => self.delete_cache_security_group(&request),
+            "DescribeCacheSecurityGroups" => self.describe_cache_security_groups(&request),
+            "CreateCacheParameterGroup" => self.create_cache_parameter_group(&request),
+            "DeleteCacheParameterGroup" => self.delete_cache_parameter_group(&request),
+            "ModifyCacheParameterGroup" => self.modify_cache_parameter_group(&request),
+            "ResetCacheParameterGroup" => self.reset_cache_parameter_group(&request),
+            "DescribeCacheParameters" => self.describe_cache_parameters(&request),
+            "ModifyCacheCluster" => self.modify_cache_cluster(&request),
+            "RebootCacheCluster" => self.reboot_cache_cluster(&request),
+            "ListAllowedNodeTypeModifications" => {
+                self.list_allowed_node_type_modifications(&request)
+            }
+            "ModifyReplicationGroupShardConfiguration" => {
+                self.modify_replication_group_shard_configuration(&request)
+            }
+            "DecreaseNodeGroupsInGlobalReplicationGroup" => {
+                self.decrease_node_groups_in_global_replication_group(&request)
+            }
+            "IncreaseNodeGroupsInGlobalReplicationGroup" => {
+                self.increase_node_groups_in_global_replication_group(&request)
+            }
+            "RebalanceSlotsInGlobalReplicationGroup" => {
+                self.rebalance_slots_in_global_replication_group(&request)
+            }
+            "ModifyUser" => self.modify_user(&request),
+            "ModifyUserGroup" => self.modify_user_group(&request),
+            "PurchaseReservedCacheNodesOffering" => {
+                self.purchase_reserved_cache_nodes_offering(&request)
+            }
+            "DescribeEvents" => self.describe_events(&request),
+            "DescribeServiceUpdates" => self.describe_service_updates(&request),
+            "DescribeUpdateActions" => self.describe_update_actions(&request),
+            "BatchApplyUpdateAction" => self.batch_apply_update_action(&request),
+            "BatchStopUpdateAction" => self.batch_stop_update_action(&request),
+            "CopySnapshot" => self.copy_snapshot(&request),
+            "CopyServerlessCacheSnapshot" => self.copy_serverless_cache_snapshot(&request),
+            "ExportServerlessCacheSnapshot" => self.export_serverless_cache_snapshot(&request),
+            "StartMigration" => self.start_migration(&request),
+            "CompleteMigration" => self.complete_migration(&request),
+            "TestMigration" => self.test_migration(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -2993,6 +3076,984 @@ impl ElastiCacheService {
             xml_wrap("RemoveTagsFromResource", "", &request.request_id),
         ))
     }
+
+    // ── Cache Security Groups ──
+
+    fn create_cache_security_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let name = required_param(request, "CacheSecurityGroupName")?;
+        let description = required_param(request, "Description")?;
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        if state.security_groups.contains_key(&name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "CacheSecurityGroupAlreadyExists",
+                format!("CacheSecurityGroup {name} already exists."),
+            ));
+        }
+        let arn = format!(
+            "arn:aws:elasticache:{}:{}:securitygroup:{}",
+            request.region, request.account_id, name
+        );
+        let sg = crate::state::CacheSecurityGroup {
+            cache_security_group_name: name.clone(),
+            description,
+            owner_id: request.account_id.clone(),
+            arn: arn.clone(),
+            ec2_security_groups: Vec::new(),
+        };
+        state.security_groups.insert(name.clone(), sg.clone());
+        let xml = format!(
+            "<CacheSecurityGroup>{}</CacheSecurityGroup>",
+            cache_security_group_xml(&sg)
+        );
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("CreateCacheSecurityGroup", &xml, &request.request_id),
+        ))
+    }
+
+    fn delete_cache_security_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let name = required_param(request, "CacheSecurityGroupName")?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        state.security_groups.remove(&name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheSecurityGroupNotFound",
+                format!("CacheSecurityGroup {name} not found."),
+            )
+        })?;
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("DeleteCacheSecurityGroup", "", &request.request_id),
+        ))
+    }
+
+    fn describe_cache_security_groups(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let name = optional_param(request, "CacheSecurityGroupName");
+        let max_records = optional_usize_param(request, "MaxRecords")?;
+        let marker = optional_param(request, "Marker");
+
+        let accounts = self.state.read();
+        let empty = ElastiCacheState::new(&request.account_id, &request.region);
+        let state = accounts.get(&request.account_id).unwrap_or(&empty);
+        let mut groups: Vec<&crate::state::CacheSecurityGroup> = state
+            .security_groups
+            .values()
+            .filter(|g| {
+                name.as_ref()
+                    .is_none_or(|n| g.cache_security_group_name == *n)
+            })
+            .collect();
+        groups.sort_by(|a, b| {
+            a.cache_security_group_name
+                .cmp(&b.cache_security_group_name)
+        });
+        if let Some(ref n) = name {
+            if groups.is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "CacheSecurityGroupNotFound",
+                    format!("CacheSecurityGroup {n} not found."),
+                ));
+            }
+        }
+        let (page, next_marker) = paginate(&groups, marker.as_deref(), max_records);
+        let members: String = page
+            .iter()
+            .map(|g| {
+                format!(
+                    "<CacheSecurityGroup>{}</CacheSecurityGroup>",
+                    cache_security_group_xml(g)
+                )
+            })
+            .collect();
+        let marker_xml = next_marker
+            .map(|m| format!("<Marker>{}</Marker>", xml_escape(&m)))
+            .unwrap_or_default();
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeCacheSecurityGroups",
+                &format!("<CacheSecurityGroups>{members}</CacheSecurityGroups>{marker_xml}"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn authorize_cache_security_group_ingress(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let name = required_param(request, "CacheSecurityGroupName")?;
+        let ec2_name = required_param(request, "EC2SecurityGroupName")?;
+        let ec2_owner = required_param(request, "EC2SecurityGroupOwnerId")?;
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let sg = state.security_groups.get_mut(&name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheSecurityGroupNotFound",
+                format!("CacheSecurityGroup {name} not found."),
+            )
+        })?;
+        if sg.ec2_security_groups.iter().any(|e| {
+            e.ec2_security_group_name == ec2_name && e.ec2_security_group_owner_id == ec2_owner
+        }) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AuthorizationAlreadyExists",
+                format!("Ingress for {ec2_name} already authorized."),
+            ));
+        }
+        sg.ec2_security_groups
+            .push(crate::state::Ec2SecurityGroupAuth {
+                status: "authorizing".to_string(),
+                ec2_security_group_name: ec2_name,
+                ec2_security_group_owner_id: ec2_owner,
+            });
+        let xml = format!(
+            "<CacheSecurityGroup>{}</CacheSecurityGroup>",
+            cache_security_group_xml(sg)
+        );
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "AuthorizeCacheSecurityGroupIngress",
+                &xml,
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn revoke_cache_security_group_ingress(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let name = required_param(request, "CacheSecurityGroupName")?;
+        let ec2_name = required_param(request, "EC2SecurityGroupName")?;
+        let ec2_owner = required_param(request, "EC2SecurityGroupOwnerId")?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let sg = state.security_groups.get_mut(&name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheSecurityGroupNotFound",
+                format!("CacheSecurityGroup {name} not found."),
+            )
+        })?;
+        let before = sg.ec2_security_groups.len();
+        sg.ec2_security_groups.retain(|e| {
+            !(e.ec2_security_group_name == ec2_name && e.ec2_security_group_owner_id == ec2_owner)
+        });
+        if sg.ec2_security_groups.len() == before {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "AuthorizationNotFound",
+                format!("Ingress for {ec2_name} not found."),
+            ));
+        }
+        let xml = format!(
+            "<CacheSecurityGroup>{}</CacheSecurityGroup>",
+            cache_security_group_xml(sg)
+        );
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("RevokeCacheSecurityGroupIngress", &xml, &request.request_id),
+        ))
+    }
+
+    // ── Cache Parameter Groups (CRUD beyond Describe) ──
+
+    fn create_cache_parameter_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let name = required_param(request, "CacheParameterGroupName")?;
+        let family = required_param(request, "CacheParameterGroupFamily")?;
+        let description = required_param(request, "Description")?;
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        if state
+            .parameter_groups
+            .iter()
+            .any(|g| g.cache_parameter_group_name == name)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "CacheParameterGroupAlreadyExists",
+                format!("CacheParameterGroup {name} already exists."),
+            ));
+        }
+        let arn = format!(
+            "arn:aws:elasticache:{}:{}:parametergroup:{}",
+            request.region, request.account_id, name
+        );
+        let group = CacheParameterGroup {
+            cache_parameter_group_name: name.clone(),
+            cache_parameter_group_family: family,
+            description,
+            is_global: false,
+            arn,
+        };
+        state.parameter_groups.push(group.clone());
+        let xml = cache_parameter_group_xml(&group);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("CreateCacheParameterGroup", &xml, &request.request_id),
+        ))
+    }
+
+    fn delete_cache_parameter_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let name = required_param(request, "CacheParameterGroupName")?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let before = state.parameter_groups.len();
+        state
+            .parameter_groups
+            .retain(|g| g.cache_parameter_group_name != name);
+        if state.parameter_groups.len() == before {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheParameterGroupNotFound",
+                format!("CacheParameterGroup {name} not found."),
+            ));
+        }
+        state.parameter_group_parameters.remove(&name);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("DeleteCacheParameterGroup", "", &request.request_id),
+        ))
+    }
+
+    fn modify_cache_parameter_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let name = required_param(request, "CacheParameterGroupName")?;
+        let updates = collect_indexed_pairs(
+            request,
+            "ParameterNameValues.member",
+            "ParameterName",
+            "ParameterValue",
+        );
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        if !state
+            .parameter_groups
+            .iter()
+            .any(|g| g.cache_parameter_group_name == name)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheParameterGroupNotFound",
+                format!("CacheParameterGroup {name} not found."),
+            ));
+        }
+        let params = state
+            .parameter_group_parameters
+            .entry(name.clone())
+            .or_default();
+        for (param_name, value) in updates {
+            if let Some(existing) = params.iter_mut().find(|p| p.parameter_name == param_name) {
+                existing.parameter_value = value;
+                existing.source = "user".to_string();
+            } else {
+                params.push(crate::state::CacheParameter {
+                    parameter_name: param_name,
+                    parameter_value: value,
+                    description: String::new(),
+                    source: "user".to_string(),
+                    data_type: "string".to_string(),
+                    allowed_values: String::new(),
+                    is_modifiable: true,
+                    minimum_engine_version: String::new(),
+                });
+            }
+        }
+        let body = format!(
+            "<CacheParameterGroupName>{}</CacheParameterGroupName>",
+            xml_escape(&name)
+        );
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("ModifyCacheParameterGroup", &body, &request.request_id),
+        ))
+    }
+
+    fn reset_cache_parameter_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let name = required_param(request, "CacheParameterGroupName")?;
+        let reset_all =
+            parse_optional_bool(optional_param(request, "ResetAllParameters").as_deref())?
+                .unwrap_or(false);
+        let to_reset = collect_indexed_strings(request, "ParameterNameValues.member.ParameterName");
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        if !state
+            .parameter_groups
+            .iter()
+            .any(|g| g.cache_parameter_group_name == name)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheParameterGroupNotFound",
+                format!("CacheParameterGroup {name} not found."),
+            ));
+        }
+        if reset_all {
+            state.parameter_group_parameters.remove(&name);
+        } else if let Some(params) = state.parameter_group_parameters.get_mut(&name) {
+            params.retain(|p| !to_reset.contains(&p.parameter_name));
+        }
+        let body = format!(
+            "<CacheParameterGroupName>{}</CacheParameterGroupName>",
+            xml_escape(&name)
+        );
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("ResetCacheParameterGroup", &body, &request.request_id),
+        ))
+    }
+
+    fn describe_cache_parameters(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let name = required_param(request, "CacheParameterGroupName")?;
+        let max_records = optional_usize_param(request, "MaxRecords")?;
+        let marker = optional_param(request, "Marker");
+
+        let accounts = self.state.read();
+        let empty = ElastiCacheState::new(&request.account_id, &request.region);
+        let state = accounts.get(&request.account_id).unwrap_or(&empty);
+        if !state
+            .parameter_groups
+            .iter()
+            .any(|g| g.cache_parameter_group_name == name)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheParameterGroupNotFound",
+                format!("CacheParameterGroup {name} not found."),
+            ));
+        }
+        let params: Vec<&crate::state::CacheParameter> = state
+            .parameter_group_parameters
+            .get(&name)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default();
+        let (page, next_marker) = paginate(&params, marker.as_deref(), max_records);
+        let members: String = page.iter().map(|p| cache_parameter_xml(p)).collect();
+        let marker_xml = next_marker
+            .map(|m| format!("<Marker>{}</Marker>", xml_escape(&m)))
+            .unwrap_or_default();
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeCacheParameters",
+                &format!("<Parameters>{members}</Parameters><CacheNodeTypeSpecificParameters/>{marker_xml}"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    // ── Cluster lifecycle extras ──
+
+    fn modify_cache_cluster(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let id = required_param(request, "CacheClusterId")?;
+        let new_node_count = optional_param(request, "NumCacheNodes")
+            .as_deref()
+            .and_then(|v| v.parse::<i32>().ok());
+        let new_node_type = optional_param(request, "CacheNodeType");
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let cluster = state.cache_clusters.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheClusterNotFound",
+                format!("CacheCluster {id} not found."),
+            )
+        })?;
+        if let Some(n) = new_node_count {
+            cluster.num_cache_nodes = n;
+        }
+        if let Some(t) = new_node_type {
+            cluster.cache_node_type = t;
+        }
+        cluster.cache_cluster_status = "modifying".to_string();
+        let xml = cache_cluster_xml(cluster, true);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "ModifyCacheCluster",
+                &format!("<CacheCluster>{xml}</CacheCluster>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn reboot_cache_cluster(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let id = required_param(request, "CacheClusterId")?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let cluster = state.cache_clusters.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "CacheClusterNotFound",
+                format!("CacheCluster {id} not found."),
+            )
+        })?;
+        cluster.cache_cluster_status = "rebooting cache cluster nodes".to_string();
+        let xml = cache_cluster_xml(cluster, true);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "RebootCacheCluster",
+                &format!("<CacheCluster>{xml}</CacheCluster>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn list_allowed_node_type_modifications(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // Documented sample of upgradeable node types. Not exhaustive
+        // but matches the shape SDKs decode.
+        let scale_up = ["cache.t4g.medium", "cache.m6g.large", "cache.r6g.large"];
+        let scale_down = ["cache.t4g.micro", "cache.t4g.small"];
+        let mut body = String::from("<ScaleUpModifications>");
+        for n in scale_up {
+            body.push_str(&format!("<member>{}</member>", xml_escape(n)));
+        }
+        body.push_str("</ScaleUpModifications><ScaleDownModifications>");
+        for n in scale_down {
+            body.push_str(&format!("<member>{}</member>", xml_escape(n)));
+        }
+        body.push_str("</ScaleDownModifications>");
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "ListAllowedNodeTypeModifications",
+                &body,
+                &request.request_id,
+            ),
+        ))
+    }
+
+    // ── Replication group + global replication group ──
+
+    fn modify_replication_group_shard_configuration(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = required_param(request, "ReplicationGroupId")?;
+        let _node_group_count = required_param(request, "NodeGroupCount")?;
+        let _apply = required_param(request, "ApplyImmediately")?;
+        let accounts = self.state.read();
+        let empty = ElastiCacheState::new(&request.account_id, &request.region);
+        let state = accounts.get(&request.account_id).unwrap_or(&empty);
+        let group = state.replication_groups.get(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ReplicationGroupNotFoundFault",
+                format!("ReplicationGroup {id} not found."),
+            )
+        })?;
+        let region = state.region.clone();
+        let xml = replication_group_xml(group, &region);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "ModifyReplicationGroupShardConfiguration",
+                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn decrease_node_groups_in_global_replication_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        self.modify_global_node_groups(request, "DecreaseNodeGroupsInGlobalReplicationGroup")
+    }
+
+    fn increase_node_groups_in_global_replication_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        self.modify_global_node_groups(request, "IncreaseNodeGroupsInGlobalReplicationGroup")
+    }
+
+    fn rebalance_slots_in_global_replication_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        self.modify_global_node_groups(request, "RebalanceSlotsInGlobalReplicationGroup")
+    }
+
+    fn modify_global_node_groups(
+        &self,
+        request: &AwsRequest,
+        action: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = required_param(request, "GlobalReplicationGroupId")?;
+        let accounts = self.state.read();
+        let empty = ElastiCacheState::new(&request.account_id, &request.region);
+        let state = accounts.get(&request.account_id).unwrap_or(&empty);
+        let group = state.global_replication_groups.get(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "GlobalReplicationGroupNotFoundFault",
+                format!("GlobalReplicationGroup {id} not found."),
+            )
+        })?;
+        let xml = global_replication_group_xml(group, true);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                action,
+                &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    // ── Users / User groups (modify) ──
+
+    fn modify_user(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let id = required_param(request, "UserId")?;
+        let access_string = optional_param(request, "AccessString");
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let user = state.users.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "UserNotFound",
+                format!("User {id} not found."),
+            )
+        })?;
+        if let Some(a) = access_string {
+            user.access_string = a;
+        }
+        user.status = "modifying".to_string();
+        let xml = user_xml(user);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("ModifyUser", &xml, &request.request_id),
+        ))
+    }
+
+    fn modify_user_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let id = required_param(request, "UserGroupId")?;
+        let to_add = collect_indexed_strings(request, "UserIdsToAdd.member");
+        let to_remove = collect_indexed_strings(request, "UserIdsToRemove.member");
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let group = state.user_groups.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "UserGroupNotFoundFault",
+                format!("UserGroup {id} not found."),
+            )
+        })?;
+        for u in to_add {
+            if !group.user_ids.contains(&u) {
+                group.user_ids.push(u);
+            }
+        }
+        group.user_ids.retain(|u| !to_remove.contains(u));
+        group.status = "modifying".to_string();
+        let xml = user_group_xml(group);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("ModifyUserGroup", &xml, &request.request_id),
+        ))
+    }
+
+    // ── Reserved cache nodes ──
+
+    fn purchase_reserved_cache_nodes_offering(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let offering_id = required_param(request, "ReservedCacheNodesOfferingId")?;
+        let id = optional_param(request, "ReservedCacheNodeId").unwrap_or_else(|| {
+            format!(
+                "ri-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            )
+        });
+        let count = optional_param(request, "CacheNodeCount")
+            .as_deref()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(1);
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let offering = state
+            .reserved_cache_nodes_offerings
+            .iter()
+            .find(|o| o.reserved_cache_nodes_offering_id == offering_id)
+            .cloned()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ReservedCacheNodesOfferingNotFound",
+                    format!("ReservedCacheNodesOffering {offering_id} not found."),
+                )
+            })?;
+        let arn = format!(
+            "arn:aws:elasticache:{}:{}:reserved-instance:{}",
+            request.region, request.account_id, id
+        );
+        let node = ReservedCacheNode {
+            reserved_cache_node_id: id.clone(),
+            reserved_cache_nodes_offering_id: offering_id,
+            cache_node_type: offering.cache_node_type,
+            start_time: chrono::Utc::now().to_rfc3339(),
+            duration: offering.duration,
+            fixed_price: offering.fixed_price,
+            usage_price: offering.usage_price,
+            cache_node_count: count,
+            product_description: offering.product_description,
+            offering_type: offering.offering_type,
+            state: "payment-pending".to_string(),
+            recurring_charges: offering.recurring_charges,
+            reservation_arn: arn,
+        };
+        state.reserved_cache_nodes.insert(id.clone(), node.clone());
+        let xml = reserved_cache_node_xml(&node);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "PurchaseReservedCacheNodesOffering",
+                &format!("<ReservedCacheNode>{xml}</ReservedCacheNode>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    // ── Events / Service updates / Update actions ──
+
+    fn describe_events(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let max_records = optional_usize_param(request, "MaxRecords")?;
+        let marker = optional_param(request, "Marker");
+        let accounts = self.state.read();
+        let empty = ElastiCacheState::new(&request.account_id, &request.region);
+        let state = accounts.get(&request.account_id).unwrap_or(&empty);
+        let events: Vec<&crate::state::CacheEvent> = state.events.iter().collect();
+        let (page, next_marker) = paginate(&events, marker.as_deref(), max_records);
+        let members: String = page
+            .iter()
+            .map(|e| {
+                format!(
+                    "<Event><SourceIdentifier>{}</SourceIdentifier><SourceType>{}</SourceType><Message>{}</Message><Date>{}</Date></Event>",
+                    xml_escape(&e.source_identifier),
+                    xml_escape(&e.source_type),
+                    xml_escape(&e.message),
+                    xml_escape(&e.date),
+                )
+            })
+            .collect();
+        let marker_xml = next_marker
+            .map(|m| format!("<Marker>{}</Marker>", xml_escape(&m)))
+            .unwrap_or_default();
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "DescribeEvents",
+                &format!("<Events>{members}</Events>{marker_xml}"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn describe_service_updates(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = "<ServiceUpdates/>";
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("DescribeServiceUpdates", body, &request.request_id),
+        ))
+    }
+
+    fn describe_update_actions(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = "<UpdateActions/>";
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap("DescribeUpdateActions", body, &request.request_id),
+        ))
+    }
+
+    fn batch_apply_update_action(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        self.batch_update_action(request, "BatchApplyUpdateAction", "stopping")
+    }
+
+    fn batch_stop_update_action(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        self.batch_update_action(request, "BatchStopUpdateAction", "stopped")
+    }
+
+    fn batch_update_action(
+        &self,
+        request: &AwsRequest,
+        action: &str,
+        new_status: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let svc_update = required_param(request, "ServiceUpdateName")?;
+        let cluster_ids = collect_indexed_strings(request, "CacheClusterIds.member");
+        let group_ids = collect_indexed_strings(request, "ReplicationGroupIds.member");
+        let processed: Vec<String> = cluster_ids
+            .iter()
+            .chain(group_ids.iter())
+            .cloned()
+            .collect();
+        let processed_xml: String = processed
+            .iter()
+            .map(|id| {
+                format!(
+                    "<member><ServiceUpdateName>{}</ServiceUpdateName><ReplicationGroupId>{}</ReplicationGroupId><UpdateActionStatus>{}</UpdateActionStatus></member>",
+                    xml_escape(&svc_update),
+                    xml_escape(id),
+                    xml_escape(new_status),
+                )
+            })
+            .collect();
+        let body = format!(
+            "<ProcessedUpdateActions>{processed_xml}</ProcessedUpdateActions><UnprocessedUpdateActions/>"
+        );
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(action, &body, &request.request_id),
+        ))
+    }
+
+    // ── Snapshots ──
+
+    fn copy_snapshot(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let source = required_param(request, "SourceSnapshotName")?;
+        let target = required_param(request, "TargetSnapshotName")?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let mut snap = state.snapshots.get(&source).cloned().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "SnapshotNotFoundFault",
+                format!("Snapshot {source} not found."),
+            )
+        })?;
+        if state.snapshots.contains_key(&target) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "SnapshotAlreadyExistsFault",
+                format!("Snapshot {target} already exists."),
+            ));
+        }
+        snap.snapshot_name = target.clone();
+        snap.snapshot_status = "creating".to_string();
+        snap.snapshot_source = "manual".to_string();
+        let xml = snapshot_xml(&snap);
+        state.snapshots.insert(target, snap);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "CopySnapshot",
+                &format!("<Snapshot>{xml}</Snapshot>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn copy_serverless_cache_snapshot(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let source = required_param(request, "SourceServerlessCacheSnapshotName")?;
+        let target = required_param(request, "TargetServerlessCacheSnapshotName")?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let mut snap = state
+            .serverless_cache_snapshots
+            .get(&source)
+            .cloned()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ServerlessCacheSnapshotNotFoundFault",
+                    format!("ServerlessCacheSnapshot {source} not found."),
+                )
+            })?;
+        snap.serverless_cache_snapshot_name = target.clone();
+        snap.status = "creating".to_string();
+        let xml = serverless_cache_snapshot_xml(&snap);
+        state.serverless_cache_snapshots.insert(target, snap);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "CopyServerlessCacheSnapshot",
+                &format!("<ServerlessCacheSnapshot>{xml}</ServerlessCacheSnapshot>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn export_serverless_cache_snapshot(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let snap_name = required_param(request, "ServerlessCacheSnapshotName")?;
+        let bucket = required_param(request, "S3BucketName")?;
+        let accounts = self.state.read();
+        let empty = ElastiCacheState::new(&request.account_id, &request.region);
+        let state = accounts.get(&request.account_id).unwrap_or(&empty);
+        let snap = state
+            .serverless_cache_snapshots
+            .get(&snap_name)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ServerlessCacheSnapshotNotFoundFault",
+                    format!("ServerlessCacheSnapshot {snap_name} not found."),
+                )
+            })?;
+        let xml = serverless_cache_snapshot_xml(snap);
+        let _ = bucket;
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "ExportServerlessCacheSnapshot",
+                &format!("<ServerlessCacheSnapshot>{xml}</ServerlessCacheSnapshot>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    // ── Migrations ──
+
+    fn start_migration(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.migration_op(request, "StartMigration", "queued")
+    }
+
+    fn complete_migration(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let id = required_param(request, "ReplicationGroupId")?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let migration = state.migrations.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ReplicationGroupNotUnderMigrationFault",
+                format!("ReplicationGroup {id} is not currently being migrated."),
+            )
+        })?;
+        migration.status = "complete".to_string();
+        let group = state.replication_groups.get(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ReplicationGroupNotFoundFault",
+                format!("ReplicationGroup {id} not found."),
+            )
+        })?;
+        let region = state.region.clone();
+        let xml = replication_group_xml(group, &region);
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                "CompleteMigration",
+                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    fn test_migration(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.migration_op(request, "TestMigration", "test-passed")
+    }
+
+    fn migration_op(
+        &self,
+        request: &AwsRequest,
+        action: &str,
+        status: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = required_param(request, "ReplicationGroupId")?;
+        let endpoint_addr =
+            collect_indexed_strings(request, "CustomerNodeEndpointList.member.Address")
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| "127.0.0.1".to_string());
+        let endpoint_port =
+            collect_indexed_strings(request, "CustomerNodeEndpointList.member.Port")
+                .into_iter()
+                .next()
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(6379);
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let group = state.replication_groups.get(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ReplicationGroupNotFoundFault",
+                format!("ReplicationGroup {id} not found."),
+            )
+        })?;
+        let region = state.region.clone();
+        let xml = replication_group_xml(group, &region);
+        state.migrations.insert(
+            id.clone(),
+            crate::state::Migration {
+                replication_group_id: id,
+                customer_node_endpoint_address: endpoint_addr,
+                customer_node_endpoint_port: endpoint_port,
+                status: status.to_string(),
+                started_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            xml_wrap(
+                action,
+                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
+                &request.request_id,
+            ),
+        ))
+    }
 }
 
 // Helpers
@@ -3052,6 +4113,77 @@ fn default_full_engine_version(
     }
 
     Ok(major_engine_version.to_string())
+}
+
+fn collect_indexed_strings(req: &AwsRequest, prefix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 1..=64 {
+        let key = format!("{prefix}.{i}");
+        match req.query_params.get(&key) {
+            Some(v) => out.push(v.clone()),
+            None => break,
+        }
+    }
+    out
+}
+
+fn collect_indexed_pairs(
+    req: &AwsRequest,
+    prefix: &str,
+    a: &str,
+    b: &str,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for i in 1..=64 {
+        let key_a = format!("{prefix}.{i}.{a}");
+        let key_b = format!("{prefix}.{i}.{b}");
+        match (req.query_params.get(&key_a), req.query_params.get(&key_b)) {
+            (Some(av), Some(bv)) => out.push((av.clone(), bv.clone())),
+            _ => break,
+        }
+    }
+    out
+}
+
+fn cache_security_group_xml(g: &crate::state::CacheSecurityGroup) -> String {
+    let ec2_xml: String = g
+        .ec2_security_groups
+        .iter()
+        .map(|e| {
+            format!(
+                "<EC2SecurityGroup><Status>{}</Status><EC2SecurityGroupName>{}</EC2SecurityGroupName><EC2SecurityGroupOwnerId>{}</EC2SecurityGroupOwnerId></EC2SecurityGroup>",
+                xml_escape(&e.status),
+                xml_escape(&e.ec2_security_group_name),
+                xml_escape(&e.ec2_security_group_owner_id),
+            )
+        })
+        .collect();
+    format!(
+        "<CacheSecurityGroupName>{}</CacheSecurityGroupName>\
+         <Description>{}</Description>\
+         <OwnerId>{}</OwnerId>\
+         <ARN>{}</ARN>\
+         <EC2SecurityGroups>{}</EC2SecurityGroups>",
+        xml_escape(&g.cache_security_group_name),
+        xml_escape(&g.description),
+        xml_escape(&g.owner_id),
+        xml_escape(&g.arn),
+        ec2_xml,
+    )
+}
+
+fn cache_parameter_xml(p: &crate::state::CacheParameter) -> String {
+    format!(
+        "<Parameter><ParameterName>{}</ParameterName><ParameterValue>{}</ParameterValue><Description>{}</Description><Source>{}</Source><DataType>{}</DataType><AllowedValues>{}</AllowedValues><IsModifiable>{}</IsModifiable><MinimumEngineVersion>{}</MinimumEngineVersion></Parameter>",
+        xml_escape(&p.parameter_name),
+        xml_escape(&p.parameter_value),
+        xml_escape(&p.description),
+        xml_escape(&p.source),
+        xml_escape(&p.data_type),
+        xml_escape(&p.allowed_values),
+        p.is_modifiable,
+        xml_escape(&p.minimum_engine_version),
+    )
 }
 
 fn parse_optional_bool(value: Option<&str>) -> Result<Option<bool>, AwsServiceError> {
