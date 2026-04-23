@@ -115,6 +115,10 @@ pub struct ShapeTraits {
     pub http_header: Option<String>,
     /// `smithy.api#httpPayload` — member is sent as the raw request/response body.
     pub http_payload: bool,
+    /// `smithy.api#jsonName("name")` — override the key used when serializing
+    /// this member in JSON bodies. AWS restJson1 services use this to map
+    /// camelCase/kebab-case JSON keys to PascalCase Smithy member names.
+    pub json_name: Option<String>,
 }
 
 /// An example from `smithy.api#examples` trait on operations.
@@ -502,6 +506,10 @@ fn parse_traits(raw: Option<&serde_json::Map<String, Value>>) -> ShapeTraits {
 
     if raw.contains_key("smithy.api#httpPayload") {
         traits.http_payload = true;
+    }
+
+    if let Some(name) = raw.get("smithy.api#jsonName").and_then(|v| v.as_str()) {
+        traits.json_name = Some(name.to_string());
     }
 
     if let Some(default) = raw.get("smithy.api#default") {

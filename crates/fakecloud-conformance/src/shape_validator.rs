@@ -207,7 +207,11 @@ fn validate_shape(
                     });
                 }
                 for (key, val) in obj {
-                    if let Some(member) = members.iter().find(|m| m.name == *key) {
+                    let member = members.iter().find(|m| {
+                        let member_key = m.traits.json_name.as_deref().unwrap_or(&m.name);
+                        member_key == key.as_str()
+                    });
+                    if let Some(member) = member {
                         let child_path = format!("{}.{}", path, key);
                         validate_shape(
                             model,
@@ -314,19 +318,35 @@ fn validate_structure(
         }
     };
 
+    // Per-member key: `@jsonName` trait on the member (or its target shape)
+    // wins; otherwise the member's own name. AWS restJson1 services commonly
+    // override with camelCase (e.g. `Items` -> `items`).
+    let member_key = |m: &crate::smithy::Member| -> String {
+        if let Some(name) = &m.traits.json_name {
+            return name.clone();
+        }
+        if let Some(shape) = model.shapes.get(&m.target) {
+            if let Some(name) = &shape.traits.json_name {
+                return name.clone();
+            }
+        }
+        m.name.clone()
+    };
+
     // Check required fields are present
     for member in members {
-        if member.required && !obj.contains_key(&member.name) {
+        let key = member_key(member);
+        if member.required && !obj.contains_key(&key) {
             violations.push(ShapeViolation::MissingField {
                 path: path.to_string(),
-                field: member.name.clone(),
+                field: key,
             });
         }
     }
 
     // Validate present fields
     for (key, val) in obj {
-        if let Some(member) = members.iter().find(|m| m.name == *key) {
+        if let Some(member) = members.iter().find(|m| member_key(m) == *key) {
             let child_path = format!("{}.{}", path, key);
             validate_shape(
                 model,
@@ -722,5 +742,94 @@ mod tests {
             },
         );
         assert!(violations.is_empty());
+    }
+
+    /// Build a model where the output member has a `@jsonName` override
+    /// (`Items` -> `items`), matching the restJson1 pattern used by
+    /// API Gateway v2 and most AWS REST services.
+    fn json_name_model() -> ServiceModel {
+        let mut shapes = HashMap::new();
+
+        let items_traits = ShapeTraits {
+            json_name: Some("items".to_string()),
+            ..ShapeTraits::default()
+        };
+
+        shapes.insert(
+            "test#GetApisOutput".to_string(),
+            Shape {
+                shape_id: "test#GetApisOutput".to_string(),
+                shape_type: ShapeType::Structure {
+                    members: vec![Member {
+                        name: "Items".to_string(),
+                        target: "test#ApiList".to_string(),
+                        required: false,
+                        traits: items_traits,
+                    }],
+                },
+                traits: ShapeTraits::default(),
+            },
+        );
+
+        shapes.insert(
+            "test#ApiList".to_string(),
+            Shape {
+                shape_id: "test#ApiList".to_string(),
+                shape_type: ShapeType::List {
+                    member_target: "smithy.api#String".to_string(),
+                },
+                traits: ShapeTraits::default(),
+            },
+        );
+
+        ServiceModel {
+            service_name: "test".to_string(),
+            operations: Vec::new(),
+            shapes,
+        }
+    }
+
+    #[test]
+    fn json_name_override_accepts_lowercase_key() {
+        let model = json_name_model();
+        // Response uses the @jsonName ("items"), not the Smithy PascalCase
+        // member name ("Items"). Must validate cleanly.
+        let body = r#"{"items": ["a", "b"]}"#;
+        let violations = validate_response(
+            &model,
+            "test#GetApisOutput",
+            body,
+            Protocol::Json {
+                target_prefix: "Test",
+            },
+        );
+        assert!(
+            violations.is_empty(),
+            "expected no violations, got {:?}",
+            violations
+        );
+    }
+
+    #[test]
+    fn json_name_override_rejects_pascal_key() {
+        let model = json_name_model();
+        // Member has @jsonName("items"), so a response using the PascalCase
+        // Smithy name is NOT a valid restJson1 payload — flag it.
+        let body = r#"{"Items": ["a"]}"#;
+        let violations = validate_response(
+            &model,
+            "test#GetApisOutput",
+            body,
+            Protocol::Json {
+                target_prefix: "Test",
+            },
+        );
+        assert!(
+            violations.iter().any(
+                |v| matches!(v, ShapeViolation::UnexpectedField { field, .. } if field == "Items")
+            ),
+            "expected an UnexpectedField(Items) violation, got {:?}",
+            violations
+        );
     }
 }

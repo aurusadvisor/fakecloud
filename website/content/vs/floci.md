@@ -16,7 +16,7 @@ Both are free, open-source, local AWS emulators. Real HTTP server speaking the A
 
 **floci's approach** (check their site for the current details — the project publishes performance claims like startup time, memory, and SDK-test pass rate): a free LocalStack replacement. Verify their numbers against the version you'd actually run.
 
-**fakecloud's approach:** depth-first, explicit goal. 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. A service is added when it passes the full Smithy-model test variants and cross-service wire-ups, not when the API surface looks filled in. 23 services shipped today. Built around real Lambda execution (13 runtimes in Docker), real stateful backends (Postgres/MySQL/MariaDB/Redis/Valkey via Docker), real cross-service wiring, and validation on every commit against AWS's own Smithy models (57,000+ generated test variants) plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites.
+**fakecloud's approach:** depth-first, explicit goal. 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. A service is added when it passes the full Smithy-model test variants and cross-service wire-ups, not when the API surface looks filled in. 23 services shipped today. Built around real Lambda execution (13 runtimes in Docker), real stateful backends (Postgres/MySQL/MariaDB/Redis/Valkey via Docker), real cross-service wiring, and validation on every commit against AWS's own Smithy models (59,000+ generated test variants) plus the upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites.
 
 Breadth-first and depth-first are both valid tradeoffs. Pick by whether your tests need real downstream execution and cross-service flows, or surface-level plausibility across more services.
 
@@ -37,7 +37,7 @@ Run your actual test suite against both. Numbers published on landing pages are 
 | RDS | Real PostgreSQL/MySQL/MariaDB via Docker |
 | ElastiCache | Real Redis/Valkey via Docker |
 | Cross-service wiring | S3 -> Lambda, SNS fan-out, EventBridge -> Step Functions, SES inbound -> S3/SNS/Lambda, 15+ more fire end-to-end |
-| Conformance methodology | Smithy-validated, 57k+ test variants per commit |
+| Conformance methodology | Smithy-validated, 59k+ test variants per commit |
 | Terraform TestAcc CI | Yes (upstream suites run against fakecloud) |
 | Test-assertion SDKs | TypeScript, Python, Go, PHP, Java, Rust |
 | Multi-account, SCPs, ABAC | Yes |

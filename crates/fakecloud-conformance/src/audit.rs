@@ -90,6 +90,15 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["service.rs"],
             &["bedrock", "bedrock-runtime"],
         ),
+        // fakecloud's APIGWv2 crate reports `service_name() = "apigateway"`,
+        // which matches the Smithy service-map entry, but handwritten conformance
+        // tests tag `apigatewayv2` to stay consistent with the AWS SDK crate.
+        (
+            "apigateway",
+            "apigatewayv2",
+            &["service.rs"],
+            &["apigateway", "apigatewayv2"],
+        ),
     ];
 
     mappings

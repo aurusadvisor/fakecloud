@@ -6,7 +6,7 @@ weight = 3
 
 ## What fakecloud is
 
-A free, open-source local AWS emulator for integration testing and local development. For every service it implements, the goal is 100% behavioral parity with real AWS — measured by a schema-driven [conformance harness](/docs/about/conformance/) that runs 57,000+ generated test variants against official AWS Smithy models on every commit.
+A free, open-source local AWS emulator for integration testing and local development. For every service it implements, the goal is 100% behavioral parity with real AWS — measured by a schema-driven [conformance harness](/docs/about/conformance/) that runs 59,000+ generated test variants against official AWS Smithy models on every commit.
 
 The point is to let you run your application code against something that behaves like AWS, without burning an AWS account or hitting rate limits. Your tests exercise real SDK code paths end-to-end. Your CI pipeline runs fast and free.
 

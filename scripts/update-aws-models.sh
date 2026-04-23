@@ -37,6 +37,12 @@ SERVICES=(
     "sesv2:sesv2"
     "cognito-identity-provider:cognito-identity-provider"
     "rds:rds"
+    "elasticache:elasticache"
+    "sfn:sfn"
+    "bedrock:bedrock"
+    "bedrock-runtime:bedrock-runtime"
+    "scheduler:scheduler"
+    "apigatewayv2:apigatewayv2"
 )
 
 # Sparse checkout only the models we need
