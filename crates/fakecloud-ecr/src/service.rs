@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -41,6 +42,42 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "UploadLayerPart",
     "CompleteLayerUpload",
     "GetAuthorizationToken",
+    "PutLifecyclePolicy",
+    "GetLifecyclePolicy",
+    "DeleteLifecyclePolicy",
+    "StartLifecyclePolicyPreview",
+    "GetLifecyclePolicyPreview",
+    "StartImageScan",
+    "DescribeImageScanFindings",
+    "DescribeRegistry",
+    "GetRegistryPolicy",
+    "PutRegistryPolicy",
+    "DeleteRegistryPolicy",
+    "GetRegistryScanningConfiguration",
+    "PutRegistryScanningConfiguration",
+    "BatchGetRepositoryScanningConfiguration",
+    "PutReplicationConfiguration",
+    "DescribeImageReplicationStatus",
+    "CreatePullThroughCacheRule",
+    "DeletePullThroughCacheRule",
+    "DescribePullThroughCacheRules",
+    "UpdatePullThroughCacheRule",
+    "ValidatePullThroughCacheRule",
+    "GetAccountSetting",
+    "PutAccountSetting",
+    "CreateRepositoryCreationTemplate",
+    "DeleteRepositoryCreationTemplate",
+    "DescribeRepositoryCreationTemplates",
+    "UpdateRepositoryCreationTemplate",
+    "GetSigningConfiguration",
+    "PutSigningConfiguration",
+    "DeleteSigningConfiguration",
+    "DescribeImageSigningStatus",
+    "RegisterPullTimeUpdateExclusion",
+    "DeregisterPullTimeUpdateExclusion",
+    "ListPullTimeUpdateExclusions",
+    "ListImageReferrers",
+    "UpdateImageStorageClass",
 ];
 
 /// Actions that mutate persisted state. Only these trigger a snapshot save.
@@ -60,6 +97,26 @@ fn is_mutating(action: &str) -> bool {
             | "InitiateLayerUpload"
             | "UploadLayerPart"
             | "CompleteLayerUpload"
+            | "PutLifecyclePolicy"
+            | "DeleteLifecyclePolicy"
+            | "StartLifecyclePolicyPreview"
+            | "StartImageScan"
+            | "PutRegistryPolicy"
+            | "DeleteRegistryPolicy"
+            | "PutRegistryScanningConfiguration"
+            | "PutReplicationConfiguration"
+            | "CreatePullThroughCacheRule"
+            | "DeletePullThroughCacheRule"
+            | "UpdatePullThroughCacheRule"
+            | "PutAccountSetting"
+            | "CreateRepositoryCreationTemplate"
+            | "DeleteRepositoryCreationTemplate"
+            | "UpdateRepositoryCreationTemplate"
+            | "PutSigningConfiguration"
+            | "DeleteSigningConfiguration"
+            | "RegisterPullTimeUpdateExclusion"
+            | "DeregisterPullTimeUpdateExclusion"
+            | "UpdateImageStorageClass"
     )
 }
 
@@ -166,6 +223,58 @@ impl AwsService for EcrService {
             "UploadLayerPart" => self.upload_layer_part(&request),
             "CompleteLayerUpload" => self.complete_layer_upload(&request),
             "GetAuthorizationToken" => self.get_authorization_token(&request),
+            "PutLifecyclePolicy" => self.put_lifecycle_policy(&request),
+            "GetLifecyclePolicy" => self.get_lifecycle_policy(&request),
+            "DeleteLifecyclePolicy" => self.delete_lifecycle_policy(&request),
+            "StartLifecyclePolicyPreview" => self.start_lifecycle_policy_preview(&request),
+            "GetLifecyclePolicyPreview" => self.get_lifecycle_policy_preview(&request),
+            "StartImageScan" => self.start_image_scan(&request),
+            "DescribeImageScanFindings" => self.describe_image_scan_findings(&request),
+            "DescribeRegistry" => self.describe_registry(&request),
+            "GetRegistryPolicy" => self.get_registry_policy(&request),
+            "PutRegistryPolicy" => self.put_registry_policy(&request),
+            "DeleteRegistryPolicy" => self.delete_registry_policy(&request),
+            "GetRegistryScanningConfiguration" => {
+                self.get_registry_scanning_configuration(&request)
+            }
+            "PutRegistryScanningConfiguration" => {
+                self.put_registry_scanning_configuration(&request)
+            }
+            "BatchGetRepositoryScanningConfiguration" => {
+                self.batch_get_repository_scanning_configuration(&request)
+            }
+            "PutReplicationConfiguration" => self.put_replication_configuration(&request),
+            "DescribeImageReplicationStatus" => self.describe_image_replication_status(&request),
+            "CreatePullThroughCacheRule" => self.create_pull_through_cache_rule(&request),
+            "DeletePullThroughCacheRule" => self.delete_pull_through_cache_rule(&request),
+            "DescribePullThroughCacheRules" => self.describe_pull_through_cache_rules(&request),
+            "UpdatePullThroughCacheRule" => self.update_pull_through_cache_rule(&request),
+            "ValidatePullThroughCacheRule" => self.validate_pull_through_cache_rule(&request),
+            "GetAccountSetting" => self.get_account_setting(&request),
+            "PutAccountSetting" => self.put_account_setting(&request),
+            "CreateRepositoryCreationTemplate" => {
+                self.create_repository_creation_template(&request)
+            }
+            "DeleteRepositoryCreationTemplate" => {
+                self.delete_repository_creation_template(&request)
+            }
+            "DescribeRepositoryCreationTemplates" => {
+                self.describe_repository_creation_templates(&request)
+            }
+            "UpdateRepositoryCreationTemplate" => {
+                self.update_repository_creation_template(&request)
+            }
+            "GetSigningConfiguration" => self.get_signing_configuration(&request),
+            "PutSigningConfiguration" => self.put_signing_configuration(&request),
+            "DeleteSigningConfiguration" => self.delete_signing_configuration(&request),
+            "DescribeImageSigningStatus" => self.describe_image_signing_status(&request),
+            "RegisterPullTimeUpdateExclusion" => self.register_pull_time_update_exclusion(&request),
+            "DeregisterPullTimeUpdateExclusion" => {
+                self.deregister_pull_time_update_exclusion(&request)
+            }
+            "ListPullTimeUpdateExclusions" => self.list_pull_time_update_exclusions(&request),
+            "ListImageReferrers" => self.list_image_referrers(&request),
+            "UpdateImageStorageClass" => self.update_image_storage_class(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -1419,6 +1528,1385 @@ impl EcrService {
             "layerDigest": computed,
         })))
     }
+}
+
+// -------- lifecycle + scan + registry + polish handlers (Batch 4) --------
+
+fn lifecycle_policy_not_found(name: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "LifecyclePolicyNotFoundException",
+        format!("Lifecycle policy does not exist for the repository with name '{name}'."),
+    )
+}
+
+fn registry_policy_not_found() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "RegistryPolicyNotFoundException",
+        "The registry doesn't have an associated registry policy.",
+    )
+}
+
+/// Apply the most common `countType` rules of a lifecycle policy
+/// (imageCountMoreThan, sinceImagePushed) to this repo's stored
+/// images and return the digests that should be pruned. Real AWS
+/// evaluates more rule types — this supports the subset that covers
+/// the majority of deployed policies.
+fn evaluate_lifecycle_policy(repo: &crate::state::Repository, policy: &str) -> Vec<String> {
+    let Ok(doc) = serde_json::from_str::<Value>(policy) else {
+        return Vec::new();
+    };
+    let Some(rules) = doc.get("rules").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut to_delete: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Sort rules by priority ascending (lower priority runs first
+    // per AWS semantics).
+    let mut sorted: Vec<&Value> = rules.iter().collect();
+    sorted.sort_by_key(|r| r.get("rulePriority").and_then(|v| v.as_i64()).unwrap_or(0));
+    for rule in sorted {
+        let sel = rule.get("selection").cloned().unwrap_or(Value::Null);
+        let tag_status = sel
+            .get("tagStatus")
+            .and_then(|v| v.as_str())
+            .unwrap_or("any");
+        let count_type = sel.get("countType").and_then(|v| v.as_str()).unwrap_or("");
+        let count_number = sel.get("countNumber").and_then(|v| v.as_i64()).unwrap_or(0);
+        let count_unit = sel
+            .get("countUnit")
+            .and_then(|v| v.as_str())
+            .unwrap_or("days");
+
+        // Candidate images, filtered by tagStatus.
+        let mut candidates: Vec<&Image> = repo
+            .images
+            .values()
+            .filter(|img| {
+                let has_tag = repo.image_tags.values().any(|d| d == &img.image_digest);
+                match tag_status {
+                    "tagged" => has_tag,
+                    "untagged" => !has_tag,
+                    _ => true,
+                }
+            })
+            .filter(|img| !to_delete.contains(&img.image_digest))
+            .collect();
+        candidates.sort_by_key(|img| img.image_pushed_at);
+        match count_type {
+            "imageCountMoreThan" => {
+                // Keep the newest N, prune the rest.
+                let total = candidates.len() as i64;
+                if total > count_number {
+                    let prune_count = (total - count_number) as usize;
+                    for img in candidates.into_iter().take(prune_count) {
+                        to_delete.insert(img.image_digest.clone());
+                    }
+                }
+            }
+            "sinceImagePushed" => {
+                let now = chrono::Utc::now();
+                let delta = match count_unit {
+                    "days" => chrono::Duration::days(count_number),
+                    "hours" => chrono::Duration::hours(count_number),
+                    _ => chrono::Duration::days(count_number),
+                };
+                let threshold = now - delta;
+                for img in candidates {
+                    if img.image_pushed_at < threshold {
+                        to_delete.insert(img.image_digest.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    to_delete.into_iter().collect()
+}
+
+impl EcrService {
+    fn put_lifecycle_policy(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "repositoryName")?.to_string();
+        let policy = req_str(&body, "lifecyclePolicyText")?.to_string();
+        // Parse sanity-check.
+        serde_json::from_str::<Value>(&policy)
+            .map_err(|_| invalid_parameter("lifecyclePolicyText is not valid JSON"))?;
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts
+            .get_mut(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get_mut(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        repo.lifecycle_policy = Some(policy.clone());
+        // Apply immediately so the store reflects the policy.
+        let prune = evaluate_lifecycle_policy(repo, &policy);
+        for digest in &prune {
+            repo.images.remove(digest);
+            repo.image_tags.retain(|_, d| d != digest);
+        }
+        let registry_id = repo.registry_id.clone();
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": registry_id,
+            "repositoryName": name,
+            "lifecyclePolicyText": policy,
+        })))
+    }
+
+    fn get_lifecycle_policy(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "repositoryName")?.to_string();
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let policy = repo
+            .lifecycle_policy
+            .clone()
+            .ok_or_else(|| lifecycle_policy_not_found(&name))?;
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": repo.registry_id,
+            "repositoryName": name,
+            "lifecyclePolicyText": policy,
+            "lastEvaluatedAt": Utc::now().timestamp(),
+        })))
+    }
+
+    fn delete_lifecycle_policy(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "repositoryName")?.to_string();
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts
+            .get_mut(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get_mut(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let policy = repo
+            .lifecycle_policy
+            .take()
+            .ok_or_else(|| lifecycle_policy_not_found(&name))?;
+        let registry_id = repo.registry_id.clone();
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": registry_id,
+            "repositoryName": name,
+            "lifecyclePolicyText": policy,
+            "lastEvaluatedAt": Utc::now().timestamp(),
+        })))
+    }
+
+    fn start_lifecycle_policy_preview(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "repositoryName")?.to_string();
+        let account = target_account_id(request, &body);
+        let policy = match opt_str(&body, "lifecyclePolicyText") {
+            Some(s) => s.to_string(),
+            None => {
+                let accounts = self.state.read();
+                let state = accounts
+                    .get(&account)
+                    .ok_or_else(|| repository_not_found(&name))?;
+                let repo = state
+                    .repositories
+                    .get(&name)
+                    .ok_or_else(|| repository_not_found(&name))?;
+                repo.lifecycle_policy
+                    .clone()
+                    .ok_or_else(|| lifecycle_policy_not_found(&name))?
+            }
+        };
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let _prune = evaluate_lifecycle_policy(repo, &policy);
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": repo.registry_id,
+            "repositoryName": name,
+            "lifecyclePolicyText": policy,
+            "status": "COMPLETE",
+        })))
+    }
+
+    fn get_lifecycle_policy_preview(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "repositoryName")?.to_string();
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let policy = repo
+            .lifecycle_policy
+            .clone()
+            .ok_or_else(|| lifecycle_policy_not_found(&name))?;
+        let prune = evaluate_lifecycle_policy(repo, &policy);
+        let results: Vec<Value> = prune
+            .iter()
+            .map(|digest| {
+                json!({
+                    "imageDigest": digest,
+                    "imagePushedAt": repo.images.get(digest).map(|i| i.image_pushed_at.timestamp()).unwrap_or(0),
+                    "action": {"type": "EXPIRE"},
+                })
+            })
+            .collect();
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": repo.registry_id,
+            "repositoryName": name,
+            "lifecyclePolicyText": policy,
+            "status": "COMPLETE",
+            "previewResults": results,
+            "summary": {"expiringImageTotalCount": prune.len()},
+        })))
+    }
+
+    fn start_image_scan(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        use crate::state::ImageScanFindings;
+        let body = request.json_body();
+        let name = req_str(&body, "repositoryName")?.to_string();
+        let image_id = body
+            .get("imageId")
+            .cloned()
+            .ok_or_else(|| invalid_parameter("Missing imageId"))?;
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts
+            .get_mut(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get_mut(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let digest = resolve_image_digest(repo, &image_id)
+            .ok_or_else(|| image_not_found(&name, &image_id))?;
+        // Synthetic-but-schema-complete findings. Real scanner integration
+        // lives out of scope for a mock; a deterministic non-empty shape
+        // lets callers exercise their findings plumbing.
+        let findings = ImageScanFindings {
+            image_digest: digest.clone(),
+            scan_status: "COMPLETE".to_string(),
+            scan_completed_at: Some(Utc::now()),
+            vulnerability_source_updated_at: Some(Utc::now()),
+            finding_severity_counts: BTreeMap::new(),
+            findings: Vec::new(),
+        };
+        repo.scan_findings.insert(digest.clone(), findings);
+        let registry_id = repo.registry_id.clone();
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": registry_id,
+            "repositoryName": name,
+            "imageId": image_id,
+            "imageScanStatus": {"status": "IN_PROGRESS"},
+        })))
+    }
+
+    fn describe_image_scan_findings(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "repositoryName")?.to_string();
+        let image_id = body
+            .get("imageId")
+            .cloned()
+            .ok_or_else(|| invalid_parameter("Missing imageId"))?;
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let digest = resolve_image_digest(repo, &image_id)
+            .ok_or_else(|| image_not_found(&name, &image_id))?;
+        let findings = repo.scan_findings.get(&digest).cloned().unwrap_or_else(|| {
+            crate::state::ImageScanFindings {
+                image_digest: digest.clone(),
+                scan_status: "COMPLETE".to_string(),
+                scan_completed_at: Some(Utc::now()),
+                vulnerability_source_updated_at: Some(Utc::now()),
+                finding_severity_counts: BTreeMap::new(),
+                findings: Vec::new(),
+            }
+        });
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": repo.registry_id,
+            "repositoryName": name,
+            "imageId": image_id,
+            "imageScanStatus": {"status": findings.scan_status},
+            "imageScanFindings": {
+                "imageScanCompletedAt": findings.scan_completed_at.map(|t| t.timestamp()),
+                "vulnerabilitySourceUpdatedAt": findings.vulnerability_source_updated_at.map(|t| t.timestamp()),
+                "findings": findings.findings,
+                "findingSeverityCounts": findings.finding_severity_counts,
+            },
+        })))
+    }
+
+    fn describe_registry(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts.get(&account);
+        let registry_id = state
+            .map(|s| s.account_id.clone())
+            .unwrap_or_else(|| account.clone());
+        let rules = state
+            .and_then(|s| s.replication_configuration.as_ref())
+            .map(|cfg| {
+                cfg.rules
+                    .iter()
+                    .map(|r| {
+                        json!({
+                            "destinations": r.destinations.iter().map(|d| json!({
+                                "region": d.region,
+                                "registryId": d.registry_id,
+                            })).collect::<Vec<_>>(),
+                            "repositoryFilters": r.repository_filters.iter().map(|f| json!({
+                                "filter": f.filter,
+                                "filterType": f.filter_type,
+                            })).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": registry_id,
+            "replicationConfiguration": {"rules": rules},
+        })))
+    }
+
+    fn get_registry_policy(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&account)
+            .ok_or_else(registry_policy_not_found)?;
+        let policy = state
+            .registry_policy
+            .clone()
+            .ok_or_else(registry_policy_not_found)?;
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": state.account_id,
+            "policyText": policy,
+        })))
+    }
+
+    fn put_registry_policy(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let policy = req_str(&body, "policyText")?.to_string();
+        if policy.len() > 10_240 {
+            return Err(invalid_parameter(format!(
+                "Value at 'policyText' failed to satisfy constraint: \
+                 Member must have length less than or equal to 10240 (got {})",
+                policy.len()
+            )));
+        }
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        state.registry_policy = Some(policy.clone());
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": state.account_id,
+            "policyText": policy,
+        })))
+    }
+
+    fn delete_registry_policy(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts
+            .get_mut(&account)
+            .ok_or_else(registry_policy_not_found)?;
+        let policy = state
+            .registry_policy
+            .take()
+            .ok_or_else(registry_policy_not_found)?;
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": state.account_id,
+            "policyText": policy,
+        })))
+    }
+
+    fn get_registry_scanning_configuration(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts.get(&account);
+        let cfg = state
+            .map(|s| s.registry_scanning_configuration.clone())
+            .unwrap_or_default();
+        let rules: Vec<Value> = cfg
+            .rules
+            .iter()
+            .map(|r| {
+                json!({
+                    "scanFrequency": r.scan_frequency,
+                    "repositoryFilters": r.repository_filters.iter().map(|f| json!({
+                        "filter": f.filter,
+                        "filterType": f.filter_type,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": state.map(|s| s.account_id.clone()).unwrap_or(account),
+            "scanningConfiguration": {
+                "scanType": cfg.scan_type,
+                "rules": rules,
+            },
+        })))
+    }
+
+    fn put_registry_scanning_configuration(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use crate::state::{RegistryScanningConfiguration, RegistryScanningRule, RepositoryFilter};
+        let body = request.json_body();
+        let scan_type = opt_str(&body, "scanType").unwrap_or("BASIC").to_string();
+        if scan_type != "BASIC" && scan_type != "ENHANCED" {
+            return Err(invalid_parameter(format!(
+                "Invalid scanType '{scan_type}'. Must be BASIC or ENHANCED."
+            )));
+        }
+        let rules = body
+            .get("rules")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let parsed_rules: Vec<RegistryScanningRule> = rules
+            .iter()
+            .map(|r| RegistryScanningRule {
+                scan_frequency: r
+                    .get("scanFrequency")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("SCAN_ON_PUSH")
+                    .to_string(),
+                repository_filters: r
+                    .get("repositoryFilters")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|f| RepositoryFilter {
+                                filter: f
+                                    .get("filter")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                filter_type: f
+                                    .get("filterType")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("WILDCARD")
+                                    .to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+            .collect();
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        state.registry_scanning_configuration = RegistryScanningConfiguration {
+            scan_type: scan_type.clone(),
+            rules: parsed_rules,
+        };
+        let cfg = state.registry_scanning_configuration.clone();
+        Ok(AwsResponse::ok_json(json!({
+            "registryScanningConfiguration": {
+                "scanType": cfg.scan_type,
+                "rules": cfg.rules.iter().map(|r| json!({
+                    "scanFrequency": r.scan_frequency,
+                    "repositoryFilters": r.repository_filters.iter().map(|f| json!({
+                        "filter": f.filter,
+                        "filterType": f.filter_type,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            },
+        })))
+    }
+
+    fn batch_get_repository_scanning_configuration(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let names: Vec<String> = body
+            .get("repositoryNames")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| invalid_parameter("Missing required field: repositoryNames"))?
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&account)
+            .ok_or_else(|| repository_not_found(&account))?;
+        let mut scanning: Vec<Value> = Vec::new();
+        let mut failures: Vec<Value> = Vec::new();
+        for n in &names {
+            match state.repositories.get(n) {
+                Some(repo) => scanning.push(json!({
+                    "repositoryArn": repo.repository_arn,
+                    "repositoryName": n,
+                    "scanOnPush": repo.image_scanning_configuration.scan_on_push,
+                    "scanFrequency": "SCAN_ON_PUSH",
+                    "appliedScanFilters": [],
+                })),
+                None => failures.push(json!({
+                    "repositoryName": n,
+                    "failureCode": "REPOSITORY_NOT_FOUND",
+                    "failureReason": format!("Repository '{n}' not found"),
+                })),
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "scanningConfigurations": scanning,
+            "failures": failures,
+        })))
+    }
+
+    fn put_replication_configuration(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use crate::state::{
+            ReplicationConfiguration, ReplicationDestination, ReplicationRule, RepositoryFilter,
+        };
+        let body = request.json_body();
+        let cfg_value = body
+            .get("replicationConfiguration")
+            .cloned()
+            .ok_or_else(|| invalid_parameter("Missing replicationConfiguration"))?;
+        let rules_value = cfg_value
+            .get("rules")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let rules: Vec<ReplicationRule> = rules_value
+            .iter()
+            .map(|r| ReplicationRule {
+                destinations: r
+                    .get("destinations")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|d| ReplicationDestination {
+                                region: d
+                                    .get("region")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                registry_id: d
+                                    .get("registryId")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                repository_filters: r
+                    .get("repositoryFilters")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|f| RepositoryFilter {
+                                filter: f
+                                    .get("filter")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                filter_type: f
+                                    .get("filterType")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("PREFIX_MATCH")
+                                    .to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+            .collect();
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        state.replication_configuration = Some(ReplicationConfiguration { rules });
+        let cfg = state.replication_configuration.clone().unwrap();
+        Ok(AwsResponse::ok_json(json!({
+            "replicationConfiguration": {
+                "rules": cfg.rules.iter().map(|r| json!({
+                    "destinations": r.destinations.iter().map(|d| json!({
+                        "region": d.region,
+                        "registryId": d.registry_id,
+                    })).collect::<Vec<_>>(),
+                    "repositoryFilters": r.repository_filters.iter().map(|f| json!({
+                        "filter": f.filter,
+                        "filterType": f.filter_type,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            },
+        })))
+    }
+
+    fn describe_image_replication_status(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "repositoryName")?.to_string();
+        let image_id = body
+            .get("imageId")
+            .cloned()
+            .ok_or_else(|| invalid_parameter("Missing imageId"))?;
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        if resolve_image_digest(repo, &image_id).is_none() {
+            return Err(image_not_found(&name, &image_id));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "repositoryName": name,
+            "imageId": image_id,
+            "replicationStatuses": [],
+        })))
+    }
+
+    fn create_pull_through_cache_rule(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use crate::state::PullThroughCacheRule;
+        let body = request.json_body();
+        let prefix = req_str(&body, "ecrRepositoryPrefix")?.to_string();
+        validate_pullthrough_prefix(&prefix)?;
+        let upstream_url = req_str(&body, "upstreamRegistryUrl")?.to_string();
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        if state.pull_through_cache_rules.contains_key(&prefix) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "PullThroughCacheRuleAlreadyExistsException",
+                format!("A pull through cache rule with the prefix '{prefix}' already exists."),
+            ));
+        }
+        let now = Utc::now();
+        let rule = PullThroughCacheRule {
+            ecr_repository_prefix: prefix.clone(),
+            upstream_registry_url: upstream_url.clone(),
+            upstream_registry: opt_str(&body, "upstreamRegistry").map(|s| s.to_string()),
+            credential_arn: opt_str(&body, "credentialArn").map(|s| s.to_string()),
+            created_at: now,
+            updated_at: now,
+            custom_role_arn: opt_str(&body, "customRoleArn").map(|s| s.to_string()),
+        };
+        state
+            .pull_through_cache_rules
+            .insert(prefix.clone(), rule.clone());
+        Ok(AwsResponse::ok_json(pull_through_rule_json(
+            state.account_id.as_str(),
+            &rule,
+        )))
+    }
+
+    fn delete_pull_through_cache_rule(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let prefix = req_str(&body, "ecrRepositoryPrefix")?.to_string();
+        validate_pullthrough_prefix(&prefix)?;
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        let removed = state
+            .pull_through_cache_rules
+            .remove(&prefix)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "PullThroughCacheRuleNotFoundException",
+                    format!("No pull through cache rule with prefix '{prefix}' exists."),
+                )
+            })?;
+        // DeletePullThroughCacheRuleResponse omits upstreamRegistry per
+        // the Smithy model — it only appears on Create/Describe.
+        let mut response = pull_through_rule_json(state.account_id.as_str(), &removed);
+        if let Value::Object(ref mut map) = response {
+            map.remove("upstreamRegistry");
+        }
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn describe_pull_through_cache_rules(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_max_results(&body)?;
+        let prefixes: Vec<String> = body
+            .get("ecrRepositoryPrefixes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts.get(&account);
+        let rules: Vec<&crate::state::PullThroughCacheRule> = state
+            .map(|s| s.pull_through_cache_rules.values().collect())
+            .unwrap_or_default();
+        let registry_id = state.map(|s| s.account_id.clone()).unwrap_or_default();
+        let filtered: Vec<Value> = rules
+            .iter()
+            .filter(|r| prefixes.is_empty() || prefixes.contains(&r.ecr_repository_prefix))
+            .map(|r| pull_through_rule_json_with_updated(&registry_id, r))
+            .collect();
+        Ok(AwsResponse::ok_json(json!({
+            "pullThroughCacheRules": filtered,
+        })))
+    }
+
+    fn update_pull_through_cache_rule(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let prefix = req_str(&body, "ecrRepositoryPrefix")?.to_string();
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        let rule = state
+            .pull_through_cache_rules
+            .get_mut(&prefix)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "PullThroughCacheRuleNotFoundException",
+                    format!("No pull through cache rule with prefix '{prefix}' exists."),
+                )
+            })?;
+        if let Some(cred) = opt_str(&body, "credentialArn") {
+            rule.credential_arn = Some(cred.to_string());
+        }
+        if let Some(role) = opt_str(&body, "customRoleArn") {
+            rule.custom_role_arn = Some(role.to_string());
+        }
+        rule.updated_at = Utc::now();
+        let response = pull_through_rule_json_with_updated(state.account_id.as_str(), rule);
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn validate_pull_through_cache_rule(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let prefix = req_str(&body, "ecrRepositoryPrefix")?.to_string();
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts.get(&account);
+        let rule = state
+            .and_then(|s| s.pull_through_cache_rules.get(&prefix))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "PullThroughCacheRuleNotFoundException",
+                    format!("No pull through cache rule with prefix '{prefix}' exists."),
+                )
+            })?;
+        let registry_id = state.map(|s| s.account_id.clone()).unwrap_or_default();
+        let mut base = pull_through_rule_json(&registry_id, rule);
+        base["isValid"] = json!(true);
+        Ok(AwsResponse::ok_json(base))
+    }
+
+    fn get_account_setting(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "name")?.to_string();
+        validate_account_setting_name(&name)?;
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts.get(&account);
+        let value = state
+            .and_then(|s| s.account_settings.get(&name).cloned())
+            .unwrap_or_else(|| "DISABLED".to_string());
+        Ok(AwsResponse::ok_json(json!({
+            "name": name,
+            "value": value,
+        })))
+    }
+
+    fn put_account_setting(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "name")?.to_string();
+        validate_account_setting_name(&name)?;
+        let value = req_str(&body, "value")?.to_string();
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        state.account_settings.insert(name.clone(), value.clone());
+        Ok(AwsResponse::ok_json(json!({
+            "name": name,
+            "value": value,
+        })))
+    }
+
+    fn create_repository_creation_template(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use crate::state::{EncryptionConfiguration as Enc, RepositoryCreationTemplate};
+        let body = request.json_body();
+        let prefix = req_str(&body, "prefix")?.to_string();
+        validate_template_prefix(&prefix)?;
+        let applied_for: Vec<String> = body
+            .get("appliedFor")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let image_tag_mutability = opt_str(&body, "imageTagMutability")
+            .unwrap_or("MUTABLE")
+            .to_string();
+        let resource_tags = body
+            .get("resourceTags")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let encryption = body.get("encryptionConfiguration").map(|v| Enc {
+            encryption_type: v
+                .get("encryptionType")
+                .and_then(|x| x.as_str())
+                .unwrap_or("AES256")
+                .to_string(),
+            kms_key: v
+                .get("kmsKey")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string()),
+        });
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        if state.repository_creation_templates.contains_key(&prefix) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "TemplateAlreadyExistsException",
+                format!(
+                    "A repository creation template with the prefix '{prefix}' already exists."
+                ),
+            ));
+        }
+        let now = Utc::now();
+        let tpl = RepositoryCreationTemplate {
+            prefix: prefix.clone(),
+            description: opt_str(&body, "description").map(|s| s.to_string()),
+            image_tag_mutability,
+            applied_for,
+            resource_tags,
+            created_at: now,
+            updated_at: now,
+            custom_role_arn: opt_str(&body, "customRoleArn").map(|s| s.to_string()),
+            repository_policy: opt_str(&body, "repositoryPolicy").map(|s| s.to_string()),
+            lifecycle_policy: opt_str(&body, "lifecyclePolicy").map(|s| s.to_string()),
+            encryption_configuration: encryption,
+        };
+        state
+            .repository_creation_templates
+            .insert(prefix, tpl.clone());
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": state.account_id,
+            "repositoryCreationTemplate": template_to_json(&tpl),
+        })))
+    }
+
+    fn delete_repository_creation_template(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let prefix = req_str(&body, "prefix")?.to_string();
+        validate_template_prefix(&prefix)?;
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        let removed = state
+            .repository_creation_templates
+            .remove(&prefix)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "TemplateNotFoundException",
+                    format!("No repository creation template with prefix '{prefix}' exists."),
+                )
+            })?;
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": state.account_id,
+            "repositoryCreationTemplate": template_to_json(&removed),
+        })))
+    }
+
+    fn describe_repository_creation_templates(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_max_results(&body)?;
+        let prefixes: Vec<String> = body
+            .get("prefixes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts.get(&account);
+        let tpls: Vec<Value> = state
+            .map(|s| {
+                s.repository_creation_templates
+                    .values()
+                    .filter(|t| prefixes.is_empty() || prefixes.contains(&t.prefix))
+                    .map(template_to_json)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": state.map(|s| s.account_id.clone()).unwrap_or_default(),
+            "repositoryCreationTemplates": tpls,
+        })))
+    }
+
+    fn update_repository_creation_template(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let prefix = req_str(&body, "prefix")?.to_string();
+        validate_template_prefix(&prefix)?;
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        let tpl = state
+            .repository_creation_templates
+            .get_mut(&prefix)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "TemplateNotFoundException",
+                    format!("No repository creation template with prefix '{prefix}' exists."),
+                )
+            })?;
+        if let Some(desc) = opt_str(&body, "description") {
+            tpl.description = Some(desc.to_string());
+        }
+        if let Some(mutability) = opt_str(&body, "imageTagMutability") {
+            tpl.image_tag_mutability = mutability.to_string();
+        }
+        if let Some(arr) = body.get("appliedFor").and_then(|v| v.as_array()) {
+            tpl.applied_for = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(arr) = body.get("resourceTags").and_then(|v| v.as_array()) {
+            tpl.resource_tags = arr.clone();
+        }
+        tpl.updated_at = Utc::now();
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": state.account_id,
+            "repositoryCreationTemplate": template_to_json(tpl),
+        })))
+    }
+
+    fn get_signing_configuration(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts.get(&account);
+        let rules: Vec<Value> = state
+            .and_then(|s| s.signing_configuration.as_ref())
+            .map(|c| c.rules.clone())
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": state.map(|s| s.account_id.clone()).unwrap_or_default(),
+            "signingConfiguration": {"rules": rules},
+        })))
+    }
+
+    fn put_signing_configuration(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use crate::state::SigningConfiguration;
+        let body = request.json_body();
+        let cfg = body
+            .get("signingConfiguration")
+            .ok_or_else(|| invalid_parameter("Missing required field: signingConfiguration"))?;
+        let rules: Vec<Value> = cfg
+            .get("rules")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        state.signing_configuration = Some(SigningConfiguration {
+            rules: rules.clone(),
+        });
+        Ok(AwsResponse::ok_json(json!({
+            "signingConfiguration": {"rules": rules},
+        })))
+    }
+
+    fn delete_signing_configuration(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        state.signing_configuration = None;
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn describe_image_signing_status(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "repositoryName")?.to_string();
+        let image_id = body
+            .get("imageId")
+            .cloned()
+            .ok_or_else(|| invalid_parameter("Missing imageId"))?;
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        if resolve_image_digest(repo, &image_id).is_none() {
+            return Err(image_not_found(&name, &image_id));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": repo.registry_id,
+            "repositoryName": name,
+            "imageId": image_id,
+            "imageSignatures": [],
+        })))
+    }
+
+    fn register_pull_time_update_exclusion(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use crate::state::PullTimeExclusion;
+        let body = request.json_body();
+        let principal_arn = req_str(&body, "principalArn")?.to_string();
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        state
+            .pull_time_exclusions
+            .entry(principal_arn.clone())
+            .or_insert_with(|| PullTimeExclusion {
+                principal_arn: principal_arn.clone(),
+                registered_at: Utc::now(),
+            });
+        Ok(AwsResponse::ok_json(json!({
+            "principalArn": principal_arn,
+        })))
+    }
+
+    fn deregister_pull_time_update_exclusion(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let principal_arn = req_str(&body, "principalArn")?.to_string();
+        let account = target_account_id(request, &body);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&account);
+        state.pull_time_exclusions.remove(&principal_arn);
+        Ok(AwsResponse::ok_json(json!({
+            "principalArn": principal_arn,
+        })))
+    }
+
+    fn list_pull_time_update_exclusions(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        validate_max_results(&body)?;
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts.get(&account);
+        let exclusions: Vec<Value> = state
+            .map(|s| {
+                s.pull_time_exclusions
+                    .values()
+                    .map(|e| {
+                        json!({
+                            "principalArn": e.principal_arn,
+                            "registeredAt": e.registered_at.timestamp(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(AwsResponse::ok_json(json!({
+            "pullTimeUpdateExclusions": exclusions,
+        })))
+    }
+
+    fn list_image_referrers(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "repositoryName")?.to_string();
+        let subject = body
+            .get("subjectId")
+            .cloned()
+            .ok_or_else(|| invalid_parameter("Missing subjectId"))?;
+        let digest = subject
+            .get("imageDigest")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid_parameter("subjectId.imageDigest is required"))?
+            .to_string();
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        if !repo.images.contains_key(&digest) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ImageNotFoundException",
+                format!("Subject image {digest} not found in repository '{name}'"),
+            ));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "imageReferrers": [],
+        })))
+    }
+
+    fn update_image_storage_class(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let name = req_str(&body, "repositoryName")?.to_string();
+        let image_id = body
+            .get("imageId")
+            .cloned()
+            .ok_or_else(|| invalid_parameter("Missing imageId"))?;
+        let target_class = req_str(&body, "targetStorageClass")?.to_string();
+        if target_class != "STANDARD" && target_class != "ARCHIVE" {
+            return Err(invalid_parameter(format!(
+                "Invalid targetStorageClass '{target_class}'. Must be STANDARD or ARCHIVE."
+            )));
+        }
+        let account = target_account_id(request, &body);
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        if resolve_image_digest(repo, &image_id).is_none() {
+            return Err(image_not_found(&name, &image_id));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "registryId": repo.registry_id,
+            "repositoryName": name,
+            "imageId": image_id,
+            "targetStorageClass": target_class,
+        })))
+    }
+}
+
+fn validate_account_setting_name(name: &str) -> Result<(), AwsServiceError> {
+    // Smithy `@length(1, 64)` on AccountSettingName.
+    if name.is_empty() || name.len() > 64 {
+        return Err(invalid_parameter(format!(
+            "Invalid parameter at 'name': '{name}' failed to satisfy constraint: \
+             Member must have length between 1 and 64"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_pullthrough_prefix(prefix: &str) -> Result<(), AwsServiceError> {
+    // Smithy @length(2, 30) on PullThroughCacheRuleRepositoryPrefix.
+    if prefix.len() < 2 || prefix.len() > 30 {
+        return Err(invalid_parameter(format!(
+            "Invalid parameter at 'ecrRepositoryPrefix': '{prefix}' failed to satisfy constraint: \
+             Member must have length between 2 and 30"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_template_prefix(prefix: &str) -> Result<(), AwsServiceError> {
+    // Smithy `@length(2, 256)` on CreationTemplatePrefixString, plus
+    // AWS's `ROOT` sentinel that's allowed on any-prefix templates.
+    if prefix == "ROOT" {
+        return Ok(());
+    }
+    if prefix.len() < 2 || prefix.len() > 256 {
+        return Err(invalid_parameter(format!(
+            "Invalid parameter at 'prefix': '{prefix}' failed to satisfy constraint: \
+             Member must have length between 2 and 256"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_max_results(body: &Value) -> Result<(), AwsServiceError> {
+    if let Some(n) = body.get("maxResults").and_then(|v| v.as_i64()) {
+        if !(1..=1000).contains(&n) {
+            return Err(invalid_parameter(format!(
+                "Value '{n}' at 'maxResults' failed to satisfy constraint: \
+                 Member must have value between 1 and 1000"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn pull_through_rule_json(registry_id: &str, r: &crate::state::PullThroughCacheRule) -> Value {
+    pull_through_rule_json_with(registry_id, r, false)
+}
+
+fn pull_through_rule_json_with_updated(
+    registry_id: &str,
+    r: &crate::state::PullThroughCacheRule,
+) -> Value {
+    pull_through_rule_json_with(registry_id, r, true)
+}
+
+fn pull_through_rule_json_with(
+    registry_id: &str,
+    r: &crate::state::PullThroughCacheRule,
+    include_updated: bool,
+) -> Value {
+    let mut out = json!({
+        "ecrRepositoryPrefix": r.ecr_repository_prefix,
+        "upstreamRegistryUrl": r.upstream_registry_url,
+        "createdAt": r.created_at.timestamp(),
+        "registryId": registry_id,
+    });
+    if include_updated {
+        out["updatedAt"] = json!(r.updated_at.timestamp());
+    }
+    if let Some(v) = &r.credential_arn {
+        out["credentialArn"] = json!(v);
+    }
+    if let Some(v) = &r.upstream_registry {
+        out["upstreamRegistry"] = json!(v);
+    }
+    if let Some(v) = &r.custom_role_arn {
+        out["customRoleArn"] = json!(v);
+    }
+    out
+}
+
+fn template_to_json(tpl: &crate::state::RepositoryCreationTemplate) -> Value {
+    let mut out = json!({
+        "prefix": tpl.prefix,
+        "imageTagMutability": tpl.image_tag_mutability,
+        "appliedFor": tpl.applied_for,
+        "resourceTags": tpl.resource_tags,
+        "createdAt": tpl.created_at.timestamp(),
+        "updatedAt": tpl.updated_at.timestamp(),
+    });
+    if let Some(desc) = &tpl.description {
+        out["description"] = json!(desc);
+    }
+    if let Some(arn) = &tpl.custom_role_arn {
+        out["customRoleArn"] = json!(arn);
+    }
+    if let Some(p) = &tpl.repository_policy {
+        out["repositoryPolicy"] = json!(p);
+    }
+    if let Some(p) = &tpl.lifecycle_policy {
+        out["lifecyclePolicy"] = json!(p);
+    }
+    if let Some(enc) = &tpl.encryption_configuration {
+        let mut e = Map::new();
+        e.insert("encryptionType".to_string(), json!(enc.encryption_type));
+        if let Some(k) = &enc.kms_key {
+            e.insert("kmsKey".to_string(), json!(k));
+        }
+        out["encryptionConfiguration"] = Value::Object(e);
+    }
+    out
 }
 
 #[cfg(test)]

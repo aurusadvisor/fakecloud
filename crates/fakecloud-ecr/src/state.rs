@@ -4,6 +4,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub type SharedEcrState = Arc<RwLock<fakecloud_core::multi_account::MultiAccountState<EcrState>>>;
 
@@ -13,7 +14,7 @@ impl fakecloud_core::multi_account::AccountState for EcrState {
     }
 }
 
-pub const ECR_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+pub const ECR_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 /// Top-level persisted ECR snapshot. The shape mirrors the convention
 /// used by other multi-account services (Kinesis, ElastiCache) so the
@@ -46,6 +47,19 @@ pub struct EcrState {
     /// tied to a specific repository.
     #[serde(default)]
     pub layer_uploads: BTreeMap<String, LayerUpload>,
+    /// Pull-time update exclusions keyed by IAM principal ARN. These
+    /// are registry-level per the Smithy model.
+    #[serde(default)]
+    pub pull_time_exclusions: BTreeMap<String, PullTimeExclusion>,
+    /// Pull-through cache rules keyed by `ecrRepositoryPrefix`.
+    #[serde(default)]
+    pub pull_through_cache_rules: BTreeMap<String, PullThroughCacheRule>,
+    /// Repository creation templates keyed by prefix.
+    #[serde(default)]
+    pub repository_creation_templates: BTreeMap<String, RepositoryCreationTemplate>,
+    /// Registry-wide signing configuration.
+    #[serde(default)]
+    pub signing_configuration: Option<SigningConfiguration>,
 }
 
 impl EcrState {
@@ -59,6 +73,10 @@ impl EcrState {
             replication_configuration: None,
             account_settings: HashMap::new(),
             layer_uploads: BTreeMap::new(),
+            pull_time_exclusions: BTreeMap::new(),
+            pull_through_cache_rules: BTreeMap::new(),
+            repository_creation_templates: BTreeMap::new(),
+            signing_configuration: None,
         }
     }
 
@@ -69,6 +87,10 @@ impl EcrState {
         self.replication_configuration = None;
         self.account_settings.clear();
         self.layer_uploads.clear();
+        self.pull_time_exclusions.clear();
+        self.pull_through_cache_rules.clear();
+        self.repository_creation_templates.clear();
+        self.signing_configuration = None;
     }
 
     pub fn repository_arn(&self, repository_name: &str) -> String {
@@ -99,6 +121,9 @@ pub struct Repository {
     pub policy: Option<String>,
     /// Repository-level lifecycle policy document JSON.
     pub lifecycle_policy: Option<String>,
+    /// Per-image scan findings, keyed by manifest digest.
+    #[serde(default)]
+    pub scan_findings: BTreeMap<String, ImageScanFindings>,
     /// Stored images keyed by manifest digest (sha256). One image can
     /// have many tags (via `image_tags`).
     #[serde(default)]
@@ -139,11 +164,59 @@ impl Repository {
             tags: BTreeMap::new(),
             policy: None,
             lifecycle_policy: None,
+            scan_findings: BTreeMap::new(),
             images: BTreeMap::new(),
             image_tags: BTreeMap::new(),
             layers: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PullTimeExclusion {
+    pub principal_arn: String,
+    pub registered_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageScanFindings {
+    pub image_digest: String,
+    pub scan_status: String,
+    pub scan_completed_at: Option<DateTime<Utc>>,
+    pub vulnerability_source_updated_at: Option<DateTime<Utc>>,
+    pub finding_severity_counts: BTreeMap<String, i64>,
+    pub findings: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PullThroughCacheRule {
+    pub ecr_repository_prefix: String,
+    pub upstream_registry_url: String,
+    pub upstream_registry: Option<String>,
+    pub credential_arn: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub custom_role_arn: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RepositoryCreationTemplate {
+    pub prefix: String,
+    pub description: Option<String>,
+    pub image_tag_mutability: String,
+    pub applied_for: Vec<String>,
+    pub resource_tags: Vec<Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub custom_role_arn: Option<String>,
+    pub repository_policy: Option<String>,
+    pub lifecycle_policy: Option<String>,
+    pub encryption_configuration: Option<EncryptionConfiguration>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SigningConfiguration {
+    pub rules: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

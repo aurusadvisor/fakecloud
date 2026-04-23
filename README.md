@@ -48,7 +48,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 
 ## Supported services
 
-24 services, 1,702 operations, 100% conformance per implemented service.
+24 services, 1,738 operations, 100% conformance per implemented service.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -75,7 +75,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | API Gateway v2         |  28 | HTTP APIs, Lambda proxy, JWT/Lambda authorizers, CORS                  |
 | Bedrock                | 101 | Foundation models, guardrails, custom models, invocation/eval jobs    |
 | Bedrock Runtime        |  10 | InvokeModel, Converse, streaming, configurable responses, fault inject |
-| ECR                    |  22 | Repositories, images, OCI v2 Distribution (real `docker push`/`pull`)  |
+| ECR                    |  58 | Full API — OCI v2 push/pull, lifecycle, scanning, registry, pull-through |
 
 Per-service docs and feature matrices: [fakecloud.dev/docs/services](https://fakecloud.dev/docs/services).
 
@@ -114,7 +114,7 @@ Full guides: [fakecloud.dev/docs/guides](https://fakecloud.dev/docs/guides).
 | ElastiCache         | 75 operations, Redis and Valkey via Docker         | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | API Gateway v2      | 28 operations, full HTTP API support               | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | Bedrock             | 111 operations (control plane + runtime)           | Not available                                                                  |
-| ECR                 | Real `docker push`/`pull` via OCI v2 Distribution  | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| ECR                 | 58 operations, real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/)              |
 
 > Performance numbers measured on Apple M1 via `time fakecloud`, `ps -o rss`, `ls -lh`.
 
