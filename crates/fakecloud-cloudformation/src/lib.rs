@@ -1,3 +1,4 @@
+pub mod extras;
 pub mod resource_provisioner;
 pub mod service;
 pub mod state;
