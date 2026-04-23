@@ -1042,10 +1042,34 @@ fn classify_response(
     expectation: &Expectation,
     duration_ms: u64,
 ) -> ProbeResult {
+    // Classify as NotImplemented when fakecloud signals "we did not find a
+    // handler for this action" — as opposed to AWS-shaped errors that mean
+    // "handler found, rejected synthetic input" (e.g. ValidationException,
+    // ResourceNotFoundException for a non-existent resource id).
+    //
+    // The error-body patterns below cover every way fakecloud services
+    // today express an unrouted action:
+    //   - `not implemented` / `NotImplemented` — `ActionNotImplemented`
+    //     emitted by the generic service dispatcher.
+    //   - `UnknownAction` / `InvalidAction` — Query-protocol services
+    //     for unknown `Action=…` form params.
+    //   - `UnknownOperationException` — Lambda for unrouted URL paths.
+    //   - `Unknown path:` — API Gateway v2, EventBridge Scheduler, and
+    //     a few other REST-routed services return this string in the
+    //     error body when `resolve_action` yields None.
+    //   - `Unknown operation:` — also emitted by some Query services.
+    //
+    // Important: these substrings must NOT appear in legitimate AWS-shaped
+    // error responses for implemented actions. `NotFoundException` alone is
+    // not listed here because it's also what implemented handlers return
+    // for a missing resource id.
     let is_not_implemented = body.contains("not implemented")
         || body.contains("NotImplemented")
         || body.contains("UnknownAction")
-        || body.contains("InvalidAction");
+        || body.contains("InvalidAction")
+        || body.contains("UnknownOperationException")
+        || body.contains("Unknown path:")
+        || body.contains("Unknown operation:");
 
     if is_not_implemented {
         return ProbeResult {
@@ -1508,5 +1532,44 @@ mod tests {
         let input = serde_json::json!({"Id": "a b#c"});
         let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
         assert_eq!(url, "/foo/a%20b%23c");
+    }
+
+    #[test]
+    fn classify_unknown_path_is_not_implemented() {
+        // API Gateway v2 emits `Unknown path: ...` when resolve_action
+        // can't match a URL. Must classify as NotImplemented, not Pass.
+        let body = r#"{"__type":"NotFoundException","message":"Unknown path: /v2/domainnames"}"#;
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0);
+        assert_eq!(result.status, ProbeStatus::NotImplemented);
+    }
+
+    #[test]
+    fn classify_unknown_operation_is_not_implemented() {
+        // Lambda emits `UnknownOperationException` for URLs its
+        // resolve_action doesn't recognize.
+        let body = r#"{"__type":"UnknownOperationException","message":"Unknown operation: /foo"}"#;
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0);
+        assert_eq!(result.status, ProbeStatus::NotImplemented);
+    }
+
+    #[test]
+    fn classify_action_not_implemented_string() {
+        // `ActionNotImplemented` error maps to the substring "not implemented"
+        // in the response body.
+        let body =
+            r#"{"__type":"InvalidAction","message":"action Foo not implemented for service bar"}"#;
+        let result = classify_response("v1", 501, body, &Expectation::Success, 0);
+        assert_eq!(result.status, ProbeStatus::NotImplemented);
+    }
+
+    #[test]
+    fn classify_legit_resource_not_found_is_pass() {
+        // AWS-shaped `ResourceNotFoundException` for a synthetic id is a
+        // legitimate response from an implemented handler; must not be
+        // confused with NotImplemented.
+        let body =
+            r#"{"__type":"ResourceNotFoundException","message":"Function not found: test-fn"}"#;
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0);
+        assert_eq!(result.status, ProbeStatus::Pass);
     }
 }
