@@ -1042,10 +1042,34 @@ fn classify_response(
     expectation: &Expectation,
     duration_ms: u64,
 ) -> ProbeResult {
+    // Classify as NotImplemented when fakecloud signals "we did not find a
+    // handler for this action" — as opposed to AWS-shaped errors that mean
+    // "handler found, rejected synthetic input" (e.g. ValidationException,
+    // ResourceNotFoundException for a non-existent resource id).
+    //
+    // The error-body patterns below cover every way fakecloud services
+    // today express an unrouted action:
+    //   - `not implemented` / `NotImplemented` — `ActionNotImplemented`
+    //     emitted by the generic service dispatcher.
+    //   - `UnknownAction` / `InvalidAction` — Query-protocol services
+    //     for unknown `Action=…` form params.
+    //   - `UnknownOperationException` — Lambda for unrouted URL paths.
+    //   - `Unknown path:` — API Gateway v2, EventBridge Scheduler, and
+    //     a few other REST-routed services return this string in the
+    //     error body when `resolve_action` yields None.
+    //   - `Unknown operation:` — also emitted by some Query services.
+    //
+    // Important: these substrings must NOT appear in legitimate AWS-shaped
+    // error responses for implemented actions. `NotFoundException` alone is
+    // not listed here because it's also what implemented handlers return
+    // for a missing resource id.
     let is_not_implemented = body.contains("not implemented")
         || body.contains("NotImplemented")
         || body.contains("UnknownAction")
-        || body.contains("InvalidAction");
+        || body.contains("InvalidAction")
+        || body.contains("UnknownOperationException")
+        || body.contains("Unknown path:")
+        || body.contains("Unknown operation:");
 
     if is_not_implemented {
         return ProbeResult {

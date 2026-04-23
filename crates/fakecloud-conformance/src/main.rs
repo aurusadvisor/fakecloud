@@ -180,6 +180,30 @@ fn run_probes(
         .build()
         .expect("Failed to create HTTP client");
 
+    // Cross-reference Smithy operations against fakecloud's own
+    // `fn supported_actions()` lists. Operations not in a service's SUPPORTED
+    // set are classified as NotImplemented without sending a probe. This
+    // prevents fakecloud's grab-bag of unrouted-path responses
+    // (NotFoundException, UnknownOperationException, execute-api stage errors,
+    // generic-handler stubs, etc.) from being counted as "routed successes"
+    // under the lenient 2xx-4xx = Pass rule.
+    //
+    // The SUPPORTED list is fakecloud's own source of truth for "we implement
+    // this action." Treating it as authoritative gives honest per-service
+    // coverage numbers and surfaces real feature gaps — the same numbers the
+    // Level-2 audit uses. If a service routes actions without listing them
+    // in SUPPORTED (a known under-reporting pattern in some older services),
+    // the right fix is to update SUPPORTED, not to paper over in the probe.
+    let project_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let implemented_actions = fakecloud_conformance::audit::scan_implemented_actions(&project_root)
+        .unwrap_or_else(|e| {
+            eprintln!("Warning: failed to scan implemented actions: {e}");
+            HashMap::new()
+        });
+    let implemented_tags = fakecloud_conformance::audit::audit_service_tags(&project_root);
+
     let mut all_results: HashMap<String, HashMap<String, Vec<probe::ProbeResult>>> = HashMap::new();
     let mut total_ops_per_service: HashMap<String, usize> = HashMap::new();
 
@@ -200,9 +224,58 @@ fn run_probes(
 
         let mut service_results: HashMap<String, Vec<probe::ProbeResult>> = HashMap::new();
 
+        // Union SUPPORTED lists across every audit mapping whose tag list
+        // includes this Smithy service_name. Covers shared-crate services
+        // (bedrock + bedrock-runtime share one SUPPORTED list across two
+        // Smithy service keys).
+        let supported_for_service: Option<Vec<String>> = {
+            let mut combined: Vec<String> = Vec::new();
+            let mut any = false;
+            for (audit_key, tags) in &implemented_tags {
+                if tags.iter().any(|t| t == service_name) {
+                    if let Some(list) = implemented_actions.get(audit_key) {
+                        combined.extend(list.iter().cloned());
+                        any = true;
+                    }
+                }
+            }
+            if any {
+                combined.sort();
+                combined.dedup();
+                Some(combined)
+            } else {
+                // Smithy service not yet in audit mapping — preserve the
+                // legacy probe-and-classify behavior so nothing regresses.
+                None
+            }
+        };
+
         for op in &model.operations {
             let overrides = HashMap::new();
             let variants = generators::generate_all_variants(model, &op.name, &overrides);
+
+            // If fakecloud's SUPPORTED list is known and this op isn't in it,
+            // short-circuit every variant to NotImplemented. Saves the
+            // network round-trip and, more importantly, gives an honest
+            // per-service coverage number.
+            if let Some(supported) = supported_for_service.as_ref() {
+                if !supported.iter().any(|s| s == &op.name) {
+                    let results: Vec<probe::ProbeResult> = variants
+                        .iter()
+                        .map(|v| probe::ProbeResult {
+                            variant_name: v.name.clone(),
+                            status: probe::ProbeStatus::NotImplemented,
+                            http_status: 0,
+                            response_body: String::new(),
+                            duration_ms: 0,
+                        })
+                        .collect();
+                    let total = results.len();
+                    eprintln!("  SKIP {} (0/{})", op.name, total);
+                    service_results.insert(op.name.clone(), results);
+                    continue;
+                }
+            }
 
             // Get output shape for shape validation
             let output_shape_id = op.output_shape.as_deref();
