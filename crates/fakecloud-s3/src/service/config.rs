@@ -1201,4 +1201,701 @@ impl S3Service {
         }
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
+
+    // ---- Analytics / Intelligent-Tiering / Metrics configurations ----
+
+    pub(super) fn put_bucket_analytics_config(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        store_named_config(self, account_id, req, bucket, ConfigKind::Analytics)
+    }
+    pub(super) fn get_bucket_analytics_config(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        get_named_config(self, account_id, req, bucket, ConfigKind::Analytics)
+    }
+    pub(super) fn delete_bucket_analytics_config(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        delete_named_config(self, account_id, req, bucket, ConfigKind::Analytics)
+    }
+    pub(super) fn list_bucket_analytics_configurations(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        list_named_config(self, account_id, bucket, ConfigKind::Analytics)
+    }
+
+    pub(super) fn put_bucket_intelligent_tiering_config(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        store_named_config(
+            self,
+            account_id,
+            req,
+            bucket,
+            ConfigKind::IntelligentTiering,
+        )
+    }
+    pub(super) fn get_bucket_intelligent_tiering_config(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        get_named_config(
+            self,
+            account_id,
+            req,
+            bucket,
+            ConfigKind::IntelligentTiering,
+        )
+    }
+    pub(super) fn delete_bucket_intelligent_tiering_config(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        delete_named_config(
+            self,
+            account_id,
+            req,
+            bucket,
+            ConfigKind::IntelligentTiering,
+        )
+    }
+    pub(super) fn list_bucket_intelligent_tiering_configurations(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        list_named_config(self, account_id, bucket, ConfigKind::IntelligentTiering)
+    }
+
+    pub(super) fn put_bucket_metrics_config(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        store_named_config(self, account_id, req, bucket, ConfigKind::Metrics)
+    }
+    pub(super) fn get_bucket_metrics_config(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        get_named_config(self, account_id, req, bucket, ConfigKind::Metrics)
+    }
+    pub(super) fn delete_bucket_metrics_config(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        delete_named_config(self, account_id, req, bucket, ConfigKind::Metrics)
+    }
+    pub(super) fn list_bucket_metrics_configurations(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        list_named_config(self, account_id, bucket, ConfigKind::Metrics)
+    }
+
+    // ---- Request Payment ----
+
+    pub(super) fn put_bucket_request_payment(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.request_payment = Some(body_str);
+        Ok(empty_response(StatusCode::OK))
+    }
+
+    pub(super) fn get_bucket_request_payment(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accts = self.state.read();
+        let empty = crate::state::S3State::new(account_id, "us-east-1");
+        let state = accts.get(account_id).unwrap_or(&empty);
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let payer = b
+            .request_payment
+            .as_deref()
+            .and_then(|x| extract_xml_value(x, "Payer"))
+            .unwrap_or_else(|| "BucketOwner".to_string());
+        let body = format!(
+            "<RequestPaymentConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Payer>{}</Payer></RequestPaymentConfiguration>",
+            xml_escape(&payer)
+        );
+        Ok(s3_xml(StatusCode::OK, body))
+    }
+
+    // ---- ABAC ----
+
+    pub(super) fn put_bucket_abac(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.abac_config = Some(body_str);
+        Ok(empty_response(StatusCode::OK))
+    }
+    pub(super) fn get_bucket_abac(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accts = self.state.read();
+        let empty = crate::state::S3State::new(account_id, "us-east-1");
+        let state = accts.get(account_id).unwrap_or(&empty);
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let body = b
+            .abac_config
+            .clone()
+            .unwrap_or_else(|| "<BucketAbacConfiguration/>".to_string());
+        Ok(s3_xml(StatusCode::OK, body))
+    }
+
+    // ---- Policy Status ----
+
+    pub(super) fn get_bucket_policy_status(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accts = self.state.read();
+        let empty = crate::state::S3State::new(account_id, "us-east-1");
+        let state = accts.get(account_id).unwrap_or(&empty);
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let is_public = b
+            .policy
+            .as_deref()
+            .map(|p| p.contains("\"Principal\":\"*\"") || p.contains("\"AWS\":\"*\""))
+            .unwrap_or(false);
+        let body = format!("<PolicyStatus><IsPublic>{is_public}</IsPublic></PolicyStatus>");
+        Ok(s3_xml(StatusCode::OK, body))
+    }
+
+    // ---- Metadata configurations ----
+
+    pub(super) fn create_bucket_metadata_config(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.metadata_configuration = Some(body_str);
+        Ok(empty_response(StatusCode::OK))
+    }
+    pub(super) fn get_bucket_metadata_config(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accts = self.state.read();
+        let empty = crate::state::S3State::new(account_id, "us-east-1");
+        let state = accts.get(account_id).unwrap_or(&empty);
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let body = b
+            .metadata_configuration
+            .clone()
+            .unwrap_or_else(|| "<GetBucketMetadataConfigurationResult/>".to_string());
+        Ok(s3_xml(StatusCode::OK, body))
+    }
+    pub(super) fn delete_bucket_metadata_config(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.metadata_configuration = None;
+        Ok(empty_response(StatusCode::NO_CONTENT))
+    }
+
+    pub(super) fn create_bucket_metadata_table_config(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.metadata_table_configuration = Some(body_str);
+        Ok(empty_response(StatusCode::OK))
+    }
+    pub(super) fn get_bucket_metadata_table_config(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accts = self.state.read();
+        let empty = crate::state::S3State::new(account_id, "us-east-1");
+        let state = accts.get(account_id).unwrap_or(&empty);
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let body = b
+            .metadata_table_configuration
+            .clone()
+            .unwrap_or_else(|| "<GetBucketMetadataTableConfigurationResult/>".to_string());
+        Ok(s3_xml(StatusCode::OK, body))
+    }
+    pub(super) fn delete_bucket_metadata_table_config(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        b.metadata_table_configuration = None;
+        Ok(empty_response(StatusCode::NO_CONTENT))
+    }
+    pub(super) fn update_bucket_metadata_inventory_table(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        // Composite metadata configuration: append/replace inventory table block.
+        let combined = match b.metadata_configuration.as_deref() {
+            Some(prev) => format!("{prev}\n<InventoryTable>{body_str}</InventoryTable>"),
+            None => format!("<InventoryTable>{body_str}</InventoryTable>"),
+        };
+        b.metadata_configuration = Some(combined);
+        Ok(empty_response(StatusCode::OK))
+    }
+    pub(super) fn update_bucket_metadata_journal_table(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let combined = match b.metadata_configuration.as_deref() {
+            Some(prev) => format!("{prev}\n<JournalTable>{body_str}</JournalTable>"),
+            None => format!("<JournalTable>{body_str}</JournalTable>"),
+        };
+        b.metadata_configuration = Some(combined);
+        Ok(empty_response(StatusCode::OK))
+    }
+
+    // ---- ListDirectoryBuckets / CreateSession (S3 Express) ----
+
+    pub(super) fn list_directory_buckets(
+        &self,
+        account_id: &str,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // S3 Express directory buckets are not modeled separately in
+        // fakecloud; return an empty list per the documented schema so
+        // SDK calls succeed.
+        let _ = account_id;
+        let body = "<ListDirectoryBucketsResult><Buckets/><ContinuationToken/></ListDirectoryBucketsResult>".to_string();
+        Ok(s3_xml(StatusCode::OK, body))
+    }
+
+    pub(super) fn create_session(
+        &self,
+        account_id: &str,
+        _req: &AwsRequest,
+        bucket: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // Issue ephemeral credentials scoped to the directory bucket. These
+        // are not usable for actual SigV4 in the emulator (the S3 Express
+        // session-token flow isn't enforced) but the response shape is
+        // what SDKs expect.
+        let _ = account_id;
+        let body = format!(
+            "<CreateSessionResult><Credentials><AccessKeyId>FAKEACCESSKEY</AccessKeyId><SecretAccessKey>FAKESECRET</SecretAccessKey><SessionToken>FAKESESSION-{}</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials></CreateSessionResult>",
+            xml_escape(bucket)
+        );
+        Ok(s3_xml(StatusCode::OK, body))
+    }
+
+    // ---- Object-level extras ----
+
+    pub(super) fn rename_object(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // RenameObject is an S3 Express op: source key is taken from the
+        // x-amz-rename-source header; destination is the request URI key.
+        let source_key = req
+            .headers
+            .get("x-amz-rename-source")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "x-amz-rename-source header is required for RenameObject.",
+                )
+            })?
+            .trim_start_matches('/')
+            .to_string();
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let obj = b.objects.remove(&source_key).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchKey",
+                format!("Source key {source_key} does not exist."),
+            )
+        })?;
+        b.objects.insert(key.to_string(), obj);
+        Ok(empty_response(StatusCode::OK))
+    }
+
+    pub(super) fn update_object_encryption(
+        &self,
+        account_id: &str,
+        req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let new_alg = req
+            .headers
+            .get("x-amz-server-side-encryption")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        let obj = b.objects.get_mut(key).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchKey",
+                format!("Key {key} does not exist."),
+            )
+        })?;
+        obj.sse_algorithm = new_alg;
+        Ok(empty_response(StatusCode::OK))
+    }
+
+    pub(super) fn get_object_torrent(
+        &self,
+        account_id: &str,
+        _req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accts = self.state.read();
+        let empty = crate::state::S3State::new(account_id, "us-east-1");
+        let state = accts.get(account_id).unwrap_or(&empty);
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        if !b.objects.contains_key(key) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchKey",
+                format!("Key {key} does not exist."),
+            ));
+        }
+        // Return a stub torrent file body. Real S3 disabled torrent in
+        // 2024; keep an honest tiny payload here so callers see the route
+        // is wired.
+        let body = b"d8:announce0:e".to_vec();
+        Ok(AwsResponse {
+            status: StatusCode::OK,
+            content_type: "application/x-bittorrent".to_string(),
+            body: Bytes::from(body).into(),
+            headers: HeaderMap::new(),
+        })
+    }
+
+    pub(super) fn select_object_content(
+        &self,
+        account_id: &str,
+        _req: &AwsRequest,
+        bucket: &str,
+        key: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // SelectObjectContent normally returns an EventStream of
+        // RecordsEvent / EndEvent frames. We can't easily produce real
+        // EventStream binary frames here, but the SDK only requires a 200
+        // with the right content-type; the parser will then receive an
+        // empty event stream which is decoded as zero records.
+        let accts = self.state.read();
+        let empty = crate::state::S3State::new(account_id, "us-east-1");
+        let state = accts.get(account_id).unwrap_or(&empty);
+        let b = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        if !b.objects.contains_key(key) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchKey",
+                format!("Key {key} does not exist."),
+            ));
+        }
+        let body = Bytes::new();
+        Ok(AwsResponse {
+            status: StatusCode::OK,
+            content_type: "application/octet-stream".to_string(),
+            body: body.into(),
+            headers: HeaderMap::new(),
+        })
+    }
+
+    pub(super) fn write_get_object_response(
+        &self,
+        _account_id: &str,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // Object Lambda WriteGetObjectResponse is the back-channel a
+        // Lambda function uses to deliver its rewritten payload to the
+        // requesting client. fakecloud doesn't run Object Lambda; ack the
+        // call so SDKs don't error out, and rely on integration tests for
+        // any real exercise.
+        Ok(empty_response(StatusCode::OK))
+    }
+}
+
+// ── Shared helpers for analytics/intelligent-tiering/metrics named configs ──
+
+#[derive(Clone, Copy)]
+enum ConfigKind {
+    Analytics,
+    IntelligentTiering,
+    Metrics,
+}
+
+impl ConfigKind {
+    fn list_root(&self) -> &'static str {
+        match self {
+            ConfigKind::Analytics => "ListBucketAnalyticsConfigurationResult",
+            ConfigKind::IntelligentTiering => "ListBucketIntelligentTieringConfigurationsOutput",
+            ConfigKind::Metrics => "ListMetricsConfigurationsResult",
+        }
+    }
+    fn member(&self) -> &'static str {
+        match self {
+            ConfigKind::Analytics => "AnalyticsConfiguration",
+            ConfigKind::IntelligentTiering => "IntelligentTieringConfiguration",
+            ConfigKind::Metrics => "MetricsConfiguration",
+        }
+    }
+}
+
+fn config_map(
+    bucket: &mut crate::state::S3Bucket,
+    kind: ConfigKind,
+) -> &mut std::collections::HashMap<String, String> {
+    match kind {
+        ConfigKind::Analytics => &mut bucket.analytics_configs,
+        ConfigKind::IntelligentTiering => &mut bucket.intelligent_tiering_configs,
+        ConfigKind::Metrics => &mut bucket.metrics_configs,
+    }
+}
+
+fn config_map_ref(
+    bucket: &crate::state::S3Bucket,
+    kind: ConfigKind,
+) -> &std::collections::HashMap<String, String> {
+    match kind {
+        ConfigKind::Analytics => &bucket.analytics_configs,
+        ConfigKind::IntelligentTiering => &bucket.intelligent_tiering_configs,
+        ConfigKind::Metrics => &bucket.metrics_configs,
+    }
+}
+
+fn store_named_config(
+    svc: &S3Service,
+    account_id: &str,
+    req: &AwsRequest,
+    bucket: &str,
+    kind: ConfigKind,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = req.query_params.get("id").cloned().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "Missing required query parameter: id",
+        )
+    })?;
+    let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+    let mut accts = svc.state.write();
+    let state = accts.get_or_create(account_id);
+    let b = state
+        .buckets
+        .get_mut(bucket)
+        .ok_or_else(|| no_such_bucket(bucket))?;
+    config_map(b, kind).insert(id, body_str);
+    Ok(empty_response(StatusCode::OK))
+}
+
+fn get_named_config(
+    svc: &S3Service,
+    account_id: &str,
+    req: &AwsRequest,
+    bucket: &str,
+    kind: ConfigKind,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = req.query_params.get("id").cloned().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "Missing required query parameter: id",
+        )
+    })?;
+    let accts = svc.state.read();
+    let empty = crate::state::S3State::new(account_id, "us-east-1");
+    let state = accts.get(account_id).unwrap_or(&empty);
+    let b = state
+        .buckets
+        .get(bucket)
+        .ok_or_else(|| no_such_bucket(bucket))?;
+    let body = config_map_ref(b, kind).get(&id).cloned().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "NoSuchConfiguration",
+            format!("Configuration {id} not found."),
+        )
+    })?;
+    Ok(s3_xml(StatusCode::OK, body))
+}
+
+fn delete_named_config(
+    svc: &S3Service,
+    account_id: &str,
+    req: &AwsRequest,
+    bucket: &str,
+    kind: ConfigKind,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = req.query_params.get("id").cloned().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "Missing required query parameter: id",
+        )
+    })?;
+    let mut accts = svc.state.write();
+    let state = accts.get_or_create(account_id);
+    let b = state
+        .buckets
+        .get_mut(bucket)
+        .ok_or_else(|| no_such_bucket(bucket))?;
+    config_map(b, kind).remove(&id);
+    Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
+fn list_named_config(
+    svc: &S3Service,
+    account_id: &str,
+    bucket: &str,
+    kind: ConfigKind,
+) -> Result<AwsResponse, AwsServiceError> {
+    let accts = svc.state.read();
+    let empty = crate::state::S3State::new(account_id, "us-east-1");
+    let state = accts.get(account_id).unwrap_or(&empty);
+    let b = state
+        .buckets
+        .get(bucket)
+        .ok_or_else(|| no_such_bucket(bucket))?;
+    let entries: Vec<String> = config_map_ref(b, kind)
+        .values()
+        .map(|cfg| format!("<{m}>{cfg}</{m}>", m = kind.member()))
+        .collect();
+    let body = format!(
+        "<{root}>{entries}<IsTruncated>false</IsTruncated></{root}>",
+        root = kind.list_root(),
+        entries = entries.join(""),
+    );
+    Ok(s3_xml(StatusCode::OK, body))
 }

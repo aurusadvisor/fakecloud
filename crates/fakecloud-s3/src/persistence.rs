@@ -230,6 +230,13 @@ pub fn s3_bucket_from_snapshot(
         ownership_controls: None,
         inventory_configs: HashMap::new(),
         eventbridge_enabled: meta.eventbridge_enabled,
+        analytics_configs: HashMap::new(),
+        intelligent_tiering_configs: HashMap::new(),
+        metrics_configs: HashMap::new(),
+        request_payment: None,
+        abac_config: None,
+        metadata_configuration: None,
+        metadata_table_configuration: None,
     };
     for (key, lo) in objects {
         b.objects.insert(key, s3_object_from_loaded(lo));

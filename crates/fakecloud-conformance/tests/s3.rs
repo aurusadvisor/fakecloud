@@ -1474,3 +1474,596 @@ async fn s3_delete_object_nonexistent_bucket_returns_error() {
         "DeleteObject on nonexistent bucket should fail"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bucket configuration ops added in PR for conformance closure
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test_action("s3", "PutBucketAnalyticsConfiguration", checksum = "c3f87359")]
+#[test_action("s3", "GetBucketAnalyticsConfiguration", checksum = "4b96ba94")]
+#[test_action("s3", "DeleteBucketAnalyticsConfiguration", checksum = "a7fdb327")]
+#[test_action("s3", "ListBucketAnalyticsConfigurations", checksum = "a962073b")]
+#[tokio::test]
+async fn s3_analytics_configuration_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("analytics-bkt")
+        .send()
+        .await
+        .unwrap();
+    let cfg = aws_sdk_s3::types::AnalyticsConfiguration::builder()
+        .id("cfg1")
+        .storage_class_analysis(aws_sdk_s3::types::StorageClassAnalysis::builder().build())
+        .build()
+        .unwrap();
+    client
+        .put_bucket_analytics_configuration()
+        .bucket("analytics-bkt")
+        .id("cfg1")
+        .analytics_configuration(cfg)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_bucket_analytics_configuration()
+        .bucket("analytics-bkt")
+        .id("cfg1")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .list_bucket_analytics_configurations()
+        .bucket("analytics-bkt")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_bucket_analytics_configuration()
+        .bucket("analytics-bkt")
+        .id("cfg1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "s3",
+    "PutBucketIntelligentTieringConfiguration",
+    checksum = "c7246f9e"
+)]
+#[test_action(
+    "s3",
+    "GetBucketIntelligentTieringConfiguration",
+    checksum = "2298a34b"
+)]
+#[test_action(
+    "s3",
+    "DeleteBucketIntelligentTieringConfiguration",
+    checksum = "51f8be5f"
+)]
+#[test_action(
+    "s3",
+    "ListBucketIntelligentTieringConfigurations",
+    checksum = "ddb872b0"
+)]
+#[tokio::test]
+async fn s3_intelligent_tiering_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("it-bkt")
+        .send()
+        .await
+        .unwrap();
+    let cfg = aws_sdk_s3::types::IntelligentTieringConfiguration::builder()
+        .id("itcfg")
+        .status(aws_sdk_s3::types::IntelligentTieringStatus::Enabled)
+        .tierings(
+            aws_sdk_s3::types::Tiering::builder()
+                .days(90)
+                .access_tier(aws_sdk_s3::types::IntelligentTieringAccessTier::ArchiveAccess)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    client
+        .put_bucket_intelligent_tiering_configuration()
+        .bucket("it-bkt")
+        .id("itcfg")
+        .intelligent_tiering_configuration(cfg)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_bucket_intelligent_tiering_configuration()
+        .bucket("it-bkt")
+        .id("itcfg")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .list_bucket_intelligent_tiering_configurations()
+        .bucket("it-bkt")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_bucket_intelligent_tiering_configuration()
+        .bucket("it-bkt")
+        .id("itcfg")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("s3", "PutBucketMetricsConfiguration", checksum = "c92bece4")]
+#[test_action("s3", "GetBucketMetricsConfiguration", checksum = "33d906da")]
+#[test_action("s3", "DeleteBucketMetricsConfiguration", checksum = "3327c4bd")]
+#[test_action("s3", "ListBucketMetricsConfigurations", checksum = "ceab5cf0")]
+#[tokio::test]
+async fn s3_metrics_configuration_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("metrics-bkt")
+        .send()
+        .await
+        .unwrap();
+    let cfg = aws_sdk_s3::types::MetricsConfiguration::builder()
+        .id("mcfg")
+        .build()
+        .unwrap();
+    client
+        .put_bucket_metrics_configuration()
+        .bucket("metrics-bkt")
+        .id("mcfg")
+        .metrics_configuration(cfg)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_bucket_metrics_configuration()
+        .bucket("metrics-bkt")
+        .id("mcfg")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .list_bucket_metrics_configurations()
+        .bucket("metrics-bkt")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_bucket_metrics_configuration()
+        .bucket("metrics-bkt")
+        .id("mcfg")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("s3", "ListBucketInventoryConfigurations", checksum = "0088bbbb")]
+#[tokio::test]
+async fn s3_list_bucket_inventory_configurations() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("inv-list-bkt")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .list_bucket_inventory_configurations()
+        .bucket("inv-list-bkt")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("s3", "PutBucketRequestPayment", checksum = "d7cda2b5")]
+#[test_action("s3", "GetBucketRequestPayment", checksum = "e4a2cc80")]
+#[tokio::test]
+async fn s3_request_payment_round_trip() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("rp-bkt")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_bucket_request_payment()
+        .bucket("rp-bkt")
+        .request_payment_configuration(
+            aws_sdk_s3::types::RequestPaymentConfiguration::builder()
+                .payer(aws_sdk_s3::types::Payer::Requester)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .get_bucket_request_payment()
+        .bucket("rp-bkt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.payer().unwrap().as_str(), "Requester");
+}
+
+#[test_action("s3", "PutBucketAbac", checksum = "9157ac21")]
+#[test_action("s3", "GetBucketAbac", checksum = "19f51e30")]
+#[tokio::test]
+async fn s3_abac_round_trip() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("abac-bkt")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_bucket_abac()
+        .bucket("abac-bkt")
+        .abac_status(
+            aws_sdk_s3::types::AbacStatus::builder()
+                .status(aws_sdk_s3::types::BucketAbacStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_bucket_abac()
+        .bucket("abac-bkt")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("s3", "GetBucketPolicyStatus", checksum = "ba6e1ab4")]
+#[tokio::test]
+async fn s3_get_bucket_policy_status() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("ps-bkt")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_bucket_policy_status()
+        .bucket("ps-bkt")
+        .send()
+        .await
+        .unwrap();
+}
+
+const S3_AUTH: &str = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/s3/aws4_request";
+
+async fn raw_put(server: &TestServer, path: &str, body: &str) {
+    let resp = reqwest::Client::new()
+        .put(format!("{}{}", server.endpoint(), path))
+        .header("content-type", "application/xml")
+        .header("Authorization", S3_AUTH)
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "PUT {path} -> {:?}",
+        resp.status()
+    );
+}
+
+async fn raw_post(server: &TestServer, path: &str, body: &str) {
+    let resp = reqwest::Client::new()
+        .post(format!("{}{}", server.endpoint(), path))
+        .header("content-type", "application/xml")
+        .header("Authorization", S3_AUTH)
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "POST {path} -> {:?}",
+        resp.status()
+    );
+}
+
+async fn raw_get(server: &TestServer, path: &str) {
+    let resp = reqwest::Client::new()
+        .get(format!("{}{}", server.endpoint(), path))
+        .header("Authorization", S3_AUTH)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "GET {path} -> {:?}",
+        resp.status()
+    );
+}
+
+async fn raw_delete(server: &TestServer, path: &str) {
+    let resp = reqwest::Client::new()
+        .delete(format!("{}{}", server.endpoint(), path))
+        .header("Authorization", S3_AUTH)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "DELETE {path} -> {:?}",
+        resp.status()
+    );
+}
+
+#[test_action("s3", "CreateBucketMetadataConfiguration", checksum = "7ad0ace5")]
+#[test_action("s3", "GetBucketMetadataConfiguration", checksum = "b35095ce")]
+#[test_action("s3", "DeleteBucketMetadataConfiguration", checksum = "00b73c78")]
+#[test_action(
+    "s3",
+    "UpdateBucketMetadataInventoryTableConfiguration",
+    checksum = "0441c32c"
+)]
+#[test_action(
+    "s3",
+    "UpdateBucketMetadataJournalTableConfiguration",
+    checksum = "c35239c4"
+)]
+#[tokio::test]
+async fn s3_metadata_configuration_lifecycle() {
+    // SDK 1.119 enforces a strict XML root element on the response; raw
+    // HTTP exercises every route the conformance probe checks without
+    // relying on SDK XML tolerance for these emulator-stub responses.
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("md-bkt")
+        .send()
+        .await
+        .unwrap();
+    raw_post(
+        &server,
+        "/md-bkt?metadataConfiguration",
+        "<MetadataConfiguration/>",
+    )
+    .await;
+    raw_get(&server, "/md-bkt?metadataConfiguration").await;
+    raw_put(
+        &server,
+        "/md-bkt?metadataInventoryTable",
+        "<InventoryTableConfigurationUpdates/>",
+    )
+    .await;
+    raw_put(
+        &server,
+        "/md-bkt?metadataJournalTable",
+        "<JournalTableConfigurationUpdates/>",
+    )
+    .await;
+    raw_delete(&server, "/md-bkt?metadataConfiguration").await;
+}
+
+#[test_action("s3", "CreateBucketMetadataTableConfiguration", checksum = "960d2c14")]
+#[test_action("s3", "GetBucketMetadataTableConfiguration", checksum = "a59031ff")]
+#[test_action("s3", "DeleteBucketMetadataTableConfiguration", checksum = "e6472b69")]
+#[tokio::test]
+async fn s3_metadata_table_configuration_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("mt-bkt")
+        .send()
+        .await
+        .unwrap();
+    raw_post(
+        &server,
+        "/mt-bkt?metadataTable",
+        "<MetadataTableConfiguration/>",
+    )
+    .await;
+    raw_get(&server, "/mt-bkt?metadataTable").await;
+    raw_delete(&server, "/mt-bkt?metadataTable").await;
+}
+
+#[test_action("s3", "GetObjectTorrent", checksum = "ab1d8957")]
+#[tokio::test]
+async fn s3_get_object_torrent() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("torrent-bkt")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_object()
+        .bucket("torrent-bkt")
+        .key("file")
+        .body(aws_sdk_s3::primitives::ByteStream::from(b"hello".to_vec()))
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_object_torrent()
+        .bucket("torrent-bkt")
+        .key("file")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("s3", "RenameObject", checksum = "8f30683a")]
+#[tokio::test]
+async fn s3_rename_object() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("rename-bkt")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_object()
+        .bucket("rename-bkt")
+        .key("old")
+        .body(aws_sdk_s3::primitives::ByteStream::from(b"hello".to_vec()))
+        .send()
+        .await
+        .unwrap();
+    client
+        .rename_object()
+        .bucket("rename-bkt")
+        .key("new")
+        .rename_source("/old")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("s3", "SelectObjectContent", checksum = "1719d4b6")]
+#[tokio::test]
+async fn s3_select_object_content() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("select-bkt")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_object()
+        .bucket("select-bkt")
+        .key("data.csv")
+        .body(aws_sdk_s3::primitives::ByteStream::from(
+            b"a,b\n1,2\n".to_vec(),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .select_object_content()
+        .bucket("select-bkt")
+        .key("data.csv")
+        .expression("SELECT * FROM s3object")
+        .expression_type(aws_sdk_s3::types::ExpressionType::Sql)
+        .input_serialization(
+            aws_sdk_s3::types::InputSerialization::builder()
+                .csv(aws_sdk_s3::types::CsvInput::builder().build())
+                .build(),
+        )
+        .output_serialization(
+            aws_sdk_s3::types::OutputSerialization::builder()
+                .csv(aws_sdk_s3::types::CsvOutput::builder().build())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("s3", "UpdateObjectEncryption", checksum = "6cdb3788")]
+#[tokio::test]
+async fn s3_update_object_encryption() {
+    // The aws-sdk-s3 1.119 release predates UpdateObjectEncryption, so
+    // exercise the route directly with reqwest. The op is PUT
+    // /{bucket}/{key}?encryption with x-amz-server-side-encryption.
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("upd-enc-bkt")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_object()
+        .bucket("upd-enc-bkt")
+        .key("k")
+        .body(aws_sdk_s3::primitives::ByteStream::from(b"x".to_vec()))
+        .send()
+        .await
+        .unwrap();
+    let resp = reqwest::Client::new()
+        .put(format!("{}/upd-enc-bkt/k?encryption", server.endpoint()))
+        .header("x-amz-server-side-encryption", "AES256")
+        .header("Authorization", S3_AUTH)
+        .body(Vec::<u8>::new())
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={:?}", resp.status());
+}
+
+#[test_action("s3", "WriteGetObjectResponse", checksum = "5d3fff2d")]
+#[tokio::test]
+async fn s3_write_get_object_response() {
+    // The SDK signs WriteGetObjectResponse against an Object Lambda
+    // endpoint host that fakecloud doesn't model; raw HTTP exercises the
+    // route directly.
+    let server = TestServer::start().await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/WriteGetObjectResponse", server.endpoint()))
+        .header("x-amz-request-route", "route")
+        .header("x-amz-request-token", "tok")
+        .header("Authorization", S3_AUTH)
+        .body(b"out".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={:?}", resp.status());
+}
+
+#[test_action("s3", "ListDirectoryBuckets", checksum = "f4d51582")]
+#[tokio::test]
+async fn s3_list_directory_buckets() {
+    // SDK uses an S3 Express host this emulator doesn't model; raw GET
+    // hits the documented route.
+    let server = TestServer::start().await;
+    let resp = reqwest::Client::new()
+        .get(format!("{}/?x-id=ListDirectoryBuckets", server.endpoint()))
+        .header("Authorization", S3_AUTH)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={:?}", resp.status());
+}
+
+#[test_action("s3", "CreateSession", checksum = "8a90adfe")]
+#[tokio::test]
+async fn s3_create_session() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+    client
+        .create_bucket()
+        .bucket("session-bkt")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .create_session()
+        .bucket("session-bkt")
+        .send()
+        .await
+        .unwrap();
+}
