@@ -982,7 +982,7 @@ async fn apigwv2_closure_routes_exist() {
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let page_id = body["id"].as_str().unwrap().to_string();
+    let page_id = body["productPageId"].as_str().unwrap().to_string();
     apigw_request(
         &server,
         reqwest::Method::GET,
@@ -1020,7 +1020,10 @@ async fn apigwv2_closure_routes_exist() {
     )
     .await;
     let body: serde_json::Value = resp.json().await.unwrap();
-    let rep_id = body["id"].as_str().unwrap().to_string();
+    let rep_id = body["productRestEndpointPageId"]
+        .as_str()
+        .unwrap()
+        .to_string();
     apigw_request(
         &server,
         reqwest::Method::GET,
