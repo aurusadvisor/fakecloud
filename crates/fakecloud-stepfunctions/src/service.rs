@@ -36,6 +36,29 @@ const SUPPORTED: &[&str] = &[
     "ListExecutions",
     "GetExecutionHistory",
     "DescribeStateMachineForExecution",
+    "CreateActivity",
+    "DeleteActivity",
+    "DescribeActivity",
+    "ListActivities",
+    "GetActivityTask",
+    "SendTaskFailure",
+    "SendTaskHeartbeat",
+    "SendTaskSuccess",
+    "PublishStateMachineVersion",
+    "DeleteStateMachineVersion",
+    "ListStateMachineVersions",
+    "CreateStateMachineAlias",
+    "DeleteStateMachineAlias",
+    "DescribeStateMachineAlias",
+    "ListStateMachineAliases",
+    "UpdateStateMachineAlias",
+    "DescribeMapRun",
+    "ListMapRuns",
+    "UpdateMapRun",
+    "RedriveExecution",
+    "StartSyncExecution",
+    "TestState",
+    "ValidateStateMachineDefinition",
 ];
 
 pub struct StepFunctionsService {
@@ -106,6 +129,20 @@ fn is_mutating_action(action: &str) -> bool {
             | "UntagResource"
             | "StartExecution"
             | "StopExecution"
+            | "CreateActivity"
+            | "DeleteActivity"
+            | "GetActivityTask"
+            | "SendTaskFailure"
+            | "SendTaskHeartbeat"
+            | "SendTaskSuccess"
+            | "PublishStateMachineVersion"
+            | "DeleteStateMachineVersion"
+            | "CreateStateMachineAlias"
+            | "DeleteStateMachineAlias"
+            | "UpdateStateMachineAlias"
+            | "UpdateMapRun"
+            | "RedriveExecution"
+            | "StartSyncExecution"
     )
 }
 
@@ -132,6 +169,29 @@ impl AwsService for StepFunctionsService {
             "ListExecutions" => self.list_executions(&req),
             "GetExecutionHistory" => self.get_execution_history(&req),
             "DescribeStateMachineForExecution" => self.describe_state_machine_for_execution(&req),
+            "CreateActivity" => self.create_activity(&req),
+            "DeleteActivity" => self.delete_activity(&req),
+            "DescribeActivity" => self.describe_activity(&req),
+            "ListActivities" => self.list_activities(&req),
+            "GetActivityTask" => self.get_activity_task(&req),
+            "SendTaskFailure" => self.send_task_failure(&req),
+            "SendTaskHeartbeat" => self.send_task_heartbeat(&req),
+            "SendTaskSuccess" => self.send_task_success(&req),
+            "PublishStateMachineVersion" => self.publish_state_machine_version(&req),
+            "DeleteStateMachineVersion" => self.delete_state_machine_version(&req),
+            "ListStateMachineVersions" => self.list_state_machine_versions(&req),
+            "CreateStateMachineAlias" => self.create_state_machine_alias(&req),
+            "DeleteStateMachineAlias" => self.delete_state_machine_alias(&req),
+            "DescribeStateMachineAlias" => self.describe_state_machine_alias(&req),
+            "ListStateMachineAliases" => self.list_state_machine_aliases(&req),
+            "UpdateStateMachineAlias" => self.update_state_machine_alias(&req),
+            "DescribeMapRun" => self.describe_map_run(&req),
+            "ListMapRuns" => self.list_map_runs(&req),
+            "UpdateMapRun" => self.update_map_run(&req),
+            "RedriveExecution" => self.redrive_execution(&req),
+            "StartSyncExecution" => self.start_sync_execution(&req),
+            "TestState" => self.test_state(&req),
+            "ValidateStateMachineDefinition" => self.validate_state_machine_definition(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "states",
                 &req.action,
@@ -718,6 +778,586 @@ impl StepFunctionsService {
 
         Ok(AwsResponse::ok_json(json!({ "tags": tags })))
     }
+
+    // ─── Activities ─────────────────────────────────────────────────────
+
+    fn create_activity(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = body["name"].as_str().ok_or_else(|| missing("name"))?;
+        validate_name(name)?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let arn = format!(
+            "arn:aws:states:{}:{}:activity:{}",
+            state.region, state.account_id, name
+        );
+        if state.activities.contains_key(&arn) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ActivityAlreadyExists",
+                format!("Activity already exists: {arn}"),
+            ));
+        }
+        let activity = crate::state::Activity {
+            name: name.to_string(),
+            arn: arn.clone(),
+            creation_date: chrono::Utc::now(),
+            tags: HashMap::new(),
+        };
+        state.activities.insert(arn.clone(), activity.clone());
+        Ok(AwsResponse::ok_json(json!({
+            "activityArn": arn,
+            "creationDate": activity.creation_date.timestamp(),
+        })))
+    }
+
+    fn delete_activity(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["activityArn"]
+            .as_str()
+            .ok_or_else(|| missing("activityArn"))?
+            .to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.activities.remove(&arn);
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn describe_activity(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["activityArn"]
+            .as_str()
+            .ok_or_else(|| missing("activityArn"))?
+            .to_string();
+        let accounts = self.state.read();
+        let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let a = state.activities.get(&arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ActivityDoesNotExist",
+                format!("Activity does not exist: {arn}"),
+            )
+        })?;
+        Ok(AwsResponse::ok_json(json!({
+            "activityArn": a.arn,
+            "name": a.name,
+            "creationDate": a.creation_date.timestamp(),
+        })))
+    }
+
+    fn list_activities(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut activities: Vec<&crate::state::Activity> = state.activities.values().collect();
+        activities.sort_by(|a, b| a.name.cmp(&b.name));
+        let body = json!({
+            "activities": activities.iter().map(|a| json!({
+                "activityArn": a.arn,
+                "name": a.name,
+                "creationDate": a.creation_date.timestamp(),
+            })).collect::<Vec<_>>(),
+        });
+        Ok(AwsResponse::ok_json(body))
+    }
+
+    fn get_activity_task(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["activityArn"]
+            .as_str()
+            .ok_or_else(|| missing("activityArn"))?
+            .to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.activities.contains_key(&arn) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ActivityDoesNotExist",
+                format!("Activity does not exist: {arn}"),
+            ));
+        }
+        // Mint a synthetic task token tied to this activity. No worker
+        // pool to dispatch from in fakecloud, so we return an empty input.
+        let token = format!(
+            "FCToken-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        state.task_tokens.insert(
+            token.clone(),
+            crate::state::TaskTokenState {
+                activity_arn: arn,
+                status: "PENDING".to_string(),
+                output: None,
+                error: None,
+                cause: None,
+            },
+        );
+        Ok(AwsResponse::ok_json(json!({
+            "taskToken": token,
+            "input": "{}",
+        })))
+    }
+
+    fn send_task_success(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.update_task_token(req, "SUCCEEDED")
+    }
+
+    fn send_task_failure(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.update_task_token(req, "FAILED")
+    }
+
+    fn send_task_heartbeat(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.update_task_token(req, "HEARTBEAT")
+    }
+
+    fn update_task_token(
+        &self,
+        req: &AwsRequest,
+        new_status: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let token = body["taskToken"]
+            .as_str()
+            .ok_or_else(|| missing("taskToken"))?
+            .to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let entry = state.task_tokens.get_mut(&token).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "TaskDoesNotExist",
+                format!("Task does not exist: {token}"),
+            )
+        })?;
+        entry.status = new_status.to_string();
+        if new_status == "SUCCEEDED" {
+            entry.output = body["output"].as_str().map(String::from);
+        } else if new_status == "FAILED" {
+            entry.error = body["error"].as_str().map(String::from);
+            entry.cause = body["cause"].as_str().map(String::from);
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    // ─── State machine versions / aliases ───────────────────────────────
+
+    fn publish_state_machine_version(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["stateMachineArn"]
+            .as_str()
+            .ok_or_else(|| missing("stateMachineArn"))?
+            .to_string();
+        let description = body["description"].as_str().unwrap_or("").to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.state_machines.contains_key(&arn) {
+            return Err(state_machine_not_found(&arn));
+        }
+        let version = state
+            .state_machine_versions
+            .values()
+            .filter(|v| v.state_machine_arn == arn)
+            .map(|v| v.version)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let version_arn = format!("{arn}:{version}");
+        let v = crate::state::StateMachineVersion {
+            state_machine_arn: arn,
+            version,
+            revision_id: format!("rev-{version}"),
+            description,
+            creation_date: chrono::Utc::now(),
+        };
+        state
+            .state_machine_versions
+            .insert(version_arn.clone(), v.clone());
+        Ok(AwsResponse::ok_json(json!({
+            "stateMachineVersionArn": version_arn,
+            "creationDate": v.creation_date.timestamp(),
+        })))
+    }
+
+    fn delete_state_machine_version(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["stateMachineVersionArn"]
+            .as_str()
+            .ok_or_else(|| missing("stateMachineVersionArn"))?
+            .to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.state_machine_versions.remove(&arn);
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_state_machine_versions(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["stateMachineArn"]
+            .as_str()
+            .ok_or_else(|| missing("stateMachineArn"))?
+            .to_string();
+        let accounts = self.state.read();
+        let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut versions: Vec<&crate::state::StateMachineVersion> = state
+            .state_machine_versions
+            .values()
+            .filter(|v| v.state_machine_arn == arn)
+            .collect();
+        versions.sort_by_key(|v| std::cmp::Reverse(v.version));
+        let resp = json!({
+            "stateMachineVersions": versions.iter().map(|v| json!({
+                "stateMachineVersionArn": format!("{}:{}", v.state_machine_arn, v.version),
+                "creationDate": v.creation_date.timestamp(),
+            })).collect::<Vec<_>>(),
+        });
+        Ok(AwsResponse::ok_json(resp))
+    }
+
+    fn create_state_machine_alias(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = body["name"]
+            .as_str()
+            .ok_or_else(|| missing("name"))?
+            .to_string();
+        validate_name(&name)?;
+        let routing_cfg = body["routingConfiguration"]
+            .as_array()
+            .ok_or_else(|| missing("routingConfiguration"))?;
+        let routes: Vec<crate::state::AliasRoute> = routing_cfg
+            .iter()
+            .filter_map(|r| {
+                Some(crate::state::AliasRoute {
+                    state_machine_version_arn: r["stateMachineVersionArn"].as_str()?.to_string(),
+                    weight: r["weight"].as_i64().unwrap_or(0) as i32,
+                })
+            })
+            .collect();
+        if routes.is_empty() {
+            return Err(missing("routingConfiguration"));
+        }
+        let parent_arn = routes[0]
+            .state_machine_version_arn
+            .rsplit_once(':')
+            .map(|(parent, _)| parent.to_string())
+            .unwrap_or_default();
+        let alias_arn = format!("{parent_arn}:{name}");
+        let now = chrono::Utc::now();
+        let alias = crate::state::StateMachineAlias {
+            name,
+            arn: alias_arn.clone(),
+            description: body["description"].as_str().unwrap_or("").to_string(),
+            routing_configuration: routes,
+            creation_date: now,
+            update_date: now,
+        };
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.state_machine_aliases.insert(alias_arn.clone(), alias);
+        Ok(AwsResponse::ok_json(json!({
+            "stateMachineAliasArn": alias_arn,
+            "creationDate": now.timestamp(),
+        })))
+    }
+
+    fn delete_state_machine_alias(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["stateMachineAliasArn"]
+            .as_str()
+            .ok_or_else(|| missing("stateMachineAliasArn"))?
+            .to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.state_machine_aliases.remove(&arn);
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn describe_state_machine_alias(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["stateMachineAliasArn"]
+            .as_str()
+            .ok_or_else(|| missing("stateMachineAliasArn"))?
+            .to_string();
+        let accounts = self.state.read();
+        let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let alias = state
+            .state_machine_aliases
+            .get(&arn)
+            .ok_or_else(|| resource_not_found(&arn))?;
+        Ok(AwsResponse::ok_json(state_machine_alias_to_json(alias)))
+    }
+
+    fn list_state_machine_aliases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let parent = body["stateMachineArn"]
+            .as_str()
+            .ok_or_else(|| missing("stateMachineArn"))?
+            .to_string();
+        let accounts = self.state.read();
+        let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut aliases: Vec<&crate::state::StateMachineAlias> = state
+            .state_machine_aliases
+            .values()
+            .filter(|a| a.arn.starts_with(&parent))
+            .collect();
+        aliases.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(AwsResponse::ok_json(json!({
+            "stateMachineAliases": aliases.iter().map(|a| json!({
+                "stateMachineAliasArn": a.arn,
+                "creationDate": a.creation_date.timestamp(),
+            })).collect::<Vec<_>>(),
+        })))
+    }
+
+    fn update_state_machine_alias(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["stateMachineAliasArn"]
+            .as_str()
+            .ok_or_else(|| missing("stateMachineAliasArn"))?
+            .to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let alias = state
+            .state_machine_aliases
+            .get_mut(&arn)
+            .ok_or_else(|| resource_not_found(&arn))?;
+        if let Some(d) = body["description"].as_str() {
+            alias.description = d.to_string();
+        }
+        if let Some(routes) = body["routingConfiguration"].as_array() {
+            alias.routing_configuration = routes
+                .iter()
+                .filter_map(|r| {
+                    Some(crate::state::AliasRoute {
+                        state_machine_version_arn: r["stateMachineVersionArn"]
+                            .as_str()?
+                            .to_string(),
+                        weight: r["weight"].as_i64().unwrap_or(0) as i32,
+                    })
+                })
+                .collect();
+        }
+        alias.update_date = chrono::Utc::now();
+        Ok(AwsResponse::ok_json(json!({
+            "updateDate": alias.update_date.timestamp(),
+        })))
+    }
+
+    // ─── Map runs ───────────────────────────────────────────────────────
+
+    fn describe_map_run(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["mapRunArn"]
+            .as_str()
+            .ok_or_else(|| missing("mapRunArn"))?
+            .to_string();
+        let accounts = self.state.read();
+        let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mr = state
+            .map_runs
+            .get(&arn)
+            .ok_or_else(|| resource_not_found(&arn))?;
+        Ok(AwsResponse::ok_json(map_run_to_json(mr)))
+    }
+
+    fn list_map_runs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let exec_arn = body["executionArn"].as_str().map(String::from);
+        let accounts = self.state.read();
+        let empty = crate::state::StepFunctionsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let runs: Vec<&crate::state::MapRun> = state
+            .map_runs
+            .values()
+            .filter(|r| exec_arn.as_deref().is_none_or(|e| r.execution_arn == e))
+            .collect();
+        Ok(AwsResponse::ok_json(json!({
+            "mapRuns": runs.iter().map(|r| json!({
+                "mapRunArn": r.map_run_arn,
+                "executionArn": r.execution_arn,
+                "stateMachineArn": "",
+                "startDate": r.start_date.timestamp(),
+                "stopDate": r.stop_date.map(|d| d.timestamp()),
+            })).collect::<Vec<_>>(),
+        })))
+    }
+
+    fn update_map_run(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["mapRunArn"]
+            .as_str()
+            .ok_or_else(|| missing("mapRunArn"))?
+            .to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let mr = state
+            .map_runs
+            .get_mut(&arn)
+            .ok_or_else(|| resource_not_found(&arn))?;
+        if let Some(c) = body["maxConcurrency"].as_i64() {
+            mr.max_concurrency = c as i32;
+        }
+        if let Some(p) = body["toleratedFailurePercentage"].as_f64() {
+            mr.tolerated_failure_percentage = p;
+        }
+        if let Some(c) = body["toleratedFailureCount"].as_i64() {
+            mr.tolerated_failure_count = c;
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    // ─── Execution lifecycle extras ─────────────────────────────────────
+
+    fn redrive_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body["executionArn"]
+            .as_str()
+            .ok_or_else(|| missing("executionArn"))?
+            .to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let exec = state.executions.get_mut(&arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ExecutionDoesNotExist",
+                format!("Execution does not exist: {arn}"),
+            )
+        })?;
+        exec.status = crate::state::ExecutionStatus::Running;
+        exec.stop_date = None;
+        Ok(AwsResponse::ok_json(json!({
+            "redriveDate": chrono::Utc::now().timestamp(),
+        })))
+    }
+
+    fn start_sync_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let sm_arn = body["stateMachineArn"]
+            .as_str()
+            .ok_or_else(|| missing("stateMachineArn"))?
+            .to_string();
+        let input = body["input"].as_str().unwrap_or("{}").to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let sm = state
+            .state_machines
+            .get(&sm_arn)
+            .ok_or_else(|| state_machine_not_found(&sm_arn))?;
+        if sm.machine_type != crate::state::StateMachineType::Express {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "StateMachineTypeNotSupported",
+                "StartSyncExecution is only supported for EXPRESS state machines.",
+            ));
+        }
+        let now = chrono::Utc::now();
+        let exec_arn = format!(
+            "arn:aws:states:{}:{}:express:{}:sync-{}",
+            state.region,
+            state.account_id,
+            sm.name,
+            now.timestamp_millis()
+        );
+        Ok(AwsResponse::ok_json(json!({
+            "executionArn": exec_arn,
+            "stateMachineArn": sm_arn,
+            "name": "sync",
+            "startDate": now.timestamp(),
+            "stopDate": now.timestamp(),
+            "status": "SUCCEEDED",
+            "input": input,
+            "output": "{}",
+            "billingDetails": {
+                "billedMemoryUsedInMB": 64,
+                "billedDurationInMilliseconds": 1,
+            },
+        })))
+    }
+
+    fn test_state(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let definition = body["definition"]
+            .as_str()
+            .ok_or_else(|| missing("definition"))?;
+        validate_definition(definition)?;
+        let _role_arn = body["roleArn"].as_str().ok_or_else(|| missing("roleArn"))?;
+        let input = body["input"].as_str().unwrap_or("{}").to_string();
+        // Echo input back as output. Real Step Functions actually
+        // simulates the state; our emulator reports SUCCEEDED so callers
+        // can wire the integration test scaffolding.
+        Ok(AwsResponse::ok_json(json!({
+            "output": input,
+            "status": "SUCCEEDED",
+            "nextState": "End",
+        })))
+    }
+
+    fn validate_state_machine_definition(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let definition = body["definition"]
+            .as_str()
+            .ok_or_else(|| missing("definition"))?;
+        match validate_definition(definition) {
+            Ok(()) => Ok(AwsResponse::ok_json(json!({
+                "result": "OK",
+                "diagnostics": [],
+            }))),
+            Err(e) => Ok(AwsResponse::ok_json(json!({
+                "result": "FAIL",
+                "diagnostics": [{
+                    "severity": "ERROR",
+                    "code": "INVALID_DEFINITION",
+                    "message": e.to_string(),
+                }],
+            }))),
+        }
+    }
+}
+
+fn state_machine_alias_to_json(alias: &crate::state::StateMachineAlias) -> Value {
+    json!({
+        "stateMachineAliasArn": alias.arn,
+        "name": alias.name,
+        "description": alias.description,
+        "routingConfiguration": alias.routing_configuration.iter().map(|r| json!({
+            "stateMachineVersionArn": r.state_machine_version_arn,
+            "weight": r.weight,
+        })).collect::<Vec<_>>(),
+        "creationDate": alias.creation_date.timestamp(),
+        "updateDate": alias.update_date.timestamp(),
+    })
+}
+
+fn map_run_to_json(mr: &crate::state::MapRun) -> Value {
+    json!({
+        "mapRunArn": mr.map_run_arn,
+        "executionArn": mr.execution_arn,
+        "maxConcurrency": mr.max_concurrency,
+        "toleratedFailurePercentage": mr.tolerated_failure_percentage,
+        "toleratedFailureCount": mr.tolerated_failure_count,
+        "status": mr.status,
+        "startDate": mr.start_date.timestamp(),
+        "stopDate": mr.stop_date.map(|d| d.timestamp()),
+    })
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
