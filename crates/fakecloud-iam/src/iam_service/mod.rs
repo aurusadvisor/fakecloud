@@ -4610,4 +4610,208 @@ mod tests {
         let list_body = std::str::from_utf8(list.body.expect_bytes()).unwrap();
         assert!(list_body.contains("list.example.com"));
     }
+
+    // ── Tests for extras handlers (new ops added to close conformance gap) ──
+
+    #[test]
+    fn service_specific_credentials_lifecycle() {
+        let svc = make_service();
+        svc.create_user(&make_request("CreateUser", vec![("UserName", "u1")]))
+            .unwrap();
+        svc.create_service_specific_credential(&make_request(
+            "CreateServiceSpecificCredential",
+            vec![
+                ("UserName", "u1"),
+                ("ServiceName", "codecommit.amazonaws.com"),
+            ],
+        ))
+        .unwrap();
+        svc.list_service_specific_credentials(&make_request(
+            "ListServiceSpecificCredentials",
+            vec![("UserName", "u1")],
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn delegation_request_lifecycle() {
+        let svc = make_service();
+        let resp = svc
+            .create_delegation_request(&make_request(
+                "CreateDelegationRequest",
+                vec![
+                    ("TargetAccount", "999999999999"),
+                    ("Permissions.member.1", "s3:Get*"),
+                ],
+            ))
+            .unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        let id = extract_xml_tag(&body, "DelegationRequestId");
+        svc.get_delegation_request(&make_request(
+            "GetDelegationRequest",
+            vec![("DelegationRequestId", id)],
+        ))
+        .unwrap();
+        svc.list_delegation_requests(&make_request("ListDelegationRequests", vec![]))
+            .unwrap();
+    }
+
+    #[test]
+    fn organizations_root_creds_and_sessions() {
+        let svc = make_service();
+        svc.enable_organizations_root_credentials_management(&make_request(
+            "EnableOrganizationsRootCredentialsManagement",
+            vec![],
+        ))
+        .unwrap();
+        svc.disable_organizations_root_credentials_management(&make_request(
+            "DisableOrganizationsRootCredentialsManagement",
+            vec![],
+        ))
+        .unwrap();
+        svc.enable_organizations_root_sessions(&make_request(
+            "EnableOrganizationsRootSessions",
+            vec![],
+        ))
+        .unwrap();
+        svc.disable_organizations_root_sessions(&make_request(
+            "DisableOrganizationsRootSessions",
+            vec![],
+        ))
+        .unwrap();
+        svc.list_organizations_features(&make_request("ListOrganizationsFeatures", vec![]))
+            .unwrap();
+    }
+
+    #[test]
+    fn outbound_wif_round_trip() {
+        let svc = make_service();
+        svc.enable_outbound_web_identity_federation(&make_request(
+            "EnableOutboundWebIdentityFederation",
+            vec![],
+        ))
+        .unwrap();
+        svc.get_outbound_web_identity_federation_info(&make_request(
+            "GetOutboundWebIdentityFederationInfo",
+            vec![],
+        ))
+        .unwrap();
+        svc.disable_outbound_web_identity_federation(&make_request(
+            "DisableOutboundWebIdentityFederation",
+            vec![],
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn service_last_accessed_jobs() {
+        let svc = make_service();
+        let resp = svc
+            .generate_service_last_accessed_details(&make_request(
+                "GenerateServiceLastAccessedDetails",
+                vec![("Arn", "arn:aws:iam::123456789012:user/u1")],
+            ))
+            .unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        let job_id = extract_xml_tag(&body, "JobId");
+        svc.get_service_last_accessed_details(&make_request(
+            "GetServiceLastAccessedDetails",
+            vec![("JobId", job_id)],
+        ))
+        .unwrap();
+        svc.get_service_last_accessed_details_with_entities(&make_request(
+            "GetServiceLastAccessedDetailsWithEntities",
+            vec![("JobId", job_id), ("ServiceNamespace", "s3")],
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn extra_tagging_surfaces() {
+        let svc = make_service();
+        // Pre-create entities the tag handlers expect
+        svc.create_saml_provider(&make_request(
+            "CreateSAMLProvider",
+            vec![
+                ("Name", "sp1"),
+                ("SAMLMetadataDocument", "<EntityDescriptor/>"),
+            ],
+        ))
+        .unwrap();
+        svc.tag_saml_provider(&make_request(
+            "TagSAMLProvider",
+            vec![
+                (
+                    "SAMLProviderArn",
+                    "arn:aws:iam::123456789012:saml-provider/sp1",
+                ),
+                ("Tags.member.1.Key", "k"),
+                ("Tags.member.1.Value", "v"),
+            ],
+        ))
+        .unwrap();
+        svc.list_saml_provider_tags(&make_request(
+            "ListSAMLProviderTags",
+            vec![(
+                "SAMLProviderArn",
+                "arn:aws:iam::123456789012:saml-provider/sp1",
+            )],
+        ))
+        .unwrap();
+        svc.untag_saml_provider(&make_request(
+            "UntagSAMLProvider",
+            vec![
+                (
+                    "SAMLProviderArn",
+                    "arn:aws:iam::123456789012:saml-provider/sp1",
+                ),
+                ("TagKeys.member.1", "k"),
+            ],
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn policy_simulation_smoke() {
+        let svc = make_service();
+        let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+        svc.simulate_custom_policy(&make_request(
+            "SimulateCustomPolicy",
+            vec![
+                ("PolicyInputList.member.1", policy),
+                ("ActionNames.member.1", "s3:GetObject"),
+                ("ResourceArns.member.1", "arn:aws:s3:::b/k"),
+            ],
+        ))
+        .unwrap();
+        svc.get_context_keys_for_custom_policy(&make_request(
+            "GetContextKeysForCustomPolicy",
+            vec![("PolicyInputList.member.1", policy)],
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn misc_extras_smoke() {
+        let svc = make_service();
+        svc.create_user(&make_request("CreateUser", vec![("UserName", "u1")]))
+            .unwrap();
+        svc.create_login_profile(&make_request(
+            "CreateLoginProfile",
+            vec![("UserName", "u1"), ("Password", "p")],
+        ))
+        .unwrap();
+        svc.change_password(&make_request(
+            "ChangePassword",
+            vec![("OldPassword", "p"), ("NewPassword", "q")],
+        ))
+        .unwrap();
+        svc.get_human_readable_summary(&make_request("GetHumanReadableSummary", vec![]))
+            .unwrap();
+        svc.set_security_token_service_preferences(&make_request(
+            "SetSecurityTokenServicePreferences",
+            vec![("GlobalEndpointTokenVersion", "v2Token")],
+        ))
+        .unwrap();
+    }
 }
