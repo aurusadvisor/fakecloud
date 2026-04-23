@@ -717,3 +717,281 @@ fn list_extras_xml(
     );
     Ok(xml_response(action, inner, rid))
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::service::RdsService;
+    use crate::state::{RdsState, SharedRdsState};
+    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::service::AwsRequest;
+    use http::Method;
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn svc() -> RdsService {
+        let state: SharedRdsState = Arc::new(RwLock::new(MultiAccountState::<RdsState>::new(
+            "000000000000",
+            "us-east-1",
+            "",
+        )));
+        RdsService::new(state)
+    }
+
+    fn req(action: &str, params: &[(&str, &str)]) -> AwsRequest {
+        let mut q = HashMap::new();
+        q.insert("Action".to_string(), action.to_string());
+        for (k, v) in params {
+            q.insert(k.to_string(), v.to_string());
+        }
+        AwsRequest {
+            service: "rds".to_string(),
+            method: Method::POST,
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            path_segments: vec![],
+            query_params: q,
+            headers: http::HeaderMap::new(),
+            body: bytes::Bytes::new(),
+            account_id: "000000000000".to_string(),
+            region: "us-east-1".to_string(),
+            request_id: "rid".to_string(),
+            action: action.to_string(),
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn ok(action: &str, params: &[(&str, &str)]) {
+        let r = svc().handle_extra_action(&req(action, params));
+        let resp = match r {
+            Ok(r) => r,
+            Err(e) => panic!("{action} failed: {e:?}"),
+        };
+        assert!(resp.status.is_success(), "{action} status: {}", resp.status);
+    }
+
+    #[test]
+    fn cluster_lifecycle() {
+        ok("CreateDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok("ModifyDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok("RebootDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok("StartDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok("StopDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok("FailoverDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok("BacktrackDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok(
+            "PromoteReadReplicaDBCluster",
+            &[("DBClusterIdentifier", "c1")],
+        );
+        ok("DescribeDBClusters", &[]);
+        ok("DeleteDBCluster", &[("DBClusterIdentifier", "c1")]);
+    }
+
+    #[test]
+    fn cluster_snapshot_lifecycle() {
+        ok(
+            "CreateDBClusterSnapshot",
+            &[
+                ("DBClusterSnapshotIdentifier", "cs1"),
+                ("DBClusterIdentifier", "c1"),
+            ],
+        );
+        ok(
+            "CopyDBClusterSnapshot",
+            &[("TargetDBClusterSnapshotIdentifier", "cs2")],
+        );
+        ok("DescribeDBClusterSnapshots", &[]);
+        ok(
+            "DescribeDBClusterSnapshotAttributes",
+            &[("DBClusterSnapshotIdentifier", "cs1")],
+        );
+        ok(
+            "ModifyDBClusterSnapshotAttribute",
+            &[("DBClusterSnapshotIdentifier", "cs1")],
+        );
+        ok("DescribeDBClusterAutomatedBackups", &[]);
+        ok("DeleteDBClusterAutomatedBackup", &[]);
+        ok("DescribeDBClusterBacktracks", &[]);
+        ok(
+            "DeleteDBClusterSnapshot",
+            &[("DBClusterSnapshotIdentifier", "cs1")],
+        );
+    }
+
+    #[test]
+    fn cluster_param_groups_lifecycle() {
+        ok(
+            "CreateDBClusterParameterGroup",
+            &[("DBClusterParameterGroupName", "cpg")],
+        );
+        ok(
+            "CopyDBClusterParameterGroup",
+            &[("TargetDBClusterParameterGroupIdentifier", "cpg2")],
+        );
+        ok(
+            "ModifyDBClusterParameterGroup",
+            &[("DBClusterParameterGroupName", "cpg")],
+        );
+        ok(
+            "ResetDBClusterParameterGroup",
+            &[("DBClusterParameterGroupName", "cpg")],
+        );
+        ok("DescribeDBClusterParameterGroups", &[]);
+        ok("DescribeDBClusterParameters", &[]);
+        ok("DescribeEngineDefaultClusterParameters", &[]);
+        ok(
+            "DeleteDBClusterParameterGroup",
+            &[("DBClusterParameterGroupName", "cpg")],
+        );
+    }
+
+    #[test]
+    fn endpoints_proxies_secgroups() {
+        ok(
+            "CreateDBClusterEndpoint",
+            &[("DBClusterEndpointIdentifier", "ce1")],
+        );
+        ok("ModifyDBClusterEndpoint", &[]);
+        ok("DescribeDBClusterEndpoints", &[]);
+        ok(
+            "DeleteDBClusterEndpoint",
+            &[("DBClusterEndpointIdentifier", "ce1")],
+        );
+        ok("CreateDBProxy", &[("DBProxyName", "p1")]);
+        ok("DescribeDBProxies", &[]);
+        ok("CreateDBProxyEndpoint", &[("DBProxyEndpointName", "pe1")]);
+        ok("ModifyDBProxyEndpoint", &[]);
+        ok("DescribeDBProxyEndpoints", &[]);
+        ok("DescribeDBProxyTargetGroups", &[]);
+        ok("DescribeDBProxyTargets", &[]);
+        ok("ModifyDBProxyTargetGroup", &[]);
+        ok("RegisterDBProxyTargets", &[]);
+        ok("DeregisterDBProxyTargets", &[]);
+        ok("DeleteDBProxyEndpoint", &[("DBProxyEndpointName", "pe1")]);
+        ok("ModifyDBProxy", &[]);
+        ok("DeleteDBProxy", &[("DBProxyName", "p1")]);
+        ok("CreateDBSecurityGroup", &[("DBSecurityGroupName", "sg1")]);
+        ok(
+            "AuthorizeDBSecurityGroupIngress",
+            &[("DBSecurityGroupName", "sg1")],
+        );
+        ok(
+            "RevokeDBSecurityGroupIngress",
+            &[("DBSecurityGroupName", "sg1")],
+        );
+        ok("DescribeDBSecurityGroups", &[]);
+        ok("DeleteDBSecurityGroup", &[("DBSecurityGroupName", "sg1")]);
+    }
+
+    #[test]
+    fn option_groups_event_subs_global_clusters() {
+        ok("CreateOptionGroup", &[("OptionGroupName", "og1")]);
+        ok("ModifyOptionGroup", &[("OptionGroupName", "og1")]);
+        ok("CopyOptionGroup", &[("TargetOptionGroupIdentifier", "og2")]);
+        ok("DescribeOptionGroups", &[]);
+        ok("DescribeOptionGroupOptions", &[]);
+        ok("DeleteOptionGroup", &[("OptionGroupName", "og1")]);
+        ok("CreateEventSubscription", &[("SubscriptionName", "es1")]);
+        ok("ModifyEventSubscription", &[]);
+        ok("AddSourceIdentifierToSubscription", &[]);
+        ok("RemoveSourceIdentifierFromSubscription", &[]);
+        ok("DescribeEventSubscriptions", &[]);
+        ok("DeleteEventSubscription", &[("SubscriptionName", "es1")]);
+        ok("CreateGlobalCluster", &[("GlobalClusterIdentifier", "gc1")]);
+        ok("ModifyGlobalCluster", &[]);
+        ok("FailoverGlobalCluster", &[]);
+        ok("SwitchoverGlobalCluster", &[]);
+        ok("RemoveFromGlobalCluster", &[]);
+        ok("DescribeGlobalClusters", &[]);
+        ok("DeleteGlobalCluster", &[("GlobalClusterIdentifier", "gc1")]);
+    }
+
+    #[test]
+    fn integrations_blue_green_shard_groups_tenant_dbs() {
+        ok("CreateIntegration", &[("IntegrationName", "i1")]);
+        ok("ModifyIntegration", &[]);
+        ok("DescribeIntegrations", &[]);
+        ok("DeleteIntegration", &[("IntegrationIdentifier", "i1")]);
+        ok("CreateBlueGreenDeployment", &[]);
+        ok("SwitchoverBlueGreenDeployment", &[]);
+        ok("DeleteBlueGreenDeployment", &[]);
+        ok("DescribeBlueGreenDeployments", &[]);
+        ok("CreateDBShardGroup", &[("DBShardGroupIdentifier", "sg1")]);
+        ok("ModifyDBShardGroup", &[]);
+        ok("RebootDBShardGroup", &[]);
+        ok("DescribeDBShardGroups", &[]);
+        ok("DeleteDBShardGroup", &[("DBShardGroupIdentifier", "sg1")]);
+        ok("CreateCustomDBEngineVersion", &[]);
+        ok("ModifyCustomDBEngineVersion", &[]);
+        ok("DeleteCustomDBEngineVersion", &[]);
+        ok("CreateTenantDatabase", &[("TenantDBName", "t1")]);
+        ok("ModifyTenantDatabase", &[]);
+        ok("DescribeTenantDatabases", &[]);
+        ok("DescribeDBSnapshotTenantDatabases", &[]);
+        ok("DeleteTenantDatabase", &[("TenantDBName", "t1")]);
+    }
+
+    #[test]
+    fn export_activity_replicas_recommendations_certs_pending() {
+        ok("StartExportTask", &[("ExportTaskIdentifier", "ex1")]);
+        ok("CancelExportTask", &[]);
+        ok("DescribeExportTasks", &[]);
+        ok("StartActivityStream", &[]);
+        ok("ModifyActivityStream", &[]);
+        ok("StopActivityStream", &[]);
+        ok("AddRoleToDBCluster", &[]);
+        ok("RemoveRoleFromDBCluster", &[]);
+        ok("AddRoleToDBInstance", &[]);
+        ok("RemoveRoleFromDBInstance", &[]);
+        ok("ApplyPendingMaintenanceAction", &[]);
+        ok("DescribePendingMaintenanceActions", &[]);
+        ok("PurchaseReservedDBInstancesOffering", &[]);
+        ok("DescribeReservedDBInstances", &[]);
+        ok("DescribeReservedDBInstancesOfferings", &[]);
+        ok("PromoteReadReplica", &[]);
+        ok("StartDBInstance", &[]);
+        ok("StopDBInstance", &[]);
+        ok("StartDBInstanceAutomatedBackupsReplication", &[]);
+        ok("StopDBInstanceAutomatedBackupsReplication", &[]);
+        ok("DeleteDBInstanceAutomatedBackup", &[]);
+        ok("DescribeDBInstanceAutomatedBackups", &[]);
+        ok("SwitchoverReadReplica", &[]);
+        ok("DescribeDBRecommendations", &[]);
+        ok("ModifyDBRecommendation", &[]);
+        ok("DescribeCertificates", &[]);
+        ok("ModifyCertificates", &[]);
+    }
+
+    #[test]
+    fn snapshots_restores_account_events() {
+        ok("CopyDBSnapshot", &[("TargetDBSnapshotIdentifier", "s2")]);
+        ok(
+            "CopyDBParameterGroup",
+            &[("TargetDBParameterGroupIdentifier", "p2")],
+        );
+        ok("DescribeDBParameters", &[]);
+        ok("ResetDBParameterGroup", &[("DBParameterGroupName", "p1")]);
+        ok("DescribeEngineDefaultParameters", &[]);
+        ok("DescribeDBSnapshotAttributes", &[]);
+        ok("ModifyDBSnapshot", &[]);
+        ok("ModifyDBSnapshotAttribute", &[]);
+        ok("RestoreDBClusterFromS3", &[]);
+        ok("RestoreDBClusterFromSnapshot", &[]);
+        ok("RestoreDBClusterToPointInTime", &[]);
+        ok("RestoreDBInstanceFromS3", &[]);
+        ok("RestoreDBInstanceToPointInTime", &[]);
+        ok("DescribeAccountAttributes", &[]);
+        ok("DescribeEventCategories", &[]);
+        ok("DescribeEvents", &[]);
+        ok("DescribeSourceRegions", &[]);
+        ok("DescribeDBLogFiles", &[]);
+        ok("DownloadDBLogFilePortion", &[]);
+        ok("DescribeDBMajorEngineVersions", &[]);
+        ok("DescribeValidDBInstanceModifications", &[]);
+        ok("ModifyCurrentDBClusterCapacity", &[]);
+        ok("DisableHttpEndpoint", &[]);
+        ok("EnableHttpEndpoint", &[]);
+    }
+}
