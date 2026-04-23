@@ -40,6 +40,20 @@ async fn api_version_probe() {
 }
 
 #[tokio::test]
+async fn api_version_probe_without_auth_is_challenged() {
+    // Docker's two-phase login does an unauthenticated `GET /v2/`
+    // first, expects 401 + WWW-Authenticate, then retries with Basic.
+    let server = TestServer::start().await;
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v2/", server.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(resp.headers().contains_key("www-authenticate"));
+}
+
+#[tokio::test]
 async fn api_version_probe_with_bad_credentials_is_rejected() {
     let server = TestServer::start().await;
     let resp = reqwest::Client::new()

@@ -120,13 +120,13 @@ fn split_name(segs: &[&str]) -> Option<(String, Vec<String>)> {
 
 /// Accept Basic Auth with any token fakecloud issued via
 /// `GetAuthorizationToken`, or the `test*` dev-bypass used elsewhere.
-/// For convenience during local tests, a missing Authorization header
-/// is also accepted so `curl` can exercise the protocol without Docker
-/// managing credentials. Wire format:
+/// A missing `Authorization` header returns 401 with a
+/// `WWW-Authenticate` challenge so the Docker CLI's two-phase login
+/// flow (`GET /v2/` -> 401 -> Basic retry) works. Wire format:
 /// `Authorization: Basic base64("AWS:<token>")`.
 fn authorized(request: &AwsRequest) -> Result<bool, AwsServiceError> {
     let Some(header) = request.headers.get("authorization") else {
-        return Ok(true);
+        return Ok(false);
     };
     let value = header.to_str().map_err(|_| {
         AwsServiceError::aws_error(
