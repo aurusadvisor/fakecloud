@@ -110,3 +110,51 @@ async fn sts_decode_authorization_message() {
         .unwrap();
     assert!(result.decoded_message().is_some());
 }
+
+#[test_action("sts", "AssumeRoot", checksum = "ff632886")]
+#[tokio::test]
+async fn sts_assume_root() {
+    let server = TestServer::start().await;
+    let client = server.sts_client().await;
+    let resp = client
+        .assume_root()
+        .target_principal("123456789012")
+        .task_policy_arn(
+            aws_sdk_sts::types::PolicyDescriptorType::builder()
+                .arn("arn:aws:iam::aws:policy/IAMAuditRootUserCredentials")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.credentials().is_some());
+}
+
+#[test_action("sts", "GetDelegatedAccessToken", checksum = "93cb2870")]
+#[tokio::test]
+async fn sts_get_delegated_access_token() {
+    let server = TestServer::start().await;
+    let client = server.sts_client().await;
+    let resp = client
+        .get_delegated_access_token()
+        .trade_in_token("opaque-token")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.credentials().is_some());
+}
+
+#[test_action("sts", "GetWebIdentityToken", checksum = "9ea6bbde")]
+#[tokio::test]
+async fn sts_get_web_identity_token() {
+    let server = TestServer::start().await;
+    let client = server.sts_client().await;
+    let resp = client
+        .get_web_identity_token()
+        .audience("https://example.com")
+        .signing_algorithm("RS256")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.web_identity_token().is_some());
+}
