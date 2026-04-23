@@ -317,3 +317,731 @@ async fn apigatewayv2_authorizer_lifecycle() {
         .await
         .unwrap();
 }
+
+// ── Conformance closure batch (all 75 missing ops covered by route-existence assertions) ──
+
+const APIGW_AUTH: &str = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/apigateway/aws4_request, SignedHeaders=host, Signature=0";
+
+async fn apigw_request(
+    server: &TestServer,
+    method: reqwest::Method,
+    path: &str,
+    body: &str,
+) -> reqwest::Response {
+    let resp = reqwest::Client::new()
+        .request(method.clone(), format!("{}{}", server.endpoint(), path))
+        .header("content-type", "application/json")
+        .header("Authorization", APIGW_AUTH)
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "{method} {path} returned {}",
+        resp.status()
+    );
+    resp
+}
+
+#[test_action("apigatewayv2", "CreateApiMapping", checksum = "65a44b8b")]
+#[test_action("apigatewayv2", "CreateDomainName", checksum = "ac3575f3")]
+#[test_action("apigatewayv2", "CreateIntegrationResponse", checksum = "91ed2c03")]
+#[test_action("apigatewayv2", "CreateModel", checksum = "b5657ad4")]
+#[test_action("apigatewayv2", "CreatePortal", checksum = "fb0065d2")]
+#[test_action("apigatewayv2", "CreatePortalProduct", checksum = "24feedc4")]
+#[test_action("apigatewayv2", "CreateProductPage", checksum = "21238282")]
+#[test_action("apigatewayv2", "CreateProductRestEndpointPage", checksum = "a4555d5e")]
+#[test_action("apigatewayv2", "CreateRouteResponse", checksum = "efa737be")]
+#[test_action("apigatewayv2", "CreateRoutingRule", checksum = "5adb7c51")]
+#[test_action("apigatewayv2", "CreateVpcLink", checksum = "5d3c4342")]
+#[test_action("apigatewayv2", "DeleteAccessLogSettings", checksum = "f6cb1528")]
+#[test_action("apigatewayv2", "DeleteApiMapping", checksum = "3d81d072")]
+#[test_action("apigatewayv2", "DeleteCorsConfiguration", checksum = "e9a7baef")]
+#[test_action("apigatewayv2", "DeleteDeployment", checksum = "2e1770bf")]
+#[test_action("apigatewayv2", "DeleteDomainName", checksum = "d22339e8")]
+#[test_action("apigatewayv2", "DeleteIntegrationResponse", checksum = "83ed75ec")]
+#[test_action("apigatewayv2", "DeleteModel", checksum = "41929ba5")]
+#[test_action("apigatewayv2", "DeletePortal", checksum = "24df0f2a")]
+#[test_action("apigatewayv2", "DeletePortalProduct", checksum = "97223bb4")]
+#[test_action(
+    "apigatewayv2",
+    "DeletePortalProductSharingPolicy",
+    checksum = "fda8d7f7"
+)]
+#[test_action("apigatewayv2", "DeleteProductPage", checksum = "6ec6da9d")]
+#[test_action("apigatewayv2", "DeleteProductRestEndpointPage", checksum = "641d93fa")]
+#[test_action("apigatewayv2", "DeleteRouteRequestParameter", checksum = "66258394")]
+#[test_action("apigatewayv2", "DeleteRouteResponse", checksum = "b3ad3b71")]
+#[test_action("apigatewayv2", "DeleteRouteSettings", checksum = "c1cffb66")]
+#[test_action("apigatewayv2", "DeleteRoutingRule", checksum = "9c0e74ce")]
+#[test_action("apigatewayv2", "DeleteVpcLink", checksum = "83cc7290")]
+#[test_action("apigatewayv2", "DisablePortal", checksum = "d7c03a0a")]
+#[test_action("apigatewayv2", "ExportApi", checksum = "86cf0406")]
+#[test_action("apigatewayv2", "GetApiMapping", checksum = "902ccf3e")]
+#[test_action("apigatewayv2", "GetApiMappings", checksum = "0cd20b88")]
+#[test_action("apigatewayv2", "GetDomainName", checksum = "861fe9ae")]
+#[test_action("apigatewayv2", "GetDomainNames", checksum = "87ce16ff")]
+#[test_action("apigatewayv2", "GetIntegrationResponse", checksum = "8029a5a8")]
+#[test_action("apigatewayv2", "GetIntegrationResponses", checksum = "26e088ef")]
+#[test_action("apigatewayv2", "GetModel", checksum = "068e8006")]
+#[test_action("apigatewayv2", "GetModels", checksum = "c5ffe6c4")]
+#[test_action("apigatewayv2", "GetModelTemplate", checksum = "62fd314e")]
+#[test_action("apigatewayv2", "GetPortal", checksum = "e4292d93")]
+#[test_action("apigatewayv2", "GetPortalProduct", checksum = "de71d7b4")]
+#[test_action("apigatewayv2", "GetPortalProductSharingPolicy", checksum = "1bff8d12")]
+#[test_action("apigatewayv2", "GetProductPage", checksum = "ce3eaeec")]
+#[test_action("apigatewayv2", "GetProductRestEndpointPage", checksum = "33f1245d")]
+#[test_action("apigatewayv2", "GetRouteResponse", checksum = "a55851a4")]
+#[test_action("apigatewayv2", "GetRouteResponses", checksum = "3b3d4d7b")]
+#[test_action("apigatewayv2", "GetRoutingRule", checksum = "15cfac58")]
+#[test_action("apigatewayv2", "GetTags", checksum = "38f8aa65")]
+#[test_action("apigatewayv2", "GetVpcLink", checksum = "e281a65b")]
+#[test_action("apigatewayv2", "GetVpcLinks", checksum = "3791e727")]
+#[test_action("apigatewayv2", "ImportApi", checksum = "aa5dd1b0")]
+#[test_action("apigatewayv2", "ListPortalProducts", checksum = "bbdb1af1")]
+#[test_action("apigatewayv2", "ListPortals", checksum = "a4456ed5")]
+#[test_action("apigatewayv2", "ListProductPages", checksum = "62ba1c1a")]
+#[test_action("apigatewayv2", "ListProductRestEndpointPages", checksum = "21f13ca8")]
+#[test_action("apigatewayv2", "ListRoutingRules", checksum = "1a5f4cc8")]
+#[test_action("apigatewayv2", "PreviewPortal", checksum = "ec5de68f")]
+#[test_action("apigatewayv2", "PublishPortal", checksum = "b5d7fa00")]
+#[test_action("apigatewayv2", "PutPortalProductSharingPolicy", checksum = "c5dfed82")]
+#[test_action("apigatewayv2", "PutRoutingRule", checksum = "8f7115ea")]
+#[test_action("apigatewayv2", "ReimportApi", checksum = "098bf802")]
+#[test_action("apigatewayv2", "ResetAuthorizersCache", checksum = "71d782fa")]
+#[test_action("apigatewayv2", "TagResource", checksum = "bedba25c")]
+#[test_action("apigatewayv2", "UntagResource", checksum = "4289cff6")]
+#[test_action("apigatewayv2", "UpdateApiMapping", checksum = "d1ffd8c3")]
+#[test_action("apigatewayv2", "UpdateDeployment", checksum = "d04bbae0")]
+#[test_action("apigatewayv2", "UpdateDomainName", checksum = "249e1eca")]
+#[test_action("apigatewayv2", "UpdateIntegrationResponse", checksum = "e8af3800")]
+#[test_action("apigatewayv2", "UpdateModel", checksum = "6a9b5ce2")]
+#[test_action("apigatewayv2", "UpdatePortal", checksum = "a3b3d3fd")]
+#[test_action("apigatewayv2", "UpdatePortalProduct", checksum = "3529eb35")]
+#[test_action("apigatewayv2", "UpdateProductPage", checksum = "a22c704f")]
+#[test_action("apigatewayv2", "UpdateProductRestEndpointPage", checksum = "a06fad74")]
+#[test_action("apigatewayv2", "UpdateRouteResponse", checksum = "391e4258")]
+#[test_action("apigatewayv2", "UpdateVpcLink", checksum = "68637366")]
+#[tokio::test]
+async fn apigwv2_closure_routes_exist() {
+    // Every route added in this PR is exercised below. We assert HTTP 2xx
+    // (route hit + handler succeeded). Each `#[test_action]` above pins
+    // the operation to its Smithy checksum so the audit knows it has
+    // coverage even when the test groups multiple ops together.
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    // Seed an HTTP API to anchor child resources.
+    let api_id = client
+        .create_api()
+        .name("conf-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap()
+        .api_id()
+        .unwrap()
+        .to_string();
+
+    // Domain names + API mappings.
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        "/v2/domainnames",
+        r#"{"DomainName":"example.com"}"#,
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::GET,
+        "/v2/domainnames/example.com",
+        "",
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let resp = apigw_request(&server, reqwest::Method::GET, "/v2/domainnames", "").await;
+    assert!(resp.status().is_success());
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::PATCH,
+        "/v2/domainnames/example.com",
+        r#"{}"#,
+    )
+    .await;
+    assert!(resp.status().is_success());
+
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        "/v2/domainnames/example.com/apimappings",
+        &format!(r#"{{"ApiId":"{api_id}","Stage":"prod"}}"#),
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let mapping_id = body["ApiMappingId"].as_str().unwrap().to_string();
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::GET,
+        "/v2/domainnames/example.com/apimappings",
+        "",
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/domainnames/example.com/apimappings/{mapping_id}"),
+        "",
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/v2/domainnames/example.com/apimappings/{mapping_id}"),
+        r#"{}"#,
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/domainnames/example.com/apimappings/{mapping_id}"),
+        "",
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        "/v2/domainnames/example.com",
+        "",
+    )
+    .await;
+    assert!(resp.status().is_success());
+
+    // VPC links.
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        "/v2/vpclinks",
+        r#"{"Name":"link"}"#,
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let vpc_id = body["VpcLinkId"].as_str().unwrap().to_string();
+    apigw_request(&server, reqwest::Method::GET, "/v2/vpclinks", "").await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/vpclinks/{vpc_id}"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/v2/vpclinks/{vpc_id}"),
+        r#"{"Name":"upd"}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/vpclinks/{vpc_id}"),
+        "",
+    )
+    .await;
+
+    // Routing rules.
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        "/v2/routingrules",
+        r#"{"DomainName":"example.com"}"#,
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let rule_id = body["RoutingRuleId"].as_str().unwrap().to_string();
+    apigw_request(&server, reqwest::Method::GET, "/v2/routingrules", "").await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/routingrules/{rule_id}"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::PUT,
+        &format!("/v2/routingrules/{rule_id}"),
+        r#"{"DomainName":"example.com"}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/routingrules/{rule_id}"),
+        "",
+    )
+    .await;
+
+    // Tags.
+    apigw_request(
+        &server,
+        reqwest::Method::POST,
+        "/v2/tags/arn:aws:apigateway:us-east-1::%2Fapis%2Fconf-api",
+        r#"{"Tags":{"k":"v"}}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        "/v2/tags/arn:aws:apigateway:us-east-1::%2Fapis%2Fconf-api",
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        "/v2/tags/arn:aws:apigateway:us-east-1::%2Fapis%2Fconf-api?tagKeys=k",
+        "",
+    )
+    .await;
+
+    // Models.
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/apis/{api_id}/models"),
+        r#"{"Name":"m1"}"#,
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let model_id = body["ModelId"].as_str().unwrap().to_string();
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/apis/{api_id}/models"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/apis/{api_id}/models/{model_id}"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/v2/apis/{api_id}/models/{model_id}"),
+        r#"{}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/apis/{api_id}/models/{model_id}/template"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/apis/{api_id}/models/{model_id}"),
+        "",
+    )
+    .await;
+
+    // Integration + integration responses.
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        r#"{"integrationType":"HTTP_PROXY","integrationUri":"http://example.com"}"#,
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let integ_id = body["integrationId"]
+        .as_str()
+        .or_else(|| body["IntegrationId"].as_str())
+        .unwrap()
+        .to_string();
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/apis/{api_id}/integrations/{integ_id}/integrationresponses"),
+        r#"{"IntegrationResponseKey":"$default"}"#,
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let ir_id = body["IntegrationResponseId"].as_str().unwrap().to_string();
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/apis/{api_id}/integrations/{integ_id}/integrationresponses"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/apis/{api_id}/integrations/{integ_id}/integrationresponses/{ir_id}"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/v2/apis/{api_id}/integrations/{integ_id}/integrationresponses/{ir_id}"),
+        r#"{}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/apis/{api_id}/integrations/{integ_id}/integrationresponses/{ir_id}"),
+        "",
+    )
+    .await;
+
+    // Routes + route responses.
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        r#"{"routeKey":"GET /test"}"#,
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let route_id = body["routeId"]
+        .as_str()
+        .or_else(|| body["RouteId"].as_str())
+        .unwrap()
+        .to_string();
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/apis/{api_id}/routes/{route_id}/routeresponses"),
+        r#"{"RouteResponseKey":"$default"}"#,
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let rr_id = body["RouteResponseId"]
+        .as_str()
+        .unwrap_or("rr1")
+        .to_string();
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/apis/{api_id}/routes/{route_id}/routeresponses"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/apis/{api_id}/routes/{route_id}/routeresponses/{rr_id}"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/v2/apis/{api_id}/routes/{route_id}/routeresponses/{rr_id}"),
+        r#"{}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/apis/{api_id}/routes/{route_id}/routeresponses/{rr_id}"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/apis/{api_id}/routes/{route_id}/requestparameters/foo"),
+        "",
+    )
+    .await;
+
+    // Cors + access logs + route settings + reset cache.
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/apis/{api_id}/cors"),
+        "",
+    )
+    .await;
+    let stage_resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        r#"{"stageName":"prod"}"#,
+    )
+    .await;
+    assert!(stage_resp.status().is_success());
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/apis/{api_id}/stages/prod/accesslogsettings"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/apis/{api_id}/stages/prod/routesettings/GET%20%2Ftest"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/apis/{api_id}/stages/prod/cache/authorizers"),
+        "",
+    )
+    .await;
+
+    // Deployment update + delete.
+    let dep_resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/apis/{api_id}/deployments"),
+        r#"{}"#,
+    )
+    .await;
+    let body: serde_json::Value = dep_resp.json().await.unwrap();
+    let dep_id = body["deploymentId"]
+        .as_str()
+        .or_else(|| body["DeploymentId"].as_str())
+        .unwrap_or("dep1")
+        .to_string();
+    apigw_request(
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/v2/apis/{api_id}/deployments/{dep_id}"),
+        r#"{}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/apis/{api_id}/deployments/{dep_id}"),
+        "",
+    )
+    .await;
+
+    // Import + Reimport + Export.
+    apigw_request(
+        &server,
+        reqwest::Method::PUT,
+        "/v2/apis",
+        r#"{"Body":"openapi: 3.0.1\n"}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::PUT,
+        &format!("/v2/apis/{api_id}"),
+        r#"{"Body":"openapi: 3.0.1\n"}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/apis/{api_id}/exports/OAS30"),
+        "",
+    )
+    .await;
+
+    // Portals + portal products + sharing policies + product pages.
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        "/v2/portals",
+        r#"{"Name":"p1"}"#,
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let portal_id = body["PortalId"].as_str().unwrap().to_string();
+    apigw_request(&server, reqwest::Method::GET, "/v2/portals", "").await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/portals/{portal_id}"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/v2/portals/{portal_id}"),
+        r#"{}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/portals/{portal_id}/disable"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/portals/{portal_id}/preview"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/portals/{portal_id}/publish"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/portals/{portal_id}"),
+        "",
+    )
+    .await;
+
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        "/v2/portalproducts",
+        r#"{"Name":"prod"}"#,
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let pp_id = body["PortalProductId"].as_str().unwrap().to_string();
+    apigw_request(&server, reqwest::Method::GET, "/v2/portalproducts", "").await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/portalproducts/{pp_id}"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/v2/portalproducts/{pp_id}"),
+        r#"{}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::PUT,
+        &format!("/v2/portalproducts/{pp_id}/sharing-policy"),
+        r#"{}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/portalproducts/{pp_id}/sharing-policy"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/portalproducts/{pp_id}/sharing-policy"),
+        "",
+    )
+    .await;
+
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/portalproducts/{pp_id}/pages"),
+        r#"{"Name":"p"}"#,
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let page_id = body["Id"].as_str().unwrap().to_string();
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/portalproducts/{pp_id}/pages"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/portalproducts/{pp_id}/pages/{page_id}"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/v2/portalproducts/{pp_id}/pages/{page_id}"),
+        r#"{}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/portalproducts/{pp_id}/pages/{page_id}"),
+        "",
+    )
+    .await;
+
+    let resp = apigw_request(
+        &server,
+        reqwest::Method::POST,
+        &format!("/v2/portalproducts/{pp_id}/rest-endpoint-pages"),
+        r#"{"Name":"p"}"#,
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let rep_id = body["Id"].as_str().unwrap().to_string();
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/portalproducts/{pp_id}/rest-endpoint-pages"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::GET,
+        &format!("/v2/portalproducts/{pp_id}/rest-endpoint-pages/{rep_id}"),
+        "",
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::PATCH,
+        &format!("/v2/portalproducts/{pp_id}/rest-endpoint-pages/{rep_id}"),
+        r#"{}"#,
+    )
+    .await;
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/portalproducts/{pp_id}/rest-endpoint-pages/{rep_id}"),
+        "",
+    )
+    .await;
+
+    apigw_request(
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v2/portalproducts/{pp_id}"),
+        "",
+    )
+    .await;
+}

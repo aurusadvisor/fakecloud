@@ -32,6 +32,44 @@ pub struct ApiGatewayV2State {
     /// Intentionally not persisted across restarts.
     #[serde(default, skip_serializing)]
     pub request_history: Vec<ApiRequest>,
+    /// Per-resource generic stores for ops added in the closure batch.
+    /// Each map values are JSON bodies the API gateway returns verbatim.
+    #[serde(default)]
+    pub domain_names: HashMap<String, serde_json::Value>,
+    /// Per-domain api mappings keyed by mapping id.
+    #[serde(default)]
+    pub api_mappings: HashMap<String, HashMap<String, serde_json::Value>>,
+    /// Per-api models keyed by model id.
+    #[serde(default)]
+    pub models: HashMap<String, HashMap<String, serde_json::Value>>,
+    /// Per-api integration responses keyed by `{integration}/{response}`.
+    #[serde(default)]
+    pub integration_responses: HashMap<String, HashMap<String, serde_json::Value>>,
+    /// Per-api route responses keyed by `{route}/{response}`.
+    #[serde(default)]
+    pub route_responses: HashMap<String, HashMap<String, serde_json::Value>>,
+    /// Routing rules keyed by domain name + rule id.
+    #[serde(default)]
+    pub routing_rules: HashMap<String, HashMap<String, serde_json::Value>>,
+    /// VPC links keyed by id.
+    #[serde(default)]
+    pub vpc_links: HashMap<String, serde_json::Value>,
+    /// Tags keyed by resource ARN.
+    #[serde(default)]
+    pub tags: HashMap<String, HashMap<String, String>>,
+    /// Portals + portal products by id.
+    #[serde(default)]
+    pub portals: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub portal_products: HashMap<String, serde_json::Value>,
+    /// Sharing policies keyed by portal product id.
+    #[serde(default)]
+    pub portal_product_sharing_policies: HashMap<String, serde_json::Value>,
+    /// Product pages and rest endpoint pages keyed by `{portal-product}/{page}`.
+    #[serde(default)]
+    pub product_pages: HashMap<String, HashMap<String, serde_json::Value>>,
+    #[serde(default)]
+    pub product_rest_endpoint_pages: HashMap<String, HashMap<String, serde_json::Value>>,
 }
 
 pub const APIGATEWAYV2_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
@@ -57,6 +95,19 @@ impl ApiGatewayV2State {
             deployments: HashMap::new(),
             authorizers: HashMap::new(),
             request_history: Vec::new(),
+            domain_names: HashMap::new(),
+            api_mappings: HashMap::new(),
+            models: HashMap::new(),
+            integration_responses: HashMap::new(),
+            route_responses: HashMap::new(),
+            routing_rules: HashMap::new(),
+            vpc_links: HashMap::new(),
+            tags: HashMap::new(),
+            portals: HashMap::new(),
+            portal_products: HashMap::new(),
+            portal_product_sharing_policies: HashMap::new(),
+            product_pages: HashMap::new(),
+            product_rest_endpoint_pages: HashMap::new(),
         }
     }
 
@@ -68,6 +119,19 @@ impl ApiGatewayV2State {
         self.deployments.clear();
         self.authorizers.clear();
         self.request_history.clear();
+        self.domain_names.clear();
+        self.api_mappings.clear();
+        self.models.clear();
+        self.integration_responses.clear();
+        self.route_responses.clear();
+        self.routing_rules.clear();
+        self.vpc_links.clear();
+        self.tags.clear();
+        self.portals.clear();
+        self.portal_products.clear();
+        self.portal_product_sharing_policies.clear();
+        self.product_pages.clear();
+        self.product_rest_endpoint_pages.clear();
     }
 }
 

@@ -44,10 +44,85 @@ const SUPPORTED: &[&str] = &[
     "GetAuthorizers",
     "UpdateAuthorizer",
     "DeleteAuthorizer",
+    "CreateDomainName",
+    "GetDomainName",
+    "GetDomainNames",
+    "UpdateDomainName",
+    "DeleteDomainName",
+    "CreateApiMapping",
+    "GetApiMapping",
+    "GetApiMappings",
+    "UpdateApiMapping",
+    "DeleteApiMapping",
+    "CreateModel",
+    "GetModel",
+    "GetModels",
+    "UpdateModel",
+    "DeleteModel",
+    "GetModelTemplate",
+    "CreateIntegrationResponse",
+    "GetIntegrationResponse",
+    "GetIntegrationResponses",
+    "UpdateIntegrationResponse",
+    "DeleteIntegrationResponse",
+    "CreateRouteResponse",
+    "GetRouteResponse",
+    "GetRouteResponses",
+    "UpdateRouteResponse",
+    "DeleteRouteResponse",
+    "CreateRoutingRule",
+    "GetRoutingRule",
+    "PutRoutingRule",
+    "DeleteRoutingRule",
+    "ListRoutingRules",
+    "CreateVpcLink",
+    "GetVpcLink",
+    "GetVpcLinks",
+    "UpdateVpcLink",
+    "DeleteVpcLink",
+    "TagResource",
+    "UntagResource",
+    "GetTags",
+    "CreatePortal",
+    "GetPortal",
+    "ListPortals",
+    "UpdatePortal",
+    "DeletePortal",
+    "DisablePortal",
+    "PreviewPortal",
+    "PublishPortal",
+    "CreatePortalProduct",
+    "GetPortalProduct",
+    "ListPortalProducts",
+    "UpdatePortalProduct",
+    "DeletePortalProduct",
+    "PutPortalProductSharingPolicy",
+    "GetPortalProductSharingPolicy",
+    "DeletePortalProductSharingPolicy",
+    "CreateProductPage",
+    "GetProductPage",
+    "ListProductPages",
+    "UpdateProductPage",
+    "DeleteProductPage",
+    "CreateProductRestEndpointPage",
+    "GetProductRestEndpointPage",
+    "ListProductRestEndpointPages",
+    "UpdateProductRestEndpointPage",
+    "DeleteProductRestEndpointPage",
+    "ImportApi",
+    "ReimportApi",
+    "ExportApi",
+    "DeleteCorsConfiguration",
+    "DeleteAccessLogSettings",
+    "DeleteRouteRequestParameter",
+    "DeleteRouteSettings",
+    "DeleteDeployment",
+    "UpdateDeployment",
+    "ResetAuthorizersCache",
 ];
 
 pub struct ApiGatewayV2Service {
-    state: SharedApiGatewayV2State,
+    pub(crate) state: SharedApiGatewayV2State,
     delivery: Option<Arc<DeliveryBus>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
@@ -128,7 +203,125 @@ impl ApiGatewayV2Service {
     ///   DELETE /v2/apis/{api-id}/authorizers/{auth-id} -> DeleteAuthorizer
     fn resolve_action(req: &AwsRequest) -> Option<(&'static str, Option<String>, Option<String>)> {
         let segs = &req.path_segments;
-        if segs.len() < 2 || segs[0] != "v2" || segs[1] != "apis" {
+        if segs.len() < 2 || segs[0] != "v2" {
+            return None;
+        }
+
+        // Non-/v2/apis collections.
+        let second = segs.get(1).map(|s| s.as_str());
+        let m = &req.method;
+        let res = segs.get(2).map(|s| s.to_string());
+        let sub = segs.get(4).map(|s| s.to_string());
+
+        // For non-/v2/apis collections, the primary identifier (domain name,
+        // VPC link id, etc.) lives in segs[2] which we expose as `resource_id`
+        // (slot 2 of the tuple). Sub-ids (api mapping id, page id) live in
+        // segs[4] which we expose via the `api_id` slot purely as a carrier
+        // — handlers always read it as the second-level identifier.
+        if second == Some("domainnames") {
+            return match (m, segs.len(), segs.get(3).map(|s| s.as_str())) {
+                (&Method::POST, 2, _) => Some(("CreateDomainName", None, None)),
+                (&Method::GET, 2, _) => Some(("GetDomainNames", None, None)),
+                (&Method::GET, 3, _) => Some(("GetDomainName", None, res)),
+                (&Method::PATCH, 3, _) => Some(("UpdateDomainName", None, res)),
+                (&Method::DELETE, 3, _) => Some(("DeleteDomainName", None, res)),
+                (&Method::POST, 4, Some("apimappings")) => Some(("CreateApiMapping", None, res)),
+                (&Method::GET, 4, Some("apimappings")) => Some(("GetApiMappings", None, res)),
+                (&Method::GET, 5, Some("apimappings")) => Some(("GetApiMapping", sub, res)),
+                (&Method::PATCH, 5, Some("apimappings")) => Some(("UpdateApiMapping", sub, res)),
+                (&Method::DELETE, 5, Some("apimappings")) => Some(("DeleteApiMapping", sub, res)),
+                _ => None,
+            };
+        }
+
+        if second == Some("vpclinks") {
+            return match (m, segs.len()) {
+                (&Method::POST, 2) => Some(("CreateVpcLink", None, None)),
+                (&Method::GET, 2) => Some(("GetVpcLinks", None, None)),
+                (&Method::GET, 3) => Some(("GetVpcLink", None, res)),
+                (&Method::PATCH, 3) => Some(("UpdateVpcLink", None, res)),
+                (&Method::DELETE, 3) => Some(("DeleteVpcLink", None, res)),
+                _ => None,
+            };
+        }
+
+        if second == Some("routingrules") {
+            return match (m, segs.len()) {
+                (&Method::POST, 2) => Some(("CreateRoutingRule", None, None)),
+                (&Method::GET, 2) => Some(("ListRoutingRules", None, None)),
+                (&Method::GET, 3) => Some(("GetRoutingRule", None, res)),
+                (&Method::PUT, 3) => Some(("PutRoutingRule", None, res)),
+                (&Method::DELETE, 3) => Some(("DeleteRoutingRule", None, res)),
+                _ => None,
+            };
+        }
+
+        if second == Some("tags") {
+            // /v2/tags/{resource-arn}
+            let arn = segs.get(2).map(|s| s.to_string());
+            return match *m {
+                Method::POST => Some(("TagResource", None, arn)),
+                Method::DELETE => Some(("UntagResource", None, arn)),
+                Method::GET => Some(("GetTags", None, arn)),
+                _ => None,
+            };
+        }
+
+        if second == Some("portals") {
+            return match (m, segs.len(), segs.get(3).map(|s| s.as_str())) {
+                (&Method::POST, 2, _) => Some(("CreatePortal", None, None)),
+                (&Method::GET, 2, _) => Some(("ListPortals", None, None)),
+                (&Method::GET, 3, _) => Some(("GetPortal", None, res)),
+                (&Method::PATCH, 3, _) => Some(("UpdatePortal", None, res)),
+                (&Method::DELETE, 3, _) => Some(("DeletePortal", None, res)),
+                (&Method::POST, 4, Some("disable")) => Some(("DisablePortal", None, res)),
+                (&Method::POST, 4, Some("preview")) => Some(("PreviewPortal", None, res)),
+                (&Method::POST, 4, Some("publish")) => Some(("PublishPortal", None, res)),
+                _ => None,
+            };
+        }
+
+        if second == Some("portalproducts") {
+            return match (m, segs.len(), segs.get(3).map(|s| s.as_str())) {
+                (&Method::POST, 2, _) => Some(("CreatePortalProduct", None, None)),
+                (&Method::GET, 2, _) => Some(("ListPortalProducts", None, None)),
+                (&Method::GET, 3, _) => Some(("GetPortalProduct", None, res)),
+                (&Method::PATCH, 3, _) => Some(("UpdatePortalProduct", None, res)),
+                (&Method::DELETE, 3, _) => Some(("DeletePortalProduct", None, res)),
+                (&Method::PUT, 4, Some("sharing-policy")) => {
+                    Some(("PutPortalProductSharingPolicy", None, res))
+                }
+                (&Method::GET, 4, Some("sharing-policy")) => {
+                    Some(("GetPortalProductSharingPolicy", None, res))
+                }
+                (&Method::DELETE, 4, Some("sharing-policy")) => {
+                    Some(("DeletePortalProductSharingPolicy", None, res))
+                }
+                (&Method::POST, 4, Some("pages")) => Some(("CreateProductPage", None, res)),
+                (&Method::GET, 4, Some("pages")) => Some(("ListProductPages", None, res)),
+                (&Method::GET, 5, Some("pages")) => Some(("GetProductPage", sub, res)),
+                (&Method::PATCH, 5, Some("pages")) => Some(("UpdateProductPage", sub, res)),
+                (&Method::DELETE, 5, Some("pages")) => Some(("DeleteProductPage", sub, res)),
+                (&Method::POST, 4, Some("rest-endpoint-pages")) => {
+                    Some(("CreateProductRestEndpointPage", None, res))
+                }
+                (&Method::GET, 4, Some("rest-endpoint-pages")) => {
+                    Some(("ListProductRestEndpointPages", None, res))
+                }
+                (&Method::GET, 5, Some("rest-endpoint-pages")) => {
+                    Some(("GetProductRestEndpointPage", sub, res))
+                }
+                (&Method::PATCH, 5, Some("rest-endpoint-pages")) => {
+                    Some(("UpdateProductRestEndpointPage", sub, res))
+                }
+                (&Method::DELETE, 5, Some("rest-endpoint-pages")) => {
+                    Some(("DeleteProductRestEndpointPage", sub, res))
+                }
+                _ => None,
+            };
+        }
+
+        if second != Some("apis") {
             return None;
         }
 
@@ -144,15 +337,59 @@ impl ApiGatewayV2Service {
         let action = match (method, segs.len(), collection) {
             // /v2/apis
             (&Method::POST, 2, _) => "CreateApi",
+            (&Method::PUT, 2, _) => "ImportApi",
             (&Method::GET, 2, _) => "GetApis",
             // /v2/apis/{api-id}
             (&Method::GET, 3, _) => "GetApi",
             (&Method::PATCH, 3, _) => "UpdateApi",
+            (&Method::PUT, 3, _) => "ReimportApi",
             (&Method::DELETE, 3, _) => "DeleteApi",
             // /v2/apis/{api-id}/{collection}
             (m, 4, Some(col)) => resolve_collection_action(m, col)?,
             // /v2/apis/{api-id}/{collection}/{resource-id}
             (m, 5, Some(col)) => resolve_resource_action(m, col)?,
+            // /v2/apis/{api-id}/{collection}/{resource-id}/{sub}
+            (m, 6, Some(col)) => {
+                let sub = segs.get(5).map(|s| s.as_str())?;
+                match (m.clone(), col, sub) {
+                    (Method::POST, "integrations", "integrationresponses") => {
+                        "CreateIntegrationResponse"
+                    }
+                    (Method::GET, "integrations", "integrationresponses") => {
+                        "GetIntegrationResponses"
+                    }
+                    (Method::POST, "routes", "routeresponses") => "CreateRouteResponse",
+                    (Method::GET, "routes", "routeresponses") => "GetRouteResponses",
+                    (Method::GET, "models", "template") => "GetModelTemplate",
+                    (Method::DELETE, "stages", "accesslogsettings") => "DeleteAccessLogSettings",
+                    (Method::GET, "exports", _) => "ExportApi",
+                    _ => return None,
+                }
+            }
+            // /v2/apis/{api-id}/{collection}/{resource-id}/{sub}/{sub-id}
+            (m, 7, Some(col)) => {
+                let sub = segs.get(5).map(|s| s.as_str())?;
+                match (m.clone(), col, sub) {
+                    (Method::GET, "integrations", "integrationresponses") => {
+                        "GetIntegrationResponse"
+                    }
+                    (Method::PATCH, "integrations", "integrationresponses") => {
+                        "UpdateIntegrationResponse"
+                    }
+                    (Method::DELETE, "integrations", "integrationresponses") => {
+                        "DeleteIntegrationResponse"
+                    }
+                    (Method::GET, "routes", "routeresponses") => "GetRouteResponse",
+                    (Method::PATCH, "routes", "routeresponses") => "UpdateRouteResponse",
+                    (Method::DELETE, "routes", "routeresponses") => "DeleteRouteResponse",
+                    (Method::DELETE, "routes", "requestparameters") => {
+                        "DeleteRouteRequestParameter"
+                    }
+                    (Method::DELETE, "stages", "routesettings") => "DeleteRouteSettings",
+                    (Method::DELETE, "stages", "cache") => "ResetAuthorizersCache",
+                    _ => return None,
+                }
+            }
             _ => return None,
         };
 
@@ -176,6 +413,9 @@ fn resolve_collection_action(method: &Method, collection: &str) -> Option<&'stat
         (Method::GET, "deployments") => Some("GetDeployments"),
         (Method::POST, "authorizers") => Some("CreateAuthorizer"),
         (Method::GET, "authorizers") => Some("GetAuthorizers"),
+        (Method::POST, "models") => Some("CreateModel"),
+        (Method::GET, "models") => Some("GetModels"),
+        (Method::DELETE, "cors") => Some("DeleteCorsConfiguration"),
         _ => None,
     }
 }
@@ -196,9 +436,16 @@ fn resolve_resource_action(method: &Method, collection: &str) -> Option<&'static
         (Method::PATCH, "stages") => Some("UpdateStage"),
         (Method::DELETE, "stages") => Some("DeleteStage"),
         (Method::GET, "deployments") => Some("GetDeployment"),
+        (Method::PATCH, "deployments") => Some("UpdateDeployment"),
+        (Method::DELETE, "deployments") => Some("DeleteDeployment"),
         (Method::GET, "authorizers") => Some("GetAuthorizer"),
         (Method::PATCH, "authorizers") => Some("UpdateAuthorizer"),
         (Method::DELETE, "authorizers") => Some("DeleteAuthorizer"),
+        (Method::POST, "authorizers") => Some("ResetAuthorizersCache"),
+        (Method::GET, "models") => Some("GetModel"),
+        (Method::PATCH, "models") => Some("UpdateModel"),
+        (Method::DELETE, "models") => Some("DeleteModel"),
+        (Method::GET, "exports") => Some("ExportApi"),
         _ => None,
     }
 }
@@ -211,12 +458,10 @@ impl AwsService for ApiGatewayV2Service {
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         // Check if this is a management API request or an execute API request
-        // Management API: /v2/apis/*
+        // Management API: /v2/* (apis, domainnames, vpclinks, routingrules,
+        // tags, portals, portalproducts)
         // Execute API: /{stage}/{path}
-        if req.path_segments.first().map(|s| s.as_str()) == Some("v2")
-            && req.path_segments.get(1).map(|s| s.as_str()) == Some("apis")
-        {
-            // Management API: /v2/apis/*
+        if req.path_segments.first().map(|s| s.as_str()) == Some("v2") {
             return self.handle_management_api(req).await;
         }
 
@@ -240,7 +485,16 @@ impl ApiGatewayV2Service {
         })?;
         let mutates = action.starts_with("Create")
             || action.starts_with("Update")
-            || action.starts_with("Delete");
+            || action.starts_with("Delete")
+            || action.starts_with("Put")
+            || action.starts_with("Tag")
+            || action.starts_with("Untag")
+            || action == "ImportApi"
+            || action == "ReimportApi"
+            || action == "DisablePortal"
+            || action == "PreviewPortal"
+            || action == "PublishPortal"
+            || action == "ResetAuthorizersCache";
 
         let result = match action {
             "CreateApi" => self.create_api(&req),
@@ -281,10 +535,9 @@ impl ApiGatewayV2Service {
             "DeleteAuthorizer" => {
                 self.delete_authorizer(&req, api_id.as_deref(), resource_id.as_deref())
             }
-            _ => Err(AwsServiceError::action_not_implemented(
-                "apigateway",
-                action,
-            )),
+            other => {
+                self.handle_extra_action(other, &req, api_id.as_deref(), resource_id.as_deref())
+            }
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
             self.save_snapshot().await;
