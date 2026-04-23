@@ -66,6 +66,8 @@ impl SnsService {
     }
 }
 
+use fakecloud_aws::xml::xml_escape;
+
 /// Actions that mutate SNS state.
 fn is_mutating_action(action: &str) -> bool {
     matches!(
@@ -91,6 +93,14 @@ fn is_mutating_action(action: &str) -> bool {
             | "SetEndpointAttributes"
             | "SetSMSAttributes"
             | "OptInPhoneNumber"
+            | "CreateSMSSandboxPhoneNumber"
+            | "DeleteSMSSandboxPhoneNumber"
+            | "VerifySMSSandboxPhoneNumber"
+            | "PutDataProtectionPolicy"
+            // ListOriginationNumbers lazy-seeds a default origination number
+            // on first read; treat it as mutating so the snapshot stays
+            // consistent across restarts.
+            | "ListOriginationNumbers"
     )
 }
 
@@ -191,6 +201,14 @@ impl AwsService for SnsService {
             "CheckIfPhoneNumberIsOptedOut" => self.check_if_phone_number_is_opted_out(&req),
             "ListPhoneNumbersOptedOut" => self.list_phone_numbers_opted_out(&req),
             "OptInPhoneNumber" => self.opt_in_phone_number(&req),
+            "CreateSMSSandboxPhoneNumber" => self.create_sms_sandbox_phone_number(&req),
+            "DeleteSMSSandboxPhoneNumber" => self.delete_sms_sandbox_phone_number(&req),
+            "VerifySMSSandboxPhoneNumber" => self.verify_sms_sandbox_phone_number(&req),
+            "ListSMSSandboxPhoneNumbers" => self.list_sms_sandbox_phone_numbers(&req),
+            "GetSMSSandboxAccountStatus" => self.get_sms_sandbox_account_status(&req),
+            "ListOriginationNumbers" => self.list_origination_numbers(&req),
+            "GetDataProtectionPolicy" => self.get_data_protection_policy(&req),
+            "PutDataProtectionPolicy" => self.put_data_protection_policy(&req),
             _ => Err(AwsServiceError::action_not_implemented("sns", &req.action)),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
@@ -273,6 +291,9 @@ impl AwsService for SnsService {
             }
             "DeleteEndpoint" | "GetEndpointAttributes" | "SetEndpointAttributes" => {
                 param(request, "EndpointArn").unwrap_or_else(|| "*".to_string())
+            }
+            "GetDataProtectionPolicy" | "PutDataProtectionPolicy" => {
+                param(request, "ResourceArn").unwrap_or_else(|| "*".to_string())
             }
             _ => "*".to_string(),
         };
@@ -364,6 +385,14 @@ const SNS_SUPPORTED_ACTIONS: &[&str] = &[
     "CheckIfPhoneNumberIsOptedOut",
     "ListPhoneNumbersOptedOut",
     "OptInPhoneNumber",
+    "CreateSMSSandboxPhoneNumber",
+    "DeleteSMSSandboxPhoneNumber",
+    "VerifySMSSandboxPhoneNumber",
+    "ListSMSSandboxPhoneNumbers",
+    "GetSMSSandboxAccountStatus",
+    "ListOriginationNumbers",
+    "GetDataProtectionPolicy",
+    "PutDataProtectionPolicy",
 ];
 
 /// SNS uses Query protocol — params come from query_params (which includes form body).
@@ -2850,6 +2879,341 @@ impl SnsService {
             &req.request_id,
         ))
     }
+
+    fn create_sms_sandbox_phone_number(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let phone_number = required(req, "PhoneNumber")?;
+        validate_e164(&phone_number)?;
+        let language_code = param(req, "LanguageCode").unwrap_or_else(|| "en-US".to_string());
+        if !is_valid_sandbox_language(&language_code) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameter",
+                format!("Invalid parameter: LanguageCode {language_code} is not supported"),
+            ));
+        }
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if state.sms_sandbox_phone_numbers.contains_key(&phone_number) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "OptedOutException",
+                format!(
+                    "Phone number {phone_number} is already registered as a sandbox destination."
+                ),
+            ));
+        }
+        let otp = format!("{:06}", rand_u32() % 1_000_000);
+        state.sms_sandbox_phone_numbers.insert(
+            phone_number.clone(),
+            crate::state::SmsSandboxPhoneNumber {
+                phone_number: phone_number.clone(),
+                language_code,
+                status: crate::state::SmsSandboxPhoneStatus::Pending,
+                one_time_password: otp,
+            },
+        );
+        Ok(xml_resp(
+            &format!(
+                r#"<CreateSMSSandboxPhoneNumberResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <CreateSMSSandboxPhoneNumberResult/>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</CreateSMSSandboxPhoneNumberResponse>"#,
+                req.request_id
+            ),
+            &req.request_id,
+        ))
+    }
+
+    fn delete_sms_sandbox_phone_number(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let phone_number = required(req, "PhoneNumber")?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if state
+            .sms_sandbox_phone_numbers
+            .remove(&phone_number)
+            .is_none()
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                format!("Sandbox phone number {phone_number} not found."),
+            ));
+        }
+        Ok(xml_resp(
+            &format!(
+                r#"<DeleteSMSSandboxPhoneNumberResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <DeleteSMSSandboxPhoneNumberResult/>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</DeleteSMSSandboxPhoneNumberResponse>"#,
+                req.request_id
+            ),
+            &req.request_id,
+        ))
+    }
+
+    fn verify_sms_sandbox_phone_number(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let phone_number = required(req, "PhoneNumber")?;
+        let one_time_password = required(req, "OneTimePassword")?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let entry = state
+            .sms_sandbox_phone_numbers
+            .get_mut(&phone_number)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFound",
+                    format!("Sandbox phone number {phone_number} not found."),
+                )
+            })?;
+        if entry.one_time_password != one_time_password {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "VerificationException",
+                "The verification code provided is incorrect.",
+            ));
+        }
+        entry.status = crate::state::SmsSandboxPhoneStatus::Verified;
+        Ok(xml_resp(
+            &format!(
+                r#"<VerifySMSSandboxPhoneNumberResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <VerifySMSSandboxPhoneNumberResult/>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</VerifySMSSandboxPhoneNumberResponse>"#,
+                req.request_id
+            ),
+            &req.request_id,
+        ))
+    }
+
+    fn list_sms_sandbox_phone_numbers(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let _accts = self.state.read();
+        let _empty = crate::state::SnsState::new(&req.account_id, &req.region, "");
+        let state = _accts.get(&req.account_id).unwrap_or(&_empty);
+        let members: String = state
+            .sms_sandbox_phone_numbers
+            .values()
+            .map(|p| {
+                format!(
+                    "      <member>\n        <PhoneNumber>{}</PhoneNumber>\n        <Status>{}</Status>\n      </member>",
+                    xml_escape(&p.phone_number),
+                    p.status.as_str()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(xml_resp(
+            &format!(
+                r#"<ListSMSSandboxPhoneNumbersResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <ListSMSSandboxPhoneNumbersResult>
+    <PhoneNumbers>
+{members}
+    </PhoneNumbers>
+  </ListSMSSandboxPhoneNumbersResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</ListSMSSandboxPhoneNumbersResponse>"#,
+                req.request_id
+            ),
+            &req.request_id,
+        ))
+    }
+
+    fn get_sms_sandbox_account_status(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let _accts = self.state.read();
+        let _empty = crate::state::SnsState::new(&req.account_id, &req.region, "");
+        let state = _accts.get(&req.account_id).unwrap_or(&_empty);
+        let in_sandbox = state.is_sms_sandboxed();
+        Ok(xml_resp(
+            &format!(
+                r#"<GetSMSSandboxAccountStatusResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <GetSMSSandboxAccountStatusResult>
+    <IsInSandbox>{in_sandbox}</IsInSandbox>
+  </GetSMSSandboxAccountStatusResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</GetSMSSandboxAccountStatusResponse>"#,
+                req.request_id
+            ),
+            &req.request_id,
+        ))
+    }
+
+    fn list_origination_numbers(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.seed_default_origination_numbers();
+        let members: String = state
+            .origination_numbers
+            .iter()
+            .map(|n| {
+                let caps: String = n
+                    .number_capabilities
+                    .iter()
+                    .map(|c| format!("          <member>{}</member>", xml_escape(c)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    r#"      <member>
+        <PhoneNumber>{phone}</PhoneNumber>
+        <IsoCountryCode>{iso}</IsoCountryCode>
+        <Status>{status}</Status>
+        <RouteType>{rt}</RouteType>
+        <NumberCapabilities>
+{caps}
+        </NumberCapabilities>
+        <CreatedAt>{created}</CreatedAt>
+      </member>"#,
+                    phone = xml_escape(&n.phone_number),
+                    iso = xml_escape(&n.iso_country_code),
+                    status = xml_escape(&n.status),
+                    rt = xml_escape(&n.route_type),
+                    caps = caps,
+                    created = n.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(xml_resp(
+            &format!(
+                r#"<ListOriginationNumbersResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <ListOriginationNumbersResult>
+    <PhoneNumbers>
+{members}
+    </PhoneNumbers>
+  </ListOriginationNumbersResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</ListOriginationNumbersResponse>"#,
+                req.request_id
+            ),
+            &req.request_id,
+        ))
+    }
+
+    fn get_data_protection_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let resource_arn = required(req, "ResourceArn")?;
+        let _accts = self.state.read();
+        let _empty = crate::state::SnsState::new(&req.account_id, &req.region, "");
+        let state = _accts.get(&req.account_id).unwrap_or(&_empty);
+        if !state.topics.contains_key(&resource_arn) {
+            return Err(not_found("Topic"));
+        }
+        let policy = state
+            .data_protection_policies
+            .get(&resource_arn)
+            .cloned()
+            .unwrap_or_default();
+        Ok(xml_resp(
+            &format!(
+                r#"<GetDataProtectionPolicyResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <GetDataProtectionPolicyResult>
+    <DataProtectionPolicy>{}</DataProtectionPolicy>
+  </GetDataProtectionPolicyResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</GetDataProtectionPolicyResponse>"#,
+                xml_escape(&policy),
+                req.request_id
+            ),
+            &req.request_id,
+        ))
+    }
+
+    fn put_data_protection_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let resource_arn = required(req, "ResourceArn")?;
+        let policy = required(req, "DataProtectionPolicy")?;
+        // Validate JSON.
+        if serde_json::from_str::<Value>(&policy).is_err() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameter",
+                "DataProtectionPolicy must be valid JSON.",
+            ));
+        }
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.topics.contains_key(&resource_arn) {
+            return Err(not_found("Topic"));
+        }
+        state.data_protection_policies.insert(resource_arn, policy);
+        Ok(xml_resp(
+            &format!(
+                r#"<PutDataProtectionPolicyResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
+  <PutDataProtectionPolicyResult/>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</PutDataProtectionPolicyResponse>"#,
+                req.request_id
+            ),
+            &req.request_id,
+        ))
+    }
+}
+
+/// Sandbox languages SNS will send the verification code in. Mirrors the
+/// `LanguageCodeString` enum in `aws-models/sns.json` — keep these two
+/// lists in lockstep.
+const SUPPORTED_SANDBOX_LANGUAGES: &[&str] = &[
+    "en-US", "en-GB", "es-419", "es-ES", "de-DE", "fr-CA", "fr-FR", "it-IT", "ja-JP", "pt-BR",
+    "kr-KR", "zh-CN", "zh-TW",
+];
+
+fn is_valid_sandbox_language(code: &str) -> bool {
+    SUPPORTED_SANDBOX_LANGUAGES.contains(&code)
+}
+
+fn validate_e164(phone: &str) -> Result<(), AwsServiceError> {
+    // E.164: leading '+' followed by country code + subscriber digits.
+    // Real range is up to 15 digits with at least 4 (smallest standard
+    // country plus subscriber). AWS rejects shorter numbers like "+1".
+    let digits = phone.strip_prefix('+').unwrap_or("");
+    let digit_only = digits.chars().all(|c| c.is_ascii_digit());
+    let valid = phone.starts_with('+') && digit_only && (4..=15).contains(&digits.len());
+    if !valid {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameter",
+            format!("Invalid parameter: PhoneNumber Reason: {phone} does not meet the E164 format"),
+        ));
+    }
+    Ok(())
+}
+
+fn rand_u32() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    nanos.wrapping_mul(2654435761)
 }
 
 /// Inputs to `build_sns_lambda_event` — one SNS message delivered to one Lambda subscription.
@@ -6527,5 +6891,225 @@ mod tests {
         let (svc, _) = make_sns();
         let req = sns_request("OptInPhoneNumber", vec![]);
         assert!(svc.opt_in_phone_number(&req).is_err());
+    }
+
+    // ── SMS sandbox / data protection coverage ──
+
+    #[test]
+    fn validate_e164_rejects_short_numbers() {
+        assert!(validate_e164("+1").is_err());
+        assert!(validate_e164("+12").is_err());
+        assert!(validate_e164("+123").is_err());
+        assert!(validate_e164("+1234").is_ok());
+    }
+
+    #[test]
+    fn validate_e164_rejects_too_long_or_non_digit() {
+        assert!(validate_e164("+1234567890123456").is_err()); // 16 digits
+        assert!(validate_e164("+1abc4567").is_err());
+        assert!(validate_e164("12345").is_err()); // missing +
+    }
+
+    #[test]
+    fn is_valid_sandbox_language_round_trip() {
+        for code in SUPPORTED_SANDBOX_LANGUAGES {
+            assert!(is_valid_sandbox_language(code), "{code}");
+        }
+        assert!(!is_valid_sandbox_language("xx-XX"));
+        assert!(!is_valid_sandbox_language(""));
+    }
+
+    #[test]
+    fn create_sms_sandbox_phone_number_rejects_invalid_phone() {
+        let (svc, _) = make_sns();
+        let req = sns_request("CreateSMSSandboxPhoneNumber", vec![("PhoneNumber", "+1")]);
+        let err = match svc.create_sms_sandbox_phone_number(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected err"),
+        };
+        assert_eq!(err.code(), "InvalidParameter");
+    }
+
+    #[test]
+    fn create_sms_sandbox_phone_number_rejects_invalid_language() {
+        let (svc, _) = make_sns();
+        let req = sns_request(
+            "CreateSMSSandboxPhoneNumber",
+            vec![("PhoneNumber", "+15551234567"), ("LanguageCode", "xx-YY")],
+        );
+        let err = match svc.create_sms_sandbox_phone_number(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected err"),
+        };
+        assert_eq!(err.code(), "InvalidParameter");
+    }
+
+    #[test]
+    fn create_sms_sandbox_phone_number_rejects_duplicate() {
+        let (svc, _) = make_sns();
+        let req = sns_request(
+            "CreateSMSSandboxPhoneNumber",
+            vec![("PhoneNumber", "+15551234500")],
+        );
+        svc.create_sms_sandbox_phone_number(&req).unwrap();
+        let err = match svc.create_sms_sandbox_phone_number(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected err"),
+        };
+        assert_eq!(err.code(), "OptedOutException");
+    }
+
+    #[test]
+    fn delete_sms_sandbox_phone_number_unknown_errors() {
+        let (svc, _) = make_sns();
+        let req = sns_request(
+            "DeleteSMSSandboxPhoneNumber",
+            vec![("PhoneNumber", "+15551234599")],
+        );
+        let err = match svc.delete_sms_sandbox_phone_number(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected err"),
+        };
+        assert_eq!(err.code(), "ResourceNotFound");
+    }
+
+    #[test]
+    fn verify_sms_sandbox_phone_number_wrong_otp_errors() {
+        let (svc, _) = make_sns();
+        let create = sns_request(
+            "CreateSMSSandboxPhoneNumber",
+            vec![("PhoneNumber", "+15551234511")],
+        );
+        svc.create_sms_sandbox_phone_number(&create).unwrap();
+        let verify = sns_request(
+            "VerifySMSSandboxPhoneNumber",
+            vec![
+                ("PhoneNumber", "+15551234511"),
+                ("OneTimePassword", "999999"),
+            ],
+        );
+        let err = match svc.verify_sms_sandbox_phone_number(&verify) {
+            Err(e) => e,
+            Ok(_) => panic!("expected err"),
+        };
+        assert_eq!(err.code(), "VerificationException");
+    }
+
+    #[test]
+    fn verify_sms_sandbox_phone_number_unknown_errors() {
+        let (svc, _) = make_sns();
+        let req = sns_request(
+            "VerifySMSSandboxPhoneNumber",
+            vec![
+                ("PhoneNumber", "+15550009999"),
+                ("OneTimePassword", "000000"),
+            ],
+        );
+        let err = match svc.verify_sms_sandbox_phone_number(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected err"),
+        };
+        assert_eq!(err.code(), "ResourceNotFound");
+    }
+
+    #[test]
+    fn list_sms_sandbox_phone_numbers_returns_entries() {
+        let (svc, _) = make_sns();
+        let create = sns_request(
+            "CreateSMSSandboxPhoneNumber",
+            vec![("PhoneNumber", "+15551239876")],
+        );
+        svc.create_sms_sandbox_phone_number(&create).unwrap();
+        let list = sns_request("ListSMSSandboxPhoneNumbers", vec![]);
+        let resp = svc.list_sms_sandbox_phone_numbers(&list).unwrap();
+        assert!(resp.status.is_success());
+    }
+
+    #[test]
+    fn get_sms_sandbox_account_status_starts_in_sandbox() {
+        let (svc, _) = make_sns();
+        let req = sns_request("GetSMSSandboxAccountStatus", vec![]);
+        let resp = svc.get_sms_sandbox_account_status(&req).unwrap();
+        // raw XML body — eyeball IsInSandbox=true.
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("<IsInSandbox>true</IsInSandbox>"), "{body}");
+    }
+
+    #[test]
+    fn list_origination_numbers_seeds_default() {
+        let (svc, _) = make_sns();
+        let req = sns_request("ListOriginationNumbers", vec![]);
+        let resp = svc.list_origination_numbers(&req).unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("+18005550100"), "{body}");
+    }
+
+    #[test]
+    fn put_data_protection_policy_requires_topic() {
+        let (svc, _) = make_sns();
+        let req = sns_request(
+            "PutDataProtectionPolicy",
+            vec![
+                ("ResourceArn", "arn:aws:sns:us-east-1:123456789012:no-topic"),
+                ("DataProtectionPolicy", "{}"),
+            ],
+        );
+        let err = match svc.put_data_protection_policy(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected err"),
+        };
+        assert_eq!(err.code(), "NotFound");
+    }
+
+    #[test]
+    fn put_data_protection_policy_rejects_invalid_json() {
+        let (svc, _) = make_sns();
+        // First create a topic.
+        let create = sns_request("CreateTopic", vec![("Name", "dpp-topic")]);
+        svc.create_topic(&create).unwrap();
+        let arn = "arn:aws:sns:us-east-1:123456789012:dpp-topic";
+        let req = sns_request(
+            "PutDataProtectionPolicy",
+            vec![("ResourceArn", arn), ("DataProtectionPolicy", "not-json")],
+        );
+        let err = match svc.put_data_protection_policy(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected err"),
+        };
+        assert_eq!(err.code(), "InvalidParameter");
+    }
+
+    #[test]
+    fn put_then_get_data_protection_policy_round_trips() {
+        let (svc, _) = make_sns();
+        let create = sns_request("CreateTopic", vec![("Name", "dpp-topic2")]);
+        svc.create_topic(&create).unwrap();
+        let arn = "arn:aws:sns:us-east-1:123456789012:dpp-topic2";
+        let req = sns_request(
+            "PutDataProtectionPolicy",
+            vec![
+                ("ResourceArn", arn),
+                ("DataProtectionPolicy", r#"{"Name":"p"}"#),
+            ],
+        );
+        svc.put_data_protection_policy(&req).unwrap();
+        let get = sns_request("GetDataProtectionPolicy", vec![("ResourceArn", arn)]);
+        let resp = svc.get_data_protection_policy(&get).unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("&quot;Name&quot;:&quot;p&quot;"), "{body}");
+    }
+
+    #[test]
+    fn get_data_protection_policy_unknown_topic_errors() {
+        let (svc, _) = make_sns();
+        let req = sns_request(
+            "GetDataProtectionPolicy",
+            vec![("ResourceArn", "arn:aws:sns:us-east-1:123456789012:nope")],
+        );
+        let err = match svc.get_data_protection_policy(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected err"),
+        };
+        assert_eq!(err.code(), "NotFound");
     }
 }

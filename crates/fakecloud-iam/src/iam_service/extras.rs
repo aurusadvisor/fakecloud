@@ -920,11 +920,6 @@ impl IamService {
 
     pub(super) fn get_mfa_device(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let serial = required_param(&req.query_params, "SerialNumber")?;
-        let user_name = req
-            .query_params
-            .get("UserName")
-            .cloned()
-            .unwrap_or_default();
         let accounts = self.state.read();
         let empty = IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -935,11 +930,20 @@ impl IamService {
                 format!("MFADevice {serial} not found"),
             )
         })?;
+        let user_name = device
+            .user
+            .clone()
+            .or_else(|| req.query_params.get("UserName").cloned())
+            .unwrap_or_default();
+        let enable_date = device
+            .enable_date
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_else(now_iso);
         let body = format!(
             "  <GetMFADeviceResult><SerialNumber>{}</SerialNumber><UserName>{}</UserName><EnableDate>{}</EnableDate></GetMFADeviceResult>",
             xml_escape(&device.serial_number),
             xml_escape(&user_name),
-            now_iso(),
+            xml_escape(&enable_date),
         );
         Ok(xml_response("GetMFADevice", &body, &req.request_id))
     }
@@ -998,11 +1002,31 @@ impl IamService {
             )
         })?;
         let final_name = new_name.unwrap_or_else(|| name.clone());
+        if final_name != name && state.server_certificates.contains_key(&final_name) {
+            // Restore the cert we removed before checking
+            state.server_certificates.insert(name, cert);
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "EntityAlreadyExists",
+                format!("Server certificate {final_name} already exists."),
+            ));
+        }
         let mut updated = cert;
         if let Some(p) = new_path {
             updated.path = p;
         }
         updated.server_certificate_name = final_name.clone();
+        // Rebuild ARN with the new path/name so metadata responses reflect the rename.
+        updated.arn = format!(
+            "arn:aws:iam::{account}:server-certificate{path}{name}",
+            account = req.account_id,
+            path = if updated.path.starts_with('/') {
+                updated.path.clone()
+            } else {
+                format!("/{}", updated.path)
+            },
+            name = final_name,
+        );
         state.server_certificates.insert(final_name, updated);
         Ok(AwsResponse::xml(
             StatusCode::OK,
