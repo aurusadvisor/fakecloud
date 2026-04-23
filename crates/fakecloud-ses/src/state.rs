@@ -359,6 +359,52 @@ pub struct SesState {
     /// Inbound emails processed by the introspection endpoint.
     #[serde(default, skip_serializing)]
     pub inbound_emails: Vec<InboundEmail>,
+    /// Deliverability dashboard subscription state.
+    #[serde(default)]
+    pub deliverability_dashboard: DeliverabilityDashboard,
+    /// Deliverability test reports keyed by ReportId.
+    #[serde(default)]
+    pub deliverability_test_reports: HashMap<String, DeliverabilityTestReport>,
+    /// VDM recommendations (read-only, lazily seeded once on first read).
+    #[serde(default)]
+    pub vdm_recommendations: Vec<VdmRecommendation>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeliverabilityDashboard {
+    pub enabled: bool,
+    pub subscribed_domains: Vec<SubscribedDomain>,
+    pub subscription_expiry_date: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribedDomain {
+    pub domain: String,
+    pub subscription_start_date: DateTime<Utc>,
+    pub inbox_placement_tracking_option_global: bool,
+    pub inbox_placement_tracking_option_tracked_isps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliverabilityTestReport {
+    pub report_id: String,
+    pub report_name: String,
+    pub subject: String,
+    pub from_email: String,
+    pub create_date: DateTime<Utc>,
+    pub deliverability_test_status: String, // IN_PROGRESS | COMPLETED
+    pub tags: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VdmRecommendation {
+    pub resource_arn: String,
+    pub recommendation_type: String,
+    pub description: String,
+    pub status: String,
+    pub created_timestamp: DateTime<Utc>,
+    pub last_updated_timestamp: DateTime<Utc>,
+    pub impact: String,
 }
 
 pub const SES_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
@@ -407,6 +453,9 @@ impl SesState {
             active_receipt_rule_set: None,
             receipt_filters: HashMap::new(),
             inbound_emails: Vec::new(),
+            deliverability_dashboard: DeliverabilityDashboard::default(),
+            deliverability_test_reports: HashMap::new(),
+            vdm_recommendations: Vec::new(),
         }
     }
 
