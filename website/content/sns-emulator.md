@@ -1,10 +1,10 @@
 +++
-title = "Mock SNS for tests"
-description = "Mock SNS locally for integration tests with fakecloud. 42 SNS operations, fan-out to SQS/Lambda/HTTP, filter policies, real cross-service delivery. Any AWS SDK, free, no account required."
+title = "SNS emulator for tests"
+description = "Run SNS locally for integration tests with fakecloud. 42 SNS operations, fan-out to SQS/Lambda/HTTP, filter policies, real cross-service delivery. Any AWS SDK, free, no account required."
 template = "page.html"
 +++
 
-Need to mock SNS for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud).
+Need an SNS emulator for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud). Not a mock library — a real server that speaks the SNS wire protocol.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
@@ -117,11 +117,11 @@ SDKs for TypeScript, Python, Go, PHP, Java, Rust.
 |---|---|---|---|---|
 | fakecloud | Any | Yes | Yes (real code runs) | Yes |
 | LocalStack Community | Any (auth required post-paywall) | Yes | Yes | Yes |
-| Moto (mock_sns) | Python only | Yes | Stubbed | Partial |
+| Moto (`mock_sns`) | Python only | Yes | Stubbed | Partial |
 | aws-sdk-client-mock | Node only | Stubbed | N/A | Stubbed |
 
 ## Links
 
 - **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
-- **Related:** [Mock SQS for tests](/mock-sqs/), [Test Lambda locally](/test-lambda-locally/), [Fake AWS server for tests](/fake-aws-server/)
+- **Related:** [SQS emulator](/sqs-emulator/), [Test Lambda locally](/test-lambda-locally/), [Fake AWS server for tests](/fake-aws-server/)

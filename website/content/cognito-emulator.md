@@ -1,10 +1,10 @@
 +++
-title = "Mock Cognito for tests"
-description = "Mock AWS Cognito User Pools locally for integration tests with fakecloud. 122 operations, full auth flows (USER_PASSWORD_AUTH, USER_SRP_AUTH, CUSTOM_AUTH), MFA, identity providers, triggers."
+title = "Cognito emulator for tests"
+description = "Run AWS Cognito User Pools locally for integration tests with fakecloud. 122 operations, full auth flows (USER_PASSWORD_AUTH, USER_SRP_AUTH, CUSTOM_AUTH), MFA, identity providers, triggers."
 template = "page.html"
 +++
 
-Need to mock AWS Cognito for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud).
+Need a Cognito emulator for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud). Not a mock library — a real server that speaks the Cognito wire protocol.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash

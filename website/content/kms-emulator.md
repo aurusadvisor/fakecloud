@@ -1,10 +1,10 @@
 +++
-title = "Mock KMS for tests"
-description = "Mock AWS KMS locally for integration tests with fakecloud. 53 KMS operations, real ECDH, encryption/decryption, aliases, grants, key import, multi-region keys. Any AWS SDK, free."
+title = "KMS emulator for tests"
+description = "Run AWS KMS locally for integration tests with fakecloud. 53 KMS operations, real ECDH, encryption/decryption, aliases, grants, key import, multi-region keys. Any AWS SDK, free."
 template = "page.html"
 +++
 
-Need to mock AWS KMS for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud).
+Need a KMS emulator for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud). Not a mock library — a real server that speaks the KMS wire protocol with real crypto.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash

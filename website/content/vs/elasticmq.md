@@ -52,4 +52,4 @@ Both implement the SQS wire protocol.
 
 - [fakecloud GitHub](https://github.com/faiscadev/fakecloud)
 - [ElasticMQ GitHub](https://github.com/softwaremill/elasticmq)
-- [Mock SQS for tests](/mock-sqs/)
+- [SQS emulator](/sqs-emulator/)

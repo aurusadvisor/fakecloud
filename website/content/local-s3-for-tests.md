@@ -141,4 +141,4 @@ If you need S3 + cross-service wiring (S3 -> SNS/SQS/Lambda actually fires), pic
 - **Install:** `curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash`
 - **Repo:** [github.com/faiscadev/fakecloud](https://github.com/faiscadev/fakecloud)
 - **S3 docs:** [fakecloud.dev/docs/services](/docs/services/)
-- **Related:** [Fake AWS server for tests](/fake-aws-server/), [Mock DynamoDB for tests](/mock-dynamodb/), [Test Lambda locally](/test-lambda-locally/)
+- **Related:** [Fake AWS server for tests](/fake-aws-server/), [DynamoDB emulator](/dynamodb-emulator/), [Test Lambda locally](/test-lambda-locally/)

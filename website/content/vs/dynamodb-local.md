@@ -54,4 +54,4 @@ If you already test against DynamoDB Local and need nothing more, no reason to s
 
 - [fakecloud GitHub](https://github.com/faiscadev/fakecloud)
 - [DynamoDB Local docs](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html)
-- [Mock DynamoDB for tests](/mock-dynamodb/)
+- [DynamoDB emulator](/dynamodb-emulator/)

@@ -1,10 +1,10 @@
 +++
-title = "Mock DynamoDB for tests"
-description = "Mock DynamoDB locally for integration tests with fakecloud. 57 operations, transactions, PartiQL, streams, global tables. Any language, no Docker required, free."
+title = "DynamoDB emulator for tests"
+description = "Run DynamoDB locally for integration tests with fakecloud. 57 operations, transactions, PartiQL, streams, global tables. Any language, no Docker required, free."
 template = "page.html"
 +++
 
-Need to mock DynamoDB for tests? Use [fakecloud](https://github.com/faiscadev/fakecloud).
+Need a DynamoDB emulator for tests? Use [fakecloud](https://github.com/faiscadev/fakecloud). Not a mock library — a real server that speaks the DynamoDB wire protocol.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash

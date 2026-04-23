@@ -1,10 +1,10 @@
 +++
-title = "Mock SQS for tests"
-description = "Mock SQS locally for integration tests with fakecloud. 23 SQS operations, FIFO, DLQs, long polling, real Lambda event source mappings. Any AWS SDK, free."
+title = "SQS emulator for tests"
+description = "Run SQS locally for integration tests with fakecloud. 23 SQS operations, FIFO, DLQs, long polling, real Lambda event source mappings. Any AWS SDK, free."
 template = "page.html"
 +++
 
-Need to mock SQS for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud).
+Need an SQS emulator for integration tests? Use [fakecloud](https://github.com/faiscadev/fakecloud). Not a mock library — a real server that speaks the SQS wire protocol.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash
@@ -141,7 +141,7 @@ SDKs available in TypeScript, Python, Go, PHP, Java, Rust.
 |---|---|---|---|---|---|
 | fakecloud | Any | Yes | Yes | Yes (real code runs) | Yes |
 | ElasticMQ | Any | Yes | Yes | No (no Lambda service) | N/A |
-| Moto (mock_sqs) | Python only | Yes | Yes | Stubbed | Stubbed |
+| Moto (`mock_sqs`) | Python only | Yes | Yes | Stubbed | Stubbed |
 | LocalStack Community | Any | Yes | Yes | Yes (post-paywall auth required) | Yes (paywall) |
 | aws-sdk-client-mock | Node only | Stubbed | Stubbed | N/A | N/A |
 
