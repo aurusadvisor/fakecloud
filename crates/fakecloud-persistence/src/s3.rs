@@ -213,6 +213,13 @@ pub enum BucketSubresource {
     Versioning,
     Acl,
     Accelerate,
+    Analytics,
+    IntelligentTiering,
+    Metrics,
+    RequestPayment,
+    Abac,
+    MetadataConfiguration,
+    MetadataTableConfiguration,
 }
 
 pub const ALL_SUBRESOURCES: &[BucketSubresource] = &[
@@ -232,6 +239,13 @@ pub const ALL_SUBRESOURCES: &[BucketSubresource] = &[
     BucketSubresource::Versioning,
     BucketSubresource::Acl,
     BucketSubresource::Accelerate,
+    BucketSubresource::Analytics,
+    BucketSubresource::IntelligentTiering,
+    BucketSubresource::Metrics,
+    BucketSubresource::RequestPayment,
+    BucketSubresource::Abac,
+    BucketSubresource::MetadataConfiguration,
+    BucketSubresource::MetadataTableConfiguration,
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -505,6 +519,13 @@ impl DiskS3Store {
             BucketSubresource::Versioning => "versioning.toml",
             BucketSubresource::Acl => "acl.toml",
             BucketSubresource::Accelerate => "accelerate.toml",
+            BucketSubresource::Analytics => "analytics.toml",
+            BucketSubresource::IntelligentTiering => "intelligent_tiering.toml",
+            BucketSubresource::Metrics => "metrics.toml",
+            BucketSubresource::RequestPayment => "request_payment.toml",
+            BucketSubresource::Abac => "abac.toml",
+            BucketSubresource::MetadataConfiguration => "metadata_configuration.toml",
+            BucketSubresource::MetadataTableConfiguration => "metadata_table_configuration.toml",
         }
     }
 
