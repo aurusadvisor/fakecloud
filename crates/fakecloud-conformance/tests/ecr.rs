@@ -575,3 +575,689 @@ async fn ecr_list_tags_for_resource() {
         .unwrap();
     assert_eq!(resp.tags().len(), 1);
 }
+
+// ---- Batch 4: remaining 36 ops ----
+
+#[test_action("ecr", "PutLifecyclePolicy", checksum = "4e922f4a")]
+#[tokio::test]
+async fn ecr_put_lifecycle_policy() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-plp")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_lifecycle_policy()
+        .repository_name("c-plp")
+        .lifecycle_policy_text(r#"{"rules":[]}"#)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "GetLifecyclePolicy", checksum = "9e63d88c")]
+#[tokio::test]
+async fn ecr_get_lifecycle_policy() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-glp")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_lifecycle_policy()
+        .repository_name("c-glp")
+        .lifecycle_policy_text(r#"{"rules":[]}"#)
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .get_lifecycle_policy()
+        .repository_name("c-glp")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.lifecycle_policy_text().is_some());
+}
+
+#[test_action("ecr", "DeleteLifecyclePolicy", checksum = "42f231ea")]
+#[tokio::test]
+async fn ecr_delete_lifecycle_policy() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-dlp")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_lifecycle_policy()
+        .repository_name("c-dlp")
+        .lifecycle_policy_text(r#"{"rules":[]}"#)
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_lifecycle_policy()
+        .repository_name("c-dlp")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "StartLifecyclePolicyPreview", checksum = "500f5542")]
+#[tokio::test]
+async fn ecr_start_lifecycle_policy_preview() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-slp")
+        .send()
+        .await
+        .unwrap();
+    client
+        .start_lifecycle_policy_preview()
+        .repository_name("c-slp")
+        .lifecycle_policy_text(r#"{"rules":[]}"#)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "GetLifecyclePolicyPreview", checksum = "74df621f")]
+#[tokio::test]
+async fn ecr_get_lifecycle_policy_preview() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-glpp")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_lifecycle_policy()
+        .repository_name("c-glpp")
+        .lifecycle_policy_text(r#"{"rules":[]}"#)
+        .send()
+        .await
+        .unwrap();
+    client
+        .get_lifecycle_policy_preview()
+        .repository_name("c-glpp")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "StartImageScan", checksum = "46e81cbc")]
+#[tokio::test]
+async fn ecr_start_image_scan() {
+    use aws_sdk_ecr::types::ImageIdentifier;
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-sis")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_image()
+        .repository_name("c-sis")
+        .image_manifest(r#"{"x":1}"#)
+        .image_tag("v1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .start_image_scan()
+        .repository_name("c-sis")
+        .image_id(ImageIdentifier::builder().image_tag("v1").build())
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "DescribeImageScanFindings", checksum = "e49e899e")]
+#[tokio::test]
+async fn ecr_describe_image_scan_findings() {
+    use aws_sdk_ecr::types::ImageIdentifier;
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-disf")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_image()
+        .repository_name("c-disf")
+        .image_manifest(r#"{"x":1}"#)
+        .image_tag("v1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .describe_image_scan_findings()
+        .repository_name("c-disf")
+        .image_id(ImageIdentifier::builder().image_tag("v1").build())
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "DescribeRegistry", checksum = "f44a4b59")]
+#[tokio::test]
+async fn ecr_describe_registry() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client.describe_registry().send().await.unwrap();
+}
+
+#[test_action("ecr", "PutRegistryPolicy", checksum = "f6901f7b")]
+#[tokio::test]
+async fn ecr_put_registry_policy() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .put_registry_policy()
+        .policy_text(r#"{"Version":"2012-10-17","Statement":[]}"#)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "GetRegistryPolicy", checksum = "492491f5")]
+#[tokio::test]
+async fn ecr_get_registry_policy() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .put_registry_policy()
+        .policy_text(r#"{"a":1}"#)
+        .send()
+        .await
+        .unwrap();
+    client.get_registry_policy().send().await.unwrap();
+}
+
+#[test_action("ecr", "DeleteRegistryPolicy", checksum = "d8381889")]
+#[tokio::test]
+async fn ecr_delete_registry_policy() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .put_registry_policy()
+        .policy_text(r#"{"a":1}"#)
+        .send()
+        .await
+        .unwrap();
+    client.delete_registry_policy().send().await.unwrap();
+}
+
+#[test_action("ecr", "GetRegistryScanningConfiguration", checksum = "dee7433f")]
+#[tokio::test]
+async fn ecr_get_registry_scanning_configuration() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .get_registry_scanning_configuration()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "PutRegistryScanningConfiguration", checksum = "44ab2d60")]
+#[tokio::test]
+async fn ecr_put_registry_scanning_configuration() {
+    use aws_sdk_ecr::types::ScanType;
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .put_registry_scanning_configuration()
+        .scan_type(ScanType::Basic)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "ecr",
+    "BatchGetRepositoryScanningConfiguration",
+    checksum = "235c1412"
+)]
+#[tokio::test]
+async fn ecr_batch_get_repository_scanning_configuration() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-bgrs")
+        .send()
+        .await
+        .unwrap();
+    client
+        .batch_get_repository_scanning_configuration()
+        .repository_names("c-bgrs")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "PutReplicationConfiguration", checksum = "1ec45e3b")]
+#[tokio::test]
+async fn ecr_put_replication_configuration() {
+    use aws_sdk_ecr::types::ReplicationConfiguration;
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .put_replication_configuration()
+        .replication_configuration(
+            ReplicationConfiguration::builder()
+                .set_rules(Some(Vec::new()))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "DescribeImageReplicationStatus", checksum = "67cd7282")]
+#[tokio::test]
+async fn ecr_describe_image_replication_status() {
+    use aws_sdk_ecr::types::ImageIdentifier;
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-dirs")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_image()
+        .repository_name("c-dirs")
+        .image_manifest(r#"{"x":1}"#)
+        .image_tag("v")
+        .send()
+        .await
+        .unwrap();
+    client
+        .describe_image_replication_status()
+        .repository_name("c-dirs")
+        .image_id(ImageIdentifier::builder().image_tag("v").build())
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "CreatePullThroughCacheRule", checksum = "d6cf73e8")]
+#[tokio::test]
+async fn ecr_create_pull_through_cache_rule() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_pull_through_cache_rule()
+        .ecr_repository_prefix("ecr-public")
+        .upstream_registry_url("public.ecr.aws")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "DeletePullThroughCacheRule", checksum = "71ef632d")]
+#[tokio::test]
+async fn ecr_delete_pull_through_cache_rule() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_pull_through_cache_rule()
+        .ecr_repository_prefix("ecr-public")
+        .upstream_registry_url("public.ecr.aws")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_pull_through_cache_rule()
+        .ecr_repository_prefix("ecr-public")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "DescribePullThroughCacheRules", checksum = "e3da5ddd")]
+#[tokio::test]
+async fn ecr_describe_pull_through_cache_rules() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .describe_pull_through_cache_rules()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "UpdatePullThroughCacheRule", checksum = "4fd20141")]
+#[tokio::test]
+async fn ecr_update_pull_through_cache_rule() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_pull_through_cache_rule()
+        .ecr_repository_prefix("ecr-public")
+        .upstream_registry_url("public.ecr.aws")
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_pull_through_cache_rule()
+        .ecr_repository_prefix("ecr-public")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "ValidatePullThroughCacheRule", checksum = "0e8ef382")]
+#[tokio::test]
+async fn ecr_validate_pull_through_cache_rule() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_pull_through_cache_rule()
+        .ecr_repository_prefix("ecr-public")
+        .upstream_registry_url("public.ecr.aws")
+        .send()
+        .await
+        .unwrap();
+    client
+        .validate_pull_through_cache_rule()
+        .ecr_repository_prefix("ecr-public")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "GetAccountSetting", checksum = "33c7e584")]
+#[tokio::test]
+async fn ecr_get_account_setting() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .get_account_setting()
+        .name("BASIC_SCAN_TYPE_VERSION")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "PutAccountSetting", checksum = "89ef638c")]
+#[tokio::test]
+async fn ecr_put_account_setting() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .put_account_setting()
+        .name("BASIC_SCAN_TYPE_VERSION")
+        .value("AWS_NATIVE")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "CreateRepositoryCreationTemplate", checksum = "40a22769")]
+#[tokio::test]
+async fn ecr_create_repository_creation_template() {
+    use aws_sdk_ecr::types::RctAppliedFor;
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository_creation_template()
+        .prefix("web-")
+        .applied_for(RctAppliedFor::PullThroughCache)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "DeleteRepositoryCreationTemplate", checksum = "17cc8f4b")]
+#[tokio::test]
+async fn ecr_delete_repository_creation_template() {
+    use aws_sdk_ecr::types::RctAppliedFor;
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository_creation_template()
+        .prefix("web-")
+        .applied_for(RctAppliedFor::PullThroughCache)
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_repository_creation_template()
+        .prefix("web-")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "DescribeRepositoryCreationTemplates", checksum = "d2f51403")]
+#[tokio::test]
+async fn ecr_describe_repository_creation_templates() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .describe_repository_creation_templates()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "UpdateRepositoryCreationTemplate", checksum = "124c64ad")]
+#[tokio::test]
+async fn ecr_update_repository_creation_template() {
+    use aws_sdk_ecr::types::RctAppliedFor;
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository_creation_template()
+        .prefix("web-")
+        .applied_for(RctAppliedFor::PullThroughCache)
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_repository_creation_template()
+        .prefix("web-")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "GetSigningConfiguration", checksum = "03962dfb")]
+#[tokio::test]
+async fn ecr_get_signing_configuration() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client.get_signing_configuration().send().await.unwrap();
+}
+
+#[test_action("ecr", "PutSigningConfiguration", checksum = "5d199ddd")]
+#[tokio::test]
+async fn ecr_put_signing_configuration() {
+    use aws_sdk_ecr::types::SigningConfiguration;
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .put_signing_configuration()
+        .signing_configuration(
+            SigningConfiguration::builder()
+                .set_rules(Some(Vec::new()))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "DeleteSigningConfiguration", checksum = "eef83f03")]
+#[tokio::test]
+async fn ecr_delete_signing_configuration() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client.delete_signing_configuration().send().await.unwrap();
+}
+
+#[test_action("ecr", "DescribeImageSigningStatus", checksum = "4b5c1296")]
+#[tokio::test]
+async fn ecr_describe_image_signing_status() {
+    use aws_sdk_ecr::types::ImageIdentifier;
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-diss")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_image()
+        .repository_name("c-diss")
+        .image_manifest(r#"{"x":1}"#)
+        .image_tag("v")
+        .send()
+        .await
+        .unwrap();
+    client
+        .describe_image_signing_status()
+        .repository_name("c-diss")
+        .image_id(ImageIdentifier::builder().image_tag("v").build())
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "RegisterPullTimeUpdateExclusion", checksum = "67d0c177")]
+#[tokio::test]
+async fn ecr_register_pull_time_update_exclusion() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .register_pull_time_update_exclusion()
+        .principal_arn("arn:aws:iam::111111111111:user/tester")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "DeregisterPullTimeUpdateExclusion", checksum = "c0a5baad")]
+#[tokio::test]
+async fn ecr_deregister_pull_time_update_exclusion() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .register_pull_time_update_exclusion()
+        .principal_arn("arn:aws:iam::111111111111:user/tester")
+        .send()
+        .await
+        .unwrap();
+    client
+        .deregister_pull_time_update_exclusion()
+        .principal_arn("arn:aws:iam::111111111111:user/tester")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "ListPullTimeUpdateExclusions", checksum = "aaa3a95a")]
+#[tokio::test]
+async fn ecr_list_pull_time_update_exclusions() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .list_pull_time_update_exclusions()
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "ListImageReferrers", checksum = "c97d5c24")]
+#[tokio::test]
+async fn ecr_list_image_referrers() {
+    use aws_sdk_ecr::types::SubjectIdentifier;
+    use sha2::{Digest, Sha256};
+    let manifest = r#"{"x":1}"#;
+    let digest = {
+        let mut h = Sha256::new();
+        h.update(manifest.as_bytes());
+        format!("sha256:{:x}", h.finalize())
+    };
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-lir")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_image()
+        .repository_name("c-lir")
+        .image_manifest(manifest)
+        .image_tag("v")
+        .send()
+        .await
+        .unwrap();
+    client
+        .list_image_referrers()
+        .repository_name("c-lir")
+        .subject_id(
+            SubjectIdentifier::builder()
+                .image_digest(&digest)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecr", "UpdateImageStorageClass", checksum = "ae738cb9")]
+#[tokio::test]
+async fn ecr_update_image_storage_class() {
+    use aws_sdk_ecr::types::{ImageIdentifier, TargetStorageClass};
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("c-uisc")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_image()
+        .repository_name("c-uisc")
+        .image_manifest(r#"{"x":1}"#)
+        .image_tag("v")
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_image_storage_class()
+        .repository_name("c-uisc")
+        .image_id(ImageIdentifier::builder().image_tag("v").build())
+        .target_storage_class(TargetStorageClass::Standard)
+        .send()
+        .await
+        .unwrap();
+}
