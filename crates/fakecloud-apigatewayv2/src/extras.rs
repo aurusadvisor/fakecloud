@@ -131,12 +131,21 @@ impl ApiGatewayV2Service {
                     .to_string();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
-                let entry = json!({
+                let mut entry = json!({
                     "DomainName": name,
+                    "DomainNameArn": format!("arn:aws:apigateway:us-east-1::/domainnames/{}", name),
                     "DomainNameConfigurations": body.get("DomainNameConfigurations").cloned().unwrap_or(json!([])),
-                    "MutualTlsAuthentication": body.get("MutualTlsAuthentication").cloned(),
+                    "ApiMappingSelectionExpression": "$request.basepath",
+                    "RoutingMode": "API_MAPPING_ONLY",
                     "Tags": body.get("Tags").cloned().unwrap_or(json!({})),
                 });
+                // Only include MutualTlsAuthentication when caller supplied it;
+                // Smithy rejects `null` where an object is expected.
+                if let Some(mtls) = body.get("MutualTlsAuthentication") {
+                    if !mtls.is_null() {
+                        entry["MutualTlsAuthentication"] = mtls.clone();
+                    }
+                }
                 state.domain_names.insert(name.clone(), entry.clone());
                 ok(entry)
             }
@@ -324,7 +333,11 @@ impl ApiGatewayV2Service {
                 let id = rand_id();
                 let entry = json!({
                     "RoutingRuleId": id,
-                    "DomainName": domain,
+                    "RoutingRuleArn": format!(
+                        "arn:aws:apigateway:us-east-1::/domainnames/{}/routingrules/{}",
+                        domain, id
+                    ),
+                    "Priority": body.get("Priority").cloned().unwrap_or(json!(1)),
                     "Conditions": body.get("Conditions").cloned().unwrap_or(json!([])),
                     "Actions": body.get("Actions").cloned().unwrap_or(json!([])),
                 });
@@ -345,7 +358,11 @@ impl ApiGatewayV2Service {
                 let body = body(req);
                 let entry = json!({
                     "RoutingRuleId": id,
-                    "DomainName": domain,
+                    "RoutingRuleArn": format!(
+                        "arn:aws:apigateway:us-east-1::/domainnames/{}/routingrules/{}",
+                        domain, id
+                    ),
+                    "Priority": body.get("Priority").cloned().unwrap_or(json!(1)),
                     "Conditions": body.get("Conditions").cloned().unwrap_or(json!([])),
                     "Actions": body.get("Actions").cloned().unwrap_or(json!([])),
                 });
@@ -374,12 +391,12 @@ impl ApiGatewayV2Service {
             "ListRoutingRules" => {
                 let domain = resource_id.ok_or_else(|| missing("DomainName"))?;
                 self.read_state(aid, &region, |state| {
-                    let items: Vec<Value> = state
+                    let rules: Vec<Value> = state
                         .routing_rules
                         .get(domain)
                         .map(|m| m.values().cloned().collect())
                         .unwrap_or_default();
-                    ok(json!({"Items": items}))
+                    ok(json!({"RoutingRules": rules}))
                 })
             }
             "DeleteRoutingRule" => {
@@ -631,13 +648,15 @@ impl ApiGatewayV2Service {
                 .map(|s| s.to_string())
                 .ok_or_else(|| missing("ModelId"))?
         };
-        let entry = json!({
+        let mut entry = json!({
             "ModelId": id,
             "Name": body["Name"].as_str().unwrap_or(""),
             "Schema": body["Schema"].as_str().unwrap_or("{}"),
             "ContentType": body["ContentType"].as_str().unwrap_or("application/json"),
-            "Description": body["Description"].as_str(),
         });
+        if let Some(desc) = body["Description"].as_str() {
+            entry["Description"] = json!(desc);
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let bucket = state.models.entry(api).or_default();
@@ -684,8 +703,23 @@ impl ApiGatewayV2Service {
         let mut value = entry.clone();
         if is_integration {
             value["IntegrationResponseId"] = json!(id);
+            // IntegrationResponseKey is required on the Smithy response shape.
+            if value
+                .get("IntegrationResponseKey")
+                .and_then(|v| v.as_str())
+                .is_none()
+            {
+                value["IntegrationResponseKey"] = json!("$default");
+            }
         } else {
             value["RouteResponseId"] = json!(id);
+            if value
+                .get("RouteResponseKey")
+                .and_then(|v| v.as_str())
+                .is_none()
+            {
+                value["RouteResponseKey"] = json!("$default");
+            }
         }
         let bucket = store.entry(api).or_default();
         if !is_create && !bucket.contains_key(&key) {
@@ -792,8 +826,94 @@ impl ApiGatewayV2Service {
         account_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = id_opt.map(String::from).unwrap_or_else(rand_id);
-        let mut entry = body(req);
-        entry[id_field] = json!(id);
+        let input = body(req);
+        // Build response from scratch with Smithy-required fields. Don't
+        // echo arbitrary input keys — probe variants send things like
+        // `logoUri` that aren't on the response shape.
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let entry = match store {
+            "portals" => {
+                let mut portal_content = input
+                    .get("PortalContent")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                // PortalContent requires DisplayName + Theme per Smithy.
+                if portal_content
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                    && portal_content
+                        .get("DisplayName")
+                        .and_then(|v| v.as_str())
+                        .is_none()
+                {
+                    portal_content["DisplayName"] = json!(id);
+                }
+                // Theme is a PortalTheme struct (CustomColors + timestamp), not a string.
+                if portal_content
+                    .get("theme")
+                    .or_else(|| portal_content.get("Theme"))
+                    .and_then(|v| if v.is_object() { Some(()) } else { None })
+                    .is_none()
+                {
+                    portal_content["Theme"] = json!({
+                        "CustomColors": {
+                            "AccentColor": "#ff9900",
+                            "BackgroundColor": "#ffffff",
+                            "ErrorValidationColor": "#d13212",
+                            "HeaderColor": "#232f3e",
+                            "NavigationColor": "#232f3e",
+                            "TextColor": "#000000",
+                        },
+                    });
+                }
+                // Rebuild endpoint configuration strictly (Smithy shape has
+                // only CertificateArn, DomainName, PortalDefaultDomainName,
+                // PortalDomainHostedZoneId).
+                let mut ec = json!({
+                    "PortalDefaultDomainName": format!("{}.portal.example.com", id),
+                    "PortalDomainHostedZoneId": "Z123456789PORTAL",
+                });
+                if let Some(in_ec) = input.get("EndpointConfiguration") {
+                    for key in [
+                        "CertificateArn",
+                        "DomainName",
+                        "certificateArn",
+                        "domainName",
+                    ] {
+                        if let Some(v) = in_ec.get(key) {
+                            if !v.is_null() {
+                                ec[key] = v.clone();
+                            }
+                        }
+                    }
+                }
+                json!({
+                    id_field: id,
+                    "PortalArn": format!("arn:aws:apigateway:us-east-1::/portals/{}", id),
+                    "LastModified": now,
+                    "LastPublished": now,
+                    "LastPublishedDescription": "",
+                    "PublishStatus": "UNPUBLISHED",
+                    "RumAppMonitorName": "",
+                    "IncludedPortalProductArns": [],
+                    "Tags": input.get("Tags").cloned().unwrap_or(json!({})),
+                    "Authorization": input.get("Authorization").cloned().unwrap_or(json!({})),
+                    "EndpointConfiguration": ec,
+                    "PortalContent": portal_content,
+                    "StatusException": json!({}),
+                })
+            }
+            "portal_products" => json!({
+                id_field: id,
+                "PortalProductArn": format!("arn:aws:apigateway:us-east-1::/portalproducts/{}", id),
+                "LastModified": now,
+                "Description": input.get("Description").and_then(|x| x.as_str()).unwrap_or(""),
+                "DisplayName": input.get("DisplayName").and_then(|x| x.as_str()).unwrap_or(&id),
+                "Tags": input.get("Tags").cloned().unwrap_or(json!({})),
+            }),
+            _ => return Err(missing("Store")),
+        };
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(account_id);
         let map = match store {
@@ -871,8 +991,93 @@ impl ApiGatewayV2Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let parent = parent_opt.ok_or_else(|| missing("Parent"))?.to_string();
         let id = id_opt.unwrap_or_else(rand_id);
-        let mut entry = body(req);
-        entry["Id"] = json!(id);
+        let input = body(req);
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let entry = match store {
+            "product_pages" => {
+                // DisplayContent requires Title + Body (both required).
+                let mut dc = input
+                    .get("DisplayContent")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                if dc.get("title").and_then(|v| v.as_str()).is_none()
+                    && dc.get("Title").and_then(|v| v.as_str()).is_none()
+                {
+                    dc["Title"] = json!(id.clone());
+                }
+                if dc.get("body").and_then(|v| v.as_str()).is_none()
+                    && dc.get("Body").and_then(|v| v.as_str()).is_none()
+                {
+                    dc["Body"] = json!("");
+                }
+                // Derive a PageTitle for summary lookups (Smithy summary
+                // requires pageTitle but the full response uses
+                // DisplayContent.title — keep both on the entry so the
+                // list view can project the summary shape).
+                let page_title = dc
+                    .get("title")
+                    .or_else(|| dc.get("Title"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&id)
+                    .to_string();
+                json!({
+                    "ProductPageId": id,
+                    "ProductPageArn": format!(
+                        "arn:aws:apigateway:us-east-1::/portalproducts/{}/productpages/{}",
+                        parent, id
+                    ),
+                    "PageTitle": page_title,
+                    "LastModified": now,
+                    "DisplayContent": dc,
+                })
+            }
+            "product_rest_endpoint_pages" => {
+                // EndpointDisplayContentResponse.Endpoint is a simple string
+                // (endpoint name / URL ref). If the caller sent a full
+                // Endpoint object at the root, store it separately and
+                // build a string ref for DisplayContent.Endpoint.
+                let endpoint_obj = input.get("Endpoint").cloned().unwrap_or_else(|| {
+                    json!({
+                        "ApiId": "",
+                        "StageName": "",
+                        "RouteKey": "ANY /",
+                    })
+                });
+                let mut dc = input
+                    .get("DisplayContent")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                // Set a string endpoint label inside displayContent.
+                if dc
+                    .get("endpoint")
+                    .or_else(|| dc.get("Endpoint"))
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    dc["Endpoint"] = json!(id.clone());
+                }
+                let rei = input
+                    .get("RestEndpointIdentifier")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let _ = endpoint_obj;
+                json!({
+                    "ProductRestEndpointPageId": id,
+                    "ProductRestEndpointPageArn": format!(
+                        "arn:aws:apigateway:us-east-1::/portalproducts/{}/productrestendpointpages/{}",
+                        parent, id
+                    ),
+                    "Endpoint": id.clone(),
+                    "Status": "AVAILABLE",
+                    "LastModified": now,
+                    "DisplayContent": dc,
+                    "StatusException": json!({}),
+                    "TryItState": "DISABLED",
+                    "RestEndpointIdentifier": rei,
+                })
+            }
+            _ => return Err(missing("Store")),
+        };
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(account_id);
         let map = match store {
@@ -922,9 +1127,34 @@ impl ApiGatewayV2Service {
                 "product_rest_endpoint_pages" => &state.product_rest_endpoint_pages,
                 _ => return Err(missing("Store")),
             };
-            let items: Vec<&Value> = map
+            // Project each stored entry into its Summary shape per Smithy
+            // (ProductPageSummaryNoBody / ProductRestEndpointPageSummaryNoBody)
+            // so the list output doesn't carry DisplayContent / other
+            // body-only fields.
+            let items: Vec<Value> = map
                 .get(parent)
-                .map(|m| m.values().collect())
+                .map(|m| {
+                    m.values()
+                        .map(|v| match store {
+                            "product_pages" => json!({
+                                "ProductPageId": v.get("ProductPageId").cloned().unwrap_or(json!("")),
+                                "ProductPageArn": v.get("ProductPageArn").cloned().unwrap_or(json!("")),
+                                "PageTitle": v.get("PageTitle").cloned().unwrap_or(json!("")),
+                                "LastModified": v.get("LastModified").cloned().unwrap_or(json!("")),
+                            }),
+                            "product_rest_endpoint_pages" => json!({
+                                "ProductRestEndpointPageId": v.get("ProductRestEndpointPageId").cloned().unwrap_or(json!("")),
+                                "ProductRestEndpointPageArn": v.get("ProductRestEndpointPageArn").cloned().unwrap_or(json!("")),
+                                "Endpoint": v.get("Endpoint").cloned().unwrap_or(json!("")),
+                                "Status": v.get("Status").cloned().unwrap_or(json!("AVAILABLE")),
+                                "TryItState": v.get("TryItState").cloned().unwrap_or(json!("DISABLED")),
+                                "LastModified": v.get("LastModified").cloned().unwrap_or(json!("")),
+                                "RestEndpointIdentifier": v.get("RestEndpointIdentifier").cloned().unwrap_or(json!({})),
+                            }),
+                            _ => v.clone(),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             ok(json!({"Items": items}))
         })
