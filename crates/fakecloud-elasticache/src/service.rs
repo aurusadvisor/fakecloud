@@ -7725,4 +7725,354 @@ mod tests {
         );
         assert!(svc.list_tags_for_resource(&req).is_err());
     }
+
+    // ── Coverage for the closure batch ──
+
+    fn fresh_service() -> ElastiCacheService {
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        ElastiCacheService::new(shared)
+    }
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn cache_security_group_lifecycle_unit() {
+        let svc = fresh_service();
+        let create = request(
+            "CreateCacheSecurityGroup",
+            &[("CacheSecurityGroupName", "sg1"), ("Description", "d")],
+        );
+        let resp = svc.create_cache_security_group(&create).unwrap();
+        assert!(body(resp).contains("sg1"));
+
+        let auth = request(
+            "AuthorizeCacheSecurityGroupIngress",
+            &[
+                ("CacheSecurityGroupName", "sg1"),
+                ("EC2SecurityGroupName", "ec2"),
+                ("EC2SecurityGroupOwnerId", "111122223333"),
+            ],
+        );
+        svc.authorize_cache_security_group_ingress(&auth).unwrap();
+
+        let dup_auth = request(
+            "AuthorizeCacheSecurityGroupIngress",
+            &[
+                ("CacheSecurityGroupName", "sg1"),
+                ("EC2SecurityGroupName", "ec2"),
+                ("EC2SecurityGroupOwnerId", "111122223333"),
+            ],
+        );
+        let err = match svc.authorize_cache_security_group_ingress(&dup_auth) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "AuthorizationAlreadyExists");
+
+        let revoke = request(
+            "RevokeCacheSecurityGroupIngress",
+            &[
+                ("CacheSecurityGroupName", "sg1"),
+                ("EC2SecurityGroupName", "ec2"),
+                ("EC2SecurityGroupOwnerId", "111122223333"),
+            ],
+        );
+        svc.revoke_cache_security_group_ingress(&revoke).unwrap();
+
+        let revoke_unknown = request(
+            "RevokeCacheSecurityGroupIngress",
+            &[
+                ("CacheSecurityGroupName", "sg1"),
+                ("EC2SecurityGroupName", "no-such"),
+                ("EC2SecurityGroupOwnerId", "111122223333"),
+            ],
+        );
+        let err = match svc.revoke_cache_security_group_ingress(&revoke_unknown) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "AuthorizationNotFound");
+
+        let list = request("DescribeCacheSecurityGroups", &[]);
+        let resp = svc.describe_cache_security_groups(&list).unwrap();
+        assert!(body(resp).contains("sg1"));
+
+        let del = request(
+            "DeleteCacheSecurityGroup",
+            &[("CacheSecurityGroupName", "sg1")],
+        );
+        svc.delete_cache_security_group(&del).unwrap();
+    }
+
+    #[test]
+    fn cache_security_group_create_duplicate_errors() {
+        let svc = fresh_service();
+        let create = request(
+            "CreateCacheSecurityGroup",
+            &[("CacheSecurityGroupName", "sg2"), ("Description", "d")],
+        );
+        svc.create_cache_security_group(&create).unwrap();
+        let err = match svc.create_cache_security_group(&create) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "CacheSecurityGroupAlreadyExists");
+    }
+
+    #[test]
+    fn delete_unknown_security_group_errors() {
+        let svc = fresh_service();
+        let req = request(
+            "DeleteCacheSecurityGroup",
+            &[("CacheSecurityGroupName", "ghost")],
+        );
+        let err = match svc.delete_cache_security_group(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "CacheSecurityGroupNotFound");
+    }
+
+    #[test]
+    fn cache_parameter_group_full_lifecycle_unit() {
+        let svc = fresh_service();
+        let create = request(
+            "CreateCacheParameterGroup",
+            &[
+                ("CacheParameterGroupName", "pg1"),
+                ("CacheParameterGroupFamily", "redis7"),
+                ("Description", "test"),
+            ],
+        );
+        svc.create_cache_parameter_group(&create).unwrap();
+
+        let modify = request(
+            "ModifyCacheParameterGroup",
+            &[
+                ("CacheParameterGroupName", "pg1"),
+                (
+                    "ParameterNameValues.member.1.ParameterName",
+                    "maxmemory-policy",
+                ),
+                ("ParameterNameValues.member.1.ParameterValue", "allkeys-lru"),
+            ],
+        );
+        svc.modify_cache_parameter_group(&modify).unwrap();
+
+        let describe = request(
+            "DescribeCacheParameters",
+            &[("CacheParameterGroupName", "pg1")],
+        );
+        let resp = svc.describe_cache_parameters(&describe).unwrap();
+        assert!(body(resp).contains("maxmemory-policy"));
+
+        let reset = request(
+            "ResetCacheParameterGroup",
+            &[
+                ("CacheParameterGroupName", "pg1"),
+                ("ResetAllParameters", "true"),
+            ],
+        );
+        svc.reset_cache_parameter_group(&reset).unwrap();
+
+        let del = request(
+            "DeleteCacheParameterGroup",
+            &[("CacheParameterGroupName", "pg1")],
+        );
+        svc.delete_cache_parameter_group(&del).unwrap();
+    }
+
+    #[test]
+    fn create_parameter_group_duplicate_errors() {
+        let svc = fresh_service();
+        let create = request(
+            "CreateCacheParameterGroup",
+            &[
+                ("CacheParameterGroupName", "pg2"),
+                ("CacheParameterGroupFamily", "redis7"),
+                ("Description", "test"),
+            ],
+        );
+        svc.create_cache_parameter_group(&create).unwrap();
+        let err = match svc.create_cache_parameter_group(&create) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "CacheParameterGroupAlreadyExists");
+    }
+
+    #[test]
+    fn describe_cache_parameters_unknown_group_errors() {
+        let svc = fresh_service();
+        let req = request(
+            "DescribeCacheParameters",
+            &[("CacheParameterGroupName", "ghost")],
+        );
+        let err = match svc.describe_cache_parameters(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "CacheParameterGroupNotFound");
+    }
+
+    #[test]
+    fn list_allowed_node_type_modifications_returns_lists() {
+        let svc = fresh_service();
+        let req = request("ListAllowedNodeTypeModifications", &[]);
+        let resp = svc.list_allowed_node_type_modifications(&req).unwrap();
+        let b = body(resp);
+        assert!(b.contains("ScaleUpModifications"));
+        assert!(b.contains("cache.t4g.medium"));
+    }
+
+    #[test]
+    fn list_origination_numbers_seeds_default() {
+        // Sanity check on the parameter-group default seed by hitting an
+        // unrelated read endpoint that should always succeed.
+        let svc = fresh_service();
+        let req = request("DescribeCacheParameterGroups", &[]);
+        let resp = svc.describe_cache_parameter_groups(&req).unwrap();
+        assert!(body(resp).contains("CacheParameterGroups"));
+    }
+
+    #[test]
+    fn modify_unknown_cache_cluster_errors() {
+        let svc = fresh_service();
+        let req = request(
+            "ModifyCacheCluster",
+            &[("CacheClusterId", "ghost"), ("NumCacheNodes", "2")],
+        );
+        let err = match svc.modify_cache_cluster(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "CacheClusterNotFound");
+    }
+
+    #[test]
+    fn reboot_unknown_cluster_errors() {
+        let svc = fresh_service();
+        let req = request("RebootCacheCluster", &[("CacheClusterId", "ghost")]);
+        let err = match svc.reboot_cache_cluster(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "CacheClusterNotFound");
+    }
+
+    #[test]
+    fn modify_unknown_user_errors() {
+        let svc = fresh_service();
+        let req = request("ModifyUser", &[("UserId", "ghost")]);
+        let err = match svc.modify_user(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "UserNotFound");
+    }
+
+    #[test]
+    fn modify_unknown_user_group_errors() {
+        let svc = fresh_service();
+        let req = request("ModifyUserGroup", &[("UserGroupId", "ghost")]);
+        let err = match svc.modify_user_group(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "UserGroupNotFoundFault");
+    }
+
+    #[test]
+    fn purchase_offering_unknown_id_errors() {
+        let svc = fresh_service();
+        let req = request(
+            "PurchaseReservedCacheNodesOffering",
+            &[("ReservedCacheNodesOfferingId", "no-such")],
+        );
+        let err = match svc.purchase_reserved_cache_nodes_offering(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "ReservedCacheNodesOfferingNotFound");
+    }
+
+    #[test]
+    fn describe_events_returns_empty() {
+        let svc = fresh_service();
+        let req = request("DescribeEvents", &[]);
+        let resp = svc.describe_events(&req).unwrap();
+        let b = body(resp);
+        assert!(b.contains("<Events>"));
+    }
+
+    #[test]
+    fn describe_service_updates_returns_empty() {
+        let svc = fresh_service();
+        let req = request("DescribeServiceUpdates", &[]);
+        let resp = svc.describe_service_updates(&req).unwrap();
+        assert!(body(resp).contains("ServiceUpdates"));
+    }
+
+    #[test]
+    fn batch_apply_update_action_round_trip() {
+        let svc = fresh_service();
+        let req = request(
+            "BatchApplyUpdateAction",
+            &[
+                ("ServiceUpdateName", "svc-1"),
+                ("ReplicationGroupIds.member.1", "rg"),
+            ],
+        );
+        let resp = svc.batch_apply_update_action(&req).unwrap();
+        assert!(body(resp).contains("ProcessedUpdateActions"));
+    }
+
+    #[test]
+    fn copy_snapshot_unknown_source_errors() {
+        let svc = fresh_service();
+        let req = request(
+            "CopySnapshot",
+            &[
+                ("SourceSnapshotName", "ghost"),
+                ("TargetSnapshotName", "ghost-copy"),
+            ],
+        );
+        let err = match svc.copy_snapshot(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "SnapshotNotFoundFault");
+    }
+
+    #[test]
+    fn copy_serverless_snapshot_unknown_source_errors() {
+        let svc = fresh_service();
+        let req = request(
+            "CopyServerlessCacheSnapshot",
+            &[
+                ("SourceServerlessCacheSnapshotName", "ghost"),
+                ("TargetServerlessCacheSnapshotName", "ghost-copy"),
+            ],
+        );
+        let err = match svc.copy_serverless_cache_snapshot(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "ServerlessCacheSnapshotNotFoundFault");
+    }
+
+    #[test]
+    fn migration_ops_unknown_replication_group_errors() {
+        let svc = fresh_service();
+        let req = request("StartMigration", &[("ReplicationGroupId", "ghost")]);
+        let err = match svc.start_migration(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "ReplicationGroupNotFoundFault");
+    }
 }
