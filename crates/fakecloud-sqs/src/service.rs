@@ -2888,10 +2888,8 @@ impl SqsService {
             .ok_or_else(|| missing_param("SourceArn"))?
             .to_string();
         let destination_arn = body["DestinationArn"].as_str().map(|s| s.to_string());
-        let max_per_sec = body["MaxNumberOfMessagesPerSecond"]
-            .as_i64()
-            .map(|n| n as i32);
-        if let Some(rate) = max_per_sec {
+        let max_per_sec_i64 = val_as_i64(&body["MaxNumberOfMessagesPerSecond"]);
+        if let Some(rate) = max_per_sec_i64 {
             if !(1..=500).contains(&rate) {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
@@ -2900,6 +2898,7 @@ impl SqsService {
                 ));
             }
         }
+        let max_per_sec = max_per_sec_i64.map(|rate| rate as i32);
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -3082,8 +3081,7 @@ impl SqsService {
             .as_str()
             .ok_or_else(|| missing_param("SourceArn"))?
             .to_string();
-        let max_results = body["MaxResults"]
-            .as_i64()
+        let max_results = val_as_i64(&body["MaxResults"])
             .map(|n| n.clamp(1, 10) as usize)
             .unwrap_or(1);
 
@@ -5513,6 +5511,191 @@ mod tests {
         let svc = make_service();
         let req = make_request("UntagQueue", json!({"TagKeys": ["k"]}));
         assert!(svc.untag_queue(&req).is_err());
+    }
+
+    fn make_query_request(action: &str, params: &[(&str, &str)]) -> AwsRequest {
+        let mut qp = HashMap::new();
+        for (k, v) in params {
+            qp.insert(k.to_string(), v.to_string());
+        }
+        AwsRequest {
+            service: "sqs".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-id".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: qp,
+            body: Vec::<u8>::new().into(),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn create_dlq_with_source(svc: &SqsService, dlq_name: &str, src_name: &str) -> String {
+        let dlq_url = create_queue_url(svc, dlq_name);
+        let dlq_arn = body_json(
+            svc.get_queue_attributes(&make_request(
+                "GetQueueAttributes",
+                json!({ "QueueUrl": dlq_url, "AttributeNames": ["QueueArn"] }),
+            ))
+            .unwrap(),
+        )["Attributes"]["QueueArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let src_url = create_queue_url(svc, src_name);
+        let redrive = json!({ "deadLetterTargetArn": dlq_arn, "maxReceiveCount": "1" }).to_string();
+        svc.set_queue_attributes(&make_request(
+            "SetQueueAttributes",
+            json!({
+                "QueueUrl": src_url,
+                "Attributes": { "RedrivePolicy": redrive }
+            }),
+        ))
+        .unwrap();
+        dlq_arn
+    }
+
+    #[test]
+    fn start_message_move_task_query_protocol_parses_string_rate() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "qp-dlq", "qp-src");
+        // Query protocol passes integers as strings; this should parse fine.
+        let req = make_query_request(
+            "StartMessageMoveTask",
+            &[
+                ("SourceArn", dlq_arn.as_str()),
+                ("MaxNumberOfMessagesPerSecond", "100"),
+            ],
+        );
+        let resp = svc.start_message_move_task(&req).unwrap();
+        assert!(resp.status.is_success());
+    }
+
+    #[test]
+    fn start_message_move_task_rejects_out_of_range_rate() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "oor-dlq", "oor-src");
+        let req = make_request(
+            "StartMessageMoveTask",
+            json!({
+                "SourceArn": dlq_arn,
+                "MaxNumberOfMessagesPerSecond": 0
+            }),
+        );
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "InvalidParameterValue");
+
+        let req = make_request(
+            "StartMessageMoveTask",
+            json!({
+                "SourceArn": dlq_arn,
+                "MaxNumberOfMessagesPerSecond": 501
+            }),
+        );
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "InvalidParameterValue");
+    }
+
+    #[test]
+    fn start_message_move_task_rejects_non_dlq_source() {
+        let svc = make_service();
+        let q_url = create_queue_url(&svc, "lonely");
+        let q_arn = body_json(
+            svc.get_queue_attributes(&make_request(
+                "GetQueueAttributes",
+                json!({ "QueueUrl": q_url, "AttributeNames": ["QueueArn"] }),
+            ))
+            .unwrap(),
+        )["Attributes"]["QueueArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let req = make_request("StartMessageMoveTask", json!({ "SourceArn": q_arn }));
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "AWS.SimpleQueueService.UnsupportedOperation");
+    }
+
+    #[test]
+    fn start_message_move_task_rejects_unknown_source() {
+        let svc = make_service();
+        let req = make_request(
+            "StartMessageMoveTask",
+            json!({ "SourceArn": "arn:aws:sqs:us-east-1:123456789012:ghost" }),
+        );
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[test]
+    fn list_message_move_tasks_query_protocol_caps_max_results() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "lmmt-dlq2", "lmmt-src2");
+        // Start a task so there's something to list.
+        svc.start_message_move_task(&make_request(
+            "StartMessageMoveTask",
+            json!({ "SourceArn": dlq_arn }),
+        ))
+        .unwrap();
+        // Query protocol: MaxResults arrives as string. Helper must parse it.
+        let req = make_query_request(
+            "ListMessageMoveTasks",
+            &[("SourceArn", dlq_arn.as_str()), ("MaxResults", "5")],
+        );
+        let resp = svc.list_message_move_tasks(&req).unwrap();
+        assert!(resp.status.is_success());
+    }
+
+    #[test]
+    fn list_message_move_tasks_rejects_unknown_source() {
+        let svc = make_service();
+        let req = make_request(
+            "ListMessageMoveTasks",
+            json!({ "SourceArn": "arn:aws:sqs:us-east-1:123456789012:nope" }),
+        );
+        let err = expect_err(svc.list_message_move_tasks(&req));
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[test]
+    fn cancel_message_move_task_unknown_handle_errors() {
+        let svc = make_service();
+        let req = make_request(
+            "CancelMessageMoveTask",
+            json!({ "TaskHandle": "no-such-task" }),
+        );
+        let err = expect_err(svc.cancel_message_move_task(&req));
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[test]
+    fn cancel_message_move_task_completed_task_errors() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "cmmt-dlq", "cmmt-src");
+        let resp = svc
+            .start_message_move_task(&make_request(
+                "StartMessageMoveTask",
+                json!({ "SourceArn": dlq_arn }),
+            ))
+            .unwrap();
+        let handle = body_json(resp)["TaskHandle"].as_str().unwrap().to_string();
+        let req = make_request("CancelMessageMoveTask", json!({ "TaskHandle": handle }));
+        let err = expect_err(svc.cancel_message_move_task(&req));
+        assert_eq!(err.code(), "AWS.SimpleQueueService.UnsupportedOperation");
+    }
+
+    #[test]
+    fn val_as_i64_handles_number_and_string() {
+        assert_eq!(val_as_i64(&json!(42)), Some(42));
+        assert_eq!(val_as_i64(&json!("42")), Some(42));
+        assert_eq!(val_as_i64(&json!("not-int")), None);
+        assert_eq!(val_as_i64(&json!(null)), None);
     }
 
     #[test]
