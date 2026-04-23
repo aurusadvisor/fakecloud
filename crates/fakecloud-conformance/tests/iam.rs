@@ -1662,3 +1662,518 @@ async fn iam_ssh_public_keys() {
         .await
         .unwrap();
 }
+
+// ── Conformance closure batch ──
+
+#[test_action("iam", "CreateServiceSpecificCredential", checksum = "a9be3f58")]
+#[test_action("iam", "ListServiceSpecificCredentials", checksum = "7b023fcc")]
+#[test_action("iam", "ResetServiceSpecificCredential", checksum = "a2680c35")]
+#[test_action("iam", "UpdateServiceSpecificCredential", checksum = "21ba6981")]
+#[test_action("iam", "DeleteServiceSpecificCredential", checksum = "110bd145")]
+#[tokio::test]
+async fn iam_service_specific_credential_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+    client
+        .create_user()
+        .user_name("ssc-user")
+        .send()
+        .await
+        .unwrap();
+    let cred_id = client
+        .create_service_specific_credential()
+        .user_name("ssc-user")
+        .service_name("codecommit.amazonaws.com")
+        .send()
+        .await
+        .unwrap()
+        .service_specific_credential()
+        .unwrap()
+        .service_specific_credential_id()
+        .to_string();
+    let _ = client
+        .list_service_specific_credentials()
+        .user_name("ssc-user")
+        .send()
+        .await
+        .unwrap();
+    client
+        .reset_service_specific_credential()
+        .user_name("ssc-user")
+        .service_specific_credential_id(&cred_id)
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_service_specific_credential()
+        .user_name("ssc-user")
+        .service_specific_credential_id(&cred_id)
+        .status(aws_sdk_iam::types::StatusType::Inactive)
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_service_specific_credential()
+        .user_name("ssc-user")
+        .service_specific_credential_id(&cred_id)
+        .send()
+        .await
+        .unwrap();
+}
+
+fn url_form_encode(s: &str) -> String {
+    let mut out = String::new();
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    out
+}
+
+async fn iam_post_raw(server: &TestServer, params: &[(&str, &str)]) -> reqwest::Response {
+    let body: String = params
+        .iter()
+        .map(|(k, v)| format!("{}={}", url_form_encode(k), url_form_encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    reqwest::Client::new()
+        .post(server.endpoint())
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=0")
+        .body(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[test_action("iam", "CreateDelegationRequest", checksum = "84b7a617")]
+#[test_action("iam", "GetDelegationRequest", checksum = "c7b7aff8")]
+#[test_action("iam", "ListDelegationRequests", checksum = "a06e2be5")]
+#[test_action("iam", "UpdateDelegationRequest", checksum = "0675f35d")]
+#[test_action("iam", "AcceptDelegationRequest", checksum = "d512c062")]
+#[test_action("iam", "RejectDelegationRequest", checksum = "4120b198")]
+#[test_action("iam", "AssociateDelegationRequest", checksum = "05f74036")]
+#[test_action("iam", "SendDelegationToken", checksum = "6d253750")]
+#[tokio::test]
+async fn iam_delegation_request_lifecycle() {
+    let server = TestServer::start().await;
+    let resp = iam_post_raw(
+        &server,
+        &[
+            ("Action", "CreateDelegationRequest"),
+            ("TargetAccount", "111122223333"),
+        ],
+    )
+    .await;
+    let body = resp.text().await.unwrap();
+    let id = body
+        .split("<DelegationRequestId>")
+        .nth(1)
+        .unwrap()
+        .split("</")
+        .next()
+        .unwrap()
+        .to_string();
+
+    for action in [
+        "GetDelegationRequest",
+        "UpdateDelegationRequest",
+        "AcceptDelegationRequest",
+        "AssociateDelegationRequest",
+        "RejectDelegationRequest",
+        "SendDelegationToken",
+    ] {
+        let resp = iam_post_raw(&server, &[("Action", action), ("DelegationRequestId", &id)]).await;
+        assert!(resp.status().is_success(), "{action}");
+    }
+
+    let resp = iam_post_raw(&server, &[("Action", "ListDelegationRequests")]).await;
+    assert!(resp.status().is_success());
+}
+
+#[test_action(
+    "iam",
+    "EnableOrganizationsRootCredentialsManagement",
+    checksum = "3f0ee0db"
+)]
+#[test_action(
+    "iam",
+    "DisableOrganizationsRootCredentialsManagement",
+    checksum = "992d38ef"
+)]
+#[test_action("iam", "EnableOrganizationsRootSessions", checksum = "5010aa63")]
+#[test_action("iam", "DisableOrganizationsRootSessions", checksum = "85d9d033")]
+#[test_action("iam", "ListOrganizationsFeatures", checksum = "1144ba80")]
+#[test_action("iam", "GenerateOrganizationsAccessReport", checksum = "26659942")]
+#[test_action("iam", "GetOrganizationsAccessReport", checksum = "0cdaf171")]
+#[tokio::test]
+async fn iam_organizations_lifecycle() {
+    let server = TestServer::start().await;
+    for action in [
+        "EnableOrganizationsRootCredentialsManagement",
+        "EnableOrganizationsRootSessions",
+        "ListOrganizationsFeatures",
+    ] {
+        let resp = iam_post_raw(&server, &[("Action", action)]).await;
+        assert!(resp.status().is_success(), "{action}");
+    }
+    let resp = iam_post_raw(
+        &server,
+        &[
+            ("Action", "GenerateOrganizationsAccessReport"),
+            ("EntityPath", "o-abc/r-xyz/123456789012"),
+        ],
+    )
+    .await;
+    let body = resp.text().await.unwrap();
+    let job_id = body
+        .split("<JobId>")
+        .nth(1)
+        .unwrap()
+        .split("</")
+        .next()
+        .unwrap()
+        .to_string();
+    let resp = iam_post_raw(
+        &server,
+        &[
+            ("Action", "GetOrganizationsAccessReport"),
+            ("JobId", &job_id),
+        ],
+    )
+    .await;
+    assert!(resp.status().is_success());
+    for action in [
+        "DisableOrganizationsRootCredentialsManagement",
+        "DisableOrganizationsRootSessions",
+    ] {
+        let resp = iam_post_raw(&server, &[("Action", action)]).await;
+        assert!(resp.status().is_success(), "{action}");
+    }
+}
+
+#[test_action("iam", "EnableOutboundWebIdentityFederation", checksum = "ed54ae5f")]
+#[test_action("iam", "DisableOutboundWebIdentityFederation", checksum = "2f6d24b9")]
+#[test_action("iam", "GetOutboundWebIdentityFederationInfo", checksum = "947612c4")]
+#[tokio::test]
+async fn iam_outbound_web_identity_federation() {
+    let server = TestServer::start().await;
+    let resp = iam_post_raw(
+        &server,
+        &[
+            ("Action", "EnableOutboundWebIdentityFederation"),
+            ("IssuerUrl", "https://example.com"),
+        ],
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let resp = iam_post_raw(
+        &server,
+        &[("Action", "GetOutboundWebIdentityFederationInfo")],
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let resp = iam_post_raw(
+        &server,
+        &[("Action", "DisableOutboundWebIdentityFederation")],
+    )
+    .await;
+    assert!(resp.status().is_success());
+}
+
+#[test_action("iam", "GenerateServiceLastAccessedDetails", checksum = "1222363b")]
+#[test_action("iam", "GetServiceLastAccessedDetails", checksum = "c0167f64")]
+#[test_action(
+    "iam",
+    "GetServiceLastAccessedDetailsWithEntities",
+    checksum = "6e9fae8a"
+)]
+#[tokio::test]
+async fn iam_service_last_accessed_lifecycle() {
+    let server = TestServer::start().await;
+    let resp = iam_post_raw(
+        &server,
+        &[
+            ("Action", "GenerateServiceLastAccessedDetails"),
+            ("Arn", "arn:aws:iam::123456789012:user/x"),
+        ],
+    )
+    .await;
+    let body = resp.text().await.unwrap();
+    let job_id = body
+        .split("<JobId>")
+        .nth(1)
+        .unwrap()
+        .split("</")
+        .next()
+        .unwrap()
+        .to_string();
+    let resp = iam_post_raw(
+        &server,
+        &[
+            ("Action", "GetServiceLastAccessedDetails"),
+            ("JobId", &job_id),
+        ],
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let resp = iam_post_raw(
+        &server,
+        &[
+            ("Action", "GetServiceLastAccessedDetailsWithEntities"),
+            ("JobId", &job_id),
+            ("ServiceNamespace", "s3"),
+        ],
+    )
+    .await;
+    assert!(resp.status().is_success());
+}
+
+#[test_action("iam", "TagSAMLProvider", checksum = "6135fc65")]
+#[test_action("iam", "UntagSAMLProvider", checksum = "ab2f9669")]
+#[test_action("iam", "ListSAMLProviderTags", checksum = "d6742f65")]
+#[tokio::test]
+async fn iam_saml_provider_tags() {
+    let server = TestServer::start().await;
+    let arn = "arn:aws:iam::123456789012:saml-provider/conf";
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "TagSAMLProvider"),
+            ("SAMLProviderArn", arn),
+            ("Tags.member.1.Key", "k"),
+            ("Tags.member.1.Value", "v"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+    let r = iam_post_raw(
+        &server,
+        &[("Action", "ListSAMLProviderTags"), ("SAMLProviderArn", arn)],
+    )
+    .await;
+    assert!(r.status().is_success());
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "UntagSAMLProvider"),
+            ("SAMLProviderArn", arn),
+            ("TagKeys.member.1", "k"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+}
+
+#[test_action("iam", "TagServerCertificate", checksum = "8d24f569")]
+#[test_action("iam", "UntagServerCertificate", checksum = "cb561335")]
+#[test_action("iam", "ListServerCertificateTags", checksum = "6146e52a")]
+#[test_action("iam", "UpdateServerCertificate", checksum = "febf07e3")]
+#[tokio::test]
+async fn iam_server_certificate_tags_and_update() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+    client
+        .upload_server_certificate()
+        .server_certificate_name("conf-cert")
+        .certificate_body("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----")
+        .private_key("-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----")
+        .send()
+        .await
+        .unwrap();
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "TagServerCertificate"),
+            ("ServerCertificateName", "conf-cert"),
+            ("Tags.member.1.Key", "env"),
+            ("Tags.member.1.Value", "test"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "ListServerCertificateTags"),
+            ("ServerCertificateName", "conf-cert"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "UntagServerCertificate"),
+            ("ServerCertificateName", "conf-cert"),
+            ("TagKeys.member.1", "env"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "UpdateServerCertificate"),
+            ("ServerCertificateName", "conf-cert"),
+            ("NewServerCertificateName", "conf-cert-renamed"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+}
+
+#[test_action("iam", "TagMFADevice", checksum = "9bb87c60")]
+#[test_action("iam", "UntagMFADevice", checksum = "07fa7b29")]
+#[test_action("iam", "ListMFADeviceTags", checksum = "5647d4d3")]
+#[test_action("iam", "GetMFADevice", checksum = "4f8fc0db")]
+#[test_action("iam", "ResyncMFADevice", checksum = "f4b9a90d")]
+#[tokio::test]
+async fn iam_mfa_device_tags_and_introspection() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+    client
+        .create_user()
+        .user_name("mfa-user")
+        .send()
+        .await
+        .unwrap();
+    let serial = client
+        .create_virtual_mfa_device()
+        .virtual_mfa_device_name("mfa-1")
+        .send()
+        .await
+        .unwrap()
+        .virtual_mfa_device()
+        .unwrap()
+        .serial_number()
+        .to_string();
+
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "TagMFADevice"),
+            ("SerialNumber", &serial),
+            ("Tags.member.1.Key", "k"),
+            ("Tags.member.1.Value", "v"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+    let r = iam_post_raw(
+        &server,
+        &[("Action", "ListMFADeviceTags"), ("SerialNumber", &serial)],
+    )
+    .await;
+    assert!(r.status().is_success());
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "UntagMFADevice"),
+            ("SerialNumber", &serial),
+            ("TagKeys.member.1", "k"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+    let r = iam_post_raw(
+        &server,
+        &[("Action", "GetMFADevice"), ("SerialNumber", &serial)],
+    )
+    .await;
+    assert!(r.status().is_success());
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "ResyncMFADevice"),
+            ("SerialNumber", &serial),
+            ("UserName", "mfa-user"),
+            ("AuthenticationCode1", "123456"),
+            ("AuthenticationCode2", "654321"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+}
+
+#[test_action("iam", "SimulateCustomPolicy", checksum = "d3d7ac96")]
+#[test_action("iam", "SimulatePrincipalPolicy", checksum = "f045fc96")]
+#[test_action("iam", "GetContextKeysForCustomPolicy", checksum = "513a86d2")]
+#[test_action("iam", "GetContextKeysForPrincipalPolicy", checksum = "203fbd07")]
+#[test_action("iam", "ListPoliciesGrantingServiceAccess", checksum = "64185421")]
+#[tokio::test]
+async fn iam_policy_simulation() {
+    let server = TestServer::start().await;
+    for action in ["SimulateCustomPolicy", "SimulatePrincipalPolicy"] {
+        let r = iam_post_raw(
+            &server,
+            &[
+                ("Action", action),
+                ("ActionNames.member.1", "s3:GetObject"),
+                ("PolicyInputList.member.1", r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#),
+                ("PolicySourceArn", "arn:aws:iam::123456789012:user/x"),
+            ],
+        )
+        .await;
+        assert!(r.status().is_success(), "{action}");
+    }
+    for action in [
+        "GetContextKeysForCustomPolicy",
+        "GetContextKeysForPrincipalPolicy",
+    ] {
+        let r = iam_post_raw(
+            &server,
+            &[
+                ("Action", action),
+                ("PolicyInputList.member.1", r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-1"}}}]}"#),
+                ("PolicySourceArn", "arn:aws:iam::123456789012:user/x"),
+            ],
+        )
+        .await;
+        assert!(r.status().is_success(), "{action}");
+    }
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "ListPoliciesGrantingServiceAccess"),
+            ("Arn", "arn:aws:iam::123456789012:user/x"),
+            ("ServiceNamespaces.member.1", "s3"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+}
+
+#[test_action("iam", "ChangePassword", checksum = "afd8c998")]
+#[test_action("iam", "GetHumanReadableSummary", checksum = "b37cb675")]
+#[test_action("iam", "SetSecurityTokenServicePreferences", checksum = "b48dcc82")]
+#[tokio::test]
+async fn iam_misc_account_ops() {
+    let server = TestServer::start().await;
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "ChangePassword"),
+            ("OldPassword", "old"),
+            ("NewPassword", "new"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+    let r = iam_post_raw(&server, &[("Action", "GetHumanReadableSummary")]).await;
+    assert!(r.status().is_success());
+    let r = iam_post_raw(
+        &server,
+        &[
+            ("Action", "SetSecurityTokenServicePreferences"),
+            ("GlobalEndpointTokenVersion", "v2Token"),
+        ],
+    )
+    .await;
+    assert!(r.status().is_success());
+}

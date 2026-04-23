@@ -1,4 +1,5 @@
 mod account;
+mod extras;
 mod groups;
 mod instance_profiles;
 mod oidc;
@@ -379,6 +380,84 @@ impl AwsService for IamService {
 
             // Entities for policy
             "ListEntitiesForPolicy" => self.list_entities_for_policy(&req),
+
+            // Service-specific credentials
+            "CreateServiceSpecificCredential" => self.create_service_specific_credential(&req),
+            "DeleteServiceSpecificCredential" => self.delete_service_specific_credential(&req),
+            "ListServiceSpecificCredentials" => self.list_service_specific_credentials(&req),
+            "ResetServiceSpecificCredential" => self.reset_service_specific_credential(&req),
+            "UpdateServiceSpecificCredential" => self.update_service_specific_credential(&req),
+
+            // Delegation requests
+            "CreateDelegationRequest" => self.create_delegation_request(&req),
+            "AcceptDelegationRequest" => self.accept_delegation_request(&req),
+            "RejectDelegationRequest" => self.reject_delegation_request(&req),
+            "AssociateDelegationRequest" => self.associate_delegation_request(&req),
+            "GetDelegationRequest" => self.get_delegation_request(&req),
+            "ListDelegationRequests" => self.list_delegation_requests(&req),
+            "UpdateDelegationRequest" => self.update_delegation_request(&req),
+            "SendDelegationToken" => self.send_delegation_token(&req),
+
+            // Organizations integration
+            "EnableOrganizationsRootCredentialsManagement" => {
+                self.enable_organizations_root_credentials_management(&req)
+            }
+            "DisableOrganizationsRootCredentialsManagement" => {
+                self.disable_organizations_root_credentials_management(&req)
+            }
+            "EnableOrganizationsRootSessions" => self.enable_organizations_root_sessions(&req),
+            "DisableOrganizationsRootSessions" => self.disable_organizations_root_sessions(&req),
+            "GenerateOrganizationsAccessReport" => self.generate_organizations_access_report(&req),
+            "GetOrganizationsAccessReport" => self.get_organizations_access_report(&req),
+            "ListOrganizationsFeatures" => self.list_organizations_features(&req),
+
+            // Outbound web identity federation
+            "EnableOutboundWebIdentityFederation" => {
+                self.enable_outbound_web_identity_federation(&req)
+            }
+            "DisableOutboundWebIdentityFederation" => {
+                self.disable_outbound_web_identity_federation(&req)
+            }
+            "GetOutboundWebIdentityFederationInfo" => {
+                self.get_outbound_web_identity_federation_info(&req)
+            }
+
+            // Service last accessed details
+            "GenerateServiceLastAccessedDetails" => {
+                self.generate_service_last_accessed_details(&req)
+            }
+            "GetServiceLastAccessedDetails" => self.get_service_last_accessed_details(&req),
+            "GetServiceLastAccessedDetailsWithEntities" => {
+                self.get_service_last_accessed_details_with_entities(&req)
+            }
+
+            // Tags on more resource types
+            "TagSAMLProvider" => self.tag_saml_provider(&req),
+            "UntagSAMLProvider" => self.untag_saml_provider(&req),
+            "ListSAMLProviderTags" => self.list_saml_provider_tags(&req),
+            "TagServerCertificate" => self.tag_server_certificate(&req),
+            "UntagServerCertificate" => self.untag_server_certificate(&req),
+            "ListServerCertificateTags" => self.list_server_certificate_tags(&req),
+            "TagMFADevice" => self.tag_mfa_device(&req),
+            "UntagMFADevice" => self.untag_mfa_device(&req),
+            "ListMFADeviceTags" => self.list_mfa_device_tags(&req),
+
+            // Policy simulation
+            "SimulateCustomPolicy" => self.simulate_custom_policy(&req),
+            "SimulatePrincipalPolicy" => self.simulate_principal_policy(&req),
+            "GetContextKeysForCustomPolicy" => self.get_context_keys_for_custom_policy(&req),
+            "GetContextKeysForPrincipalPolicy" => self.get_context_keys_for_principal_policy(&req),
+            "ListPoliciesGrantingServiceAccess" => self.list_policies_granting_service_access(&req),
+
+            // Misc
+            "ChangePassword" => self.change_password(&req),
+            "GetMFADevice" => self.get_mfa_device(&req),
+            "ResyncMFADevice" => self.resync_mfa_device(&req),
+            "GetHumanReadableSummary" => self.get_human_readable_summary(&req),
+            "SetSecurityTokenServicePreferences" => {
+                self.set_security_token_service_preferences(&req)
+            }
+            "UpdateServerCertificate" => self.update_server_certificate(&req),
 
             _ => Err(AwsServiceError::action_not_implemented("iam", &req.action)),
         };
@@ -934,6 +1013,52 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListSSHPublicKeys",
     "UpdateSSHPublicKey",
     "DeleteSSHPublicKey",
+    "CreateServiceSpecificCredential",
+    "DeleteServiceSpecificCredential",
+    "ListServiceSpecificCredentials",
+    "ResetServiceSpecificCredential",
+    "UpdateServiceSpecificCredential",
+    "CreateDelegationRequest",
+    "AcceptDelegationRequest",
+    "RejectDelegationRequest",
+    "AssociateDelegationRequest",
+    "GetDelegationRequest",
+    "ListDelegationRequests",
+    "UpdateDelegationRequest",
+    "SendDelegationToken",
+    "EnableOrganizationsRootCredentialsManagement",
+    "DisableOrganizationsRootCredentialsManagement",
+    "EnableOrganizationsRootSessions",
+    "DisableOrganizationsRootSessions",
+    "GenerateOrganizationsAccessReport",
+    "GetOrganizationsAccessReport",
+    "ListOrganizationsFeatures",
+    "EnableOutboundWebIdentityFederation",
+    "DisableOutboundWebIdentityFederation",
+    "GetOutboundWebIdentityFederationInfo",
+    "GenerateServiceLastAccessedDetails",
+    "GetServiceLastAccessedDetails",
+    "GetServiceLastAccessedDetailsWithEntities",
+    "TagSAMLProvider",
+    "UntagSAMLProvider",
+    "ListSAMLProviderTags",
+    "TagServerCertificate",
+    "UntagServerCertificate",
+    "ListServerCertificateTags",
+    "TagMFADevice",
+    "UntagMFADevice",
+    "ListMFADeviceTags",
+    "SimulateCustomPolicy",
+    "SimulatePrincipalPolicy",
+    "GetContextKeysForCustomPolicy",
+    "GetContextKeysForPrincipalPolicy",
+    "ListPoliciesGrantingServiceAccess",
+    "ChangePassword",
+    "GetMFADevice",
+    "ResyncMFADevice",
+    "GetHumanReadableSummary",
+    "SetSecurityTokenServicePreferences",
+    "UpdateServerCertificate",
 ];
 
 /// Extract the caller's access key from the request's Authorization header.
