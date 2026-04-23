@@ -887,3 +887,401 @@ impl ApiGatewayV2Service {
             .unwrap_or_else(|| "us-east-1".to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::service::ApiGatewayV2Service;
+    use crate::state::{ApiGatewayV2State, SharedApiGatewayV2State};
+    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::service::AwsRequest;
+    use http::Method;
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn svc() -> ApiGatewayV2Service {
+        let state: SharedApiGatewayV2State =
+            Arc::new(RwLock::new(MultiAccountState::<ApiGatewayV2State>::new(
+                "000000000000",
+                "us-east-1",
+                "",
+            )));
+        ApiGatewayV2Service::new(state)
+    }
+
+    fn req(action: &str, body: &str, segs: &[&str]) -> AwsRequest {
+        AwsRequest {
+            service: "apigatewayv2".to_string(),
+            method: Method::POST,
+            raw_path: format!("/{}", segs.join("/")),
+            raw_query: String::new(),
+            path_segments: segs.iter().map(|s| s.to_string()).collect(),
+            query_params: HashMap::new(),
+            headers: http::HeaderMap::new(),
+            body: bytes::Bytes::from(body.to_string()),
+            account_id: "000000000000".to_string(),
+            region: "us-east-1".to_string(),
+            request_id: "rid".to_string(),
+            action: action.to_string(),
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn run(
+        s: &ApiGatewayV2Service,
+        action: &str,
+        body: &str,
+        segs: &[&str],
+        api_id: Option<&str>,
+        resource_id: Option<&str>,
+    ) {
+        let r = s.handle_extra_action(action, &req(action, body, segs), api_id, resource_id);
+        match r {
+            Ok(resp) => assert!(resp.status.is_success(), "{action} status: {}", resp.status),
+            Err(e) => panic!("{action} failed: {e:?}"),
+        }
+    }
+
+    fn ok(
+        action: &str,
+        body: &str,
+        segs: &[&str],
+        api_id: Option<&str>,
+        resource_id: Option<&str>,
+    ) {
+        run(&svc(), action, body, segs, api_id, resource_id);
+    }
+
+    #[test]
+    fn domain_names_and_api_mappings() {
+        let s = svc();
+        run(
+            &s,
+            "CreateDomainName",
+            r#"{"DomainName":"example.com"}"#,
+            &["v2", "domainnames"],
+            None,
+            None,
+        );
+        run(
+            &s,
+            "GetDomainName",
+            "",
+            &["v2", "domainnames", "example.com"],
+            None,
+            Some("example.com"),
+        );
+        run(
+            &s,
+            "UpdateDomainName",
+            "{}",
+            &["v2", "domainnames", "example.com"],
+            None,
+            Some("example.com"),
+        );
+        run(&s, "GetDomainNames", "", &["v2", "domainnames"], None, None);
+        run(
+            &s,
+            "CreateApiMapping",
+            r#"{"ApiId":"a1","Stage":"prod"}"#,
+            &["v2", "domainnames", "example.com", "apimappings"],
+            None,
+            Some("example.com"),
+        );
+        run(
+            &s,
+            "GetApiMappings",
+            "",
+            &["v2", "domainnames", "example.com", "apimappings"],
+            None,
+            Some("example.com"),
+        );
+        run(
+            &s,
+            "DeleteDomainName",
+            "",
+            &["v2", "domainnames", "example.com"],
+            None,
+            Some("example.com"),
+        );
+    }
+
+    #[test]
+    fn vpc_links_routing_rules_tags_portals() {
+        let s = svc();
+        run(
+            &s,
+            "CreateVpcLink",
+            r#"{"Name":"l"}"#,
+            &["v2", "vpclinks"],
+            None,
+            None,
+        );
+        run(&s, "GetVpcLinks", "", &["v2", "vpclinks"], None, None);
+        run(
+            &s,
+            "CreateRoutingRule",
+            r#"{"DomainName":"d"}"#,
+            &["v2", "routingrules"],
+            None,
+            None,
+        );
+        run(
+            &s,
+            "ListRoutingRules",
+            "",
+            &["v2", "routingrules"],
+            None,
+            None,
+        );
+        run(
+            &s,
+            "TagResource",
+            r#"{"Tags":{"k":"v"}}"#,
+            &["v2", "tags", "arn"],
+            None,
+            Some("arn"),
+        );
+        run(&s, "GetTags", "", &["v2", "tags", "arn"], None, Some("arn"));
+        run(
+            &s,
+            "UntagResource",
+            "",
+            &["v2", "tags", "arn"],
+            None,
+            Some("arn"),
+        );
+        run(
+            &s,
+            "CreatePortal",
+            r#"{"Name":"p"}"#,
+            &["v2", "portals"],
+            None,
+            Some("p"),
+        );
+        run(
+            &s,
+            "GetPortal",
+            "",
+            &["v2", "portals", "p"],
+            None,
+            Some("p"),
+        );
+        run(&s, "ListPortals", "", &["v2", "portals"], None, None);
+        run(
+            &s,
+            "DisablePortal",
+            "",
+            &["v2", "portals", "p", "disable"],
+            None,
+            Some("p"),
+        );
+        run(
+            &s,
+            "PreviewPortal",
+            "",
+            &["v2", "portals", "p", "preview"],
+            None,
+            Some("p"),
+        );
+        run(
+            &s,
+            "PublishPortal",
+            "",
+            &["v2", "portals", "p", "publish"],
+            None,
+            Some("p"),
+        );
+        run(
+            &s,
+            "CreatePortalProduct",
+            r#"{"Name":"pp"}"#,
+            &["v2", "portalproducts"],
+            None,
+            Some("pp"),
+        );
+        run(
+            &s,
+            "GetPortalProduct",
+            "",
+            &["v2", "portalproducts", "pp"],
+            None,
+            Some("pp"),
+        );
+        run(
+            &s,
+            "ListPortalProducts",
+            "",
+            &["v2", "portalproducts"],
+            None,
+            None,
+        );
+        run(
+            &s,
+            "PutPortalProductSharingPolicy",
+            "{}",
+            &["v2", "portalproducts", "pp", "sharing-policy"],
+            None,
+            Some("pp"),
+        );
+        run(
+            &s,
+            "GetPortalProductSharingPolicy",
+            "",
+            &["v2", "portalproducts", "pp", "sharing-policy"],
+            None,
+            Some("pp"),
+        );
+        run(
+            &s,
+            "DeletePortalProductSharingPolicy",
+            "",
+            &["v2", "portalproducts", "pp", "sharing-policy"],
+            None,
+            Some("pp"),
+        );
+    }
+
+    #[test]
+    fn models_and_responses() {
+        ok(
+            "CreateModel",
+            r#"{"Name":"m"}"#,
+            &["v2", "apis", "a1", "models"],
+            Some("a1"),
+            None,
+        );
+        ok(
+            "GetModels",
+            "",
+            &["v2", "apis", "a1", "models"],
+            Some("a1"),
+            None,
+        );
+        ok(
+            "GetModelTemplate",
+            "",
+            &["v2", "apis", "a1", "models", "m1", "template"],
+            Some("a1"),
+            Some("m1"),
+        );
+        ok(
+            "CreateIntegrationResponse",
+            r#"{"IntegrationResponseKey":"$default"}"#,
+            &[
+                "v2",
+                "apis",
+                "a1",
+                "integrations",
+                "i1",
+                "integrationresponses",
+            ],
+            Some("a1"),
+            Some("i1"),
+        );
+        ok(
+            "GetIntegrationResponses",
+            "",
+            &[
+                "v2",
+                "apis",
+                "a1",
+                "integrations",
+                "i1",
+                "integrationresponses",
+            ],
+            Some("a1"),
+            Some("i1"),
+        );
+        ok(
+            "CreateRouteResponse",
+            r#"{"RouteResponseKey":"$default"}"#,
+            &["v2", "apis", "a1", "routes", "r1", "routeresponses"],
+            Some("a1"),
+            Some("r1"),
+        );
+        ok(
+            "GetRouteResponses",
+            "",
+            &["v2", "apis", "a1", "routes", "r1", "routeresponses"],
+            Some("a1"),
+            Some("r1"),
+        );
+    }
+
+    #[test]
+    fn import_export_cleanup() {
+        ok(
+            "ImportApi",
+            r#"{"Body":"openapi"}"#,
+            &["v2", "apis"],
+            None,
+            None,
+        );
+        ok(
+            "ReimportApi",
+            r#"{"Body":"openapi"}"#,
+            &["v2", "apis", "a1"],
+            Some("a1"),
+            None,
+        );
+        ok(
+            "ExportApi",
+            "",
+            &["v2", "apis", "a1", "exports", "OAS30"],
+            Some("a1"),
+            None,
+        );
+        ok(
+            "DeleteCorsConfiguration",
+            "",
+            &["v2", "apis", "a1", "cors"],
+            Some("a1"),
+            None,
+        );
+        ok(
+            "DeleteAccessLogSettings",
+            "",
+            &["v2", "apis", "a1", "stages", "prod", "accesslogsettings"],
+            Some("a1"),
+            Some("prod"),
+        );
+        ok(
+            "DeleteRouteRequestParameter",
+            "",
+            &["v2", "apis", "a1", "routes", "r1", "requestparameters", "p"],
+            Some("a1"),
+            Some("r1"),
+        );
+        ok(
+            "DeleteRouteSettings",
+            "",
+            &["v2", "apis", "a1", "stages", "prod", "routesettings", "X"],
+            Some("a1"),
+            Some("prod"),
+        );
+        ok(
+            "DeleteDeployment",
+            "",
+            &["v2", "apis", "a1", "deployments", "d1"],
+            Some("a1"),
+            Some("d1"),
+        );
+        ok(
+            "UpdateDeployment",
+            "{}",
+            &["v2", "apis", "a1", "deployments", "d1"],
+            Some("a1"),
+            Some("d1"),
+        );
+        ok(
+            "ResetAuthorizersCache",
+            "",
+            &["v2", "apis", "a1", "stages", "prod", "cache", "authorizers"],
+            Some("a1"),
+            Some("prod"),
+        );
+    }
+}
