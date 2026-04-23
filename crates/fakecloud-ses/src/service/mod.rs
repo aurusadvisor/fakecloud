@@ -4396,4 +4396,242 @@ mod tests {
         let resp = svc.handle(req).await.unwrap();
         assert_eq!(resp.status, StatusCode::OK);
     }
+
+    // ── Coverage for the deliverability + insights closure batch ──
+
+    #[tokio::test]
+    async fn test_deliverability_dashboard_round_trip() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+
+        // Default: not enabled.
+        let req = make_request(Method::GET, "/v2/email/deliverability-dashboard", "");
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["DashboardEnabled"], false);
+
+        // Enable + add a subscribed domain.
+        let req = make_request(
+            Method::PUT,
+            "/v2/email/deliverability-dashboard",
+            r#"{"DashboardEnabled":true,"SubscribedDomains":[{"Domain":"example.com","InboxPlacementTrackingOption":{"Global":true,"TrackedIsps":["gmail.com"]}}]}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(Method::GET, "/v2/email/deliverability-dashboard", "");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["DashboardEnabled"], true);
+        assert_eq!(body["AccountStatus"], "ACTIVE");
+        let domains = body["ActiveSubscribedDomains"].as_array().unwrap();
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0]["Domain"], "example.com");
+    }
+
+    #[tokio::test]
+    async fn test_put_deliverability_dashboard_option_requires_flag() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(Method::PUT, "/v2/email/deliverability-dashboard", r#"{}"#);
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "BadRequestException");
+    }
+
+    #[tokio::test]
+    async fn test_deliverability_test_report_lifecycle() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(
+            Method::POST,
+            "/v2/email/deliverability-dashboard/test",
+            r#"{"FromEmailAddress":"a@example.com","Content":{"Simple":{"Subject":{"Data":"Hi"}}}}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let report_id = body["ReportId"].as_str().unwrap().to_string();
+
+        let req = make_request(
+            Method::GET,
+            &format!("/v2/email/deliverability-dashboard/test-reports/{report_id}"),
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let req = make_request(
+            Method::GET,
+            "/v2/email/deliverability-dashboard/test-reports",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            body["DeliverabilityTestReports"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_deliverability_test_report_requires_from() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(
+            Method::POST,
+            "/v2/email/deliverability-dashboard/test",
+            r#"{}"#,
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "BadRequestException");
+    }
+
+    #[tokio::test]
+    async fn test_get_deliverability_test_report_unknown() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(
+            Method::GET,
+            "/v2/email/deliverability-dashboard/test-reports/no-such",
+            "",
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "NotFoundException");
+    }
+
+    #[tokio::test]
+    async fn test_blacklist_reports_route() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(
+            Method::GET,
+            "/v2/email/deliverability-dashboard/blacklist-report",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_domain_deliverability_campaign_route() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(
+            Method::GET,
+            "/v2/email/deliverability-dashboard/campaigns/camp-1",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_domain_statistics_report_route() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(
+            Method::GET,
+            "/v2/email/deliverability-dashboard/statistics-report/example.com",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_list_domain_deliverability_campaigns_route() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(
+            Method::GET,
+            "/v2/email/deliverability-dashboard/domains/example.com/campaigns",
+            "",
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_email_address_insights_route() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(
+            Method::POST,
+            "/v2/email/email-address-insights",
+            r#"{"EmailAddress":"a@example.com"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_email_address_insights_requires_email() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(Method::POST, "/v2/email/email-address-insights", r#"{}"#);
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "BadRequestException");
+    }
+
+    #[tokio::test]
+    async fn test_get_message_insights_unknown() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(Method::GET, "/v2/email/insights/no-such-id", "");
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "NotFoundException");
+    }
+
+    #[tokio::test]
+    async fn test_list_recommendations_seeds_default() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(Method::POST, "/v2/email/vdm/recommendations", "{}");
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert!(!body["Recommendations"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_dedicated_ip_pool_round_trip() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(
+            Method::POST,
+            "/v2/email/dedicated-ip-pools",
+            r#"{"PoolName":"pool1"}"#,
+        );
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let req = make_request(Method::GET, "/v2/email/dedicated-ip-pools/pool1", "");
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_dedicated_ip_pool_unknown() {
+        let state = make_state();
+        let svc = SesV2Service::new(state);
+        let req = make_request(Method::GET, "/v2/email/dedicated-ip-pools/no-such", "");
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "NotFoundException");
+    }
 }
