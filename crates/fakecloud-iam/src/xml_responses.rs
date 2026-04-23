@@ -788,6 +788,83 @@ pub fn get_federation_token_response(
     )
 }
 
+pub fn assume_root_response(
+    creds: &StsCredentials,
+    expiration: &str,
+    source_identity: Option<&str>,
+    request_id: &str,
+) -> String {
+    let access_key_id = creds.access_key_id.as_str();
+    let secret_access_key = creds.secret_access_key.as_str();
+    let session_token = creds.session_token.as_str();
+    let source_identity_section = match source_identity {
+        Some(s) => format!("\n    <SourceIdentity>{}</SourceIdentity>", xml_escape(s)),
+        None => String::new(),
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<AssumeRootResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRootResult>
+    <Credentials>
+      <AccessKeyId>{access_key_id}</AccessKeyId>
+      <SecretAccessKey>{secret_access_key}</SecretAccessKey>
+      <SessionToken>{session_token}</SessionToken>
+      <Expiration>{expiration}</Expiration>
+    </Credentials>{source_identity_section}
+  </AssumeRootResult>
+  <ResponseMetadata>
+    <RequestId>{request_id}</RequestId>
+  </ResponseMetadata>
+</AssumeRootResponse>"#,
+    )
+}
+
+pub fn get_delegated_access_token_response(
+    creds: &StsCredentials,
+    expiration: &str,
+    assumed_principal: &str,
+    request_id: &str,
+) -> String {
+    let access_key_id = creds.access_key_id.as_str();
+    let secret_access_key = creds.secret_access_key.as_str();
+    let session_token = creds.session_token.as_str();
+    let assumed_principal = xml_escape(assumed_principal);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<GetDelegatedAccessTokenResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetDelegatedAccessTokenResult>
+    <Credentials>
+      <AccessKeyId>{access_key_id}</AccessKeyId>
+      <SecretAccessKey>{secret_access_key}</SecretAccessKey>
+      <SessionToken>{session_token}</SessionToken>
+      <Expiration>{expiration}</Expiration>
+    </Credentials>
+    <PackedPolicySize>0</PackedPolicySize>
+    <AssumedPrincipal>{assumed_principal}</AssumedPrincipal>
+  </GetDelegatedAccessTokenResult>
+  <ResponseMetadata>
+    <RequestId>{request_id}</RequestId>
+  </ResponseMetadata>
+</GetDelegatedAccessTokenResponse>"#,
+    )
+}
+
+pub fn get_web_identity_token_response(token: &str, expiration: &str, request_id: &str) -> String {
+    let token = xml_escape(token);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<GetWebIdentityTokenResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetWebIdentityTokenResult>
+    <WebIdentityToken>{token}</WebIdentityToken>
+    <Expiration>{expiration}</Expiration>
+  </GetWebIdentityTokenResult>
+  <ResponseMetadata>
+    <RequestId>{request_id}</RequestId>
+  </ResponseMetadata>
+</GetWebIdentityTokenResponse>"#,
+    )
+}
+
 pub fn decode_authorization_message_response(decoded_message: &str, request_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
