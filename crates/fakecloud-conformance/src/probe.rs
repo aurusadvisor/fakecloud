@@ -1,5 +1,7 @@
 //! Level 1 probing: send generated requests to fakecloud and classify responses.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use crate::generators::{Expectation, TestVariant};
@@ -130,7 +132,14 @@ pub fn probe_variant_with_model(
         Protocol::Json { target_prefix } => {
             probe_json(client, endpoint, target_prefix, operation_name, variant)
         }
-        Protocol::Rest => probe_rest(client, endpoint, service_name, operation_name, variant),
+        Protocol::Rest => probe_rest(
+            client,
+            endpoint,
+            service_name,
+            operation_name,
+            variant,
+            model_info.map(|(m, _)| m),
+        ),
     };
 
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -684,28 +693,34 @@ fn rest_request_config(
     }
 }
 
+/// REST services with a hand-curated `rest_request_config` table. These keep
+/// their hardcoded entries; everything else falls back to the generic
+/// `@http`-trait-driven request builder.
+const SERVICES_WITH_HARDCODED_REST: &[&str] = &["lambda", "s3"];
+
 fn probe_rest(
     client: &reqwest::blocking::Client,
     endpoint: &str,
     service_name: &str,
     operation_name: &str,
     variant: &TestVariant,
+    model: Option<&ServiceModel>,
 ) -> Result<(u16, String), String> {
-    let (method, path, query) = rest_request_config(service_name, operation_name);
-
-    let url = match query {
-        Some(qs) => format!("{}{}?{}", endpoint, path, qs),
-        None => format!("{}{}", endpoint, path),
+    let (method, url, headers, body) = match model {
+        Some(model) if !SERVICES_WITH_HARDCODED_REST.contains(&service_name) => {
+            let op = model.operations.iter().find(|o| o.name == operation_name);
+            match op.and_then(|op| build_http_request_from_model(op, model, &variant.input)) {
+                Some((m, path_and_query, hdrs, body)) => {
+                    let url = format!("{}{}", endpoint, path_and_query);
+                    (m, url, hdrs, body)
+                }
+                None => legacy_rest_request(endpoint, service_name, operation_name, variant),
+            }
+        }
+        _ => legacy_rest_request(endpoint, service_name, operation_name, variant),
     };
 
-    let has_body = matches!(method, reqwest::Method::POST | reqwest::Method::PUT);
-    let body = if has_body {
-        serde_json::to_string(&variant.input).unwrap_or_else(|_| "{}".to_string())
-    } else {
-        String::new()
-    };
-
-    let mut req = client.request(method, &url).header(
+    let mut req = client.request(method.clone(), &url).header(
         "Authorization",
         format!(
             "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/{}/aws4_request",
@@ -713,8 +728,24 @@ fn probe_rest(
         ),
     );
 
-    if has_body {
-        req = req.header("Content-Type", "application/json").body(body);
+    for (name, value) in &headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+
+    // Trust the builder to decide whether to emit a body: both
+    // `build_http_request_from_model` and `legacy_rest_request` only return
+    // `Some(body)` when a body is appropriate for this op + method (including
+    // DELETE/GET with an explicit `@httpPayload` member, a case AWS models do
+    // use — e.g. `DeleteObjects` via POST-with-payload, plus streaming
+    // ingest-style APIs with payloads on non-POST methods).
+    if let Some(body) = body {
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
+            req = req.header("Content-Type", "application/json");
+        }
+        req = req.body(body);
     }
 
     let resp = req.send().map_err(|e| e.to_string())?;
@@ -722,6 +753,281 @@ fn probe_rest(
     let status = resp.status().as_u16();
     let body = resp.text().map_err(|e| e.to_string())?;
     Ok((status, body))
+}
+
+/// `(method, url, headers, body)` tuple produced by the REST request builders.
+type RestRequestParts = (
+    reqwest::Method,
+    String,
+    Vec<(String, String)>,
+    Option<String>,
+);
+
+/// Preserve the pre-existing hardcoded-table behavior for Lambda / S3.
+fn legacy_rest_request(
+    endpoint: &str,
+    service_name: &str,
+    operation_name: &str,
+    variant: &TestVariant,
+) -> RestRequestParts {
+    let (method, path, query) = rest_request_config(service_name, operation_name);
+    let url = match query {
+        Some(qs) => format!("{}{}?{}", endpoint, path, qs),
+        None => format!("{}{}", endpoint, path),
+    };
+    let has_body = matches!(method, reqwest::Method::POST | reqwest::Method::PUT);
+    let body = if has_body {
+        Some(serde_json::to_string(&variant.input).unwrap_or_else(|_| "{}".to_string()))
+    } else {
+        None
+    };
+    (method, url, Vec::new(), body)
+}
+
+/// Build an HTTP request for an operation from the `@http` / `@httpLabel` /
+/// `@httpQuery` / `@httpHeader` / `@httpPayload` Smithy traits on its input
+/// shape. Returns `None` if the operation is missing `@http` metadata.
+///
+/// Returned tuple: `(method, path_and_query_string, headers, body)`.
+fn build_http_request_from_model(
+    op: &crate::smithy::Operation,
+    model: &ServiceModel,
+    input: &serde_json::Value,
+) -> Option<RestRequestParts> {
+    use crate::smithy::ShapeType;
+
+    let method_str = op.http_method.as_ref()?;
+    let uri_template = op.http_uri.as_ref()?;
+
+    let method = reqwest::Method::from_bytes(method_str.as_bytes()).ok()?;
+
+    // Clone input so we can progressively drain label/query/header/payload members.
+    let mut remaining = match input {
+        serde_json::Value::Object(map) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+
+    let mut headers: Vec<(String, String)> = Vec::new();
+    let mut query_parts: Vec<String> = Vec::new();
+    let mut payload_value: Option<serde_json::Value> = None;
+
+    // Walk the input shape's members to discover http bindings. Label / query /
+    // header / payload traits can live on either the member or the referenced
+    // target shape — check both.
+    let members: Vec<crate::smithy::Member> = op
+        .input_shape
+        .as_ref()
+        .and_then(|id| model.shapes.get(id))
+        .and_then(|shape| match &shape.shape_type {
+            ShapeType::Structure { members } => Some(members.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    for member in &members {
+        let target_traits = model.shapes.get(&member.target).map(|s| &s.traits);
+        let member_traits = &member.traits;
+        let is_label =
+            member_traits.http_label || target_traits.map(|t| t.http_label).unwrap_or(false);
+        let query_name = member_traits
+            .http_query
+            .clone()
+            .or_else(|| target_traits.and_then(|t| t.http_query.clone()));
+        let header_name = member_traits
+            .http_header
+            .clone()
+            .or_else(|| target_traits.and_then(|t| t.http_header.clone()));
+        let is_payload =
+            member_traits.http_payload || target_traits.map(|t| t.http_payload).unwrap_or(false);
+
+        if is_label || query_name.is_some() || header_name.is_some() || is_payload {
+            if let Some(val) = remaining.remove(&member.name) {
+                if let Some(qk) = query_name {
+                    append_query(&mut query_parts, &qk, &val);
+                } else if let Some(hk) = header_name {
+                    if let Some(hv) = value_to_header_string(&val) {
+                        headers.push((hk, hv));
+                    }
+                } else if is_payload {
+                    payload_value = Some(val);
+                }
+                // is_label handled below from `remaining` ∪ `members` (we already
+                // removed; re-use the popped value via a side map)
+                if is_label {
+                    // Re-insert for label substitution below. Simpler: keep a
+                    // separate label map rather than re-reading `remaining`.
+                }
+            }
+        }
+    }
+
+    // Second pass: collect label values fresh from the original input, since we
+    // may have removed them above.
+    let mut label_values: HashMap<String, serde_json::Value> = HashMap::new();
+    for member in &members {
+        let target_traits = model.shapes.get(&member.target).map(|s| &s.traits);
+        let is_label =
+            member.traits.http_label || target_traits.map(|t| t.http_label).unwrap_or(false);
+        if is_label {
+            if let Some(val) = input.get(&member.name) {
+                label_values.insert(member.name.clone(), val.clone());
+            }
+        }
+    }
+
+    let path = substitute_uri_labels(uri_template, &label_values);
+
+    // Merge literal query (from URI template after `?`) with computed params.
+    let (path_only, literal_query) = match path.split_once('?') {
+        Some((p, q)) => (p.to_string(), Some(q.to_string())),
+        None => (path, None),
+    };
+
+    let mut all_query: Vec<String> = Vec::new();
+    if let Some(lq) = literal_query {
+        if !lq.is_empty() {
+            all_query.push(lq);
+        }
+    }
+    all_query.extend(query_parts);
+    let path_and_query = if all_query.is_empty() {
+        path_only
+    } else {
+        format!("{}?{}", path_only, all_query.join("&"))
+    };
+
+    // Body: @httpPayload member wins; else whatever remains in the input object
+    // (minus labels, query, headers, payload). Omit body entirely on
+    // GET/HEAD/DELETE unless an explicit @httpPayload member was present.
+    let is_bodyless_method = matches!(
+        method,
+        reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::DELETE
+    );
+    let body = if let Some(v) = payload_value {
+        Some(value_to_body(&v))
+    } else if is_bodyless_method {
+        None
+    } else {
+        // Drop label members from `remaining` (we re-added none, but be defensive).
+        for name in label_values.keys() {
+            remaining.remove(name);
+        }
+        if remaining.is_empty() {
+            Some("{}".to_string())
+        } else {
+            Some(serde_json::to_string(&serde_json::Value::Object(remaining)).unwrap_or_default())
+        }
+    };
+
+    Some((method, path_and_query, headers, body))
+}
+
+fn substitute_uri_labels(template: &str, labels: &HashMap<String, serde_json::Value>) -> String {
+    // URI templates use `{Name}` and `{Name+}` (greedy, keeps `/` literal).
+    let mut out = String::with_capacity(template.len());
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(end) = template[i + 1..].find('}') {
+                let inner = &template[i + 1..i + 1 + end];
+                let (name, greedy) = if let Some(n) = inner.strip_suffix('+') {
+                    (n, true)
+                } else {
+                    (inner, false)
+                };
+                let raw = labels.get(name).and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    serde_json::Value::Bool(b) => Some(b.to_string()),
+                    _ => None,
+                });
+                if let Some(raw) = raw {
+                    let encoded = if greedy {
+                        percent_encode_greedy(&raw)
+                    } else {
+                        percent_encode_label(&raw)
+                    };
+                    out.push_str(&encoded);
+                } else {
+                    // No value: leave the literal {Name} in place so the
+                    // server-side failure surfaces as a mismatch rather than a
+                    // silent 500.
+                    out.push_str(&template[i..i + 1 + end + 1]);
+                }
+                i += 1 + end + 1;
+                continue;
+            }
+        }
+        out.push(template[i..].chars().next().unwrap());
+        i += template[i..].chars().next().unwrap().len_utf8();
+    }
+    out
+}
+
+/// Percent-encode a path segment label. Keeps `-._~` unencoded (RFC 3986
+/// unreserved) and encodes `/` so segment boundaries are preserved.
+fn percent_encode_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*b as char);
+            }
+            other => {
+                out.push_str(&format!("%{:02X}", other));
+            }
+        }
+    }
+    out
+}
+
+/// Greedy-label encoding (`{Name+}`): same as label encoding but keeps `/`.
+fn percent_encode_greedy(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(*b as char);
+            }
+            other => {
+                out.push_str(&format!("%{:02X}", other));
+            }
+        }
+    }
+    out
+}
+
+fn append_query(out: &mut Vec<String>, key: &str, v: &serde_json::Value) {
+    match v {
+        serde_json::Value::String(s) => out.push(format!("{}={}", key, percent_encode_label(s))),
+        serde_json::Value::Number(n) => out.push(format!("{}={}", key, n)),
+        serde_json::Value::Bool(b) => out.push(format!("{}={}", key, b)),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                append_query(out, key, item);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Object(_) => {}
+    }
+}
+
+fn value_to_header_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// For `@httpPayload` members: structures/lists/objects become JSON; strings
+/// become the raw string; blobs (JSON-encoded as strings here) likewise.
+fn value_to_body(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        _ => serde_json::to_string(v).unwrap_or_default(),
+    }
 }
 
 fn classify_response(
@@ -858,5 +1164,344 @@ fn truncate(s: &str, max: usize) -> &str {
             .last()
             .unwrap_or(0);
         &s[..boundary]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::smithy::{Member, Operation, Shape, ShapeTraits, ShapeType};
+
+    fn op_with_http(name: &str, method: &str, uri: &str, input_shape_id: &str) -> Operation {
+        Operation {
+            name: name.to_string(),
+            input_shape: Some(input_shape_id.to_string()),
+            output_shape: None,
+            error_shapes: Vec::new(),
+            http_method: Some(method.to_string()),
+            http_uri: Some(uri.to_string()),
+            http_code: Some(200),
+        }
+    }
+
+    fn member(name: &str, target: &str, traits: ShapeTraits) -> Member {
+        Member {
+            name: name.to_string(),
+            target: target.to_string(),
+            required: false,
+            traits,
+        }
+    }
+
+    fn structure_shape(id: &str, members: Vec<Member>) -> Shape {
+        Shape {
+            shape_id: id.to_string(),
+            shape_type: ShapeType::Structure { members },
+            traits: ShapeTraits::default(),
+        }
+    }
+
+    fn string_shape(id: &str, traits: ShapeTraits) -> Shape {
+        Shape {
+            shape_id: id.to_string(),
+            shape_type: ShapeType::String { enum_values: None },
+            traits,
+        }
+    }
+
+    fn model_with(op: Operation, shapes: Vec<Shape>) -> ServiceModel {
+        let mut map = HashMap::new();
+        for s in shapes {
+            map.insert(s.shape_id.clone(), s);
+        }
+        ServiceModel {
+            service_name: "test".to_string(),
+            operations: vec![op],
+            shapes: map,
+        }
+    }
+
+    fn label_traits() -> ShapeTraits {
+        ShapeTraits {
+            http_label: true,
+            ..ShapeTraits::default()
+        }
+    }
+
+    fn query_traits(name: &str) -> ShapeTraits {
+        ShapeTraits {
+            http_query: Some(name.to_string()),
+            ..ShapeTraits::default()
+        }
+    }
+
+    fn header_traits(name: &str) -> ShapeTraits {
+        ShapeTraits {
+            http_header: Some(name.to_string()),
+            ..ShapeTraits::default()
+        }
+    }
+
+    fn payload_traits() -> ShapeTraits {
+        ShapeTraits {
+            http_payload: true,
+            ..ShapeTraits::default()
+        }
+    }
+
+    #[test]
+    fn label_substitution_basic() {
+        let op = op_with_http("GetApi", "GET", "/v2/apis/{ApiId}", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape("#Input", vec![member("ApiId", "#String", label_traits())]),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"ApiId": "abc123"});
+        let (method, url, headers, body) =
+            build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(method, reqwest::Method::GET);
+        assert_eq!(url, "/v2/apis/abc123");
+        assert!(headers.is_empty());
+        assert!(body.is_none(), "GET has no body");
+    }
+
+    #[test]
+    fn greedy_label_preserves_slashes() {
+        let op = op_with_http("X", "GET", "/foo/{Path+}", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape("#Input", vec![member("Path", "#String", label_traits())]),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"Path": "a/b/c"});
+        let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(url, "/foo/a/b/c");
+    }
+
+    #[test]
+    fn non_greedy_label_encodes_slashes() {
+        let op = op_with_http("X", "GET", "/foo/{Name}", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape("#Input", vec![member("Name", "#String", label_traits())]),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"Name": "a/b"});
+        let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(url, "/foo/a%2Fb");
+    }
+
+    #[test]
+    fn query_optional_omitted() {
+        let op = op_with_http("X", "GET", "/foo", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape(
+                    "#Input",
+                    vec![member("BasePath", "#String", query_traits("basepath"))],
+                ),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({}); // BasePath absent
+        let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(url, "/foo");
+    }
+
+    #[test]
+    fn query_present_emitted() {
+        let op = op_with_http("X", "GET", "/foo", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape(
+                    "#Input",
+                    vec![member("BasePath", "#String", query_traits("basepath"))],
+                ),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"BasePath": "hello"});
+        let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(url, "/foo?basepath=hello");
+    }
+
+    #[test]
+    fn header_extracted_out_of_body() {
+        let op = op_with_http("X", "POST", "/foo", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape(
+                    "#Input",
+                    vec![
+                        member("Idempotency", "#String", header_traits("x-idem")),
+                        member("Other", "#String", ShapeTraits::default()),
+                    ],
+                ),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"Idempotency": "abc", "Other": "keep"});
+        let (_, _, headers, body) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(headers, vec![("x-idem".to_string(), "abc".to_string())]);
+        let body: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"Other": "keep"}));
+    }
+
+    #[test]
+    fn payload_member_only_body() {
+        let op = op_with_http("X", "PUT", "/foo", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape("#Input", vec![member("Body", "#String", payload_traits())]),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"Body": "raw-openapi-doc"});
+        let (_, _, _, body) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(body.unwrap(), "raw-openapi-doc");
+    }
+
+    #[test]
+    fn delete_without_payload_has_no_body() {
+        let op = op_with_http("X", "DELETE", "/foo/{Id}", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape("#Input", vec![member("Id", "#String", label_traits())]),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"Id": "abc"});
+        let (method, _, _, body) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(method, reqwest::Method::DELETE);
+        assert!(body.is_none());
+    }
+
+    #[test]
+    fn missing_label_leaves_placeholder() {
+        // When a required label is absent, keep the literal {Name} so the server
+        // returns a routing failure (not a silent 500). Ensures the variant
+        // surfaces as a SHAPE_MISMATCH/UNEXPECTED rather than being hidden.
+        let op = op_with_http("X", "GET", "/foo/{ApiId}", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape("#Input", vec![member("ApiId", "#String", label_traits())]),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({}); // ApiId missing
+        let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(url, "/foo/{ApiId}");
+    }
+
+    #[test]
+    fn literal_query_in_template_merged_with_computed() {
+        let op = op_with_http("X", "GET", "/x?action=foo", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape("#Input", vec![member("P", "#String", query_traits("p"))]),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"P": "v"});
+        let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(url, "/x?action=foo&p=v");
+    }
+
+    #[test]
+    fn list_valued_query_repeats() {
+        let op = op_with_http("X", "GET", "/foo", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape(
+                    "#Input",
+                    vec![member("Tags", "#StringList", query_traits("tag"))],
+                ),
+                Shape {
+                    shape_id: "#StringList".to_string(),
+                    shape_type: ShapeType::List {
+                        member_target: "#String".to_string(),
+                    },
+                    traits: ShapeTraits::default(),
+                },
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"Tags": ["a", "b"]});
+        let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(url, "/foo?tag=a&tag=b");
+    }
+
+    #[test]
+    fn delete_with_payload_keeps_body() {
+        // `@httpPayload` overrides the default "DELETE = bodyless" rule. Rare
+        // in practice but AWS models do use it for some delete-with-filter-doc
+        // shapes; ensure the builder emits a body in that case.
+        let op = op_with_http("X", "DELETE", "/foo", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape("#Input", vec![member("Body", "#String", payload_traits())]),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"Body": "delete-me"});
+        let (method, _, _, body) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(method, reqwest::Method::DELETE);
+        assert_eq!(body.unwrap(), "delete-me");
+    }
+
+    #[test]
+    fn patch_method_keeps_body() {
+        // APIGWv2 Update* ops use PATCH. Regression guard for the
+        // `has_body_method` check: don't treat PATCH as bodyless.
+        let op = op_with_http("X", "PATCH", "/foo/{Id}", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape(
+                    "#Input",
+                    vec![
+                        member("Id", "#String", label_traits()),
+                        member("Description", "#String", ShapeTraits::default()),
+                    ],
+                ),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"Id": "abc", "Description": "updated"});
+        let (method, _, _, body) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(method, reqwest::Method::PATCH);
+        let body: serde_json::Value = serde_json::from_str(&body.unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"Description": "updated"}));
+    }
+
+    #[test]
+    fn percent_encoding_in_label() {
+        let op = op_with_http("X", "GET", "/foo/{Id}", "#Input");
+        let model = model_with(
+            op.clone(),
+            vec![
+                structure_shape("#Input", vec![member("Id", "#String", label_traits())]),
+                string_shape("#String", ShapeTraits::default()),
+            ],
+        );
+        let input = serde_json::json!({"Id": "a b#c"});
+        let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
+        assert_eq!(url, "/foo/a%20b%23c");
     }
 }
