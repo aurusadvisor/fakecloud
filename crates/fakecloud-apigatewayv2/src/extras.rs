@@ -1026,48 +1026,51 @@ impl ApiGatewayV2Service {
                         "arn:aws:apigateway:us-east-1::/portalproducts/{}/productpages/{}",
                         parent, id
                     ),
-                    "PageTitle": page_title,
+                    // Internal-only: the summary shape requires pageTitle
+                    // but Create/Update responses don't carry it. We
+                    // strip this before returning the response below.
+                    "_summary_pageTitle": page_title,
                     "LastModified": now,
                     "DisplayContent": dc,
                 })
             }
             "product_rest_endpoint_pages" => {
-                // EndpointDisplayContentResponse.Endpoint is a simple string
-                // (endpoint name / URL ref). If the caller sent a full
-                // Endpoint object at the root, store it separately and
-                // build a string ref for DisplayContent.Endpoint.
-                let endpoint_obj = input.get("Endpoint").cloned().unwrap_or_else(|| {
-                    json!({
-                        "ApiId": "",
-                        "StageName": "",
-                        "RouteKey": "ANY /",
-                    })
-                });
-                let mut dc = input
-                    .get("DisplayContent")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                // Set a string endpoint label inside displayContent.
-                if dc
-                    .get("endpoint")
-                    .or_else(|| dc.get("Endpoint"))
-                    .and_then(|v| v.as_str())
-                    .is_none()
-                {
+                // EndpointDisplayContentResponse has only Body, Endpoint,
+                // OperationName. Input may carry EndpointDisplayContent
+                // (None, Overrides) shape — translate to the response
+                // shape rather than echoing the input.
+                let input_dc = input.get("DisplayContent").cloned().unwrap_or(json!({}));
+                let mut dc = json!({});
+                for (out_key, in_keys) in &[
+                    ("Endpoint", &["endpoint", "Endpoint"][..]),
+                    ("Body", &["body", "Body"][..]),
+                    ("OperationName", &["operationName", "OperationName"][..]),
+                ] {
+                    for in_key in *in_keys {
+                        if let Some(v) = input_dc.get(*in_key) {
+                            if !v.is_null() {
+                                dc[*out_key] = v.clone();
+                                break;
+                            }
+                        }
+                    }
+                }
+                if dc.get("Endpoint").and_then(|v| v.as_str()).is_none() {
                     dc["Endpoint"] = json!(id.clone());
                 }
                 let rei = input
                     .get("RestEndpointIdentifier")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                let _ = endpoint_obj;
                 json!({
                     "ProductRestEndpointPageId": id,
                     "ProductRestEndpointPageArn": format!(
                         "arn:aws:apigateway:us-east-1::/portalproducts/{}/productrestendpointpages/{}",
                         parent, id
                     ),
-                    "Endpoint": id.clone(),
+                    // Internal-only: summary shape requires endpoint at
+                    // root but Create/Update responses don't carry it.
+                    "_summary_endpoint": id.clone(),
                     "Status": "AVAILABLE",
                     "LastModified": now,
                     "DisplayContent": dc,
@@ -1086,7 +1089,13 @@ impl ApiGatewayV2Service {
             _ => return Err(missing("Store")),
         };
         map.entry(parent).or_default().insert(id, entry.clone());
-        ok(entry)
+        // Strip summary-only fields that live in storage but aren't
+        // part of the Create/Update response shape.
+        let mut response = entry.clone();
+        if let Value::Object(ref mut obj) = response {
+            obj.retain(|k, _| !k.starts_with("_summary_"));
+        }
+        ok(response)
     }
 
     fn get_subresource(
@@ -1108,7 +1117,12 @@ impl ApiGatewayV2Service {
             map.get(parent)
                 .and_then(|m| m.get(id))
                 .cloned()
-                .map(ok)
+                .map(|mut v| {
+                    if let Value::Object(ref mut obj) = v {
+                        obj.retain(|k, _| !k.starts_with("_summary_"));
+                    }
+                    ok(v)
+                })
                 .unwrap_or_else(|| Err(not_found(store, id)))
         })
     }
@@ -1139,13 +1153,19 @@ impl ApiGatewayV2Service {
                             "product_pages" => json!({
                                 "ProductPageId": v.get("ProductPageId").cloned().unwrap_or(json!("")),
                                 "ProductPageArn": v.get("ProductPageArn").cloned().unwrap_or(json!("")),
-                                "PageTitle": v.get("PageTitle").cloned().unwrap_or(json!("")),
+                                "PageTitle": v.get("_summary_pageTitle")
+                                    .or_else(|| v.get("PageTitle"))
+                                    .cloned()
+                                    .unwrap_or(json!("")),
                                 "LastModified": v.get("LastModified").cloned().unwrap_or(json!("")),
                             }),
                             "product_rest_endpoint_pages" => json!({
                                 "ProductRestEndpointPageId": v.get("ProductRestEndpointPageId").cloned().unwrap_or(json!("")),
                                 "ProductRestEndpointPageArn": v.get("ProductRestEndpointPageArn").cloned().unwrap_or(json!("")),
-                                "Endpoint": v.get("Endpoint").cloned().unwrap_or(json!("")),
+                                "Endpoint": v.get("_summary_endpoint")
+                                    .or_else(|| v.get("Endpoint"))
+                                    .cloned()
+                                    .unwrap_or(json!("")),
                                 "Status": v.get("Status").cloned().unwrap_or(json!("AVAILABLE")),
                                 "TryItState": v.get("TryItState").cloned().unwrap_or(json!("DISABLED")),
                                 "LastModified": v.get("LastModified").cloned().unwrap_or(json!("")),
