@@ -414,6 +414,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-ecr"
+version = "1.114.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bd79cc872923874e31b7bba0f5f0dab4880b82ca417c0c669e43ad6891f5d9e"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-elasticache"
 version = "1.104.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1991,6 +2015,7 @@ dependencies = [
  "fakecloud-cognito",
  "fakecloud-core",
  "fakecloud-dynamodb",
+ "fakecloud-ecr",
  "fakecloud-elasticache",
  "fakecloud-eventbridge",
  "fakecloud-iam",
@@ -2146,6 +2171,7 @@ dependencies = [
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-cognitoidentityprovider",
  "aws-sdk-dynamodb",
+ "aws-sdk-ecr",
  "aws-sdk-elasticache",
  "aws-sdk-eventbridge",
  "aws-sdk-iam",
@@ -2241,6 +2267,7 @@ dependencies = [
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-cognitoidentityprovider",
  "aws-sdk-dynamodb",
+ "aws-sdk-ecr",
  "aws-sdk-elasticache",
  "aws-sdk-eventbridge",
  "aws-sdk-iam",
@@ -2273,6 +2300,25 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "zip",
+]
+
+[[package]]
+name = "fakecloud-ecr"
+version = "0.10.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2701,6 +2747,7 @@ dependencies = [
  "aws-sdk-cloudwatchlogs",
  "aws-sdk-cognitoidentityprovider",
  "aws-sdk-dynamodb",
+ "aws-sdk-ecr",
  "aws-sdk-elasticache",
  "aws-sdk-eventbridge",
  "aws-sdk-iam",

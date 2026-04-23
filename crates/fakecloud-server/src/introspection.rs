@@ -39,6 +39,29 @@ pub(crate) fn rds_instance_response(
     }
 }
 
+pub(crate) fn ecr_repository_response(
+    repo: &fakecloud_ecr::state::Repository,
+) -> types::EcrRepository {
+    types::EcrRepository {
+        repository_name: repo.repository_name.clone(),
+        repository_arn: repo.repository_arn.clone(),
+        registry_id: repo.registry_id.clone(),
+        repository_uri: repo.repository_uri.clone(),
+        image_tag_mutability: repo.image_tag_mutability.clone(),
+        scan_on_push: repo.image_scanning_configuration.scan_on_push,
+        created_at: repo.created_at.to_rfc3339(),
+        tags: repo
+            .tags
+            .iter()
+            .map(|(k, v)| types::EcrTag {
+                key: k.clone(),
+                value: v.clone(),
+            })
+            .collect(),
+        has_policy: repo.policy.is_some(),
+    }
+}
+
 pub(crate) fn elasticache_cluster_response(
     cluster: &fakecloud_elasticache::state::CacheCluster,
 ) -> types::ElastiCacheCluster {

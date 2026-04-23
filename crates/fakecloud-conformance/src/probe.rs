@@ -90,6 +90,9 @@ pub fn service_protocol(service_name: &str) -> Protocol {
         "kinesis" => Protocol::Json {
             target_prefix: "Kinesis_20131202",
         },
+        "ecr" => Protocol::Json {
+            target_prefix: "AmazonEC2ContainerRegistry_V20150921",
+        },
         "s3" => Protocol::Rest,
         "lambda" => Protocol::Rest,
         // `service_name` in `service-map.json` for API Gateway v2 is

@@ -24,7 +24,7 @@ mod stepfunctions_delivery;
 use cli::Cli;
 use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
 use introspection::{
-    elasticache_cluster_response, elasticache_replication_group_response,
+    ecr_repository_response, elasticache_cluster_response, elasticache_replication_group_response,
     elasticache_serverless_cache_response, rds_instance_response,
 };
 use kinesis_lambda_poller::KinesisLambdaPoller;
@@ -36,6 +36,7 @@ use fakecloud_bedrock::service::BedrockService;
 use fakecloud_cloudformation::service::CloudFormationService;
 use fakecloud_cognito::service::CognitoService;
 use fakecloud_dynamodb::service::DynamoDbService;
+use fakecloud_ecr::service::EcrService;
 use fakecloud_elasticache::service::ElastiCacheService;
 use fakecloud_eventbridge::service::EventBridgeService;
 use fakecloud_iam::iam_service::IamService;
@@ -274,6 +275,14 @@ async fn main() {
         ),
     ));
 
+    let ecr_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+
     let bedrock_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -440,6 +449,7 @@ async fn main() {
     let s3_introspection_state = s3_state.clone();
     let rds_introspection_state = rds_state.clone();
     let elasticache_introspection_state = elasticache_state.clone();
+    let ecr_introspection_state = ecr_state.clone();
     let dynamodb_ttl_state = dynamodb_state.clone();
     let secretsmanager_rotation_state = secretsmanager_state.clone();
 
@@ -484,6 +494,7 @@ async fn main() {
         kinesis: kinesis_state.clone(),
         rds: rds_state.clone(),
         elasticache: elasticache_state.clone(),
+        ecr: ecr_state.clone(),
         stepfunctions: stepfunctions_state.clone(),
         scheduler: scheduler_state.clone(),
         apigatewayv2: apigatewayv2_state.clone(),
@@ -1679,6 +1690,60 @@ async fn main() {
         elasticache_service = elasticache_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(elasticache_service));
+
+    let ecr_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("ecr").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_ecr::state::EcrSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_ecr::state::ECR_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "ecr persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_ecr::state::ECR_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *ecr_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded ecr persistence snapshot (multi-account)"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse ecr persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no ecr persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read ecr persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut ecr_service = EcrService::new(ecr_state.clone());
+    if let Some(store) = ecr_snapshot_store {
+        ecr_service = ecr_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(ecr_service));
+
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {
         let mut sns_eb_bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());
@@ -2997,6 +3062,25 @@ async fn main() {
                         serverless_caches
                             .sort_by(|a, b| a.serverless_cache_name.cmp(&b.serverless_cache_name));
                         axum::Json(types::ElastiCacheServerlessCachesResponse { serverless_caches })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ecr/repositories",
+            axum::routing::get({
+                let ec = ecr_introspection_state.clone();
+                move || {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        let state = accounts.default_ref();
+                        let repositories: Vec<types::EcrRepository> = state
+                            .repositories
+                            .values()
+                            .map(ecr_repository_response)
+                            .collect();
+                        axum::Json(types::EcrRepositoriesResponse { repositories })
                     }
                 }
             }),
