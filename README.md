@@ -36,7 +36,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 ## Why fakecloud
 
 - **Free, forever.** AGPL-3.0, no paid tier, no account, no token.
-- **100% conformance** per implemented service. Every operation validated against AWS's own Smithy models — 57,000+ generated test variants on every commit.
+- **100% conformance** per implemented service. Every operation validated against AWS's own Smithy models — 59,000+ generated test variants on every commit.
 - **Tested against upstream Terraform acceptance tests.** CI runs `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud. Catches waiter/field-presence/drift bugs that pure SDK tests miss.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations actually execute end-to-end.
 - **Real infrastructure for stateful services.** Lambda runs in Docker containers (13 runtimes). RDS runs real Postgres/MySQL/MariaDB. ElastiCache runs real Redis/Valkey.

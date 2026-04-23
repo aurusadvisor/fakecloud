@@ -207,7 +207,11 @@ fn validate_shape(
                     });
                 }
                 for (key, val) in obj {
-                    if let Some(member) = members.iter().find(|m| m.name == *key) {
+                    let member = members.iter().find(|m| {
+                        let member_key = m.traits.json_name.as_deref().unwrap_or(&m.name);
+                        member_key == key.as_str()
+                    });
+                    if let Some(member) = member {
                         let child_path = format!("{}.{}", path, key);
                         validate_shape(
                             model,
@@ -314,19 +318,35 @@ fn validate_structure(
         }
     };
 
+    // Per-member key: `@jsonName` trait on the member (or its target shape)
+    // wins; otherwise the member's own name. AWS restJson1 services commonly
+    // override with camelCase (e.g. `Items` -> `items`).
+    let member_key = |m: &crate::smithy::Member| -> String {
+        if let Some(name) = &m.traits.json_name {
+            return name.clone();
+        }
+        if let Some(shape) = model.shapes.get(&m.target) {
+            if let Some(name) = &shape.traits.json_name {
+                return name.clone();
+            }
+        }
+        m.name.clone()
+    };
+
     // Check required fields are present
     for member in members {
-        if member.required && !obj.contains_key(&member.name) {
+        let key = member_key(member);
+        if member.required && !obj.contains_key(&key) {
             violations.push(ShapeViolation::MissingField {
                 path: path.to_string(),
-                field: member.name.clone(),
+                field: key,
             });
         }
     }
 
     // Validate present fields
     for (key, val) in obj {
-        if let Some(member) = members.iter().find(|m| m.name == *key) {
+        if let Some(member) = members.iter().find(|m| member_key(m) == *key) {
             let child_path = format!("{}.{}", path, key);
             validate_shape(
                 model,

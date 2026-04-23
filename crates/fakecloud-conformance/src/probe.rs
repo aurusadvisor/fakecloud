@@ -92,6 +92,11 @@ pub fn service_protocol(service_name: &str) -> Protocol {
         },
         "s3" => Protocol::Rest,
         "lambda" => Protocol::Rest,
+        // `service_name` in `service-map.json` for API Gateway v2 is
+        // `apigateway` — matches the `service_name()` reported by
+        // fakecloud's `ApiGatewayV2Service`. restJson1 wire format; no
+        // hardcoded op table, relies on the generic `@http`-driven builder.
+        "apigateway" => Protocol::Rest,
         _ => Protocol::Query,
     }
 }

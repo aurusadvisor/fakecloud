@@ -16,7 +16,7 @@ Listens on `http://localhost:4566`. Any AWS SDK in any language points at it and
 ## What "fake AWS server" means here
 
 - **Real HTTP server**, not an in-process mock. Your Go / Java / Kotlin / Node / Rust / PHP / Python code uses the regular AWS SDK with `endpoint_url` set to `http://localhost:4566`.
-- **Speaks the AWS wire protocol** at 100% conformance per implemented service. 23 services, 1,680 operations, validated against AWS's own Smithy models on every commit (57,000+ generated test variants).
+- **Speaks the AWS wire protocol** at 100% conformance per implemented service. 23 services, 1,680 operations, validated against AWS's own Smithy models on every commit (59,000+ generated test variants).
 - **Real execution** for stateful services: Lambda runs your function code in Docker containers across 13 runtimes, RDS runs real PostgreSQL/MySQL/MariaDB, ElastiCache runs real Redis/Valkey.
 - **Real cross-service wiring**: S3 -> Lambda, SQS -> Lambda, SNS fan-out, EventBridge -> Step Functions, and 15+ more integrations execute end-to-end, not as stubs.
 - **Free, open-source, AGPL-3.0.** No account, no auth token, no paid tier.

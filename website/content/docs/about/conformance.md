@@ -35,7 +35,7 @@ Every response is validated against the operation's Smithy output shape. Missing
 
 ## Current coverage
 
-57,000+ generated test variants, covering every operation in every service currently wired into the harness. 22 services at 100% conformance. The 23rd service fakecloud ships (API Gateway v2) is being brought into the harness incrementally as its 103 operations are implemented; in the meantime it is covered by handwritten SDK tests.
+59,000+ generated test variants across all 23 services, at 100% conformance.
 
 See the harness and methodology at [`crates/fakecloud-conformance/`](https://github.com/faiscadev/fakecloud/tree/main/crates/fakecloud-conformance).
 
