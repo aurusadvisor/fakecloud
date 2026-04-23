@@ -598,6 +598,172 @@ async fn sqs_receive_message_nonexistent_queue_returns_error() {
     );
 }
 
+#[test_action("sqs", "StartMessageMoveTask", checksum = "d9675688")]
+#[tokio::test]
+async fn sqs_start_message_move_task() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+    let dlq_url = client
+        .create_queue()
+        .queue_name("mmt-dlq")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let dlq_arn = client
+        .get_queue_attributes()
+        .queue_url(&dlq_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap()
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    let redrive = format!(
+        "{{\"deadLetterTargetArn\":\"{}\",\"maxReceiveCount\":\"1\"}}",
+        dlq_arn
+    );
+    client
+        .create_queue()
+        .queue_name("mmt-src")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::RedrivePolicy,
+            &redrive,
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .start_message_move_task()
+        .source_arn(&dlq_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.task_handle().is_some());
+}
+
+#[test_action("sqs", "ListMessageMoveTasks", checksum = "49e840b5")]
+#[tokio::test]
+async fn sqs_list_message_move_tasks() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+    let dlq_url = client
+        .create_queue()
+        .queue_name("lmmt-dlq")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let dlq_arn = client
+        .get_queue_attributes()
+        .queue_url(&dlq_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap()
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+    let redrive = format!(
+        "{{\"deadLetterTargetArn\":\"{}\",\"maxReceiveCount\":\"1\"}}",
+        dlq_arn
+    );
+    client
+        .create_queue()
+        .queue_name("lmmt-src")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::RedrivePolicy,
+            &redrive,
+        )
+        .send()
+        .await
+        .unwrap();
+    client
+        .start_message_move_task()
+        .source_arn(&dlq_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_message_move_tasks()
+        .source_arn(&dlq_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.results().len(), 1);
+}
+
+#[test_action("sqs", "CancelMessageMoveTask", checksum = "676a29c4")]
+#[tokio::test]
+async fn sqs_cancel_message_move_task() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+    let dlq_url = client
+        .create_queue()
+        .queue_name("cmmt-dlq")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let dlq_arn = client
+        .get_queue_attributes()
+        .queue_url(&dlq_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap()
+        .attributes()
+        .unwrap()
+        .get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+    let redrive = format!(
+        "{{\"deadLetterTargetArn\":\"{}\",\"maxReceiveCount\":\"1\"}}",
+        dlq_arn
+    );
+    client
+        .create_queue()
+        .queue_name("cmmt-src")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::RedrivePolicy,
+            &redrive,
+        )
+        .send()
+        .await
+        .unwrap();
+    let handle = client
+        .start_message_move_task()
+        .source_arn(&dlq_arn)
+        .send()
+        .await
+        .unwrap()
+        .task_handle()
+        .unwrap()
+        .to_string();
+    // Task is COMPLETED immediately in fakecloud (synchronous), so cancel
+    // returns the UnsupportedOperation error. Verify both response paths.
+    let result = client
+        .cancel_message_move_task()
+        .task_handle(&handle)
+        .send()
+        .await;
+    assert!(result.is_err(), "cancel of completed task should fail");
+}
+
 #[tokio::test]
 async fn sqs_create_duplicate_queue_same_attrs_succeeds() {
     let server = TestServer::start().await;

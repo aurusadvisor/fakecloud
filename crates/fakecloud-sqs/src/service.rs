@@ -13,8 +13,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    MessageAttribute, RedrivePolicy, SharedSqsState, SqsMessage, SqsQueue, SqsSnapshot, SqsState,
-    SQS_SNAPSHOT_SCHEMA_VERSION,
+    MessageAttribute, MessageMoveTask, MessageMoveTaskStatus, RedrivePolicy, SharedSqsState,
+    SqsMessage, SqsQueue, SqsSnapshot, SqsState, SQS_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// Validate DelaySeconds (0–900) and MaximumMessageSize (1024–1 MiB) if
@@ -433,6 +433,8 @@ fn is_mutating_action(action: &str) -> bool {
             | "UntagQueue"
             | "AddPermission"
             | "RemovePermission"
+            | "StartMessageMoveTask"
+            | "CancelMessageMoveTask"
     )
 }
 
@@ -465,6 +467,9 @@ impl AwsService for SqsService {
             "AddPermission" => self.add_permission(&req),
             "RemovePermission" => self.remove_permission(&req),
             "ListDeadLetterSourceQueues" => self.list_dead_letter_source_queues(&req),
+            "StartMessageMoveTask" => self.start_message_move_task(&req),
+            "CancelMessageMoveTask" => self.cancel_message_move_task(&req),
+            "ListMessageMoveTasks" => self.list_message_move_tasks(&req),
             _ => Err(AwsServiceError::action_not_implemented("sqs", &req.action)),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
@@ -495,6 +500,9 @@ impl AwsService for SqsService {
             "AddPermission",
             "RemovePermission",
             "ListDeadLetterSourceQueues",
+            "StartMessageMoveTask",
+            "CancelMessageMoveTask",
+            "ListMessageMoveTasks",
         ]
     }
 
@@ -531,6 +539,9 @@ impl AwsService for SqsService {
             "AddPermission",
             "RemovePermission",
             "ListDeadLetterSourceQueues",
+            "StartMessageMoveTask",
+            "CancelMessageMoveTask",
+            "ListMessageMoveTasks",
         ];
         let action = ACTIONS.iter().copied().find(|a| *a == request.action)?;
         let body = parse_body(request);
@@ -639,6 +650,12 @@ fn sqs_resource_for(action: &str, account: &str, region: &str, body: &Value) -> 
             .and_then(|v| v.as_str())
             .map(queue_arn)
             .unwrap_or_else(|| "*".to_string()),
+        "StartMessageMoveTask" | "ListMessageMoveTasks" => body
+            .get("SourceArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "*".to_string()),
+        "CancelMessageMoveTask" => "*".to_string(),
         _ => body
             .get("QueueUrl")
             .and_then(|v| v.as_str())
@@ -777,6 +794,9 @@ fn sqs_response(action: &str, body: Value, request_id: &str, is_query: bool) -> 
             xml_id_only_success,
         ),
         "ListDeadLetterSourceQueues" => xml_dlq_sources(&body),
+        "StartMessageMoveTask" => xml_start_message_move_task(&body),
+        "CancelMessageMoveTask" => xml_cancel_message_move_task(&body),
+        "ListMessageMoveTasks" => xml_list_message_move_tasks(&body),
         // DeleteQueue, DeleteMessage, PurgeQueue, SetQueueAttributes, ChangeMessageVisibility
         _ => return xml_metadata_only(action, request_id),
     };
@@ -955,6 +975,67 @@ fn xml_dlq_sources(body: &Value) -> String {
         if let Some(u) = url.as_str() {
             inner.push_str(&format!("<QueueUrl>{}</QueueUrl>", xml_escape(u)));
         }
+    }
+    inner
+}
+
+fn xml_start_message_move_task(body: &Value) -> String {
+    let handle = body["TaskHandle"].as_str().unwrap_or("");
+    format!("<TaskHandle>{}</TaskHandle>", xml_escape(handle))
+}
+
+fn xml_cancel_message_move_task(body: &Value) -> String {
+    let n = body["ApproximateNumberOfMessagesMoved"]
+        .as_u64()
+        .unwrap_or(0);
+    format!("<ApproximateNumberOfMessagesMoved>{n}</ApproximateNumberOfMessagesMoved>")
+}
+
+fn xml_list_message_move_tasks(body: &Value) -> String {
+    let Some(results) = body["Results"].as_array() else {
+        return String::new();
+    };
+    let mut inner = String::new();
+    for r in results {
+        inner.push_str("<ListMessageMoveTasksResultEntry>");
+        if let Some(h) = r["TaskHandle"].as_str() {
+            inner.push_str(&format!("<TaskHandle>{}</TaskHandle>", xml_escape(h)));
+        }
+        if let Some(s) = r["Status"].as_str() {
+            inner.push_str(&format!("<Status>{}</Status>", xml_escape(s)));
+        }
+        if let Some(s) = r["SourceArn"].as_str() {
+            inner.push_str(&format!("<SourceArn>{}</SourceArn>", xml_escape(s)));
+        }
+        if let Some(d) = r["DestinationArn"].as_str() {
+            inner.push_str(&format!(
+                "<DestinationArn>{}</DestinationArn>",
+                xml_escape(d)
+            ));
+        }
+        if let Some(m) = r["MaxNumberOfMessagesPerSecond"].as_i64() {
+            inner.push_str(&format!(
+                "<MaxNumberOfMessagesPerSecond>{m}</MaxNumberOfMessagesPerSecond>"
+            ));
+        }
+        let moved = r["ApproximateNumberOfMessagesMoved"].as_u64().unwrap_or(0);
+        inner.push_str(&format!(
+            "<ApproximateNumberOfMessagesMoved>{moved}</ApproximateNumberOfMessagesMoved>"
+        ));
+        if let Some(t) = r["ApproximateNumberOfMessagesToMove"].as_u64() {
+            inner.push_str(&format!(
+                "<ApproximateNumberOfMessagesToMove>{t}</ApproximateNumberOfMessagesToMove>"
+            ));
+        }
+        if let Some(reason) = r["FailureReason"].as_str() {
+            inner.push_str(&format!(
+                "<FailureReason>{}</FailureReason>",
+                xml_escape(reason)
+            ));
+        }
+        let started = r["StartedTimestamp"].as_i64().unwrap_or(0);
+        inner.push_str(&format!("<StartedTimestamp>{started}</StartedTimestamp>"));
+        inner.push_str("</ListMessageMoveTasksResultEntry>");
     }
     inner
 }
@@ -2795,6 +2876,270 @@ impl SqsService {
         Ok(sqs_response(
             "ListDeadLetterSourceQueues",
             json!({ "queueUrls": source_urls }),
+            &req.request_id,
+            req.is_query_protocol,
+        ))
+    }
+
+    fn start_message_move_task(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let source_arn = body["SourceArn"]
+            .as_str()
+            .ok_or_else(|| missing_param("SourceArn"))?
+            .to_string();
+        let destination_arn = body["DestinationArn"].as_str().map(|s| s.to_string());
+        let max_per_sec_i64 = val_as_i64(&body["MaxNumberOfMessagesPerSecond"]);
+        if let Some(rate) = max_per_sec_i64 {
+            if !(1..=500).contains(&rate) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    "MaxNumberOfMessagesPerSecond must be between 1 and 500.",
+                ));
+            }
+        }
+        let max_per_sec = max_per_sec_i64.map(|rate| rate as i32);
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+
+        let source_url = state
+            .queues
+            .values()
+            .find(|q| q.arn == source_arn)
+            .map(|q| q.queue_url.clone())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "The resource that you specified for the SourceArn parameter doesn't exist.",
+                )
+            })?;
+
+        // Source must be a DLQ (i.e. some other queue references it as redrive target).
+        let dlq_sources: Vec<String> = state
+            .queues
+            .values()
+            .filter(|q| {
+                q.redrive_policy
+                    .as_ref()
+                    .map(|rp| rp.dead_letter_target_arn == source_arn)
+                    .unwrap_or(false)
+            })
+            .map(|q| q.queue_url.clone())
+            .collect();
+        if dlq_sources.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AWS.SimpleQueueService.UnsupportedOperation",
+                "Source queue must be configured as a dead-letter queue.",
+            ));
+        }
+
+        // Validate destination if provided: must exist and be in same account.
+        if let Some(ref dest) = destination_arn {
+            if !state.queues.values().any(|q| &q.arn == dest) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "The resource that you specified for the DestinationArn parameter doesn't exist.",
+                ));
+            }
+        }
+
+        // Reject if there's already a RUNNING task for this source.
+        if state
+            .message_move_tasks
+            .iter()
+            .any(|t| t.source_arn == source_arn && t.status == MessageMoveTaskStatus::Running)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AWS.SimpleQueueService.UnsupportedOperation",
+                "There is already an active message movement task for the specified source queue.",
+            ));
+        }
+
+        // Move messages synchronously: drain source queue, redirect to destination
+        // (or to each redrive-source's queue if destination unspecified).
+        let source_messages: Vec<SqsMessage> = state
+            .queues
+            .get_mut(&source_url)
+            .map(|q| {
+                let drained: Vec<_> = q.messages.drain(..).collect();
+                q.inflight.clear();
+                drained
+            })
+            .unwrap_or_default();
+        let total = source_messages.len() as u64;
+
+        let mut moved: u64 = 0;
+        if let Some(ref dest) = destination_arn {
+            let dest_url = state
+                .queues
+                .values()
+                .find(|q| &q.arn == dest)
+                .map(|q| q.queue_url.clone());
+            if let Some(dest_url) = dest_url {
+                if let Some(dq) = state.queues.get_mut(&dest_url) {
+                    for msg in source_messages {
+                        let mut new_msg = msg;
+                        new_msg.visible_at = None;
+                        new_msg.receive_count = 0;
+                        dq.messages.push_back(new_msg);
+                        moved += 1;
+                    }
+                }
+            }
+        } else {
+            // Round-robin back to each source queue.
+            let targets = dlq_sources.clone();
+            for (idx, msg) in source_messages.into_iter().enumerate() {
+                if targets.is_empty() {
+                    break;
+                }
+                let target_url = &targets[idx % targets.len()];
+                if let Some(tq) = state.queues.get_mut(target_url) {
+                    let mut new_msg = msg;
+                    new_msg.visible_at = None;
+                    new_msg.receive_count = 0;
+                    tq.messages.push_back(new_msg);
+                    moved += 1;
+                }
+            }
+        }
+
+        let task_handle = format!("FakeCloudMessageMoveTask-{}", uuid::Uuid::new_v4().simple());
+        state.message_move_tasks.push(MessageMoveTask {
+            task_handle: task_handle.clone(),
+            source_arn,
+            destination_arn,
+            max_messages_per_second: max_per_sec,
+            status: MessageMoveTaskStatus::Completed,
+            messages_moved: moved,
+            messages_to_move: total,
+            started_timestamp: Utc::now().timestamp_millis(),
+            failure_reason: None,
+        });
+        // Cap retained tasks at 10 per source per AWS docs.
+        Ok(sqs_response(
+            "StartMessageMoveTask",
+            json!({ "TaskHandle": task_handle }),
+            &req.request_id,
+            req.is_query_protocol,
+        ))
+    }
+
+    fn cancel_message_move_task(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let task_handle = body["TaskHandle"]
+            .as_str()
+            .ok_or_else(|| missing_param("TaskHandle"))?
+            .to_string();
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let task = state
+            .message_move_tasks
+            .iter_mut()
+            .find(|t| t.task_handle == task_handle)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "The specified task handle doesn't exist.",
+                )
+            })?;
+        let moved = task.messages_moved;
+        match task.status {
+            MessageMoveTaskStatus::Running => {
+                task.status = MessageMoveTaskStatus::Cancelled;
+            }
+            MessageMoveTaskStatus::Completed
+            | MessageMoveTaskStatus::Cancelled
+            | MessageMoveTaskStatus::Cancelling
+            | MessageMoveTaskStatus::Failed => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "AWS.SimpleQueueService.UnsupportedOperation",
+                    "The message movement task isn't in RUNNING status.",
+                ));
+            }
+        }
+
+        Ok(sqs_response(
+            "CancelMessageMoveTask",
+            json!({ "ApproximateNumberOfMessagesMoved": moved }),
+            &req.request_id,
+            req.is_query_protocol,
+        ))
+    }
+
+    fn list_message_move_tasks(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_body(req);
+        let source_arn = body["SourceArn"]
+            .as_str()
+            .ok_or_else(|| missing_param("SourceArn"))?
+            .to_string();
+        let max_results = val_as_i64(&body["MaxResults"])
+            .map(|n| n.clamp(1, 10) as usize)
+            .unwrap_or(1);
+
+        let accounts = self.state.read();
+        let empty = crate::state::SqsState::new(&req.account_id, &req.region, "");
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        // Source queue must exist.
+        if !state.queues.values().any(|q| q.arn == source_arn) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "The resource that you specified for the SourceArn parameter doesn't exist.",
+            ));
+        }
+
+        let mut tasks: Vec<&MessageMoveTask> = state
+            .message_move_tasks
+            .iter()
+            .filter(|t| t.source_arn == source_arn)
+            .collect();
+        tasks.sort_by_key(|t| std::cmp::Reverse(t.started_timestamp));
+        tasks.truncate(max_results);
+
+        let results: Vec<Value> = tasks
+            .into_iter()
+            .map(|t| {
+                let mut entry = serde_json::Map::new();
+                if t.status == MessageMoveTaskStatus::Running {
+                    entry.insert("TaskHandle".to_string(), json!(t.task_handle));
+                }
+                entry.insert("Status".to_string(), json!(t.status.as_str()));
+                entry.insert("SourceArn".to_string(), json!(t.source_arn));
+                if let Some(ref d) = t.destination_arn {
+                    entry.insert("DestinationArn".to_string(), json!(d));
+                }
+                if let Some(m) = t.max_messages_per_second {
+                    entry.insert("MaxNumberOfMessagesPerSecond".to_string(), json!(m));
+                }
+                entry.insert(
+                    "ApproximateNumberOfMessagesMoved".to_string(),
+                    json!(t.messages_moved),
+                );
+                entry.insert(
+                    "ApproximateNumberOfMessagesToMove".to_string(),
+                    json!(t.messages_to_move),
+                );
+                if let Some(ref reason) = t.failure_reason {
+                    entry.insert("FailureReason".to_string(), json!(reason));
+                }
+                entry.insert("StartedTimestamp".to_string(), json!(t.started_timestamp));
+                Value::Object(entry)
+            })
+            .collect();
+
+        Ok(sqs_response(
+            "ListMessageMoveTasks",
+            json!({ "Results": results }),
             &req.request_id,
             req.is_query_protocol,
         ))
@@ -5166,6 +5511,352 @@ mod tests {
         let svc = make_service();
         let req = make_request("UntagQueue", json!({"TagKeys": ["k"]}));
         assert!(svc.untag_queue(&req).is_err());
+    }
+
+    fn make_query_request(action: &str, params: &[(&str, &str)]) -> AwsRequest {
+        let mut qp = HashMap::new();
+        for (k, v) in params {
+            qp.insert(k.to_string(), v.to_string());
+        }
+        AwsRequest {
+            service: "sqs".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-id".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: qp,
+            body: Vec::<u8>::new().into(),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn create_dlq_with_source(svc: &SqsService, dlq_name: &str, src_name: &str) -> String {
+        let dlq_url = create_queue_url(svc, dlq_name);
+        let dlq_arn = body_json(
+            svc.get_queue_attributes(&make_request(
+                "GetQueueAttributes",
+                json!({ "QueueUrl": dlq_url, "AttributeNames": ["QueueArn"] }),
+            ))
+            .unwrap(),
+        )["Attributes"]["QueueArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let src_url = create_queue_url(svc, src_name);
+        let redrive = json!({ "deadLetterTargetArn": dlq_arn, "maxReceiveCount": "1" }).to_string();
+        svc.set_queue_attributes(&make_request(
+            "SetQueueAttributes",
+            json!({
+                "QueueUrl": src_url,
+                "Attributes": { "RedrivePolicy": redrive }
+            }),
+        ))
+        .unwrap();
+        dlq_arn
+    }
+
+    #[test]
+    fn start_message_move_task_query_protocol_parses_string_rate() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "qp-dlq", "qp-src");
+        // Query protocol passes integers as strings; this should parse fine.
+        let req = make_query_request(
+            "StartMessageMoveTask",
+            &[
+                ("SourceArn", dlq_arn.as_str()),
+                ("MaxNumberOfMessagesPerSecond", "100"),
+            ],
+        );
+        let resp = svc.start_message_move_task(&req).unwrap();
+        assert!(resp.status.is_success());
+    }
+
+    #[test]
+    fn start_message_move_task_rejects_out_of_range_rate() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "oor-dlq", "oor-src");
+        let req = make_request(
+            "StartMessageMoveTask",
+            json!({
+                "SourceArn": dlq_arn,
+                "MaxNumberOfMessagesPerSecond": 0
+            }),
+        );
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "InvalidParameterValue");
+
+        let req = make_request(
+            "StartMessageMoveTask",
+            json!({
+                "SourceArn": dlq_arn,
+                "MaxNumberOfMessagesPerSecond": 501
+            }),
+        );
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "InvalidParameterValue");
+    }
+
+    #[test]
+    fn start_message_move_task_rejects_non_dlq_source() {
+        let svc = make_service();
+        let q_url = create_queue_url(&svc, "lonely");
+        let q_arn = body_json(
+            svc.get_queue_attributes(&make_request(
+                "GetQueueAttributes",
+                json!({ "QueueUrl": q_url, "AttributeNames": ["QueueArn"] }),
+            ))
+            .unwrap(),
+        )["Attributes"]["QueueArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let req = make_request("StartMessageMoveTask", json!({ "SourceArn": q_arn }));
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "AWS.SimpleQueueService.UnsupportedOperation");
+    }
+
+    #[test]
+    fn start_message_move_task_rejects_unknown_source() {
+        let svc = make_service();
+        let req = make_request(
+            "StartMessageMoveTask",
+            json!({ "SourceArn": "arn:aws:sqs:us-east-1:123456789012:ghost" }),
+        );
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[test]
+    fn list_message_move_tasks_query_protocol_caps_max_results() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "lmmt-dlq2", "lmmt-src2");
+        // Start a task so there's something to list.
+        svc.start_message_move_task(&make_request(
+            "StartMessageMoveTask",
+            json!({ "SourceArn": dlq_arn }),
+        ))
+        .unwrap();
+        // Query protocol: MaxResults arrives as string. Helper must parse it.
+        let req = make_query_request(
+            "ListMessageMoveTasks",
+            &[("SourceArn", dlq_arn.as_str()), ("MaxResults", "5")],
+        );
+        let resp = svc.list_message_move_tasks(&req).unwrap();
+        assert!(resp.status.is_success());
+    }
+
+    #[test]
+    fn list_message_move_tasks_rejects_unknown_source() {
+        let svc = make_service();
+        let req = make_request(
+            "ListMessageMoveTasks",
+            json!({ "SourceArn": "arn:aws:sqs:us-east-1:123456789012:nope" }),
+        );
+        let err = expect_err(svc.list_message_move_tasks(&req));
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[test]
+    fn cancel_message_move_task_unknown_handle_errors() {
+        let svc = make_service();
+        let req = make_request(
+            "CancelMessageMoveTask",
+            json!({ "TaskHandle": "no-such-task" }),
+        );
+        let err = expect_err(svc.cancel_message_move_task(&req));
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[test]
+    fn cancel_message_move_task_completed_task_errors() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "cmmt-dlq", "cmmt-src");
+        let resp = svc
+            .start_message_move_task(&make_request(
+                "StartMessageMoveTask",
+                json!({ "SourceArn": dlq_arn }),
+            ))
+            .unwrap();
+        let handle = body_json(resp)["TaskHandle"].as_str().unwrap().to_string();
+        let req = make_request("CancelMessageMoveTask", json!({ "TaskHandle": handle }));
+        let err = expect_err(svc.cancel_message_move_task(&req));
+        assert_eq!(err.code(), "AWS.SimpleQueueService.UnsupportedOperation");
+    }
+
+    #[test]
+    fn val_as_i64_handles_number_and_string() {
+        assert_eq!(val_as_i64(&json!(42)), Some(42));
+        assert_eq!(val_as_i64(&json!("42")), Some(42));
+        assert_eq!(val_as_i64(&json!("not-int")), None);
+        assert_eq!(val_as_i64(&json!(null)), None);
+    }
+
+    #[test]
+    fn start_message_move_task_drains_to_explicit_destination() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "drain-dlq", "drain-src");
+        // Pre-stage a couple of messages on the DLQ.
+        let dlq_url = body_json(
+            svc.get_queue_url(&make_request(
+                "GetQueueUrl",
+                json!({ "QueueName": "drain-dlq" }),
+            ))
+            .unwrap(),
+        )["QueueUrl"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for body in ["m1", "m2"] {
+            svc.send_message(&make_request(
+                "SendMessage",
+                json!({ "QueueUrl": &dlq_url, "MessageBody": body }),
+            ))
+            .unwrap();
+        }
+        // Make a custom destination queue and grab its ARN.
+        let dest_url = create_queue_url(&svc, "drain-dest");
+        let dest_arn = body_json(
+            svc.get_queue_attributes(&make_request(
+                "GetQueueAttributes",
+                json!({ "QueueUrl": dest_url, "AttributeNames": ["QueueArn"] }),
+            ))
+            .unwrap(),
+        )["Attributes"]["QueueArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let resp = svc
+            .start_message_move_task(&make_request(
+                "StartMessageMoveTask",
+                json!({ "SourceArn": dlq_arn, "DestinationArn": dest_arn }),
+            ))
+            .unwrap();
+        assert!(body_json(resp)["TaskHandle"].as_str().is_some());
+        // Verify destination queue received both messages.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let recv = runtime
+            .block_on(svc.receive_message(&make_request(
+                "ReceiveMessage",
+                json!({ "QueueUrl": dest_url, "MaxNumberOfMessages": 10 }),
+            )))
+            .unwrap();
+        let body = body_json(recv);
+        assert_eq!(body["Messages"].as_array().map(|a| a.len()).unwrap_or(0), 2);
+    }
+
+    #[test]
+    fn start_message_move_task_unknown_destination_errors() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "ud-dlq", "ud-src");
+        let req = make_request(
+            "StartMessageMoveTask",
+            json!({
+                "SourceArn": dlq_arn,
+                "DestinationArn": "arn:aws:sqs:us-east-1:123456789012:no-such-dest"
+            }),
+        );
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[test]
+    fn start_message_move_task_blocks_concurrent_running() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "conc-dlq", "conc-src");
+        // First call completes synchronously (Completed). To exercise the
+        // "already running" guard, force a Running entry directly.
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("123456789012");
+            state.message_move_tasks.push(MessageMoveTask {
+                task_handle: "FakeCloudMessageMoveTask-stub".to_string(),
+                source_arn: dlq_arn.clone(),
+                destination_arn: None,
+                max_messages_per_second: None,
+                status: MessageMoveTaskStatus::Running,
+                messages_moved: 0,
+                messages_to_move: 0,
+                started_timestamp: 0,
+                failure_reason: None,
+            });
+        }
+        let req = make_request("StartMessageMoveTask", json!({ "SourceArn": dlq_arn }));
+        let err = expect_err(svc.start_message_move_task(&req));
+        assert_eq!(err.code(), "AWS.SimpleQueueService.UnsupportedOperation");
+    }
+
+    #[test]
+    fn cancel_message_move_task_cancels_running() {
+        let svc = make_service();
+        // Insert a Running task; cancellation should succeed and report
+        // ApproximateNumberOfMessagesMoved.
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("123456789012");
+            state.message_move_tasks.push(MessageMoveTask {
+                task_handle: "running-handle".to_string(),
+                source_arn: "arn:aws:sqs:us-east-1:123456789012:src".to_string(),
+                destination_arn: None,
+                max_messages_per_second: None,
+                status: MessageMoveTaskStatus::Running,
+                messages_moved: 7,
+                messages_to_move: 10,
+                started_timestamp: 0,
+                failure_reason: None,
+            });
+        }
+        let resp = svc
+            .cancel_message_move_task(&make_request(
+                "CancelMessageMoveTask",
+                json!({ "TaskHandle": "running-handle" }),
+            ))
+            .unwrap();
+        let body = body_json(resp);
+        assert_eq!(
+            body["ApproximateNumberOfMessagesMoved"].as_u64().unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn list_message_move_tasks_caps_at_max_and_excludes_running_handle() {
+        let svc = make_service();
+        let dlq_arn = create_dlq_with_source(&svc, "cap-dlq", "cap-src");
+        // Insert 12 tasks; ListMessageMoveTasks should cap MaxResults at 10.
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("123456789012");
+            for i in 0..12 {
+                state.message_move_tasks.push(MessageMoveTask {
+                    task_handle: format!("h{i}"),
+                    source_arn: dlq_arn.clone(),
+                    destination_arn: None,
+                    max_messages_per_second: None,
+                    status: MessageMoveTaskStatus::Completed,
+                    messages_moved: 0,
+                    messages_to_move: 0,
+                    started_timestamp: i,
+                    failure_reason: None,
+                });
+            }
+        }
+        let req = make_request(
+            "ListMessageMoveTasks",
+            json!({ "SourceArn": dlq_arn, "MaxResults": 50 }),
+        );
+        let body = body_json(svc.list_message_move_tasks(&req).unwrap());
+        assert_eq!(body["Results"].as_array().unwrap().len(), 10);
+        // Completed tasks must not include TaskHandle (per AWS docs).
+        for r in body["Results"].as_array().unwrap() {
+            assert!(r.get("TaskHandle").is_none());
+        }
     }
 
     #[test]
