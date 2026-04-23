@@ -485,7 +485,16 @@ impl ApiGatewayV2Service {
         })?;
         let mutates = action.starts_with("Create")
             || action.starts_with("Update")
-            || action.starts_with("Delete");
+            || action.starts_with("Delete")
+            || action.starts_with("Put")
+            || action.starts_with("Tag")
+            || action.starts_with("Untag")
+            || action == "ImportApi"
+            || action == "ReimportApi"
+            || action == "DisablePortal"
+            || action == "PreviewPortal"
+            || action == "PublishPortal"
+            || action == "ResetAuthorizersCache";
 
         let result = match action {
             "CreateApi" => self.create_api(&req),

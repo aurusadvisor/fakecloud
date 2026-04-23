@@ -328,14 +328,20 @@ async fn apigw_request(
     path: &str,
     body: &str,
 ) -> reqwest::Response {
-    reqwest::Client::new()
-        .request(method, format!("{}{}", server.endpoint(), path))
+    let resp = reqwest::Client::new()
+        .request(method.clone(), format!("{}{}", server.endpoint(), path))
         .header("content-type", "application/json")
         .header("Authorization", APIGW_AUTH)
         .body(body.to_string())
         .send()
         .await
-        .unwrap()
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "{method} {path} returned {}",
+        resp.status()
+    );
+    resp
 }
 
 #[test_action("apigatewayv2", "CreateApiMapping", checksum = "65a44b8b")]

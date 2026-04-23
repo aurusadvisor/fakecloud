@@ -24,7 +24,7 @@ fn empty_ok() -> Result<AwsResponse, AwsServiceError> {
 }
 
 fn no_content() -> Result<AwsResponse, AwsServiceError> {
-    Ok(AwsResponse::json(StatusCode::NO_CONTENT, "{}".to_string()))
+    Ok(AwsResponse::json(StatusCode::NO_CONTENT, ""))
 }
 
 fn missing(name: &str) -> AwsServiceError {
@@ -557,11 +557,11 @@ impl ApiGatewayV2Service {
         });
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        state
-            .models
-            .entry(api)
-            .or_default()
-            .insert(id.clone(), entry.clone());
+        let bucket = state.models.entry(api).or_default();
+        if !is_create && !bucket.contains_key(&id) {
+            return Err(not_found("Model", &id));
+        }
+        bucket.insert(id.clone(), entry.clone());
         ok(entry)
     }
 
@@ -604,7 +604,11 @@ impl ApiGatewayV2Service {
         } else {
             value["RouteResponseId"] = json!(id);
         }
-        store.entry(api).or_default().insert(key, value.clone());
+        let bucket = store.entry(api).or_default();
+        if !is_create && !bucket.contains_key(&key) {
+            return Err(not_found("Response", &id));
+        }
+        bucket.insert(key, value.clone());
         ok(value)
     }
 
