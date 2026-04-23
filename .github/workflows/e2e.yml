@@ -108,7 +108,6 @@ jobs:
       INSTALL_PODMAN: ${{ matrix.install_podman }}
     steps:
       - name: Free disk space
-        if: startsWith(matrix.name, 'lambda-runtimes-') || matrix.name == 'lambda-container-clis'
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: false
