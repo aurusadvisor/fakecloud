@@ -91,6 +91,168 @@ fn missing(name: &str) -> AwsServiceError {
     )
 }
 
+/// Extract a required string body field. Accepts either Pascal-case
+/// (handler-style) or camel-case (Smithy wire). Errors with a 400
+/// `BadRequestException` naming the field when absent or empty.
+fn req_str<'a>(body: &'a Value, name: &str) -> Result<&'a str, AwsServiceError> {
+    let v = body.get(name).or_else(|| {
+        // Fallback to camel-case first-letter lookup.
+        let mut chars = name.chars();
+        let lowered = match chars.next() {
+            Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
+            None => String::new(),
+        };
+        body.get(&lowered)
+    });
+    match v.and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => Ok(s),
+        _ => Err(missing(name)),
+    }
+}
+
+/// Extract a required array body field. Errors with a 400 when absent
+/// or not an array.
+fn req_array<'a>(body: &'a Value, name: &str) -> Result<&'a Vec<Value>, AwsServiceError> {
+    let v = body.get(name).or_else(|| {
+        let mut chars = name.chars();
+        let lowered = match chars.next() {
+            Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
+            None => String::new(),
+        };
+        body.get(&lowered)
+    });
+    match v.and_then(|v| v.as_array()) {
+        Some(a) => Ok(a),
+        _ => Err(missing(name)),
+    }
+}
+
+/// Extract a required object body field.
+fn req_object<'a>(
+    body: &'a Value,
+    name: &str,
+) -> Result<&'a serde_json::Map<String, Value>, AwsServiceError> {
+    let v = body.get(name).or_else(|| {
+        let mut chars = name.chars();
+        let lowered = match chars.next() {
+            Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
+            None => String::new(),
+        };
+        body.get(&lowered)
+    });
+    match v.and_then(|v| v.as_object()) {
+        Some(o) => Ok(o),
+        _ => Err(missing(name)),
+    }
+}
+
+fn bad_request(field: &str, reason: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "BadRequestException",
+        format!("{field}: {reason}"),
+    )
+}
+
+/// Look up a body field in either Pascal- or camel-case.
+fn body_get<'a>(body: &'a Value, name: &str) -> Option<&'a Value> {
+    body.get(name).or_else(|| {
+        let mut chars = name.chars();
+        let lowered = match chars.next() {
+            Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
+            None => String::new(),
+        };
+        body.get(lowered)
+    })
+}
+
+/// Enforce the Smithy `@length` trait (inclusive min/max) on an optional
+/// string body field.
+fn check_length(
+    body: &Value,
+    name: &str,
+    min: Option<u64>,
+    max: Option<u64>,
+) -> Result<(), AwsServiceError> {
+    if let Some(s) = body_get(body, name).and_then(|v| v.as_str()) {
+        let len = s.chars().count() as u64;
+        if let Some(m) = min {
+            if len < m {
+                return Err(bad_request(name, &format!("length below min {m}")));
+            }
+        }
+        if let Some(m) = max {
+            if len > m {
+                return Err(bad_request(name, &format!("length above max {m}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Enforce the Smithy `@range` trait on an optional integer body field.
+fn check_range(
+    body: &Value,
+    name: &str,
+    min: Option<i64>,
+    max: Option<i64>,
+) -> Result<(), AwsServiceError> {
+    if let Some(n) = body_get(body, name).and_then(|v| v.as_i64()) {
+        if let Some(m) = min {
+            if n < m {
+                return Err(bad_request(name, &format!("value below min {m}")));
+            }
+        }
+        if let Some(m) = max {
+            if n > m {
+                return Err(bad_request(name, &format!("value above max {m}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Enforce a closed set of enum values on an optional string body field.
+fn check_enum(body: &Value, name: &str, allowed: &[&str]) -> Result<(), AwsServiceError> {
+    if let Some(s) = body_get(body, name).and_then(|v| v.as_str()) {
+        if !allowed.contains(&s) {
+            return Err(bad_request(name, "invalid enum value"));
+        }
+    }
+    Ok(())
+}
+
+/// Require a non-empty path-derived resource id. Empty ids come from
+/// probe variants that omit a `{param}` from the URI (rendering e.g.
+/// `/v2/tags/` or `/v2/portals/`); treat them as missing rather than
+/// silently succeeding.
+#[allow(dead_code)]
+fn non_empty<'a>(s: Option<&'a str>, name: &str) -> Result<&'a str, AwsServiceError> {
+    match s {
+        Some(v) if !v.is_empty() => Ok(v),
+        _ => Err(missing(name)),
+    }
+}
+
+/// An id segment is "valid" iff it's non-empty and not a literal
+/// placeholder (`{Name}` or URL-encoded `%7BName%7D`). Probe variants
+/// that omit a required label leave the template token behind; treating
+/// such paths as missing lets required-field validation fire instead of
+/// silently operating on a placeholder string.
+pub(crate) fn valid_path_id(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    if s.starts_with('{') && s.ends_with('}') {
+        return false;
+    }
+    if (s.starts_with("%7B") || s.starts_with("%7b")) && (s.ends_with("%7D") || s.ends_with("%7d"))
+    {
+        return false;
+    }
+    true
+}
+
 fn not_found(entity: &str, id: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::NOT_FOUND,
@@ -121,14 +283,27 @@ impl ApiGatewayV2Service {
         let region = self.region_for(aid);
         let segs = &req.path_segments;
 
+        // Normalize invalid path-derived ids to None so handlers that
+        // `ok_or_else(missing)` on a required id reject the request
+        // instead of silently operating on a placeholder. See
+        // `valid_path_id` for the rules.
+        let api_id = api_id.filter(|s| valid_path_id(s));
+        let resource_id = resource_id.filter(|s| valid_path_id(s));
+
         match action {
             // ── Domain names + API mappings ──
             "CreateDomainName" => {
                 let body = body(req);
-                let name = body["DomainName"]
-                    .as_str()
-                    .ok_or_else(|| missing("DomainName"))?
-                    .to_string();
+                check_enum(
+                    &body,
+                    "RoutingMode",
+                    &[
+                        "API_MAPPING_ONLY",
+                        "ROUTING_RULE_ONLY",
+                        "ROUTING_RULE_THEN_API_MAPPING",
+                    ],
+                )?;
+                let name = req_str(&body, "DomainName")?.to_string();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
                 let mut entry = json!({
@@ -182,19 +357,23 @@ impl ApiGatewayV2Service {
                 let name = resource_id.ok_or_else(|| missing("DomainName"))?;
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
-                state.domain_names.remove(name);
+                if state.domain_names.remove(name).is_none() {
+                    return Err(not_found("DomainName", name));
+                }
                 state.api_mappings.remove(name);
                 no_content()
             }
             "CreateApiMapping" => {
                 let domain = resource_id.ok_or_else(|| missing("DomainName"))?;
                 let body = body(req);
+                let api = req_str(&body, "ApiId")?.to_string();
+                let stage = req_str(&body, "Stage")?.to_string();
                 let mapping_id = rand_id();
                 let entry = json!({
                     "ApiMappingId": mapping_id,
                     "ApiMappingKey": body["ApiMappingKey"].as_str().unwrap_or(""),
-                    "ApiId": body["ApiId"].as_str().unwrap_or(""),
-                    "Stage": body["Stage"].as_str().unwrap_or(""),
+                    "ApiId": api,
+                    "Stage": stage,
                 });
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
@@ -233,6 +412,9 @@ impl ApiGatewayV2Service {
                 let domain = resource_id.ok_or_else(|| missing("DomainName"))?;
                 let mapping = api_id.ok_or_else(|| missing("ApiMappingId"))?.to_string();
                 let body = body(req);
+                // Per Smithy: UpdateApiMappingRequest.@required = ApiId,
+                // ApiMappingId, DomainName.
+                let new_api = req_str(&body, "ApiId")?.to_string();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
                 let map = state
@@ -242,6 +424,7 @@ impl ApiGatewayV2Service {
                 let entry = map
                     .get_mut(&mapping)
                     .ok_or_else(|| not_found("ApiMapping", &mapping))?;
+                entry["ApiId"] = json!(new_api);
                 if let Some(k) = body["ApiMappingKey"].as_str() {
                     entry["ApiMappingKey"] = json!(k);
                 }
@@ -255,8 +438,13 @@ impl ApiGatewayV2Service {
                 let mapping = api_id.ok_or_else(|| missing("ApiMappingId"))?.to_string();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
-                if let Some(map) = state.api_mappings.get_mut(domain) {
-                    map.remove(&mapping);
+                let removed = state
+                    .api_mappings
+                    .get_mut(domain)
+                    .and_then(|m| m.remove(&mapping))
+                    .is_some();
+                if !removed {
+                    return Err(not_found("ApiMapping", &mapping));
                 }
                 no_content()
             }
@@ -293,22 +481,39 @@ impl ApiGatewayV2Service {
                 let model = resource_id.ok_or_else(|| missing("ModelId"))?;
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
-                if let Some(m) = state.models.get_mut(api) {
-                    m.remove(model);
+                let removed = state
+                    .models
+                    .get_mut(api)
+                    .and_then(|m| m.remove(model))
+                    .is_some();
+                if !removed {
+                    return Err(not_found("Model", model));
                 }
                 no_content()
             }
-            "GetModelTemplate" => ok(json!({"Value": "{}"})),
+            "GetModelTemplate" => {
+                api_id.ok_or_else(|| missing("ApiId"))?;
+                resource_id.ok_or_else(|| missing("ModelId"))?;
+                ok(json!({"Value": "{}"}))
+            }
 
             // ── Integration responses ──
-            "CreateIntegrationResponse" => self.put_subresponse(
-                req,
-                api_id,
-                resource_id,
-                /* is_integration */ true,
-                /* create */ true,
-            ),
+            "CreateIntegrationResponse" => {
+                let b = body(req);
+                check_enum(
+                    &b,
+                    "ContentHandlingStrategy",
+                    &["CONVERT_TO_BINARY", "CONVERT_TO_TEXT"],
+                )?;
+                self.put_subresponse(req, api_id, resource_id, true, true)
+            }
             "UpdateIntegrationResponse" => {
+                let b = body(req);
+                check_enum(
+                    &b,
+                    "ContentHandlingStrategy",
+                    &["CONVERT_TO_BINARY", "CONVERT_TO_TEXT"],
+                )?;
                 self.put_subresponse(req, api_id, resource_id, true, false)
             }
             "GetIntegrationResponse" => self.get_subresponse(req, api_id, resource_id, true),
@@ -330,6 +535,14 @@ impl ApiGatewayV2Service {
                     .ok_or_else(|| missing("DomainName"))?
                     .to_string();
                 let body = body(req);
+                let actions = req_array(&body, "Actions")?.clone();
+                let conditions = req_array(&body, "Conditions")?.clone();
+                check_range(&body, "Priority", Some(1), Some(1_000_000))?;
+                let priority = body
+                    .get("Priority")
+                    .or_else(|| body.get("priority"))
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| missing("Priority"))?;
                 let id = rand_id();
                 let entry = json!({
                     "RoutingRuleId": id,
@@ -337,9 +550,9 @@ impl ApiGatewayV2Service {
                         "arn:aws:apigateway:us-east-1::/domainnames/{}/routingrules/{}",
                         domain, id
                     ),
-                    "Priority": body.get("Priority").cloned().unwrap_or(json!(1)),
-                    "Conditions": body.get("Conditions").cloned().unwrap_or(json!([])),
-                    "Actions": body.get("Actions").cloned().unwrap_or(json!([])),
+                    "Priority": priority,
+                    "Conditions": conditions,
+                    "Actions": actions,
                 });
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
@@ -356,15 +569,23 @@ impl ApiGatewayV2Service {
                     .to_string();
                 let id = api_id.ok_or_else(|| missing("RoutingRuleId"))?.to_string();
                 let body = body(req);
+                let actions = req_array(&body, "Actions")?.clone();
+                let conditions = req_array(&body, "Conditions")?.clone();
+                check_range(&body, "Priority", Some(1), Some(1_000_000))?;
+                let priority = body
+                    .get("Priority")
+                    .or_else(|| body.get("priority"))
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| missing("Priority"))?;
                 let entry = json!({
                     "RoutingRuleId": id,
                     "RoutingRuleArn": format!(
                         "arn:aws:apigateway:us-east-1::/domainnames/{}/routingrules/{}",
                         domain, id
                     ),
-                    "Priority": body.get("Priority").cloned().unwrap_or(json!(1)),
-                    "Conditions": body.get("Conditions").cloned().unwrap_or(json!([])),
-                    "Actions": body.get("Actions").cloned().unwrap_or(json!([])),
+                    "Priority": priority,
+                    "Conditions": conditions,
+                    "Actions": actions,
                 });
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
@@ -390,6 +611,19 @@ impl ApiGatewayV2Service {
             }
             "ListRoutingRules" => {
                 let domain = resource_id.ok_or_else(|| missing("DomainName"))?;
+                // MaxResults is @range(min:1,max:100) per Smithy.
+                if let Some(mr_str) = req
+                    .query_params
+                    .iter()
+                    .find(|(k, _)| *k == "maxResults")
+                    .map(|(_, v)| v.as_str())
+                {
+                    if let Ok(n) = mr_str.parse::<i64>() {
+                        if !(1..=100).contains(&n) {
+                            return Err(bad_request("MaxResults", "value out of range [1,100]"));
+                        }
+                    }
+                }
                 self.read_state(aid, &region, |state| {
                     let rules: Vec<Value> = state
                         .routing_rules
@@ -406,8 +640,13 @@ impl ApiGatewayV2Service {
                 let id = api_id.ok_or_else(|| missing("RoutingRuleId"))?.to_string();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
-                if let Some(m) = state.routing_rules.get_mut(&domain) {
-                    m.remove(&id);
+                let removed = state
+                    .routing_rules
+                    .get_mut(&domain)
+                    .and_then(|m| m.remove(&id))
+                    .is_some();
+                if !removed {
+                    return Err(not_found("RoutingRule", &id));
                 }
                 no_content()
             }
@@ -415,11 +654,13 @@ impl ApiGatewayV2Service {
             // ── VPC links ──
             "CreateVpcLink" => {
                 let body = body(req);
+                let name = req_str(&body, "Name")?.to_string();
+                let subnet_ids = req_array(&body, "SubnetIds")?.clone();
                 let id = rand_id();
                 let entry = json!({
                     "VpcLinkId": id,
-                    "Name": body["Name"].as_str().unwrap_or(""),
-                    "SubnetIds": body.get("SubnetIds").cloned().unwrap_or(json!([])),
+                    "Name": name,
+                    "SubnetIds": subnet_ids,
                     "SecurityGroupIds": body.get("SecurityGroupIds").cloned().unwrap_or(json!([])),
                     "VpcLinkStatus": "AVAILABLE",
                 });
@@ -461,7 +702,9 @@ impl ApiGatewayV2Service {
                 let id = resource_id.ok_or_else(|| missing("VpcLinkId"))?;
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
-                state.vpc_links.remove(id);
+                if state.vpc_links.remove(id).is_none() {
+                    return Err(not_found("VpcLink", id));
+                }
                 no_content()
             }
 
@@ -471,20 +714,28 @@ impl ApiGatewayV2Service {
                     .ok_or_else(|| missing("ResourceArn"))?
                     .to_string();
                 let body = body(req);
+                let tags_in = req_object(&body, "Tags")?.clone();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
                 let tags = state.tags.entry(arn).or_default();
-                if let Some(map) = body["Tags"].as_object() {
-                    for (k, v) in map {
-                        if let Some(s) = v.as_str() {
-                            tags.insert(k.clone(), s.to_string());
-                        }
+                for (k, v) in &tags_in {
+                    if let Some(s) = v.as_str() {
+                        tags.insert(k.clone(), s.to_string());
                     }
                 }
                 no_content()
             }
             "UntagResource" => {
                 let arn = resource_id.ok_or_else(|| missing("ResourceArn"))?;
+                // TagKeys is a required @httpQuery param per Smithy — the
+                // SDK renders each entry as `tagKeys={key}`.
+                let has_tag_keys = req
+                    .query_params
+                    .iter()
+                    .any(|(k, _)| k == "tagKeys" || k.starts_with("tagKeys"));
+                if !has_tag_keys {
+                    return Err(missing("TagKeys"));
+                }
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
                 if let Some(tags) = state.tags.get_mut(arn) {
@@ -505,19 +756,51 @@ impl ApiGatewayV2Service {
             }
 
             // ── Portals + portal products + product pages ──
-            "CreatePortal" | "UpdatePortal" => self.put_keyed(
-                req,
-                resource_id,
-                "PortalId",
-                /* store */ "portals",
-                aid,
-            ),
+            "CreatePortal" => {
+                // Per Smithy, CreatePortalRequest.@required = Authorization,
+                // EndpointConfiguration, PortalContent. Validate before
+                // delegating to put_keyed.
+                let b = body(req);
+                req_object(&b, "Authorization")?;
+                req_object(&b, "EndpointConfiguration")?;
+                req_object(&b, "PortalContent")?;
+                check_length(&b, "LogoUri", None, Some(1092))?;
+                check_length(&b, "RumAppMonitorName", None, Some(255))?;
+                self.put_keyed(req, resource_id, "PortalId", "portals", aid)
+            }
+            "UpdatePortal" => {
+                resource_id.ok_or_else(|| missing("PortalId"))?;
+                let b = body(req);
+                check_length(&b, "LogoUri", None, Some(1092))?;
+                check_length(&b, "RumAppMonitorName", None, Some(255))?;
+                self.put_keyed(req, resource_id, "PortalId", "portals", aid)
+            }
             "GetPortal" => self.get_keyed(resource_id, "portals", aid, &region),
             "ListPortals" => self.list_keyed("portals", aid, &region),
             "DeletePortal" => self.delete_keyed(resource_id, "portals", aid),
-            "DisablePortal" | "PreviewPortal" | "PublishPortal" => empty_ok(),
+            "DisablePortal" | "PreviewPortal" => {
+                resource_id.ok_or_else(|| missing("PortalId"))?;
+                empty_ok()
+            }
+            "PublishPortal" => {
+                resource_id.ok_or_else(|| missing("PortalId"))?;
+                let b = body(req);
+                check_length(&b, "Description", None, Some(1024))?;
+                empty_ok()
+            }
 
-            "CreatePortalProduct" | "UpdatePortalProduct" => {
+            "CreatePortalProduct" => {
+                let b = body(req);
+                req_str(&b, "DisplayName")?;
+                check_length(&b, "DisplayName", Some(1), Some(255))?;
+                check_length(&b, "Description", None, Some(1024))?;
+                self.put_keyed(req, resource_id, "PortalProductId", "portal_products", aid)
+            }
+            "UpdatePortalProduct" => {
+                resource_id.ok_or_else(|| missing("PortalProductId"))?;
+                let b = body(req);
+                check_length(&b, "DisplayName", Some(1), Some(255))?;
+                check_length(&b, "Description", None, Some(1024))?;
                 self.put_keyed(req, resource_id, "PortalProductId", "portal_products", aid)
             }
             "GetPortalProduct" => self.get_keyed(resource_id, "portal_products", aid, &region),
@@ -527,6 +810,7 @@ impl ApiGatewayV2Service {
             "PutPortalProductSharingPolicy" => {
                 let id = resource_id.ok_or_else(|| missing("PortalProductId"))?;
                 let body = body(req);
+                req_str(&body, "PolicyDocument")?;
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
                 state
@@ -549,17 +833,37 @@ impl ApiGatewayV2Service {
                 let id = resource_id.ok_or_else(|| missing("PortalProductId"))?;
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
-                state.portal_product_sharing_policies.remove(id);
+                if state.portal_product_sharing_policies.remove(id).is_none() {
+                    return Err(not_found("PortalProductSharingPolicy", id));
+                }
                 no_content()
             }
 
-            "CreateProductPage" | "UpdateProductPage" => self.put_subresource(
-                req,
-                resource_id,
-                segs.get(4).map(|s| s.to_string()),
-                "product_pages",
-                aid,
-            ),
+            "CreateProductPage" => {
+                let b = body(req);
+                req_object(&b, "DisplayContent")?;
+                self.put_subresource(
+                    req,
+                    resource_id,
+                    segs.get(4).map(|s| s.to_string()),
+                    "product_pages",
+                    aid,
+                )
+            }
+            "UpdateProductPage" => {
+                resource_id.ok_or_else(|| missing("PortalProductId"))?;
+                let page_id = segs.get(4).map(|s| s.as_str()).unwrap_or("");
+                if !valid_path_id(page_id) {
+                    return Err(missing("ProductPageId"));
+                }
+                self.put_subresource(
+                    req,
+                    resource_id,
+                    Some(page_id.to_string()),
+                    "product_pages",
+                    aid,
+                )
+            }
             "GetProductPage" => self.get_subresource(
                 resource_id,
                 segs.get(4).map(|s| s.as_str()),
@@ -576,14 +880,34 @@ impl ApiGatewayV2Service {
                 "product_pages",
                 aid,
             ),
-            "CreateProductRestEndpointPage" | "UpdateProductRestEndpointPage" => self
-                .put_subresource(
+            "CreateProductRestEndpointPage" => {
+                let b = body(req);
+                req_object(&b, "RestEndpointIdentifier")?;
+                check_enum(&b, "TryItState", &["ENABLED", "DISABLED"])?;
+                self.put_subresource(
                     req,
                     resource_id,
                     segs.get(4).map(|s| s.to_string()),
                     "product_rest_endpoint_pages",
                     aid,
-                ),
+                )
+            }
+            "UpdateProductRestEndpointPage" => {
+                resource_id.ok_or_else(|| missing("PortalProductId"))?;
+                let page_id = segs.get(4).map(|s| s.as_str()).unwrap_or("");
+                if !valid_path_id(page_id) {
+                    return Err(missing("ProductRestEndpointPageId"));
+                }
+                let b = body(req);
+                check_enum(&b, "TryItState", &["ENABLED", "DISABLED"])?;
+                self.put_subresource(
+                    req,
+                    resource_id,
+                    Some(page_id.to_string()),
+                    "product_rest_endpoint_pages",
+                    aid,
+                )
+            }
             "GetProductRestEndpointPage" => self.get_subresource(
                 resource_id,
                 segs.get(4).map(|s| s.as_str()),
@@ -603,6 +927,8 @@ impl ApiGatewayV2Service {
 
             // ── Import / Export ──
             "ImportApi" => {
+                let body = body(req);
+                req_str(&body, "Body")?;
                 let api_id = format!("imported-{}", rand_id());
                 ok(json!({
                     "ApiId": api_id,
@@ -610,20 +936,77 @@ impl ApiGatewayV2Service {
                     "ProtocolType": "HTTP",
                 }))
             }
-            "ReimportApi" => ok(json!({"ApiId": api_id.unwrap_or_default(), "Name": "reimported"})),
-            "ExportApi" => ok(json!({"body": "openapi: 3.0.1\n"})),
+            "ReimportApi" => {
+                let api = api_id.ok_or_else(|| missing("ApiId"))?;
+                let body = body(req);
+                req_str(&body, "Body")?;
+                ok(json!({"ApiId": api, "Name": "reimported"}))
+            }
+            "ExportApi" => {
+                let _api = api_id.ok_or_else(|| missing("ApiId"))?;
+                // Specification is an httpLabel (segs[4]) — already filtered
+                // to None for empty/placeholder path ids, so resource_id=None
+                // here means the caller omitted it.
+                let _spec = resource_id.ok_or_else(|| missing("Specification"))?;
+                let output_type = req
+                    .query_params
+                    .iter()
+                    .find(|(k, _)| *k == "outputType")
+                    .map(|(_, v)| v.as_str());
+                if output_type.is_none() {
+                    return Err(missing("OutputType"));
+                }
+                ok(json!({"body": "openapi: 3.0.1\n"}))
+            }
 
             // ── Cleanup ops ──
-            "DeleteCorsConfiguration"
-            | "DeleteAccessLogSettings"
-            | "DeleteRouteRequestParameter"
-            | "DeleteRouteSettings"
-            | "DeleteDeployment" => no_content(),
-            "UpdateDeployment" => ok(json!({
-                "DeploymentId": resource_id.unwrap_or_default(),
-                "DeploymentStatus": "DEPLOYED",
-            })),
-            "ResetAuthorizersCache" => no_content(),
+            "DeleteCorsConfiguration" => {
+                api_id.ok_or_else(|| missing("ApiId"))?;
+                no_content()
+            }
+            "DeleteAccessLogSettings" => {
+                api_id.ok_or_else(|| missing("ApiId"))?;
+                resource_id.ok_or_else(|| missing("StageName"))?;
+                no_content()
+            }
+            "DeleteRouteRequestParameter" => {
+                api_id.ok_or_else(|| missing("ApiId"))?;
+                resource_id.ok_or_else(|| missing("RouteId"))?;
+                // RequestParameterKey is segs[6]; enforce non-empty too.
+                let key = segs.get(6).map(|s| s.as_str()).unwrap_or("");
+                if !valid_path_id(key) {
+                    return Err(missing("RequestParameterKey"));
+                }
+                no_content()
+            }
+            "DeleteRouteSettings" => {
+                api_id.ok_or_else(|| missing("ApiId"))?;
+                resource_id.ok_or_else(|| missing("StageName"))?;
+                let key = segs.get(6).map(|s| s.as_str()).unwrap_or("");
+                if !valid_path_id(key) {
+                    return Err(missing("RouteKey"));
+                }
+                no_content()
+            }
+            "DeleteDeployment" => {
+                api_id.ok_or_else(|| missing("ApiId"))?;
+                resource_id.ok_or_else(|| missing("DeploymentId"))?;
+                no_content()
+            }
+            "UpdateDeployment" => {
+                let api = api_id.ok_or_else(|| missing("ApiId"))?;
+                let dep = resource_id.ok_or_else(|| missing("DeploymentId"))?;
+                let _ = api;
+                ok(json!({
+                    "DeploymentId": dep,
+                    "DeploymentStatus": "DEPLOYED",
+                }))
+            }
+            "ResetAuthorizersCache" => {
+                api_id.ok_or_else(|| missing("ApiId"))?;
+                resource_id.ok_or_else(|| missing("StageName"))?;
+                no_content()
+            }
 
             _ => Err(AwsServiceError::action_not_implemented(
                 "apigateway",
@@ -640,6 +1023,11 @@ impl ApiGatewayV2Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let api = api_id.ok_or_else(|| missing("ApiId"))?.to_string();
         let body = body(req);
+        // CreateModelRequest.@required = ApiId, Name, Schema.
+        if is_create {
+            req_str(&body, "Name")?;
+            req_str(&body, "Schema")?;
+        }
         let id = if is_create {
             rand_id()
         } else {
@@ -683,6 +1071,17 @@ impl ApiGatewayV2Service {
                 missing("RouteId")
             }
         })?;
+        let entry = body(req);
+        // On Create, the response-key is required per Smithy (members
+        // IntegrationResponseKey / RouteResponseKey).
+        if is_create {
+            let key_name = if is_integration {
+                "IntegrationResponseKey"
+            } else {
+                "RouteResponseKey"
+            };
+            req_str(&entry, key_name)?;
+        }
         let id = if is_create {
             rand_id()
         } else {
@@ -691,7 +1090,6 @@ impl ApiGatewayV2Service {
                 .map(|s| s.to_string())
                 .ok_or_else(|| missing("ResponseId"))?
         };
-        let entry = body(req);
         let key = format!("{parent}/{id}");
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -811,8 +1209,9 @@ impl ApiGatewayV2Service {
         } else {
             &mut state.route_responses
         };
-        if let Some(map) = store.get_mut(&api) {
-            map.remove(&key);
+        let removed = store.get_mut(&api).and_then(|m| m.remove(&key)).is_some();
+        if !removed {
+            return Err(not_found("Response", &id));
         }
         no_content()
     }
@@ -977,7 +1376,9 @@ impl ApiGatewayV2Service {
             "portal_products" => &mut state.portal_products,
             _ => return Err(missing("Store")),
         };
-        map.remove(id);
+        if map.remove(id).is_none() {
+            return Err(not_found(store, id));
+        }
         no_content()
     }
 
@@ -1196,8 +1597,9 @@ impl ApiGatewayV2Service {
             "product_rest_endpoint_pages" => &mut state.product_rest_endpoint_pages,
             _ => return Err(missing("Store")),
         };
-        if let Some(m) = map.get_mut(parent) {
-            m.remove(id);
+        let removed = map.get_mut(parent).and_then(|m| m.remove(id)).is_some();
+        if !removed {
+            return Err(not_found(store, id));
         }
         no_content()
     }
@@ -1243,13 +1645,26 @@ mod tests {
     }
 
     fn req(action: &str, body: &str, segs: &[&str]) -> AwsRequest {
+        req_with_query(action, body, segs, &[])
+    }
+
+    fn req_with_query(
+        action: &str,
+        body: &str,
+        segs: &[&str],
+        query: &[(&str, &str)],
+    ) -> AwsRequest {
+        let mut qp = HashMap::new();
+        for (k, v) in query {
+            qp.insert((*k).to_string(), (*v).to_string());
+        }
         AwsRequest {
             service: "apigatewayv2".to_string(),
             method: Method::POST,
             raw_path: format!("/{}", segs.join("/")),
             raw_query: String::new(),
             path_segments: segs.iter().map(|s| s.to_string()).collect(),
-            query_params: HashMap::new(),
+            query_params: qp,
             headers: http::HeaderMap::new(),
             body: bytes::Bytes::from(body.to_string()),
             account_id: "000000000000".to_string(),
@@ -1347,7 +1762,7 @@ mod tests {
         run(
             &s,
             "CreateVpcLink",
-            r#"{"Name":"l"}"#,
+            r#"{"Name":"l","SubnetIds":["s-1"]}"#,
             &["v2", "vpclinks"],
             None,
             None,
@@ -1356,7 +1771,7 @@ mod tests {
         run(
             &s,
             "CreateRoutingRule",
-            r#"{}"#,
+            r#"{"Actions":[],"Conditions":[],"Priority":1}"#,
             &["v2", "domainnames", "d", "routingrules"],
             None,
             Some("d"),
@@ -1378,18 +1793,22 @@ mod tests {
             Some("arn"),
         );
         run(&s, "GetTags", "", &["v2", "tags", "arn"], None, Some("arn"));
-        run(
-            &s,
-            "UntagResource",
-            "",
-            &["v2", "tags", "arn"],
-            None,
-            Some("arn"),
-        );
+        {
+            // Seed a tag then untag via query params to match the Smithy
+            // @httpQuery("tagKeys") binding.
+            let r = req_with_query(
+                "UntagResource",
+                "",
+                &["v2", "tags", "arn"],
+                &[("tagKeys", "k")],
+            );
+            s.handle_extra_action("UntagResource", &r, None, Some("arn"))
+                .expect("UntagResource");
+        }
         run(
             &s,
             "CreatePortal",
-            r#"{"Name":"p"}"#,
+            r#"{"Authorization":{},"EndpointConfiguration":{},"PortalContent":{}}"#,
             &["v2", "portals"],
             None,
             Some("p"),
@@ -1430,7 +1849,7 @@ mod tests {
         run(
             &s,
             "CreatePortalProduct",
-            r#"{"Name":"pp"}"#,
+            r#"{"DisplayName":"pp"}"#,
             &["v2", "portalproducts"],
             None,
             Some("pp"),
@@ -1454,7 +1873,7 @@ mod tests {
         run(
             &s,
             "PutPortalProductSharingPolicy",
-            "{}",
+            r#"{"PolicyDocument":"{}"}"#,
             &["v2", "portalproducts", "pp", "sharing-policy"],
             None,
             Some("pp"),
@@ -1481,7 +1900,7 @@ mod tests {
     fn models_and_responses() {
         ok(
             "CreateModel",
-            r#"{"Name":"m"}"#,
+            r#"{"Name":"m","Schema":"{}"}"#,
             &["v2", "apis", "a1", "models"],
             Some("a1"),
             None,
@@ -1560,13 +1979,18 @@ mod tests {
             Some("a1"),
             None,
         );
-        ok(
-            "ExportApi",
-            "",
-            &["v2", "apis", "a1", "exports", "OAS30"],
-            Some("a1"),
-            None,
-        );
+        {
+            // ExportApi requires @httpQuery("outputType") + path Specification.
+            let s = svc();
+            let r = req_with_query(
+                "ExportApi",
+                "",
+                &["v2", "apis", "a1", "exports", "OAS30"],
+                &[("outputType", "JSON")],
+            );
+            s.handle_extra_action("ExportApi", &r, Some("a1"), Some("OAS30"))
+                .expect("ExportApi");
+        }
         ok(
             "DeleteCorsConfiguration",
             "",

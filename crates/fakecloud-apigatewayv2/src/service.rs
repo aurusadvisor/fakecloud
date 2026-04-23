@@ -482,6 +482,11 @@ impl ApiGatewayV2Service {
                 format!("Unknown path: {}", req.raw_path),
             )
         })?;
+        // Normalize invalid path-derived ids to None so handlers that
+        // require an id reject the request instead of silently
+        // operating on a placeholder. See extras::valid_path_id.
+        let api_id = api_id.filter(|s| crate::extras::valid_path_id(s));
+        let resource_id = resource_id.filter(|s| crate::extras::valid_path_id(s));
         let mutates = action.starts_with("Create")
             || action.starts_with("Update")
             || action.starts_with("Delete")
