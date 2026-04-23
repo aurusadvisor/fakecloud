@@ -914,3 +914,145 @@ async fn sns_opt_in_phone_number() {
         .await
         .unwrap();
 }
+
+#[test_action("sns", "CreateSMSSandboxPhoneNumber", checksum = "98725ce0")]
+#[tokio::test]
+async fn sns_create_sms_sandbox_phone_number() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+    client
+        .create_sms_sandbox_phone_number()
+        .phone_number("+15551110001")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("sns", "DeleteSMSSandboxPhoneNumber", checksum = "62422841")]
+#[tokio::test]
+async fn sns_delete_sms_sandbox_phone_number() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+    client
+        .create_sms_sandbox_phone_number()
+        .phone_number("+15551110002")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_sms_sandbox_phone_number()
+        .phone_number("+15551110002")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("sns", "VerifySMSSandboxPhoneNumber", checksum = "177d1bdf")]
+#[tokio::test]
+async fn sns_verify_sms_sandbox_phone_number() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+    client
+        .create_sms_sandbox_phone_number()
+        .phone_number("+15551110003")
+        .send()
+        .await
+        .unwrap();
+    // Without an OTP introspection endpoint, the wrong-OTP path is the
+    // exercised one. We assert the route returns the documented error.
+    let result = client
+        .verify_sms_sandbox_phone_number()
+        .phone_number("+15551110003")
+        .one_time_password("000000")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[test_action("sns", "ListSMSSandboxPhoneNumbers", checksum = "6bf60a85")]
+#[tokio::test]
+async fn sns_list_sms_sandbox_phone_numbers() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+    client
+        .create_sms_sandbox_phone_number()
+        .phone_number("+15551110004")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .list_sms_sandbox_phone_numbers()
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.phone_numbers().is_empty());
+}
+
+#[test_action("sns", "GetSMSSandboxAccountStatus", checksum = "adc15925")]
+#[tokio::test]
+async fn sns_get_sms_sandbox_account_status() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+    let resp = client
+        .get_sms_sandbox_account_status()
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.is_in_sandbox());
+}
+
+#[test_action("sns", "ListOriginationNumbers", checksum = "bca0a71c")]
+#[tokio::test]
+async fn sns_list_origination_numbers() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+    let resp = client.list_origination_numbers().send().await.unwrap();
+    assert!(!resp.phone_numbers().is_empty());
+}
+
+#[test_action("sns", "GetDataProtectionPolicy", checksum = "17cf3f5a")]
+#[tokio::test]
+async fn sns_get_data_protection_policy() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+    let topic_arn = client
+        .create_topic()
+        .name("dpp-topic")
+        .send()
+        .await
+        .unwrap()
+        .topic_arn()
+        .unwrap()
+        .to_string();
+    let _ = client
+        .get_data_protection_policy()
+        .resource_arn(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("sns", "PutDataProtectionPolicy", checksum = "49d4d53b")]
+#[tokio::test]
+async fn sns_put_data_protection_policy() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+    let topic_arn = client
+        .create_topic()
+        .name("put-dpp-topic")
+        .send()
+        .await
+        .unwrap()
+        .topic_arn()
+        .unwrap()
+        .to_string();
+    client
+        .put_data_protection_policy()
+        .resource_arn(&topic_arn)
+        .data_protection_policy(
+            "{\"Name\":\"test\",\"Description\":\"\",\"Version\":\"2021-06-01\",\"Statement\":[]}",
+        )
+        .send()
+        .await
+        .unwrap();
+}
