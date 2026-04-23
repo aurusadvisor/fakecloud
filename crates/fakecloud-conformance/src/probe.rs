@@ -1533,4 +1533,43 @@ mod tests {
         let (_, url, _, _) = build_http_request_from_model(&op, &model, &input).unwrap();
         assert_eq!(url, "/foo/a%20b%23c");
     }
+
+    #[test]
+    fn classify_unknown_path_is_not_implemented() {
+        // API Gateway v2 emits `Unknown path: ...` when resolve_action
+        // can't match a URL. Must classify as NotImplemented, not Pass.
+        let body = r#"{"__type":"NotFoundException","message":"Unknown path: /v2/domainnames"}"#;
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0);
+        assert_eq!(result.status, ProbeStatus::NotImplemented);
+    }
+
+    #[test]
+    fn classify_unknown_operation_is_not_implemented() {
+        // Lambda emits `UnknownOperationException` for URLs its
+        // resolve_action doesn't recognize.
+        let body = r#"{"__type":"UnknownOperationException","message":"Unknown operation: /foo"}"#;
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0);
+        assert_eq!(result.status, ProbeStatus::NotImplemented);
+    }
+
+    #[test]
+    fn classify_action_not_implemented_string() {
+        // `ActionNotImplemented` error maps to the substring "not implemented"
+        // in the response body.
+        let body =
+            r#"{"__type":"InvalidAction","message":"action Foo not implemented for service bar"}"#;
+        let result = classify_response("v1", 501, body, &Expectation::Success, 0);
+        assert_eq!(result.status, ProbeStatus::NotImplemented);
+    }
+
+    #[test]
+    fn classify_legit_resource_not_found_is_pass() {
+        // AWS-shaped `ResourceNotFoundException` for a synthetic id is a
+        // legitimate response from an implemented handler; must not be
+        // confused with NotImplemented.
+        let body =
+            r#"{"__type":"ResourceNotFoundException","message":"Function not found: test-fn"}"#;
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0);
+        assert_eq!(result.status, ProbeStatus::Pass);
+    }
 }
