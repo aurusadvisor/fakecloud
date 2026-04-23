@@ -204,8 +204,9 @@ impl NextestLister for ShellNextestLister {
 
         let output = cmd.output()?;
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(SimpleError(format!(
-                "cargo nextest list failed with status {}",
+                "cargo nextest list failed with status {}\n---stderr---\n{stderr}",
                 output.status
             ))
             .into());

@@ -649,6 +649,33 @@ pub struct BedrockStatusResponse {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcrRepository {
+    pub repository_name: String,
+    pub repository_arn: String,
+    pub registry_id: String,
+    pub repository_uri: String,
+    pub image_tag_mutability: String,
+    pub scan_on_push: bool,
+    pub created_at: String,
+    pub tags: Vec<EcrTag>,
+    pub has_policy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcrTag {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcrRepositoriesResponse {
+    pub repositories: Vec<EcrRepository>,
+}
+
 /// Request to bootstrap an IAM admin user in a specific account.
 /// Used by `/_fakecloud/iam/create-admin` to solve the multi-account
 /// bootstrap problem: there's no per-account root credential, so this

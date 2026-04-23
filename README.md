@@ -48,7 +48,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 
 ## Supported services
 
-23 services, 1,680 operations, 100% conformance per implemented service.
+24 services, 1,691 operations, 100% conformance per implemented service.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -75,6 +75,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | API Gateway v2         |  28 | HTTP APIs, Lambda proxy, JWT/Lambda authorizers, CORS                  |
 | Bedrock                | 101 | Foundation models, guardrails, custom models, invocation/eval jobs    |
 | Bedrock Runtime        |  10 | InvokeModel, Converse, streaming, configurable responses, fault inject |
+| ECR                    |  11 | Repositories, tags, policies; image + OCI push/pull in follow-ups      |
 
 Per-service docs and feature matrices: [fakecloud.dev/docs/services](https://fakecloud.dev/docs/services).
 
@@ -113,6 +114,7 @@ Full guides: [fakecloud.dev/docs/guides](https://fakecloud.dev/docs/guides).
 | ElastiCache         | 75 operations, Redis and Valkey via Docker         | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | API Gateway v2      | 28 operations, full HTTP API support               | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | Bedrock             | 111 operations (control plane + runtime)           | Not available                                                                  |
+| ECR                 | 11 control-plane ops so far, full push/pull next   | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 
 > Performance numbers measured on Apple M1 via `time fakecloud`, `ps -o rss`, `ls -lh`.
 

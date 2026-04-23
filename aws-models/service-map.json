@@ -90,5 +90,9 @@
   "apigatewayv2": {
     "repo_dir": "apigatewayv2",
     "service_name": "apigateway"
+  },
+  "ecr": {
+    "repo_dir": "ecr",
+    "service_name": "ecr"
   }
 }

@@ -22,6 +22,7 @@ pub(crate) struct ResetState {
     pub kinesis: fakecloud_kinesis::state::SharedKinesisState,
     pub rds: fakecloud_rds::state::SharedRdsState,
     pub elasticache: fakecloud_elasticache::state::SharedElastiCacheState,
+    pub ecr: fakecloud_ecr::state::SharedEcrState,
     pub stepfunctions: fakecloud_stepfunctions::state::SharedStepFunctionsState,
     pub scheduler: fakecloud_scheduler::state::SharedSchedulerState,
     pub apigatewayv2: fakecloud_apigatewayv2::state::SharedApiGatewayV2State,
@@ -110,6 +111,9 @@ impl ResetState {
                     let rt = rt.clone();
                     tokio::spawn(async move { rt.stop_all().await });
                 }
+            }
+            "ecr" => {
+                self.ecr.write().reset();
             }
             "states" | "stepfunctions" => {
                 self.stepfunctions.write().reset();
@@ -244,6 +248,12 @@ impl ResetState {
                     state.reset();
                 }
             }
+            "ecr" => {
+                let mut mas = self.ecr.write();
+                if let Some(state) = mas.get_mut(account_id) {
+                    state.reset();
+                }
+            }
             "states" | "stepfunctions" => {
                 let mut mas = self.stepfunctions.write();
                 if let Some(state) = mas.get_mut(account_id) {
@@ -324,6 +334,7 @@ impl ResetState {
             let rt = rt.clone();
             tokio::spawn(async move { rt.stop_all().await });
         }
+        self.ecr.write().reset();
         self.stepfunctions.write().reset();
         self.scheduler.write().reset();
         self.apigatewayv2.write().reset();
@@ -581,6 +592,13 @@ mod tests {
                     "123456789012",
                     "us-east-1",
                     "",
+                ),
+            )),
+            ecr: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "http://localhost:4566",
                 ),
             )),
             stepfunctions: Arc::new(parking_lot::RwLock::new(

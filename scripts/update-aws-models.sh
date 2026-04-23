@@ -43,6 +43,7 @@ SERVICES=(
     "bedrock-runtime:bedrock-runtime"
     "scheduler:scheduler"
     "apigatewayv2:apigatewayv2"
+    "ecr:ecr"
 )
 
 # Sparse checkout only the models we need
