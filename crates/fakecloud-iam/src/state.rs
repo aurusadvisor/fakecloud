@@ -304,6 +304,73 @@ pub struct IamState {
     pub credential_report_generated: bool,
     pub ssh_public_keys: HashMap<String, Vec<SshPublicKey>>, // user_name -> keys
     pub access_key_last_used: HashMap<String, AccessKeyLastUsed>,
+    /// Per-user service-specific credentials (Codecommit/Keyspaces).
+    #[serde(default)]
+    pub service_specific_credentials: HashMap<String, Vec<ServiceSpecificCredential>>, // user -> creds
+    /// Active delegation requests keyed by id.
+    #[serde(default)]
+    pub delegation_requests: HashMap<String, DelegationRequest>,
+    /// Per-resource-arn tag map for SAML/Server cert/MFA device tags.
+    #[serde(default)]
+    pub extra_tags: HashMap<String, Vec<(String, String)>>,
+    /// Organizations integration toggles.
+    #[serde(default)]
+    pub organizations_root_credentials_management: bool,
+    #[serde(default)]
+    pub organizations_root_sessions: bool,
+    /// Outbound web identity federation configuration.
+    #[serde(default)]
+    pub outbound_web_identity_federation: Option<OutboundWebIdentityFederation>,
+    /// Generated ServiceLastAccessed jobs keyed by job id.
+    #[serde(default)]
+    pub service_last_accessed_jobs: HashMap<String, ServiceLastAccessedJob>,
+    /// Organizations access reports keyed by job id.
+    #[serde(default)]
+    pub organizations_access_reports: HashMap<String, OrganizationsAccessReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceSpecificCredential {
+    pub credential_id: String,
+    pub user_name: String,
+    pub service_name: String,
+    pub service_user_name: String,
+    pub service_password: String,
+    pub status: String,
+    pub create_date: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationRequest {
+    pub id: String,
+    pub source_account: String,
+    pub target_account: String,
+    pub status: String,
+    pub create_date: DateTime<Utc>,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboundWebIdentityFederation {
+    pub enabled: bool,
+    pub issuer_url: String,
+    pub audience: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceLastAccessedJob {
+    pub job_id: String,
+    pub status: String,
+    pub job_creation_date: DateTime<Utc>,
+    pub arn: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrganizationsAccessReport {
+    pub job_id: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub entity_path: String,
 }
 
 impl IamState {
@@ -334,6 +401,14 @@ impl IamState {
             credential_report_generated: false,
             ssh_public_keys: HashMap::new(),
             access_key_last_used: HashMap::new(),
+            service_specific_credentials: HashMap::new(),
+            delegation_requests: HashMap::new(),
+            extra_tags: HashMap::new(),
+            organizations_root_credentials_management: false,
+            organizations_root_sessions: false,
+            outbound_web_identity_federation: None,
+            service_last_accessed_jobs: HashMap::new(),
+            organizations_access_reports: HashMap::new(),
         }
     }
 
