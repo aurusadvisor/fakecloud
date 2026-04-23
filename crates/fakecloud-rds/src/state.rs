@@ -185,6 +185,14 @@ pub struct RdsState {
     pub snapshots: HashMap<String, DbSnapshot>,
     pub subnet_groups: HashMap<String, DbSubnetGroup>,
     pub parameter_groups: HashMap<String, DbParameterGroup>,
+    /// Generic stores keyed by category (clusters, cluster_snapshots,
+    /// cluster_param_groups, proxies, proxy_endpoints, security_groups,
+    /// option_groups, event_subscriptions, global_clusters, integrations,
+    /// blue_green, shard_groups, custom_engine_versions, tenant_dbs,
+    /// export_tasks, etc.) so the extras handlers can persist state
+    /// without proliferating per-category fields.
+    #[serde(default)]
+    pub extras: HashMap<String, HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +247,7 @@ impl RdsState {
             snapshots: HashMap::new(),
             subnet_groups: HashMap::new(),
             parameter_groups: default_parameter_groups(account_id, region),
+            extras: HashMap::new(),
         }
     }
 
@@ -248,6 +257,7 @@ impl RdsState {
         self.snapshots.clear();
         self.subnet_groups.clear();
         self.parameter_groups = default_parameter_groups(&self.account_id, &self.region);
+        self.extras.clear();
     }
 
     pub fn db_instance_arn(&self, db_instance_identifier: &str) -> String {
