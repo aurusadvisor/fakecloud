@@ -83,6 +83,39 @@ pub struct SentEmail {
     pub timestamp: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum SmsSandboxPhoneStatus {
+    Pending,
+    Verified,
+}
+
+impl SmsSandboxPhoneStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SmsSandboxPhoneStatus::Pending => "Pending",
+            SmsSandboxPhoneStatus::Verified => "Verified",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SmsSandboxPhoneNumber {
+    pub phone_number: String,
+    pub language_code: String,
+    pub status: SmsSandboxPhoneStatus,
+    pub one_time_password: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OriginationNumber {
+    pub phone_number: String,
+    pub iso_country_code: String,
+    pub status: String,
+    pub number_capabilities: Vec<String>,
+    pub route_type: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnsState {
     pub account_id: String,
@@ -99,6 +132,13 @@ pub struct SnsState {
     pub lambda_invocations: Vec<LambdaInvocation>,
     /// Recorded email deliveries (stub — not actually sent).
     pub sent_emails: Vec<SentEmail>,
+    #[serde(default)]
+    pub sms_sandbox_phone_numbers: BTreeMap<String, SmsSandboxPhoneNumber>,
+    #[serde(default)]
+    pub origination_numbers: Vec<OriginationNumber>,
+    /// Per-resource (topic ARN) data protection policy JSON.
+    #[serde(default)]
+    pub data_protection_policies: BTreeMap<String, String>,
 }
 
 impl SnsState {
@@ -116,6 +156,9 @@ impl SnsState {
             sms_messages: Vec::new(),
             lambda_invocations: Vec::new(),
             sent_emails: Vec::new(),
+            sms_sandbox_phone_numbers: BTreeMap::new(),
+            origination_numbers: Vec::new(),
+            data_protection_policies: BTreeMap::new(),
         }
     }
 
@@ -129,6 +172,33 @@ impl SnsState {
         self.sms_messages.clear();
         self.lambda_invocations.clear();
         self.sent_emails.clear();
+        self.sms_sandbox_phone_numbers.clear();
+        self.origination_numbers.clear();
+        self.data_protection_policies.clear();
+    }
+
+    /// Whether the SNS account is in the SMS sandbox: no destination
+    /// number has been verified yet.
+    pub fn is_sms_sandboxed(&self) -> bool {
+        !self
+            .sms_sandbox_phone_numbers
+            .values()
+            .any(|n| n.status == SmsSandboxPhoneStatus::Verified)
+    }
+
+    /// Lazy-seed a default origination number so listing returns something
+    /// realistic without forcing tests to set one up.
+    pub fn seed_default_origination_numbers(&mut self) {
+        if self.origination_numbers.is_empty() {
+            self.origination_numbers.push(OriginationNumber {
+                phone_number: "+18005550100".to_string(),
+                iso_country_code: "US".to_string(),
+                status: "ACTIVE".to_string(),
+                number_capabilities: vec!["SMS".to_string()],
+                route_type: "Transactional".to_string(),
+                created_at: Utc::now(),
+            });
+        }
     }
 
     /// Seed default opt-out phone numbers.
