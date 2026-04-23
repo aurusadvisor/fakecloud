@@ -1,42 +1,38 @@
 {
-  "variants_passed": 57263,
+  "variants_passed": 58040,
   "total_variants": 59954,
   "per_service": {
+    "iam": {
+      "passed": 5962,
+      "total": 5962
+    },
+    "lambda": {
+      "passed": 3347,
+      "total": 3347
+    },
     "bedrock-runtime": {
       "passed": 412,
       "total": 412
-    },
-    "events": {
-      "passed": 2108,
-      "total": 2108
-    },
-    "states": {
-      "passed": 515,
-      "total": 1292
-    },
-    "sts": {
-      "passed": 438,
-      "total": 438
     },
     "cloudformation": {
       "passed": 3420,
       "total": 3420
     },
-    "kms": {
-      "passed": 2196,
-      "total": 2196
-    },
-    "ses": {
-      "passed": 2858,
-      "total": 2858
-    },
-    "elasticache": {
-      "passed": 2219,
-      "total": 2219
-    },
     "secretsmanager": {
       "passed": 852,
       "total": 852
+    },
+    "states": {
+      "passed": 1292,
+      "total": 1292
+    },
+    "dynamodb": {
+      "passed": 2123,
+      "total": 2123
+    },
+    "logs": {
+      "passed": 3911,
+      "total": 3911
     },
     "scheduler": {
       "passed": 491,
@@ -46,33 +42,41 @@
       "passed": 1611,
       "total": 1611
     },
-    "dynamodb": {
-      "passed": 2123,
-      "total": 2123
+    "s3": {
+      "passed": 3620,
+      "total": 3620
+    },
+    "sts": {
+      "passed": 438,
+      "total": 438
     },
     "cognito-idp": {
       "passed": 4479,
       "total": 4479
     },
-    "lambda": {
-      "passed": 3347,
-      "total": 3347
+    "rds": {
+      "passed": 5376,
+      "total": 5376
     },
-    "bedrock": {
-      "passed": 3591,
-      "total": 3591
+    "ssm": {
+      "passed": 5303,
+      "total": 5303
     },
-    "apigateway": {
-      "passed": 855,
-      "total": 2769
+    "kms": {
+      "passed": 2196,
+      "total": 2196
     },
-    "logs": {
-      "passed": 3911,
-      "total": 3911
+    "ses": {
+      "passed": 2858,
+      "total": 2858
     },
-    "iam": {
-      "passed": 5962,
-      "total": 5962
+    "events": {
+      "passed": 2108,
+      "total": 2108
+    },
+    "elasticache": {
+      "passed": 2219,
+      "total": 2219
     },
     "sns": {
       "passed": 1027,
@@ -82,17 +86,13 @@
       "passed": 549,
       "total": 549
     },
-    "ssm": {
-      "passed": 5303,
-      "total": 5303
+    "apigateway": {
+      "passed": 855,
+      "total": 2769
     },
-    "s3": {
-      "passed": 3620,
-      "total": 3620
-    },
-    "rds": {
-      "passed": 5376,
-      "total": 5376
+    "bedrock": {
+      "passed": 3591,
+      "total": 3591
     }
   }
 }

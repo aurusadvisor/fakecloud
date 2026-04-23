@@ -36,6 +36,71 @@ pub struct StepFunctionsState {
     /// Executions keyed by execution ARN.
     #[serde(default)]
     pub executions: HashMap<String, Execution>,
+    #[serde(default)]
+    pub activities: HashMap<String, Activity>,
+    #[serde(default)]
+    pub state_machine_versions: HashMap<String, StateMachineVersion>,
+    #[serde(default)]
+    pub state_machine_aliases: HashMap<String, StateMachineAlias>,
+    #[serde(default)]
+    pub map_runs: HashMap<String, MapRun>,
+    /// Pending task tokens issued for sync activities + their outcome.
+    #[serde(default)]
+    pub task_tokens: HashMap<String, TaskTokenState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Activity {
+    pub name: String,
+    pub arn: String,
+    pub creation_date: DateTime<Utc>,
+    pub tags: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateMachineVersion {
+    pub state_machine_arn: String,
+    pub version: i64,
+    pub revision_id: String,
+    pub description: String,
+    pub creation_date: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateMachineAlias {
+    pub name: String,
+    pub arn: String,
+    pub description: String,
+    pub routing_configuration: Vec<AliasRoute>,
+    pub creation_date: DateTime<Utc>,
+    pub update_date: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AliasRoute {
+    pub state_machine_version_arn: String,
+    pub weight: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapRun {
+    pub map_run_arn: String,
+    pub execution_arn: String,
+    pub max_concurrency: i32,
+    pub tolerated_failure_percentage: f64,
+    pub tolerated_failure_count: i64,
+    pub status: String,
+    pub start_date: DateTime<Utc>,
+    pub stop_date: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskTokenState {
+    pub activity_arn: String,
+    pub status: String, // PENDING / SUCCEEDED / FAILED / HEARTBEAT
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub cause: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,12 +213,22 @@ impl StepFunctionsState {
             region: region.to_string(),
             state_machines: HashMap::new(),
             executions: HashMap::new(),
+            activities: HashMap::new(),
+            state_machine_versions: HashMap::new(),
+            state_machine_aliases: HashMap::new(),
+            map_runs: HashMap::new(),
+            task_tokens: HashMap::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.state_machines.clear();
         self.executions.clear();
+        self.activities.clear();
+        self.state_machine_versions.clear();
+        self.state_machine_aliases.clear();
+        self.map_runs.clear();
+        self.task_tokens.clear();
     }
 
     pub fn state_machine_arn(&self, name: &str) -> String {
