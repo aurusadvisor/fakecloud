@@ -97,7 +97,6 @@ fn is_mutating_action(action: &str) -> bool {
             | "GetFederationToken"
             | "AssumeRoot"
             | "GetDelegatedAccessToken"
-            | "GetWebIdentityToken"
     )
 }
 
@@ -1135,11 +1134,21 @@ impl StsService {
             ));
         }
 
-        let duration = req
-            .query_params
-            .get("DurationSeconds")
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(300);
+        let duration = if let Some(ds) = req.query_params.get("DurationSeconds") {
+            ds.parse::<i64>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!(
+                        "Value '{}' at 'durationSeconds' failed to satisfy constraint: \
+                         Member must be a valid integer",
+                        ds
+                    ),
+                )
+            })?
+        } else {
+            300
+        };
         if !(60..=3600).contains(&duration) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
