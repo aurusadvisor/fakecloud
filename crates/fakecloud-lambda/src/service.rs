@@ -115,7 +115,7 @@ impl CreateFunctionInput {
 }
 
 pub struct LambdaService {
-    state: SharedLambdaState,
+    pub(crate) state: SharedLambdaState,
     runtime: Option<Arc<ContainerRuntime>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
@@ -178,46 +178,428 @@ impl LambdaService {
     ///   DELETE /2015-03-31/event-source-mappings/{uuid}      -> DeleteEventSourceMapping
     fn resolve_action(req: &AwsRequest) -> Option<(&'static str, Option<String>)> {
         let segs = &req.path_segments;
-        if segs.is_empty() || segs[0] != "2015-03-31" {
+        if segs.is_empty() {
+            return None;
+        }
+        // The Lambda data API uses many date prefixes (one per
+        // operation family). Recognise any well-formed YYYY-MM-DD
+        // prefix and route based on the path structure that follows.
+        let prefix = segs[0].as_str();
+
+        // Account settings + InvokeAsync — any prefix.
+        if segs.get(1).map(|s| s.as_str()) == Some("account-settings") && req.method == Method::GET
+        {
+            return Some(("GetAccountSettings", None));
+        }
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("invoke-async")
+            && req.method == Method::POST
+        {
+            return Some(("InvokeAsync", segs.get(2).map(|s| s.to_string())));
+        }
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("response-streaming-invocations")
+            && req.method == Method::POST
+        {
+            return Some((
+                "InvokeWithResponseStream",
+                segs.get(2).map(|s| s.to_string()),
+            ));
+        }
+
+        // Concurrency (reserved + provisioned) — any prefix.
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("concurrency")
+        {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match req.method {
+                Method::PUT => Some(("PutFunctionConcurrency", res)),
+                Method::GET => Some(("GetFunctionConcurrency", res)),
+                Method::DELETE => Some(("DeleteFunctionConcurrency", res)),
+                _ => None,
+            };
+        }
+
+        // Provisioned concurrency at any prefix.
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("provisioned-concurrency")
+        {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match req.method {
+                Method::PUT => Some(("PutProvisionedConcurrencyConfig", res)),
+                Method::GET => Some(("GetProvisionedConcurrencyConfig", res)),
+                Method::DELETE => Some(("DeleteProvisionedConcurrencyConfig", res)),
+                _ => None,
+            };
+        }
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("provisioned-concurrency-configs")
+            && req.method == Method::GET
+        {
+            return Some((
+                "ListProvisionedConcurrencyConfigs",
+                segs.get(2).map(|s| s.to_string()),
+            ));
+        }
+
+        // Event invoke config — any prefix.
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("event-invoke-config")
+        {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match req.method {
+                Method::POST => Some(("PutFunctionEventInvokeConfig", res)),
+                Method::PUT => Some(("UpdateFunctionEventInvokeConfig", res)),
+                Method::GET => Some(("GetFunctionEventInvokeConfig", res)),
+                Method::DELETE => Some(("DeleteFunctionEventInvokeConfig", res)),
+                _ => None,
+            };
+        }
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && (segs.get(3).map(|s| s.as_str()) == Some("event-invoke-config-list")
+                || (segs.get(3).map(|s| s.as_str()) == Some("event-invoke-config")
+                    && segs.get(4).map(|s| s.as_str()) == Some("list")))
+            && req.method == Method::GET
+        {
+            return Some((
+                "ListFunctionEventInvokeConfigs",
+                segs.get(2).map(|s| s.to_string()),
+            ));
+        }
+
+        // Recursion config — any prefix.
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("recursion-config")
+        {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match req.method {
+                Method::PUT => Some(("PutFunctionRecursionConfig", res)),
+                Method::GET => Some(("GetFunctionRecursionConfig", res)),
+                _ => None,
+            };
+        }
+
+        // Runtime management config — any prefix.
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("runtime-management-config")
+        {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match req.method {
+                Method::PUT => Some(("PutRuntimeManagementConfig", res)),
+                Method::GET => Some(("GetRuntimeManagementConfig", res)),
+                _ => None,
+            };
+        }
+
+        // Code signing config (function and global) — any prefix.
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("code-signing-config")
+        {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match req.method {
+                Method::PUT => Some(("PutFunctionCodeSigningConfig", res)),
+                Method::GET => Some(("GetFunctionCodeSigningConfig", res)),
+                Method::DELETE => Some(("DeleteFunctionCodeSigningConfig", res)),
+                _ => None,
+            };
+        }
+        if segs.get(1).map(|s| s.as_str()) == Some("code-signing-configs") {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match (
+                req.method.clone(),
+                segs.len(),
+                segs.get(3).map(|s| s.as_str()),
+            ) {
+                (Method::POST, 2, _) => Some(("CreateCodeSigningConfig", None)),
+                (Method::GET, 2, _) => Some(("ListCodeSigningConfigs", None)),
+                (Method::GET, 3, _) => Some(("GetCodeSigningConfig", res)),
+                (Method::PUT, 3, _) => Some(("UpdateCodeSigningConfig", res)),
+                (Method::DELETE, 3, _) => Some(("DeleteCodeSigningConfig", res)),
+                (Method::GET, 4, Some("functions")) => {
+                    Some(("ListFunctionsByCodeSigningConfig", res))
+                }
+                _ => None,
+            };
+        }
+
+        // Tags resource ARN at any prefix.
+        if segs.get(1).map(|s| s.as_str()) == Some("tags") && segs.len() >= 3 {
+            let res = segs[2..].join("/");
+            return match req.method {
+                Method::POST => Some(("TagResource", Some(res))),
+                Method::DELETE => Some(("UntagResource", Some(res))),
+                Method::GET => Some(("ListTags", Some(res))),
+                _ => None,
+            };
+        }
+
+        // Function URL config + scaling config (any prefix).
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("url")
+        {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match req.method {
+                Method::POST => Some(("CreateFunctionUrlConfig", res)),
+                Method::GET => Some(("GetFunctionUrlConfig", res)),
+                Method::PUT => Some(("UpdateFunctionUrlConfig", res)),
+                Method::DELETE => Some(("DeleteFunctionUrlConfig", res)),
+                _ => None,
+            };
+        }
+        if segs.get(1).map(|s| s.as_str()) == Some("function-urls") && req.method == Method::GET {
+            return Some(("ListFunctionUrlConfigs", None));
+        }
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("urls")
+            && req.method == Method::GET
+        {
+            return Some(("ListFunctionUrlConfigs", segs.get(2).map(|s| s.to_string())));
+        }
+        if segs.get(1).map(|s| s.as_str()) == Some("event-source-mappings")
+            && segs.get(3).map(|s| s.as_str()) == Some("scaling-config")
+        {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match req.method {
+                Method::PUT => Some(("PutFunctionScalingConfig", res)),
+                Method::GET => Some(("GetFunctionScalingConfig", res)),
+                _ => None,
+            };
+        }
+
+        // Capacity providers (any prefix).
+        if segs.get(1).map(|s| s.as_str()) == Some("capacity-providers") {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match (
+                req.method.clone(),
+                segs.len(),
+                segs.get(3).map(|s| s.as_str()),
+            ) {
+                (Method::POST, 2, _) => Some(("CreateCapacityProvider", None)),
+                (Method::GET, 2, _) => Some(("ListCapacityProviders", None)),
+                (Method::GET, 3, _) => Some(("GetCapacityProvider", res)),
+                (Method::PUT, 3, _) => Some(("UpdateCapacityProvider", res)),
+                (Method::DELETE, 3, _) => Some(("DeleteCapacityProvider", res)),
+                (Method::GET, 4, Some("function-versions")) => {
+                    Some(("ListFunctionVersionsByCapacityProvider", res))
+                }
+                _ => None,
+            };
+        }
+
+        // ListDurableExecutionsByFunction lives under functions/{name}.
+        if segs.get(1).map(|s| s.as_str()) == Some("functions")
+            && segs.get(3).map(|s| s.as_str()) == Some("durable-executions")
+            && req.method == Method::GET
+        {
+            return Some((
+                "ListDurableExecutionsByFunction",
+                segs.get(2).map(|s| s.to_string()),
+            ));
+        }
+
+        // Durable execution callbacks at /durable-execution-callbacks/{id}/{kind}
+        if segs.get(1).map(|s| s.as_str()) == Some("durable-execution-callbacks")
+            && req.method == Method::POST
+        {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match segs.get(3).map(|s| s.as_str()) {
+                Some("success") | Some("succeed") => {
+                    Some(("SendDurableExecutionCallbackSuccess", res))
+                }
+                Some("failure") | Some("fail") => {
+                    Some(("SendDurableExecutionCallbackFailure", res))
+                }
+                Some("heartbeat") => Some(("SendDurableExecutionCallbackHeartbeat", res)),
+                _ => None,
+            };
+        }
+
+        // Durable executions (any prefix).
+        if segs.get(1).map(|s| s.as_str()) == Some("durable-executions") {
+            let res = segs.get(2).map(|s| s.to_string());
+            return match (
+                req.method.clone(),
+                segs.len(),
+                segs.get(3).map(|s| s.as_str()),
+                segs.get(4).map(|s| s.as_str()),
+            ) {
+                (Method::GET, 3, _, _) => Some(("GetDurableExecution", res)),
+                (Method::GET, 4, Some("history"), _) => Some(("GetDurableExecutionHistory", res)),
+                (Method::GET, 4, Some("state"), _) => Some(("GetDurableExecutionState", res)),
+                (Method::POST, 4, Some("checkpoint"), _) => {
+                    Some(("CheckpointDurableExecution", res))
+                }
+                (Method::POST, 4, Some("stop"), _) => Some(("StopDurableExecution", res)),
+                (Method::POST, 5, Some("callback"), Some("success")) => {
+                    Some(("SendDurableExecutionCallbackSuccess", res))
+                }
+                (Method::POST, 5, Some("callback"), Some("failure")) => {
+                    Some(("SendDurableExecutionCallbackFailure", res))
+                }
+                (Method::POST, 5, Some("callback"), Some("heartbeat")) => {
+                    Some(("SendDurableExecutionCallbackHeartbeat", res))
+                }
+                _ => None,
+            };
+        }
+
+        // NOTE: concurrency, event-invoke-config, recursion-config,
+        // capacity-providers, durable-executions, and code-signing-configs
+        // routes are all handled by the prefix-agnostic blocks above.
+        // The previously-present date-specific blocks were dead code.
+
+        // /2018-10-31/layers
+        if prefix == "2018-10-31" && segs.get(1).map(|s| s.as_str()) == Some("layers") {
+            let layer = segs.get(2).map(|s| s.to_string());
+            let third = segs.get(3).map(|s| s.as_str());
+            let version = segs.get(4).map(|s| s.to_string());
+            return match (&req.method, segs.len(), third, version.is_some()) {
+                (&Method::GET, 2, _, _) => Some(("ListLayers", None)),
+                (&Method::POST, 4, Some("versions"), false) => Some(("PublishLayerVersion", layer)),
+                (&Method::GET, 4, Some("versions"), false) => Some(("ListLayerVersions", layer)),
+                (&Method::GET, 5, Some("versions"), true) => Some(("GetLayerVersion", version)),
+                (&Method::DELETE, 5, Some("versions"), true) => {
+                    Some(("DeleteLayerVersion", version))
+                }
+                (&Method::GET, 6, Some("versions"), true)
+                    if segs.get(5).map(|s| s.as_str()) == Some("policy") =>
+                {
+                    Some(("GetLayerVersionPolicy", version))
+                }
+                (&Method::POST, 6, Some("versions"), true)
+                    if segs.get(5).map(|s| s.as_str()) == Some("policy") =>
+                {
+                    Some(("AddLayerVersionPermission", version))
+                }
+                (&Method::DELETE, 7, Some("versions"), true)
+                    if segs.get(5).map(|s| s.as_str()) == Some("policy") =>
+                {
+                    Some(("RemoveLayerVersionPermission", version))
+                }
+                _ => None,
+            };
+        }
+
+        // /2018-10-31/layers-by-arn
+        if prefix == "2018-10-31"
+            && segs.get(1).map(|s| s.as_str()) == Some("layers-by-arn")
+            && req.method == Method::GET
+        {
+            return Some(("GetLayerVersionByArn", None));
+        }
+
+        // NOTE: 2021-10-31/functions/{name}/url and ListFunctionUrlConfigs
+        // are handled by the prefix-agnostic blocks above.
+
+        if prefix != "2015-03-31" {
             return None;
         }
 
-        // Second segment is the collection (`functions` /
-        // `event-source-mappings`); third is the resource name when
-        // present. Bind the resource name once so the match arms don't
-        // each repeat `segs[2].clone()`.
         let collection = segs.get(1).map(|s| s.as_str());
         let resource = segs.get(2).map(|s| s.to_string());
+        let third = segs.get(3).map(|s| s.as_str());
+        let fourth = segs.get(4).map(|s| s.as_str());
 
-        let action = match (
-            &req.method,
-            segs.len(),
-            collection,
-            segs.get(3).map(|s| s.as_str()),
-        ) {
-            // /2015-03-31/functions
+        let action = match (&req.method, segs.len(), collection, third) {
             (&Method::POST, 2, Some("functions"), _) => "CreateFunction",
             (&Method::GET, 2, Some("functions"), _) => "ListFunctions",
-            // /2015-03-31/functions/{name}
             (&Method::GET, 3, Some("functions"), _) => "GetFunction",
             (&Method::DELETE, 3, Some("functions"), _) => "DeleteFunction",
-            // /2015-03-31/functions/{name}/invocations
             (&Method::POST, 4, Some("functions"), Some("invocations")) => "Invoke",
-            // /2015-03-31/functions/{name}/versions
+            (&Method::POST, 4, Some("functions"), Some("invoke-async")) => "InvokeAsync",
+            (&Method::POST, 4, Some("functions"), Some("response-streaming-invocations")) => {
+                "InvokeWithResponseStream"
+            }
             (&Method::POST, 4, Some("functions"), Some("versions")) => "PublishVersion",
-            // /2015-03-31/functions/{name}/policy
+            (&Method::GET, 4, Some("functions"), Some("versions")) => "ListVersionsByFunction",
             (&Method::POST, 4, Some("functions"), Some("policy")) => "AddPermission",
             (&Method::GET, 4, Some("functions"), Some("policy")) => "GetPolicy",
-            // /2015-03-31/functions/{name}/policy/{statement-id}
             (&Method::DELETE, 5, Some("functions"), Some("policy")) => "RemovePermission",
-            // /2015-03-31/event-source-mappings
+            (&Method::POST, 4, Some("functions"), Some("aliases")) => "CreateAlias",
+            (&Method::GET, 4, Some("functions"), Some("aliases")) => "ListAliases",
+            (&Method::GET, 5, Some("functions"), Some("aliases")) => "GetAlias",
+            (&Method::PUT, 5, Some("functions"), Some("aliases")) => "UpdateAlias",
+            (&Method::DELETE, 5, Some("functions"), Some("aliases")) => "DeleteAlias",
+            (&Method::GET, 4, Some("functions"), Some("configuration")) => {
+                "GetFunctionConfiguration"
+            }
+            (&Method::PUT, 4, Some("functions"), Some("configuration")) => {
+                "UpdateFunctionConfiguration"
+            }
+            (&Method::PUT, 4, Some("functions"), Some("code")) => "UpdateFunctionCode",
+            (&Method::PUT, 4, Some("functions"), Some("concurrency")) => "PutFunctionConcurrency",
+            (&Method::GET, 4, Some("functions"), Some("concurrency")) => "GetFunctionConcurrency",
+            (&Method::DELETE, 4, Some("functions"), Some("concurrency")) => {
+                "DeleteFunctionConcurrency"
+            }
+            (&Method::PUT, 4, Some("functions"), Some("provisioned-concurrency")) => {
+                "PutProvisionedConcurrencyConfig"
+            }
+            (&Method::GET, 4, Some("functions"), Some("provisioned-concurrency")) => {
+                "GetProvisionedConcurrencyConfig"
+            }
+            (&Method::DELETE, 4, Some("functions"), Some("provisioned-concurrency")) => {
+                "DeleteProvisionedConcurrencyConfig"
+            }
+            (&Method::GET, 4, Some("functions"), Some("provisioned-concurrency-configs")) => {
+                "ListProvisionedConcurrencyConfigs"
+            }
+            (&Method::PUT, 4, Some("functions"), Some("event-invoke-config")) => {
+                "UpdateFunctionEventInvokeConfig"
+            }
+            (&Method::POST, 4, Some("functions"), Some("event-invoke-config")) => {
+                "PutFunctionEventInvokeConfig"
+            }
+            (&Method::GET, 4, Some("functions"), Some("event-invoke-config")) => {
+                "GetFunctionEventInvokeConfig"
+            }
+            (&Method::DELETE, 4, Some("functions"), Some("event-invoke-config")) => {
+                "DeleteFunctionEventInvokeConfig"
+            }
+            (&Method::GET, 4, Some("functions"), Some("event-invoke-config-list")) => {
+                "ListFunctionEventInvokeConfigs"
+            }
+            (&Method::PUT, 4, Some("functions"), Some("code-signing-config")) => {
+                "PutFunctionCodeSigningConfig"
+            }
+            (&Method::GET, 4, Some("functions"), Some("code-signing-config")) => {
+                "GetFunctionCodeSigningConfig"
+            }
+            (&Method::DELETE, 4, Some("functions"), Some("code-signing-config")) => {
+                "DeleteFunctionCodeSigningConfig"
+            }
+            (&Method::PUT, 4, Some("functions"), Some("runtime-management-config")) => {
+                "PutRuntimeManagementConfig"
+            }
+            (&Method::GET, 4, Some("functions"), Some("runtime-management-config")) => {
+                "GetRuntimeManagementConfig"
+            }
+            (&Method::PUT, 4, Some("functions"), Some("scaling-config")) => {
+                "PutFunctionScalingConfig"
+            }
+            (&Method::GET, 4, Some("functions"), Some("scaling-config")) => {
+                "GetFunctionScalingConfig"
+            }
+            (&Method::PUT, 4, Some("functions"), Some("recursion-config")) => {
+                "PutFunctionRecursionConfig"
+            }
+            (&Method::GET, 4, Some("functions"), Some("recursion-config")) => {
+                "GetFunctionRecursionConfig"
+            }
+            (&Method::GET, 4, Some("functions"), Some("durable-executions")) => {
+                "ListDurableExecutionsByFunction"
+            }
             (&Method::POST, 2, Some("event-source-mappings"), _) => "CreateEventSourceMapping",
             (&Method::GET, 2, Some("event-source-mappings"), _) => "ListEventSourceMappings",
-            // /2015-03-31/event-source-mappings/{uuid}
             (&Method::GET, 3, Some("event-source-mappings"), _) => "GetEventSourceMapping",
+            (&Method::PUT, 3, Some("event-source-mappings"), _) => "UpdateEventSourceMapping",
             (&Method::DELETE, 3, Some("event-source-mappings"), _) => "DeleteEventSourceMapping",
+            (&Method::POST, 3, Some("tags"), _) => "TagResource",
+            (&Method::DELETE, 3, Some("tags"), _) => "UntagResource",
+            (&Method::GET, 3, Some("tags"), _) => "ListTags",
             _ => return None,
         };
+        let _ = fourth;
 
         Some((action, resource))
     }
@@ -582,7 +964,7 @@ impl LambdaService {
         ))
     }
 
-    fn function_config_json(&self, func: &LambdaFunction) -> Value {
+    pub(crate) fn function_config_json(&self, func: &LambdaFunction) -> Value {
         let mut env_vars = json!({});
         if !func.environment.is_empty() {
             env_vars = json!({ "Variables": func.environment });
@@ -884,6 +1266,46 @@ impl AwsService for LambdaService {
                 | "RemovePermission"
                 | "CreateEventSourceMapping"
                 | "DeleteEventSourceMapping"
+                | "UpdateEventSourceMapping"
+                | "UpdateFunctionCode"
+                | "UpdateFunctionConfiguration"
+                | "CreateAlias"
+                | "DeleteAlias"
+                | "UpdateAlias"
+                | "PublishLayerVersion"
+                | "DeleteLayerVersion"
+                | "AddLayerVersionPermission"
+                | "RemoveLayerVersionPermission"
+                | "CreateFunctionUrlConfig"
+                | "DeleteFunctionUrlConfig"
+                | "UpdateFunctionUrlConfig"
+                | "PutFunctionConcurrency"
+                | "DeleteFunctionConcurrency"
+                | "PutProvisionedConcurrencyConfig"
+                | "DeleteProvisionedConcurrencyConfig"
+                | "CreateCodeSigningConfig"
+                | "UpdateCodeSigningConfig"
+                | "DeleteCodeSigningConfig"
+                | "PutFunctionCodeSigningConfig"
+                | "DeleteFunctionCodeSigningConfig"
+                | "PutFunctionEventInvokeConfig"
+                | "UpdateFunctionEventInvokeConfig"
+                | "DeleteFunctionEventInvokeConfig"
+                | "PutRuntimeManagementConfig"
+                | "PutFunctionScalingConfig"
+                | "PutFunctionRecursionConfig"
+                | "TagResource"
+                | "UntagResource"
+                | "CreateCapacityProvider"
+                | "UpdateCapacityProvider"
+                | "DeleteCapacityProvider"
+                | "CheckpointDurableExecution"
+                | "StopDurableExecution"
+                | "SendDurableExecutionCallbackSuccess"
+                | "SendDurableExecutionCallbackFailure"
+                | "SendDurableExecutionCallbackHeartbeat"
+                | "InvokeAsync"
+                | "InvokeWithResponseStream"
         );
 
         let aid = &req.account_id;
@@ -916,7 +1338,10 @@ impl AwsService for LambdaService {
             "DeleteEventSourceMapping" => {
                 self.delete_event_source_mapping(resource_name.as_deref().unwrap_or(""), aid)
             }
-            _ => Err(AwsServiceError::action_not_implemented("lambda", action)),
+            other => {
+                self.handle_extra(other, resource_name.as_deref(), &req)
+                    .await
+            }
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
             self.save_snapshot().await;
@@ -931,14 +1356,86 @@ impl AwsService for LambdaService {
             "DeleteFunction",
             "ListFunctions",
             "Invoke",
+            "InvokeAsync",
+            "InvokeWithResponseStream",
             "PublishVersion",
+            "ListVersionsByFunction",
             "AddPermission",
             "RemovePermission",
             "GetPolicy",
             "CreateEventSourceMapping",
             "ListEventSourceMappings",
             "GetEventSourceMapping",
+            "UpdateEventSourceMapping",
             "DeleteEventSourceMapping",
+            "GetFunctionConfiguration",
+            "UpdateFunctionConfiguration",
+            "UpdateFunctionCode",
+            "GetAccountSettings",
+            "CreateAlias",
+            "GetAlias",
+            "ListAliases",
+            "UpdateAlias",
+            "DeleteAlias",
+            "PublishLayerVersion",
+            "GetLayerVersion",
+            "GetLayerVersionByArn",
+            "DeleteLayerVersion",
+            "ListLayerVersions",
+            "ListLayers",
+            "GetLayerVersionPolicy",
+            "AddLayerVersionPermission",
+            "RemoveLayerVersionPermission",
+            "CreateFunctionUrlConfig",
+            "GetFunctionUrlConfig",
+            "UpdateFunctionUrlConfig",
+            "DeleteFunctionUrlConfig",
+            "ListFunctionUrlConfigs",
+            "PutFunctionConcurrency",
+            "GetFunctionConcurrency",
+            "DeleteFunctionConcurrency",
+            "PutProvisionedConcurrencyConfig",
+            "GetProvisionedConcurrencyConfig",
+            "DeleteProvisionedConcurrencyConfig",
+            "ListProvisionedConcurrencyConfigs",
+            "CreateCodeSigningConfig",
+            "GetCodeSigningConfig",
+            "UpdateCodeSigningConfig",
+            "DeleteCodeSigningConfig",
+            "ListCodeSigningConfigs",
+            "PutFunctionCodeSigningConfig",
+            "GetFunctionCodeSigningConfig",
+            "DeleteFunctionCodeSigningConfig",
+            "ListFunctionsByCodeSigningConfig",
+            "PutFunctionEventInvokeConfig",
+            "GetFunctionEventInvokeConfig",
+            "UpdateFunctionEventInvokeConfig",
+            "DeleteFunctionEventInvokeConfig",
+            "ListFunctionEventInvokeConfigs",
+            "PutRuntimeManagementConfig",
+            "GetRuntimeManagementConfig",
+            "PutFunctionScalingConfig",
+            "GetFunctionScalingConfig",
+            "PutFunctionRecursionConfig",
+            "GetFunctionRecursionConfig",
+            "TagResource",
+            "UntagResource",
+            "ListTags",
+            "CreateCapacityProvider",
+            "GetCapacityProvider",
+            "UpdateCapacityProvider",
+            "DeleteCapacityProvider",
+            "ListCapacityProviders",
+            "ListFunctionVersionsByCapacityProvider",
+            "CheckpointDurableExecution",
+            "GetDurableExecution",
+            "GetDurableExecutionHistory",
+            "GetDurableExecutionState",
+            "ListDurableExecutionsByFunction",
+            "StopDurableExecution",
+            "SendDurableExecutionCallbackSuccess",
+            "SendDurableExecutionCallbackFailure",
+            "SendDurableExecutionCallbackHeartbeat",
         ]
     }
 

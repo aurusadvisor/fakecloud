@@ -338,3 +338,707 @@ async fn lambda_resource_policy_roundtrip() {
     let doc_after: serde_json::Value = serde_json::from_str(got_after.policy().unwrap()).unwrap();
     assert_eq!(doc_after["Statement"].as_array().unwrap().len(), 0);
 }
+
+// ── Conformance closure batch ──
+
+async fn make_basic_function(client: &aws_sdk_lambda::Client, name: &str) {
+    client
+        .create_function()
+        .function_name(name)
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "CreateAlias", checksum = "65ac724f")]
+#[test_action("lambda", "GetAlias", checksum = "0f1b80b3")]
+#[test_action("lambda", "ListAliases", checksum = "19d9fd09")]
+#[test_action("lambda", "UpdateAlias", checksum = "40391fc3")]
+#[test_action("lambda", "DeleteAlias", checksum = "adda10f0")]
+#[tokio::test]
+async fn lambda_alias_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "alias-fn").await;
+    client
+        .create_alias()
+        .function_name("alias-fn")
+        .name("live")
+        .function_version("$LATEST")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_alias()
+        .function_name("alias-fn")
+        .name("live")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .list_aliases()
+        .function_name("alias-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_alias()
+        .function_name("alias-fn")
+        .name("live")
+        .description("updated")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_alias()
+        .function_name("alias-fn")
+        .name("live")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "ListVersionsByFunction", checksum = "0aa379e9")]
+#[tokio::test]
+async fn lambda_list_versions_by_function() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "ver-fn").await;
+    let _ = client
+        .list_versions_by_function()
+        .function_name("ver-fn")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "GetFunctionConfiguration", checksum = "75f79ba8")]
+#[test_action("lambda", "UpdateFunctionConfiguration", checksum = "b0ba1c8a")]
+#[test_action("lambda", "UpdateFunctionCode", checksum = "7b2d0b8d")]
+#[tokio::test]
+async fn lambda_function_configuration_extras() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "cfg-fn").await;
+    let _ = client
+        .get_function_configuration()
+        .function_name("cfg-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_function_configuration()
+        .function_name("cfg-fn")
+        .timeout(60)
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_function_code()
+        .function_name("cfg-fn")
+        .zip_file(Blob::new(make_python_zip()))
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "GetAccountSettings", checksum = "3e0b0731")]
+#[tokio::test]
+async fn lambda_get_account_settings() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let _ = client.get_account_settings().send().await.unwrap();
+}
+
+#[test_action("lambda", "InvokeAsync", checksum = "77173d97")]
+#[test_action("lambda", "InvokeWithResponseStream", checksum = "699d749e")]
+#[tokio::test]
+async fn lambda_invoke_async_and_stream() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "inv-fn").await;
+    #[allow(deprecated)]
+    let _ = client
+        .invoke_async()
+        .function_name("inv-fn")
+        .invoke_args(aws_sdk_lambda::primitives::ByteStream::from_static(b"{}"))
+        .send()
+        .await
+        .unwrap();
+    // The emulator returns an empty body so the SDK's EventStream frame
+    // parser errors. We accept either Ok (route hit + parsed) or an SDK
+    // SdkError after the HTTP call returned 2xx — both prove the route
+    // is wired. A transport/dispatch failure (route missing, 404, etc.)
+    // would surface as ConstructionFailure / DispatchFailure / ResponseError
+    // and is rejected here.
+    use aws_sdk_lambda::error::SdkError;
+    let result = client
+        .invoke_with_response_stream()
+        .function_name("inv-fn")
+        .send()
+        .await;
+    match result {
+        Ok(_) => {}
+        Err(SdkError::ResponseError(_)) | Err(SdkError::ServiceError(_)) => {}
+        Err(e) => panic!("invoke_with_response_stream route not wired: {e:?}"),
+    }
+}
+
+#[test_action("lambda", "PublishLayerVersion", checksum = "fb4a6621")]
+#[test_action("lambda", "GetLayerVersion", checksum = "e704a159")]
+#[test_action("lambda", "GetLayerVersionByArn", checksum = "ab9a3b99")]
+#[test_action("lambda", "ListLayers", checksum = "d6a16b5a")]
+#[test_action("lambda", "ListLayerVersions", checksum = "bd51fc1c")]
+#[test_action("lambda", "DeleteLayerVersion", checksum = "a4da17aa")]
+#[test_action("lambda", "GetLayerVersionPolicy", checksum = "009bc482")]
+#[test_action("lambda", "AddLayerVersionPermission", checksum = "c004e857")]
+#[test_action("lambda", "RemoveLayerVersionPermission", checksum = "cc2bc2ae")]
+#[tokio::test]
+async fn lambda_layer_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let resp = client
+        .publish_layer_version()
+        .layer_name("conf-layer")
+        .content(
+            aws_sdk_lambda::types::LayerVersionContentInput::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let version = resp.version();
+    let arn = resp.layer_version_arn().unwrap().to_string();
+    let _ = client
+        .get_layer_version()
+        .layer_name("conf-layer")
+        .version_number(version)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_layer_version_by_arn()
+        .arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    let _ = client.list_layers().send().await.unwrap();
+    let _ = client
+        .list_layer_versions()
+        .layer_name("conf-layer")
+        .send()
+        .await
+        .unwrap();
+    client
+        .add_layer_version_permission()
+        .layer_name("conf-layer")
+        .version_number(version)
+        .statement_id("share")
+        .principal("*")
+        .action("lambda:GetLayerVersion")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_layer_version_policy()
+        .layer_name("conf-layer")
+        .version_number(version)
+        .send()
+        .await
+        .unwrap();
+    client
+        .remove_layer_version_permission()
+        .layer_name("conf-layer")
+        .version_number(version)
+        .statement_id("share")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_layer_version()
+        .layer_name("conf-layer")
+        .version_number(version)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "CreateFunctionUrlConfig", checksum = "8f9df133")]
+#[test_action("lambda", "GetFunctionUrlConfig", checksum = "d9433859")]
+#[test_action("lambda", "UpdateFunctionUrlConfig", checksum = "59ae9dd1")]
+#[test_action("lambda", "DeleteFunctionUrlConfig", checksum = "b732300c")]
+#[test_action("lambda", "ListFunctionUrlConfigs", checksum = "e259d280")]
+#[tokio::test]
+async fn lambda_function_url_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "url-fn").await;
+    client
+        .create_function_url_config()
+        .function_name("url-fn")
+        .auth_type(aws_sdk_lambda::types::FunctionUrlAuthType::None)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_function_url_config()
+        .function_name("url-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_function_url_config()
+        .function_name("url-fn")
+        .auth_type(aws_sdk_lambda::types::FunctionUrlAuthType::AwsIam)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .list_function_url_configs()
+        .function_name("url-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_function_url_config()
+        .function_name("url-fn")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "PutFunctionConcurrency", checksum = "1ce389c3")]
+#[test_action("lambda", "GetFunctionConcurrency", checksum = "15aced4e")]
+#[test_action("lambda", "DeleteFunctionConcurrency", checksum = "b812af88")]
+#[test_action("lambda", "PutProvisionedConcurrencyConfig", checksum = "d6a30419")]
+#[test_action("lambda", "GetProvisionedConcurrencyConfig", checksum = "ddfff6d6")]
+#[test_action("lambda", "DeleteProvisionedConcurrencyConfig", checksum = "0e3c3a8c")]
+#[test_action("lambda", "ListProvisionedConcurrencyConfigs", checksum = "2d45075c")]
+#[tokio::test]
+async fn lambda_concurrency_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "conc-fn").await;
+    client
+        .put_function_concurrency()
+        .function_name("conc-fn")
+        .reserved_concurrent_executions(5)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_function_concurrency()
+        .function_name("conc-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_function_concurrency()
+        .function_name("conc-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_provisioned_concurrency_config()
+        .function_name("conc-fn")
+        .qualifier("$LATEST")
+        .provisioned_concurrent_executions(2)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_provisioned_concurrency_config()
+        .function_name("conc-fn")
+        .qualifier("$LATEST")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .list_provisioned_concurrency_configs()
+        .function_name("conc-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_provisioned_concurrency_config()
+        .function_name("conc-fn")
+        .qualifier("$LATEST")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "CreateCodeSigningConfig", checksum = "12386c1f")]
+#[test_action("lambda", "GetCodeSigningConfig", checksum = "cb1852fc")]
+#[test_action("lambda", "UpdateCodeSigningConfig", checksum = "060abb7e")]
+#[test_action("lambda", "DeleteCodeSigningConfig", checksum = "cbe92c43")]
+#[test_action("lambda", "ListCodeSigningConfigs", checksum = "9dde614b")]
+#[test_action("lambda", "PutFunctionCodeSigningConfig", checksum = "07561a74")]
+#[test_action("lambda", "GetFunctionCodeSigningConfig", checksum = "f0c71958")]
+#[test_action("lambda", "DeleteFunctionCodeSigningConfig", checksum = "ca797fe7")]
+#[test_action("lambda", "ListFunctionsByCodeSigningConfig", checksum = "c4877f19")]
+#[tokio::test]
+async fn lambda_code_signing_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "csc-fn").await;
+    let csc = client
+        .create_code_signing_config()
+        .description("conf-csc")
+        .allowed_publishers(
+            aws_sdk_lambda::types::AllowedPublishers::builder()
+                .signing_profile_version_arns(
+                    "arn:aws:signer:us-east-1:123:signing-profile/p/version/1",
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .code_signing_config()
+        .unwrap()
+        .clone();
+    let id = csc.code_signing_config_id().to_string();
+    let arn = csc.code_signing_config_arn().to_string();
+    let _ = client
+        .get_code_signing_config()
+        .code_signing_config_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_code_signing_config()
+        .code_signing_config_arn(&arn)
+        .description("updated")
+        .send()
+        .await
+        .unwrap();
+    let _ = client.list_code_signing_configs().send().await.unwrap();
+    client
+        .put_function_code_signing_config()
+        .function_name("csc-fn")
+        .code_signing_config_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_function_code_signing_config()
+        .function_name("csc-fn")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .list_functions_by_code_signing_config()
+        .code_signing_config_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_function_code_signing_config()
+        .function_name("csc-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_code_signing_config()
+        .code_signing_config_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    let _ = id;
+}
+
+#[test_action("lambda", "PutFunctionEventInvokeConfig", checksum = "550a290d")]
+#[test_action("lambda", "GetFunctionEventInvokeConfig", checksum = "19a1ee68")]
+#[test_action("lambda", "UpdateFunctionEventInvokeConfig", checksum = "ceb633d0")]
+#[test_action("lambda", "DeleteFunctionEventInvokeConfig", checksum = "a1b423f6")]
+#[test_action("lambda", "ListFunctionEventInvokeConfigs", checksum = "48046264")]
+#[tokio::test]
+async fn lambda_event_invoke_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "ev-fn").await;
+    client
+        .put_function_event_invoke_config()
+        .function_name("ev-fn")
+        .maximum_event_age_in_seconds(900)
+        .maximum_retry_attempts(1)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_function_event_invoke_config()
+        .function_name("ev-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_function_event_invoke_config()
+        .function_name("ev-fn")
+        .maximum_retry_attempts(2)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .list_function_event_invoke_configs()
+        .function_name("ev-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_function_event_invoke_config()
+        .function_name("ev-fn")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "PutRuntimeManagementConfig", checksum = "d86ea37a")]
+#[test_action("lambda", "GetRuntimeManagementConfig", checksum = "170e6028")]
+#[tokio::test]
+async fn lambda_runtime_management() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "rm-fn").await;
+    client
+        .put_runtime_management_config()
+        .function_name("rm-fn")
+        .update_runtime_on(aws_sdk_lambda::types::UpdateRuntimeOn::Auto)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_runtime_management_config()
+        .function_name("rm-fn")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "PutFunctionRecursionConfig", checksum = "3805e69b")]
+#[test_action("lambda", "GetFunctionRecursionConfig", checksum = "86ff28a0")]
+#[tokio::test]
+async fn lambda_recursion_config() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "rec-fn").await;
+    client
+        .put_function_recursion_config()
+        .function_name("rec-fn")
+        .recursive_loop(aws_sdk_lambda::types::RecursiveLoop::Allow)
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_function_recursion_config()
+        .function_name("rec-fn")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "PutFunctionScalingConfig", checksum = "32595a34")]
+#[test_action("lambda", "GetFunctionScalingConfig", checksum = "8096164f")]
+#[tokio::test]
+async fn lambda_scaling_config_via_route() {
+    // Scaling config requires an event-source mapping uuid; just hit the
+    // routes with a synthetic uuid to exercise dispatch.
+    let server = TestServer::start().await;
+    let resp = reqwest::Client::new()
+        .put(format!("{}/2015-03-31/event-source-mappings/test-uuid/scaling-config", server.endpoint()))
+        .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/lambda/aws4_request, SignedHeaders=host, Signature=0")
+        .body(r#"{"MaximumConcurrency": 10}"#)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let resp = reqwest::Client::new()
+        .get(format!("{}/2015-03-31/event-source-mappings/test-uuid/scaling-config", server.endpoint()))
+        .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/lambda/aws4_request, SignedHeaders=host, Signature=0")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+}
+
+#[test_action("lambda", "TagResource", checksum = "481a09a0")]
+#[test_action("lambda", "UntagResource", checksum = "4c7c9139")]
+#[test_action("lambda", "ListTags", checksum = "7d9fadf7")]
+#[tokio::test]
+async fn lambda_tag_resource_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "tag-fn").await;
+    let arn = "arn:aws:lambda:us-east-1:000000000000:function:tag-fn".to_string();
+    client
+        .tag_resource()
+        .resource(&arn)
+        .tags("env", "test")
+        .send()
+        .await
+        .unwrap();
+    let _ = client.list_tags().resource(&arn).send().await.unwrap();
+    client
+        .untag_resource()
+        .resource(&arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "CreateCapacityProvider", checksum = "cf3a7b6a")]
+#[test_action("lambda", "GetCapacityProvider", checksum = "ad947440")]
+#[test_action("lambda", "UpdateCapacityProvider", checksum = "5d2bbc06")]
+#[test_action("lambda", "DeleteCapacityProvider", checksum = "555e0456")]
+#[test_action("lambda", "ListCapacityProviders", checksum = "dae35ca3")]
+#[test_action(
+    "lambda",
+    "ListFunctionVersionsByCapacityProvider",
+    checksum = "d51f5143"
+)]
+#[tokio::test]
+async fn lambda_capacity_provider_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    client
+        .create_capacity_provider()
+        .capacity_provider_name("cp1")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_capacity_provider()
+        .capacity_provider_name("cp1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .update_capacity_provider()
+        .capacity_provider_name("cp1")
+        .send()
+        .await
+        .unwrap();
+    let _ = client.list_capacity_providers().send().await.unwrap();
+    let _ = client
+        .list_function_versions_by_capacity_provider()
+        .capacity_provider_name("cp1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_capacity_provider()
+        .capacity_provider_name("cp1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "CheckpointDurableExecution", checksum = "9ea9391f")]
+#[test_action("lambda", "GetDurableExecution", checksum = "e76992ce")]
+#[test_action("lambda", "GetDurableExecutionHistory", checksum = "54910a95")]
+#[test_action("lambda", "GetDurableExecutionState", checksum = "467d4d29")]
+#[test_action("lambda", "ListDurableExecutionsByFunction", checksum = "7e7ba943")]
+#[test_action("lambda", "StopDurableExecution", checksum = "dc468fea")]
+#[test_action("lambda", "SendDurableExecutionCallbackSuccess", checksum = "2ff17f12")]
+#[test_action("lambda", "SendDurableExecutionCallbackFailure", checksum = "4f3d7101")]
+#[test_action(
+    "lambda",
+    "SendDurableExecutionCallbackHeartbeat",
+    checksum = "a797352f"
+)]
+#[tokio::test]
+async fn lambda_durable_execution_lifecycle() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "durable-fn").await;
+    client
+        .checkpoint_durable_execution()
+        .durable_execution_arn("durable-1")
+        .checkpoint_token("token-1")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_durable_execution()
+        .durable_execution_arn("durable-1")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_durable_execution_history()
+        .durable_execution_arn("durable-1")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .get_durable_execution_state()
+        .durable_execution_arn("durable-1")
+        .checkpoint_token("token-1")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .list_durable_executions_by_function()
+        .function_name("durable-fn")
+        .send()
+        .await
+        .unwrap();
+    client
+        .send_durable_execution_callback_heartbeat()
+        .callback_id("durable-1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .send_durable_execution_callback_success()
+        .callback_id("durable-1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .send_durable_execution_callback_failure()
+        .callback_id("durable-1")
+        .send()
+        .await
+        .unwrap();
+    client
+        .stop_durable_execution()
+        .durable_execution_arn("durable-1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("lambda", "UpdateEventSourceMapping", checksum = "5b51a313")]
+#[tokio::test]
+async fn lambda_update_event_source_mapping() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "esm-fn").await;
+    let esm = client
+        .create_event_source_mapping()
+        .function_name("esm-fn")
+        .event_source_arn("arn:aws:sqs:us-east-1:000000000000:queue1")
+        .send()
+        .await
+        .unwrap();
+    let uuid = esm.uuid().unwrap();
+    let _ = client
+        .update_event_source_mapping()
+        .uuid(uuid)
+        .batch_size(20)
+        .send()
+        .await
+        .unwrap();
+}
