@@ -40,6 +40,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "InitiateLayerUpload",
     "UploadLayerPart",
     "CompleteLayerUpload",
+    "GetAuthorizationToken",
 ];
 
 /// Actions that mutate persisted state. Only these trigger a snapshot save.
@@ -82,6 +83,14 @@ impl EcrService {
         self
     }
 
+    /// Read-only accessor for the multi-account state. The sibling
+    /// `oci` module owns the HTTP-layer adapter for the OCI v2
+    /// protocol and needs to reach the same repositories + blobs the
+    /// JSON control-plane ops read and write.
+    pub fn state_handle(&self) -> &SharedEcrState {
+        &self.state
+    }
+
     async fn save_snapshot(&self) {
         let Some(store) = self.snapshot_store.clone() else {
             return;
@@ -112,6 +121,27 @@ impl AwsService for EcrService {
     }
 
     async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // OCI v2 Distribution requests come in as path-only REST
+        // (`/v2/...` with no `X-Amz-Target`). Dispatch them before the
+        // JSON control plane. Most OCI paths mutate state too (uploads,
+        // manifest PUT, blob/manifest DELETE) so snapshot after.
+        if request
+            .path_segments
+            .first()
+            .map(|s| s == "v2")
+            .unwrap_or(false)
+        {
+            let result = crate::oci::dispatch(self, &request);
+            let mutates_oci = matches!(
+                request.method,
+                http::Method::POST | http::Method::PUT | http::Method::PATCH | http::Method::DELETE
+            );
+            if mutates_oci && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+                self.save_snapshot().await;
+            }
+            return result;
+        }
+
         let mutates = is_mutating(request.action.as_str());
         let result = match request.action.as_str() {
             "CreateRepository" => self.create_repository(&request),
@@ -135,6 +165,7 @@ impl AwsService for EcrService {
             "InitiateLayerUpload" => self.initiate_layer_upload(&request),
             "UploadLayerPart" => self.upload_layer_part(&request),
             "CompleteLayerUpload" => self.complete_layer_upload(&request),
+            "GetAuthorizationToken" => self.get_authorization_token(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 self.service_name(),
                 &request.action,
@@ -1277,6 +1308,46 @@ impl EcrService {
             "repositoryName": name,
             "uploadId": upload_id,
             "lastByteReceived": last_byte,
+        })))
+    }
+
+    fn get_authorization_token(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let registry_ids: Vec<String> = body
+            .get("registryIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let accounts = self.state.read();
+        let default_account = accounts.default_account_id().to_string();
+        let targets = if registry_ids.is_empty() {
+            vec![default_account]
+        } else {
+            registry_ids
+        };
+        let endpoint = accounts.endpoint().to_string();
+        drop(accounts);
+        let expires_at = (Utc::now() + chrono::Duration::hours(12)).timestamp();
+        let authorization_data: Vec<Value> = targets
+            .into_iter()
+            .map(|_registry_id| {
+                let token = B64.encode(format!("AWS:{}", Uuid::new_v4()).as_bytes());
+                json!({
+                    "authorizationToken": token,
+                    "expiresAt": expires_at,
+                    "proxyEndpoint": endpoint,
+                })
+            })
+            .collect();
+        Ok(AwsResponse::ok_json(json!({
+            "authorizationData": authorization_data,
         })))
     }
 
