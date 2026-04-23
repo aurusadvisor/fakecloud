@@ -1681,6 +1681,12 @@ async fn elasticache_copy_snapshot() {
 async fn elasticache_serverless_cache_snapshot_copy_export() {
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
+    let s3 = server.s3_client().await;
+    s3.create_bucket()
+        .bucket("dest-bucket")
+        .send()
+        .await
+        .unwrap();
     client
         .create_serverless_cache()
         .serverless_cache_name("slc1")

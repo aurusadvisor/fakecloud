@@ -434,6 +434,10 @@ impl ElastiCacheState {
         self.in_progress_cache_cluster_ids.clear();
         self.in_progress_replication_group_ids.clear();
         self.in_progress_serverless_cache_names.clear();
+        self.security_groups.clear();
+        self.parameter_group_parameters.clear();
+        self.events.clear();
+        self.migrations.clear();
     }
 
     pub fn begin_cache_cluster_creation(&mut self, cache_cluster_id: &str) -> bool {

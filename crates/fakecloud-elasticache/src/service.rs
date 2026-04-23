@@ -3405,7 +3405,7 @@ impl ElastiCacheService {
         let reset_all =
             parse_optional_bool(optional_param(request, "ResetAllParameters").as_deref())?
                 .unwrap_or(false);
-        let to_reset = collect_indexed_strings(request, "ParameterNameValues.member.ParameterName");
+        let to_reset = collect_member_field(request, "ParameterNameValues.member", "ParameterName");
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         if !state
@@ -3908,6 +3908,13 @@ impl ElastiCacheService {
         let target = required_param(request, "TargetServerlessCacheSnapshotName")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
+        if state.serverless_cache_snapshots.contains_key(&target) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ServerlessCacheSnapshotAlreadyExistsFault",
+                format!("ServerlessCacheSnapshot {target} already exists."),
+            ));
+        }
         let mut snap = state
             .serverless_cache_snapshots
             .get(&source)
@@ -4012,13 +4019,15 @@ impl ElastiCacheService {
         status: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = required_param(request, "ReplicationGroupId")?;
+        // AWS Query protocol nests indexed members under .{index}.{Field},
+        // not .{Field}.{index}.
         let endpoint_addr =
-            collect_indexed_strings(request, "CustomerNodeEndpointList.member.Address")
+            collect_member_field(request, "CustomerNodeEndpointList.member", "Address")
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| "127.0.0.1".to_string());
         let endpoint_port =
-            collect_indexed_strings(request, "CustomerNodeEndpointList.member.Port")
+            collect_member_field(request, "CustomerNodeEndpointList.member", "Port")
                 .into_iter()
                 .next()
                 .and_then(|v| v.parse::<i32>().ok())
@@ -4119,6 +4128,21 @@ fn collect_indexed_strings(req: &AwsRequest, prefix: &str) -> Vec<String> {
     let mut out = Vec::new();
     for i in 1..=64 {
         let key = format!("{prefix}.{i}");
+        match req.query_params.get(&key) {
+            Some(v) => out.push(v.clone()),
+            None => break,
+        }
+    }
+    out
+}
+
+/// Pull values out of an AWS Query protocol indexed list of structures,
+/// where each entry has a named field (e.g. `member.1.Address`,
+/// `member.2.Address`). Returns values in index order.
+fn collect_member_field(req: &AwsRequest, prefix: &str, field: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 1..=64 {
+        let key = format!("{prefix}.{i}.{field}");
         match req.query_params.get(&key) {
             Some(v) => out.push(v.clone()),
             None => break,
