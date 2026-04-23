@@ -1327,13 +1327,18 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
-        let b = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        b.request_payment = Some(body_str);
+        {
+            let mut accts = self.state.write();
+            let state = accts.get_or_create(account_id);
+            let b = state
+                .buckets
+                .get_mut(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            b.request_payment = Some(body_str.clone());
+        }
+        self.store
+            .put_bucket_subresource(bucket, BucketSubresource::RequestPayment, &body_str)
+            .map_err(super::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
 
@@ -1370,13 +1375,18 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
-        let b = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        b.abac_config = Some(body_str);
+        {
+            let mut accts = self.state.write();
+            let state = accts.get_or_create(account_id);
+            let b = state
+                .buckets
+                .get_mut(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            b.abac_config = Some(body_str.clone());
+        }
+        self.store
+            .put_bucket_subresource(bucket, BucketSubresource::Abac, &body_str)
+            .map_err(super::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
     pub(super) fn get_bucket_abac(
@@ -1415,7 +1425,12 @@ impl S3Service {
         let is_public = b
             .policy
             .as_deref()
-            .map(|p| p.contains("\"Principal\":\"*\"") || p.contains("\"AWS\":\"*\""))
+            .map(|p| {
+                // Whitespace-tolerant detection: strip all whitespace
+                // before scanning for the wildcard principal markers.
+                let compact: String = p.chars().filter(|c| !c.is_whitespace()).collect();
+                compact.contains("\"Principal\":\"*\"") || compact.contains("\"AWS\":\"*\"")
+            })
             .unwrap_or(false);
         let body = format!("<PolicyStatus><IsPublic>{is_public}</IsPublic></PolicyStatus>");
         Ok(s3_xml(StatusCode::OK, body))
@@ -1430,13 +1445,18 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
-        let b = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        b.metadata_configuration = Some(body_str);
+        {
+            let mut accts = self.state.write();
+            let state = accts.get_or_create(account_id);
+            let b = state
+                .buckets
+                .get_mut(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            b.metadata_configuration = Some(body_str.clone());
+        }
+        self.store
+            .put_bucket_subresource(bucket, BucketSubresource::MetadataConfiguration, &body_str)
+            .map_err(super::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
     pub(super) fn get_bucket_metadata_config(
@@ -1462,13 +1482,18 @@ impl S3Service {
         account_id: &str,
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
-        let b = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        b.metadata_configuration = None;
+        {
+            let mut accts = self.state.write();
+            let state = accts.get_or_create(account_id);
+            let b = state
+                .buckets
+                .get_mut(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            b.metadata_configuration = None;
+        }
+        self.store
+            .delete_bucket_subresource(bucket, BucketSubresource::MetadataConfiguration)
+            .map_err(super::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
 
@@ -1479,13 +1504,22 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
-        let b = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        b.metadata_table_configuration = Some(body_str);
+        {
+            let mut accts = self.state.write();
+            let state = accts.get_or_create(account_id);
+            let b = state
+                .buckets
+                .get_mut(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            b.metadata_table_configuration = Some(body_str.clone());
+        }
+        self.store
+            .put_bucket_subresource(
+                bucket,
+                BucketSubresource::MetadataTableConfiguration,
+                &body_str,
+            )
+            .map_err(super::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
     pub(super) fn get_bucket_metadata_table_config(
@@ -1511,13 +1545,18 @@ impl S3Service {
         account_id: &str,
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
-        let b = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        b.metadata_table_configuration = None;
+        {
+            let mut accts = self.state.write();
+            let state = accts.get_or_create(account_id);
+            let b = state
+                .buckets
+                .get_mut(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            b.metadata_table_configuration = None;
+        }
+        self.store
+            .delete_bucket_subresource(bucket, BucketSubresource::MetadataTableConfiguration)
+            .map_err(super::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
     }
     pub(super) fn update_bucket_metadata_inventory_table(
@@ -1764,11 +1803,19 @@ impl ConfigKind {
             ConfigKind::Metrics => "ListMetricsConfigurationsResult",
         }
     }
+    #[allow(dead_code)]
     fn member(&self) -> &'static str {
         match self {
             ConfigKind::Analytics => "AnalyticsConfiguration",
             ConfigKind::IntelligentTiering => "IntelligentTieringConfiguration",
             ConfigKind::Metrics => "MetricsConfiguration",
+        }
+    }
+    fn subresource(&self) -> BucketSubresource {
+        match self {
+            ConfigKind::Analytics => BucketSubresource::Analytics,
+            ConfigKind::IntelligentTiering => BucketSubresource::IntelligentTiering,
+            ConfigKind::Metrics => BucketSubresource::Metrics,
         }
     }
 }
@@ -1810,13 +1857,19 @@ fn store_named_config(
         )
     })?;
     let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
-    let mut accts = svc.state.write();
-    let state = accts.get_or_create(account_id);
-    let b = state
-        .buckets
-        .get_mut(bucket)
-        .ok_or_else(|| no_such_bucket(bucket))?;
-    config_map(b, kind).insert(id, body_str);
+    let payload = {
+        let mut accts = svc.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        config_map(b, kind).insert(id, body_str);
+        toml::to_string(config_map(b, kind)).unwrap_or_default()
+    };
+    svc.store
+        .put_bucket_subresource(bucket, kind.subresource(), &payload)
+        .map_err(super::persistence_error)?;
     Ok(empty_response(StatusCode::OK))
 }
 
@@ -1865,13 +1918,27 @@ fn delete_named_config(
             "Missing required query parameter: id",
         )
     })?;
-    let mut accts = svc.state.write();
-    let state = accts.get_or_create(account_id);
-    let b = state
-        .buckets
-        .get_mut(bucket)
-        .ok_or_else(|| no_such_bucket(bucket))?;
-    config_map(b, kind).remove(&id);
+    let (empty, payload) = {
+        let mut accts = svc.state.write();
+        let state = accts.get_or_create(account_id);
+        let b = state
+            .buckets
+            .get_mut(bucket)
+            .ok_or_else(|| no_such_bucket(bucket))?;
+        config_map(b, kind).remove(&id);
+        let map = config_map(b, kind);
+        let is_empty = map.is_empty();
+        (is_empty, toml::to_string(map).unwrap_or_default())
+    };
+    if empty {
+        svc.store
+            .delete_bucket_subresource(bucket, kind.subresource())
+            .map_err(super::persistence_error)?;
+    } else {
+        svc.store
+            .put_bucket_subresource(bucket, kind.subresource(), &payload)
+            .map_err(super::persistence_error)?;
+    }
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
@@ -1888,10 +1955,11 @@ fn list_named_config(
         .buckets
         .get(bucket)
         .ok_or_else(|| no_such_bucket(bucket))?;
-    let entries: Vec<String> = config_map_ref(b, kind)
-        .values()
-        .map(|cfg| format!("<{m}>{cfg}</{m}>", m = kind.member()))
-        .collect();
+    // Stored entries already include the per-config wrapper element
+    // (e.g. <AnalyticsConfiguration>...</AnalyticsConfiguration>), so
+    // emit them directly. Wrapping them in another <Member> here would
+    // produce a nested element list that breaks SDK parsing.
+    let entries: Vec<String> = config_map_ref(b, kind).values().cloned().collect();
     let body = format!(
         "<{root}>{entries}<IsTruncated>false</IsTruncated></{root}>",
         root = kind.list_root(),

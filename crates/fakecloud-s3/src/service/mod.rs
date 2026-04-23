@@ -1187,6 +1187,71 @@ fn s3_detect_action(
                 _ => return None,
             });
         }
+        if has("analytics") {
+            return Some(match method {
+                "GET" if has("id") => "GetBucketAnalyticsConfiguration",
+                "GET" => "ListBucketAnalyticsConfigurations",
+                "PUT" => "PutBucketAnalyticsConfiguration",
+                "DELETE" => "DeleteBucketAnalyticsConfiguration",
+                _ => return None,
+            });
+        }
+        if has("intelligent-tiering") {
+            return Some(match method {
+                "GET" if has("id") => "GetBucketIntelligentTieringConfiguration",
+                "GET" => "ListBucketIntelligentTieringConfigurations",
+                "PUT" => "PutBucketIntelligentTieringConfiguration",
+                "DELETE" => "DeleteBucketIntelligentTieringConfiguration",
+                _ => return None,
+            });
+        }
+        if has("metrics") {
+            return Some(match method {
+                "GET" if has("id") => "GetBucketMetricsConfiguration",
+                "GET" => "ListBucketMetricsConfigurations",
+                "PUT" => "PutBucketMetricsConfiguration",
+                "DELETE" => "DeleteBucketMetricsConfiguration",
+                _ => return None,
+            });
+        }
+        if has("requestPayment") {
+            return Some(match method {
+                "GET" => "GetBucketRequestPayment",
+                "PUT" => "PutBucketRequestPayment",
+                _ => return None,
+            });
+        }
+        if has("policyStatus") && is_get {
+            return Some("GetBucketPolicyStatus");
+        }
+        if has("metadataConfiguration") {
+            return Some(match method {
+                "GET" => "GetBucketMetadataConfiguration",
+                "POST" => "CreateBucketMetadataConfiguration",
+                "DELETE" => "DeleteBucketMetadataConfiguration",
+                _ => return None,
+            });
+        }
+        if has("metadataTable") {
+            return Some(match method {
+                "GET" => "GetBucketMetadataTableConfiguration",
+                "POST" => "CreateBucketMetadataTableConfiguration",
+                "DELETE" => "DeleteBucketMetadataTableConfiguration",
+                _ => return None,
+            });
+        }
+        if has("metadataInventoryTable") && is_put {
+            return Some("UpdateBucketMetadataInventoryTableConfiguration");
+        }
+        if has("metadataJournalTable") && is_put {
+            return Some("UpdateBucketMetadataJournalTableConfiguration");
+        }
+        if has("abac") && is_put {
+            return Some("PutBucketAbacConfiguration");
+        }
+        if has("renameObject") && is_put {
+            return Some("RenameObject");
+        }
         if has("object-lock") {
             return Some(match method {
                 "GET" => "GetObjectLockConfiguration",

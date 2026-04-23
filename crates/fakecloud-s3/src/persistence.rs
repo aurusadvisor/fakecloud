@@ -290,6 +290,36 @@ pub fn s3_bucket_from_snapshot(
                 })?;
                 b.inventory_configs = snap.configs;
             }
+            "analytics.toml" => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                b.analytics_configs = toml::from_str(&text).unwrap_or_default();
+            }
+            "intelligent_tiering.toml" => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                b.intelligent_tiering_configs = toml::from_str(&text).unwrap_or_default();
+            }
+            "metrics.toml" => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                b.metrics_configs = toml::from_str(&text).unwrap_or_default();
+            }
+            "request_payment.toml" => {
+                b.request_payment = Some(text);
+            }
+            "abac.toml" => {
+                b.abac_config = Some(text);
+            }
+            "metadata_configuration.toml" => {
+                b.metadata_configuration = Some(text);
+            }
+            "metadata_table_configuration.toml" => {
+                b.metadata_table_configuration = Some(text);
+            }
             _ => {}
         }
     }
