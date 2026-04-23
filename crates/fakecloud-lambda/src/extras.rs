@@ -1501,20 +1501,39 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
+        let body_arn = body
+            .get("FunctionArn")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let body_function = body
+            .get("FunctionName")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        let derived_arn = body_arn.unwrap_or_else(|| match body_function {
+            Some(name) if name.starts_with("arn:") => name,
+            Some(name) => format!(
+                "arn:aws:lambda:us-east-1:{}:function:{name}",
+                req.account_id
+            ),
+            None => String::new(),
+        });
         let exec = state
             .durable_executions
             .entry(id.to_string())
             .or_insert_with(|| DurableExecution {
                 id: id.to_string(),
-                function_arn: String::new(),
+                function_arn: derived_arn.clone(),
                 status: "RUNNING".to_string(),
                 started: Utc::now(),
                 stopped: None,
                 history: Vec::new(),
                 state: json!({}),
             });
+        if exec.function_arn.is_empty() && !derived_arn.is_empty() {
+            exec.function_arn = derived_arn;
+        }
         if let Some(s) = body.get("State") {
             exec.state = s.clone();
         }

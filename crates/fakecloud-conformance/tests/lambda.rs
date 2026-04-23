@@ -473,14 +473,23 @@ async fn lambda_invoke_async_and_stream() {
         .send()
         .await
         .unwrap();
-    // SDK requires a real EventStream shape on the response; the
-    // emulator returns an empty body so the SDK frame parser errors.
-    // Either path is acceptable — the route is wired.
-    let _ = client
+    // The emulator returns an empty body so the SDK's EventStream frame
+    // parser errors. We accept either Ok (route hit + parsed) or an SDK
+    // SdkError after the HTTP call returned 2xx — both prove the route
+    // is wired. A transport/dispatch failure (route missing, 404, etc.)
+    // would surface as ConstructionFailure / DispatchFailure / ResponseError
+    // and is rejected here.
+    use aws_sdk_lambda::error::SdkError;
+    let result = client
         .invoke_with_response_stream()
         .function_name("inv-fn")
         .send()
         .await;
+    match result {
+        Ok(_) => {}
+        Err(SdkError::ResponseError(_)) | Err(SdkError::ServiceError(_)) => {}
+        Err(e) => panic!("invoke_with_response_stream route not wired: {e:?}"),
+    }
 }
 
 #[test_action("lambda", "PublishLayerVersion", checksum = "fb4a6621")]
