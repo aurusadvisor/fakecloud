@@ -35,6 +35,20 @@ pub struct CloudFormationState {
     pub region: String,
     #[serde(default)]
     pub stacks: HashMap<String, Stack>,
+    /// Generic stores keyed by `category` (change_sets, stack_sets, types,
+    /// generated_templates, resource_scans, refactors, etc.) so the
+    /// extras handlers can keep state alive without proliferating
+    /// per-category fields.
+    #[serde(default)]
+    pub extras: HashMap<String, HashMap<String, serde_json::Value>>,
+    #[serde(default)]
+    pub events: HashMap<String, Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub stack_policies: HashMap<String, String>,
+    #[serde(default)]
+    pub termination_protection: HashMap<String, bool>,
+    #[serde(default)]
+    pub orgs_access_enabled: bool,
 }
 
 impl CloudFormationState {
@@ -43,11 +57,21 @@ impl CloudFormationState {
             account_id: account_id.to_string(),
             region: region.to_string(),
             stacks: HashMap::new(),
+            extras: HashMap::new(),
+            events: HashMap::new(),
+            stack_policies: HashMap::new(),
+            termination_protection: HashMap::new(),
+            orgs_access_enabled: false,
         }
     }
 
     pub fn reset(&mut self) {
         self.stacks.clear();
+        self.extras.clear();
+        self.events.clear();
+        self.stack_policies.clear();
+        self.termination_protection.clear();
+        self.orgs_access_enabled = false;
     }
 }
 

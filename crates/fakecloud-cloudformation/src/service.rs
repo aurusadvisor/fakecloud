@@ -119,7 +119,7 @@ pub struct CloudFormationDeps {
 }
 
 pub struct CloudFormationService {
-    state: SharedCloudFormationState,
+    pub(crate) state: SharedCloudFormationState,
     deps: CloudFormationDeps,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
@@ -190,7 +190,7 @@ impl CloudFormationService {
         body_params.get(key).cloned()
     }
 
-    fn get_all_params(req: &AwsRequest) -> HashMap<String, String> {
+    pub(crate) fn get_all_params(req: &AwsRequest) -> HashMap<String, String> {
         let mut params = req.query_params.clone();
         let body_params = fakecloud_core::protocol::parse_query_body(&req.body);
         for (k, v) in body_params {
@@ -672,11 +672,52 @@ impl AwsService for CloudFormationService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let action = req.action.as_str();
         let mutates = matches!(
-            req.action.as_str(),
-            "CreateStack" | "DeleteStack" | "UpdateStack"
+            action,
+            "CreateStack"
+                | "DeleteStack"
+                | "UpdateStack"
+                | "CreateChangeSet"
+                | "DeleteChangeSet"
+                | "ExecuteChangeSet"
+                | "CreateStackSet"
+                | "DeleteStackSet"
+                | "UpdateStackSet"
+                | "ImportStacksToStackSet"
+                | "CreateStackInstances"
+                | "UpdateStackInstances"
+                | "DeleteStackInstances"
+                | "CreateStackRefactor"
+                | "ExecuteStackRefactor"
+                | "ActivateType"
+                | "DeactivateType"
+                | "RegisterType"
+                | "DeregisterType"
+                | "SetTypeConfiguration"
+                | "SetTypeDefaultVersion"
+                | "TestType"
+                | "PublishType"
+                | "RegisterPublisher"
+                | "CreateGeneratedTemplate"
+                | "UpdateGeneratedTemplate"
+                | "DeleteGeneratedTemplate"
+                | "StartResourceScan"
+                | "DetectStackDrift"
+                | "DetectStackResourceDrift"
+                | "DetectStackSetDrift"
+                | "SetStackPolicy"
+                | "UpdateTerminationProtection"
+                | "ActivateOrganizationsAccess"
+                | "DeactivateOrganizationsAccess"
+                | "RollbackStack"
+                | "CancelUpdateStack"
+                | "ContinueUpdateRollback"
+                | "SignalResource"
+                | "RecordHandlerProgress"
+                | "StopStackSetOperation"
         );
-        let result = match req.action.as_str() {
+        let result = match action {
             "CreateStack" => self.create_stack(&req),
             "DeleteStack" => self.delete_stack(&req),
             "DescribeStacks" => self.describe_stacks(&req),
@@ -685,10 +726,7 @@ impl AwsService for CloudFormationService {
             "DescribeStackResources" => self.describe_stack_resources(&req),
             "UpdateStack" => self.update_stack(&req),
             "GetTemplate" => self.get_template(&req),
-            _ => Err(AwsServiceError::action_not_implemented(
-                "cloudformation",
-                &req.action,
-            )),
+            _ => self.handle_extra_action(&req),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
             self.save_snapshot().await;
@@ -698,14 +736,96 @@ impl AwsService for CloudFormationService {
 
     fn supported_actions(&self) -> &[&str] {
         &[
+            "ActivateOrganizationsAccess",
+            "ActivateType",
+            "BatchDescribeTypeConfigurations",
+            "CancelUpdateStack",
+            "ContinueUpdateRollback",
+            "CreateChangeSet",
+            "CreateGeneratedTemplate",
             "CreateStack",
+            "CreateStackInstances",
+            "CreateStackRefactor",
+            "CreateStackSet",
+            "DeactivateOrganizationsAccess",
+            "DeactivateType",
+            "DeleteChangeSet",
+            "DeleteGeneratedTemplate",
             "DeleteStack",
-            "DescribeStacks",
-            "ListStacks",
-            "ListStackResources",
+            "DeleteStackInstances",
+            "DeleteStackSet",
+            "DeregisterType",
+            "DescribeAccountLimits",
+            "DescribeChangeSet",
+            "DescribeChangeSetHooks",
+            "DescribeEvents",
+            "DescribeGeneratedTemplate",
+            "DescribeOrganizationsAccess",
+            "DescribePublisher",
+            "DescribeResourceScan",
+            "DescribeStackDriftDetectionStatus",
+            "DescribeStackEvents",
+            "DescribeStackInstance",
+            "DescribeStackRefactor",
+            "DescribeStackResource",
+            "DescribeStackResourceDrifts",
             "DescribeStackResources",
-            "UpdateStack",
+            "DescribeStackSet",
+            "DescribeStackSetOperation",
+            "DescribeStacks",
+            "DescribeType",
+            "DescribeTypeRegistration",
+            "DetectStackDrift",
+            "DetectStackResourceDrift",
+            "DetectStackSetDrift",
+            "EstimateTemplateCost",
+            "ExecuteChangeSet",
+            "ExecuteStackRefactor",
+            "GetGeneratedTemplate",
+            "GetHookResult",
+            "GetStackPolicy",
             "GetTemplate",
+            "GetTemplateSummary",
+            "ImportStacksToStackSet",
+            "ListChangeSets",
+            "ListExports",
+            "ListGeneratedTemplates",
+            "ListHookResults",
+            "ListImports",
+            "ListResourceScanRelatedResources",
+            "ListResourceScanResources",
+            "ListResourceScans",
+            "ListStackInstanceResourceDrifts",
+            "ListStackInstances",
+            "ListStackRefactorActions",
+            "ListStackRefactors",
+            "ListStackResources",
+            "ListStackSetAutoDeploymentTargets",
+            "ListStackSetOperationResults",
+            "ListStackSetOperations",
+            "ListStackSets",
+            "ListStacks",
+            "ListTypeRegistrations",
+            "ListTypeVersions",
+            "ListTypes",
+            "PublishType",
+            "RecordHandlerProgress",
+            "RegisterPublisher",
+            "RegisterType",
+            "RollbackStack",
+            "SetStackPolicy",
+            "SetTypeConfiguration",
+            "SetTypeDefaultVersion",
+            "SignalResource",
+            "StartResourceScan",
+            "StopStackSetOperation",
+            "TestType",
+            "UpdateGeneratedTemplate",
+            "UpdateStack",
+            "UpdateStackInstances",
+            "UpdateStackSet",
+            "UpdateTerminationProtection",
+            "ValidateTemplate",
         ]
     }
 }
