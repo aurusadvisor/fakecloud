@@ -40,7 +40,7 @@ async fn api_version_probe() {
 }
 
 #[tokio::test]
-async fn api_version_probe_without_auth_is_rejected() {
+async fn api_version_probe_with_bad_credentials_is_rejected() {
     let server = TestServer::start().await;
     let resp = reqwest::Client::new()
         .get(format!("{}/v2/", server.endpoint()))
@@ -50,6 +50,62 @@ async fn api_version_probe_without_auth_is_rejected() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
     assert!(resp.headers().contains_key("www-authenticate"));
+}
+
+#[tokio::test]
+async fn blob_upload_cancel_rejects_cross_repo_upload_id() {
+    let server = TestServer::start().await;
+    let aws = server.ecr_client().await;
+    aws.create_repository()
+        .repository_name("owner-repo")
+        .send()
+        .await
+        .unwrap();
+    aws.create_repository()
+        .repository_name("thief-repo")
+        .send()
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let start = http
+        .post(format!(
+            "{}/v2/owner-repo/blobs/uploads/",
+            server.endpoint()
+        ))
+        .header("Authorization", auth_header())
+        .send()
+        .await
+        .unwrap();
+    let uuid = start
+        .headers()
+        .get("docker-upload-uuid")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    // Different repo must not be able to cancel owner-repo's upload.
+    let resp = http
+        .delete(format!(
+            "{}/v2/thief-repo/blobs/uploads/{uuid}",
+            server.endpoint()
+        ))
+        .header("Authorization", auth_header())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    // Owner still sees its upload (HEAD-equivalent check: PATCH succeeds).
+    let patched = http
+        .patch(format!(
+            "{}/v2/owner-repo/blobs/uploads/{uuid}",
+            server.endpoint()
+        ))
+        .header("Authorization", auth_header())
+        .body(b"still-ours".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), reqwest::StatusCode::ACCEPTED);
 }
 
 #[tokio::test]

@@ -530,9 +530,18 @@ fn blob_upload_cancel(
     let state = accounts
         .get_mut(&request.account_id)
         .ok_or_else(|| repo_not_found(name))?;
-    if state.layer_uploads.remove(upload_id).is_none() {
+    // Match patch/finish: refuse to cancel an upload scoped to a
+    // different repository so a DELETE request for repo A can't tear
+    // down an in-flight upload in repo B.
+    let belongs = state
+        .layer_uploads
+        .get(upload_id)
+        .map(|u| u.repository_name == name)
+        .unwrap_or(false);
+    if !belongs {
         return Err(upload_unknown(upload_id));
     }
+    state.layer_uploads.remove(upload_id);
     Ok(base_response(
         StatusCode::NO_CONTENT,
         "application/json",
