@@ -1669,4 +1669,185 @@ mod tests {
         let req = sts_request("GetFederationToken", vec![]);
         assert!(svc.get_federation_token(&req).is_err());
     }
+
+    // ── AssumeRoot ──
+
+    #[tokio::test]
+    async fn assume_root_with_account_id_succeeds() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "AssumeRoot",
+            vec![
+                ("TargetPrincipal", "111122223333"),
+                (
+                    "TaskPolicyArn.arn",
+                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                ),
+            ],
+        );
+        let resp = svc.assume_root(&req).unwrap();
+        assert_eq!(resp.status, http::StatusCode::OK);
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("AccessKeyId"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn assume_root_with_arn_succeeds() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "AssumeRoot",
+            vec![
+                ("TargetPrincipal", "arn:aws:iam::444455556666:root"),
+                (
+                    "TaskPolicyArn.arn",
+                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                ),
+                ("DurationSeconds", "600"),
+                ("SourceIdentity", "alice"),
+            ],
+        );
+        let resp = svc.assume_root(&req).unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(
+            body.contains("<SourceIdentity>alice</SourceIdentity>"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assume_root_missing_task_policy_errors() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request("AssumeRoot", vec![("TargetPrincipal", "111122223333")]);
+        let err = match svc.assume_root(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected err"),
+        };
+        assert!(err.to_string().contains("TaskPolicyArn"));
+    }
+
+    #[tokio::test]
+    async fn assume_root_invalid_principal_errors() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "AssumeRoot",
+            vec![
+                ("TargetPrincipal", "not-an-id"),
+                ("TaskPolicyArn.arn", "arn:aws:iam::aws:policy/X"),
+            ],
+        );
+        assert!(svc.assume_root(&req).is_err());
+    }
+
+    #[tokio::test]
+    async fn assume_root_duration_above_max_errors() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "AssumeRoot",
+            vec![
+                ("TargetPrincipal", "111122223333"),
+                ("TaskPolicyArn.arn", "arn:aws:iam::aws:policy/X"),
+                ("DurationSeconds", "1800"),
+            ],
+        );
+        assert!(svc.assume_root(&req).is_err());
+    }
+
+    // ── GetDelegatedAccessToken ──
+
+    #[tokio::test]
+    async fn get_delegated_access_token_succeeds() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "GetDelegatedAccessToken",
+            vec![("TradeInToken", "any-non-empty-token")],
+        );
+        let resp = svc.get_delegated_access_token(&req).unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("AssumedPrincipal"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn get_delegated_access_token_missing_token_errors() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request("GetDelegatedAccessToken", vec![]);
+        assert!(svc.get_delegated_access_token(&req).is_err());
+    }
+
+    // ── GetWebIdentityToken ──
+
+    #[tokio::test]
+    async fn get_web_identity_token_succeeds() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "GetWebIdentityToken",
+            vec![
+                ("Audience.member.1", "https://example.com"),
+                ("SigningAlgorithm", "RS256"),
+                ("DurationSeconds", "300"),
+            ],
+        );
+        let resp = svc.get_web_identity_token(&req).unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("WebIdentityToken"), "{body}");
+        // JWT structure: header.payload.signature (signature blank).
+        assert!(body.contains("."), "{body}");
+    }
+
+    #[tokio::test]
+    async fn get_web_identity_token_missing_audience_errors() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request("GetWebIdentityToken", vec![("SigningAlgorithm", "RS256")]);
+        assert!(svc.get_web_identity_token(&req).is_err());
+    }
+
+    #[tokio::test]
+    async fn get_web_identity_token_missing_signing_errors() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "GetWebIdentityToken",
+            vec![("Audience.member.1", "https://example.com")],
+        );
+        assert!(svc.get_web_identity_token(&req).is_err());
+    }
+
+    #[tokio::test]
+    async fn get_web_identity_token_rejects_unknown_algorithm() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "GetWebIdentityToken",
+            vec![
+                ("Audience.member.1", "https://example.com"),
+                ("SigningAlgorithm", "HS256"),
+            ],
+        );
+        assert!(svc.get_web_identity_token(&req).is_err());
+    }
+
+    #[tokio::test]
+    async fn get_web_identity_token_rejects_non_numeric_duration() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "GetWebIdentityToken",
+            vec![
+                ("Audience.member.1", "https://example.com"),
+                ("SigningAlgorithm", "RS256"),
+                ("DurationSeconds", "not-a-number"),
+            ],
+        );
+        assert!(svc.get_web_identity_token(&req).is_err());
+    }
+
+    #[tokio::test]
+    async fn get_web_identity_token_rejects_out_of_range_duration() {
+        let (svc, _) = make_sts_service();
+        let req = sts_request(
+            "GetWebIdentityToken",
+            vec![
+                ("Audience.member.1", "https://example.com"),
+                ("SigningAlgorithm", "RS256"),
+                ("DurationSeconds", "10"),
+            ],
+        );
+        assert!(svc.get_web_identity_token(&req).is_err());
+    }
 }
