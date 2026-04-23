@@ -230,6 +230,13 @@ impl ApiGatewayV2Service {
                 (&Method::GET, 5, Some("apimappings")) => Some(("GetApiMapping", sub, res)),
                 (&Method::PATCH, 5, Some("apimappings")) => Some(("UpdateApiMapping", sub, res)),
                 (&Method::DELETE, 5, Some("apimappings")) => Some(("DeleteApiMapping", sub, res)),
+                // Routing rules are nested under a domain name per the Smithy
+                // model (/v2/domainnames/{DomainName}/routingrules[/...]).
+                (&Method::POST, 4, Some("routingrules")) => Some(("CreateRoutingRule", None, res)),
+                (&Method::GET, 4, Some("routingrules")) => Some(("ListRoutingRules", None, res)),
+                (&Method::GET, 5, Some("routingrules")) => Some(("GetRoutingRule", sub, res)),
+                (&Method::PUT, 5, Some("routingrules")) => Some(("PutRoutingRule", sub, res)),
+                (&Method::DELETE, 5, Some("routingrules")) => Some(("DeleteRoutingRule", sub, res)),
                 _ => None,
             };
         }
@@ -241,17 +248,6 @@ impl ApiGatewayV2Service {
                 (&Method::GET, 3) => Some(("GetVpcLink", None, res)),
                 (&Method::PATCH, 3) => Some(("UpdateVpcLink", None, res)),
                 (&Method::DELETE, 3) => Some(("DeleteVpcLink", None, res)),
-                _ => None,
-            };
-        }
-
-        if second == Some("routingrules") {
-            return match (m, segs.len()) {
-                (&Method::POST, 2) => Some(("CreateRoutingRule", None, None)),
-                (&Method::GET, 2) => Some(("ListRoutingRules", None, None)),
-                (&Method::GET, 3) => Some(("GetRoutingRule", None, res)),
-                (&Method::PUT, 3) => Some(("PutRoutingRule", None, res)),
-                (&Method::DELETE, 3) => Some(("DeleteRoutingRule", None, res)),
                 _ => None,
             };
         }
@@ -274,7 +270,10 @@ impl ApiGatewayV2Service {
                 (&Method::GET, 3, _) => Some(("GetPortal", None, res)),
                 (&Method::PATCH, 3, _) => Some(("UpdatePortal", None, res)),
                 (&Method::DELETE, 3, _) => Some(("DeletePortal", None, res)),
-                (&Method::POST, 4, Some("disable")) => Some(("DisablePortal", None, res)),
+                // Smithy: DisablePortal is DELETE /v2/portals/{id}/publish
+                // (it "unpublishes" the portal). PublishPortal is POST of the
+                // same path.
+                (&Method::DELETE, 4, Some("publish")) => Some(("DisablePortal", None, res)),
                 (&Method::POST, 4, Some("preview")) => Some(("PreviewPortal", None, res)),
                 (&Method::POST, 4, Some("publish")) => Some(("PublishPortal", None, res)),
                 _ => None,
@@ -288,33 +287,33 @@ impl ApiGatewayV2Service {
                 (&Method::GET, 3, _) => Some(("GetPortalProduct", None, res)),
                 (&Method::PATCH, 3, _) => Some(("UpdatePortalProduct", None, res)),
                 (&Method::DELETE, 3, _) => Some(("DeletePortalProduct", None, res)),
-                (&Method::PUT, 4, Some("sharing-policy")) => {
+                (&Method::PUT, 4, Some("sharingpolicy")) => {
                     Some(("PutPortalProductSharingPolicy", None, res))
                 }
-                (&Method::GET, 4, Some("sharing-policy")) => {
+                (&Method::GET, 4, Some("sharingpolicy")) => {
                     Some(("GetPortalProductSharingPolicy", None, res))
                 }
-                (&Method::DELETE, 4, Some("sharing-policy")) => {
+                (&Method::DELETE, 4, Some("sharingpolicy")) => {
                     Some(("DeletePortalProductSharingPolicy", None, res))
                 }
-                (&Method::POST, 4, Some("pages")) => Some(("CreateProductPage", None, res)),
-                (&Method::GET, 4, Some("pages")) => Some(("ListProductPages", None, res)),
-                (&Method::GET, 5, Some("pages")) => Some(("GetProductPage", sub, res)),
-                (&Method::PATCH, 5, Some("pages")) => Some(("UpdateProductPage", sub, res)),
-                (&Method::DELETE, 5, Some("pages")) => Some(("DeleteProductPage", sub, res)),
-                (&Method::POST, 4, Some("rest-endpoint-pages")) => {
+                (&Method::POST, 4, Some("productpages")) => Some(("CreateProductPage", None, res)),
+                (&Method::GET, 4, Some("productpages")) => Some(("ListProductPages", None, res)),
+                (&Method::GET, 5, Some("productpages")) => Some(("GetProductPage", sub, res)),
+                (&Method::PATCH, 5, Some("productpages")) => Some(("UpdateProductPage", sub, res)),
+                (&Method::DELETE, 5, Some("productpages")) => Some(("DeleteProductPage", sub, res)),
+                (&Method::POST, 4, Some("productrestendpointpages")) => {
                     Some(("CreateProductRestEndpointPage", None, res))
                 }
-                (&Method::GET, 4, Some("rest-endpoint-pages")) => {
+                (&Method::GET, 4, Some("productrestendpointpages")) => {
                     Some(("ListProductRestEndpointPages", None, res))
                 }
-                (&Method::GET, 5, Some("rest-endpoint-pages")) => {
+                (&Method::GET, 5, Some("productrestendpointpages")) => {
                     Some(("GetProductRestEndpointPage", sub, res))
                 }
-                (&Method::PATCH, 5, Some("rest-endpoint-pages")) => {
+                (&Method::PATCH, 5, Some("productrestendpointpages")) => {
                     Some(("UpdateProductRestEndpointPage", sub, res))
                 }
-                (&Method::DELETE, 5, Some("rest-endpoint-pages")) => {
+                (&Method::DELETE, 5, Some("productrestendpointpages")) => {
                     Some(("DeleteProductRestEndpointPage", sub, res))
                 }
                 _ => None,
