@@ -1714,12 +1714,13 @@ impl EcrService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
         let name = req_str(&body, "repositoryName")?.to_string();
+        let account = target_account_id(request, &body);
         let policy = match opt_str(&body, "lifecyclePolicyText") {
             Some(s) => s.to_string(),
             None => {
                 let accounts = self.state.read();
                 let state = accounts
-                    .get(&request.account_id)
+                    .get(&account)
                     .ok_or_else(|| repository_not_found(&name))?;
                 let repo = state
                     .repositories
@@ -1730,7 +1731,6 @@ impl EcrService {
                     .ok_or_else(|| lifecycle_policy_not_found(&name))?
             }
         };
-        let account = target_account_id(request, &body);
         let accounts = self.state.read();
         let state = accounts
             .get(&account)
