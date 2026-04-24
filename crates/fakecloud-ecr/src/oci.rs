@@ -243,6 +243,76 @@ fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+/// Resolve how this repository stores layer bytes. Returns `(stored,
+/// encrypted_with)` where `stored` is what gets written into
+/// `Layer.blob_b64` and `encrypted_with` is the KMS key ARN (if any)
+/// the blob was encrypted under. Falls back to plaintext when the
+/// service has no KMS state wired or the repo isn't KMS-configured.
+pub(crate) fn encrypt_layer_bytes(
+    service: &EcrService,
+    account_id: &str,
+    repo_name: &str,
+    plaintext: &[u8],
+) -> (Vec<u8>, Option<String>) {
+    let Some(kms) = service.kms_handle() else {
+        return (plaintext.to_vec(), None);
+    };
+    let accounts = service.state_handle().read();
+    let Some(s) = accounts.get(account_id) else {
+        return (plaintext.to_vec(), None);
+    };
+    let Some(repo) = s.repositories.get(repo_name) else {
+        return (plaintext.to_vec(), None);
+    };
+    if repo.encryption_configuration.encryption_type != "KMS" {
+        return (plaintext.to_vec(), None);
+    }
+    let Some(ref key_ref) = repo.encryption_configuration.kms_key else {
+        return (plaintext.to_vec(), None);
+    };
+    // Drop the state read guard before the KMS call.
+    let key_ref = key_ref.clone();
+    drop(accounts);
+    match fakecloud_kms::api::encrypt_blob(kms, account_id, &key_ref, plaintext) {
+        Ok(bytes) => (bytes, Some(key_ref)),
+        Err(err) => {
+            tracing::warn!(
+                %err, %repo_name,
+                "KMS-encrypt failed for layer; storing plaintext"
+            );
+            (plaintext.to_vec(), None)
+        }
+    }
+}
+
+/// Reverse the transform applied by `encrypt_layer_bytes`. Returns
+/// plaintext bytes; when the layer wasn't encrypted, the input is
+/// returned unchanged.
+pub(crate) fn decrypt_layer_bytes(
+    service: &EcrService,
+    account_id: &str,
+    layer: &Layer,
+) -> Result<Vec<u8>, AwsServiceError> {
+    let raw = B64.decode(layer.blob_b64.as_bytes()).unwrap_or_default();
+    let Some(ref _key_arn) = layer.encrypted_with_kms_key else {
+        return Ok(raw);
+    };
+    let Some(kms) = service.kms_handle() else {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "KmsNotWired",
+            "layer was stored KMS-encrypted but KMS state is not wired into ECR",
+        ));
+    };
+    fakecloud_kms::api::decrypt_blob(kms, account_id, &raw).map_err(|e| {
+        AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "KmsDecryptFailed",
+            format!("failed to decrypt layer blob: {e}"),
+        )
+    })
+}
+
 // -------- handlers --------
 
 fn tags_list(
@@ -322,7 +392,7 @@ async fn blob_get(
             .and_then(|r| r.layers.get(digest).cloned())
     };
     if let Some(layer) = local {
-        let bytes = B64.decode(layer.blob_b64.as_bytes()).unwrap_or_default();
+        let bytes = decrypt_layer_bytes(service, &request.account_id, &layer)?;
         let mut resp = base_response(StatusCode::OK, &layer.media_type, bytes);
         resp.headers.insert(
             "Docker-Content-Digest",
@@ -386,15 +456,28 @@ fn blob_upload_start(
         if expected != computed {
             return Err(digest_invalid());
         }
-        let repo = state.repositories.get_mut(name).unwrap();
         let size = body_bytes.len() as u64;
+        // Drop the state guard before KMS: encrypt_layer_bytes needs its
+        // own read lock, and holding two concurrently would deadlock.
+        drop(accounts);
+        let (stored_bytes, encrypted_with) =
+            encrypt_layer_bytes(service, &request.account_id, name, &body_bytes);
+        let mut accounts = service.state_handle().write();
+        let state = accounts
+            .get_mut(&request.account_id)
+            .ok_or_else(|| repo_not_found(name))?;
+        let repo = state
+            .repositories
+            .get_mut(name)
+            .ok_or_else(|| repo_not_found(name))?;
         repo.layers.insert(
             computed.clone(),
             Layer {
                 digest: computed.clone(),
                 size,
-                blob_b64: B64.encode(&body_bytes),
+                blob_b64: B64.encode(&stored_bytes),
                 media_type: "application/octet-stream".to_string(),
+                encrypted_with_kms_key: encrypted_with,
             },
         );
         let mut resp = base_response(StatusCode::CREATED, "application/json", Vec::new());
@@ -510,6 +593,15 @@ fn blob_upload_finish(
     // a bad digest query param on the last PUT.
     let upload = state.layer_uploads.remove(upload_id).unwrap();
     let _ = upload;
+    // Drop the write guard before calling into KMS (which acquires its
+    // own lock) so we don't hold two incompatible locks concurrently.
+    drop(accounts);
+    let (stored_bytes, encrypted_with) =
+        encrypt_layer_bytes(service, &request.account_id, name, &combined);
+    let mut accounts = service.state_handle().write();
+    let state = accounts
+        .get_mut(&request.account_id)
+        .ok_or_else(|| repo_not_found(name))?;
     let repo = state
         .repositories
         .get_mut(name)
@@ -520,8 +612,9 @@ fn blob_upload_finish(
         Layer {
             digest: computed.clone(),
             size,
-            blob_b64: B64.encode(&combined),
+            blob_b64: B64.encode(&stored_bytes),
             media_type: "application/octet-stream".to_string(),
+            encrypted_with_kms_key: encrypted_with,
         },
     );
     let mut resp = base_response(StatusCode::CREATED, "application/json", Vec::new());

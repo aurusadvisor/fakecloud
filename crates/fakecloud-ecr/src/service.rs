@@ -124,6 +124,11 @@ pub struct EcrService {
     state: SharedEcrState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// KMS state handle — when wired, repositories configured with
+    /// `EncryptionConfiguration.encryption_type == "KMS"` store layer
+    /// blobs encrypted under the configured CMK via
+    /// `fakecloud_kms::api::encrypt_blob` / `decrypt_blob`.
+    kms_state: Option<fakecloud_kms::state::SharedKmsState>,
 }
 
 impl EcrService {
@@ -132,11 +137,17 @@ impl EcrService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            kms_state: None,
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self
+    }
+
+    pub fn with_kms(mut self, kms: fakecloud_kms::state::SharedKmsState) -> Self {
+        self.kms_state = Some(kms);
         self
     }
 
@@ -146,6 +157,12 @@ impl EcrService {
     /// JSON control-plane ops read and write.
     pub fn state_handle(&self) -> &SharedEcrState {
         &self.state
+    }
+
+    /// Handle for the shared KMS state when wired. `None` skips the
+    /// encrypt/decrypt paths and stores / returns plaintext blobs.
+    pub(crate) fn kms_handle(&self) -> Option<&fakecloud_kms::state::SharedKmsState> {
+        self.kms_state.as_ref()
     }
 
     async fn save_snapshot(&self) {
@@ -1505,19 +1522,29 @@ impl EcrService {
                 ),
             ));
         }
-        let upload = state.layer_uploads.remove(&upload_id).unwrap();
+        let _upload = state.layer_uploads.remove(&upload_id).unwrap();
+        let size = blob_bytes.len() as u64;
+        // Drop the write guard before the KMS encrypt call (which takes
+        // its own lock). Re-acquire to insert.
+        drop(accounts);
+        let (stored_bytes, encrypted_with) =
+            crate::oci::encrypt_layer_bytes(self, &account, &name, &blob_bytes);
+        let mut accounts = self.state.write();
+        let state = accounts
+            .get_mut(&account)
+            .ok_or_else(|| repository_not_found(&name))?;
         let repo = state
             .repositories
             .get_mut(&name)
             .ok_or_else(|| repository_not_found(&name))?;
-        let size = blob_bytes.len() as u64;
         repo.layers.insert(
             computed.clone(),
             Layer {
                 digest: computed.clone(),
                 size,
-                blob_b64: upload.blob_b64,
+                blob_b64: B64.encode(&stored_bytes),
                 media_type: "application/vnd.docker.image.rootfs.diff.tar.gzip".to_string(),
+                encrypted_with_kms_key: encrypted_with,
             },
         );
         let registry_id = repo.registry_id.clone();

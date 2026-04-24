@@ -1787,7 +1787,7 @@ async fn main() {
         } else {
             None
         };
-    let mut ecr_service = EcrService::new(ecr_state.clone());
+    let mut ecr_service = EcrService::new(ecr_state.clone()).with_kms(kms_state.clone());
     if let Some(store) = ecr_snapshot_store {
         ecr_service = ecr_service.with_snapshot_store(store);
     }

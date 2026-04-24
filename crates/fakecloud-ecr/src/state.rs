@@ -234,11 +234,20 @@ pub struct Image {
 pub struct Layer {
     pub digest: String,
     pub size: u64,
-    /// Base64-encoded blob bytes. Kept in-process for Batch 2; Batch 3
-    /// will move this to content-addressed disk storage for the OCI
-    /// `/v2/` protocol.
+    /// Base64-encoded blob bytes. When the owning repository has
+    /// `EncryptionConfiguration.encryption_type == "KMS"`, these bytes
+    /// are the envelope produced by `fakecloud_kms::api::encrypt_blob`;
+    /// `blob_get` decrypts on the way out. For AES256 (fakecloud's
+    /// default) the bytes are the plaintext blob.
     pub blob_b64: String,
     pub media_type: String,
+    /// ARN of the KMS key the blob was encrypted under, when stored
+    /// encrypted. `None` means the bytes in `blob_b64` are plaintext
+    /// — either because the repo used the default AES256 encryption
+    /// (fakecloud-internal, no-op) or the layer pre-dates the KMS
+    /// wire-up.
+    #[serde(default)]
+    pub encrypted_with_kms_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
