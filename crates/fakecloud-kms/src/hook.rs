@@ -211,19 +211,30 @@ impl KmsServiceHook {
     }
 }
 
+/// Strip the `arn:aws:kms:<region>:<account>:` ARN prefix and return
+/// the resource portion (e.g. `key/<id>` or `alias/<name>`). Returns
+/// `None` for ARNs that don't have the right shape.
+fn strip_kms_arn_prefix(key_id: &str) -> Option<&str> {
+    let rest = key_id.strip_prefix("arn:aws:kms:")?;
+    // Format after prefix: <region>:<account>:<resource>. Need to skip
+    // both `region` and `account` separately so the resource starts
+    // cleanly at `key/...` or `alias/...`.
+    let (_region, after_region) = rest.split_once(':')?;
+    let (_account, resource) = after_region.split_once(':')?;
+    Some(resource)
+}
+
 /// Resolve `key_id` (raw id, alias name, alias ARN, or key ARN) to the
 /// full key ARN if it currently exists in `state`.
 fn resolve_key(state: &KmsState, key_id: &str) -> Option<String> {
-    if let Some(rest) = key_id.strip_prefix("arn:aws:kms:") {
-        if let Some(after_resource) = rest.split_once(':').map(|(_, r)| r) {
-            if let Some(short) = after_resource.strip_prefix("key/") {
-                return state.keys.get(short).map(|k| k.arn.clone());
-            }
-            if let Some(alias) = after_resource.strip_prefix("alias/") {
-                let full = format!("alias/{alias}");
-                if let Some(a) = state.aliases.get(&full) {
-                    return state.keys.get(&a.target_key_id).map(|k| k.arn.clone());
-                }
+    if let Some(resource) = strip_kms_arn_prefix(key_id) {
+        if let Some(short) = resource.strip_prefix("key/") {
+            return state.keys.get(short).map(|k| k.arn.clone());
+        }
+        if let Some(alias) = resource.strip_prefix("alias/") {
+            let full = format!("alias/{alias}");
+            if let Some(a) = state.aliases.get(&full) {
+                return state.keys.get(&a.target_key_id).map(|k| k.arn.clone());
             }
         }
     }
@@ -237,11 +248,9 @@ fn resolve_key(state: &KmsState, key_id: &str) -> Option<String> {
 }
 
 fn normalize_alias(key_id: &str) -> String {
-    if let Some(rest) = key_id.strip_prefix("arn:aws:kms:") {
-        if let Some(after_resource) = rest.split_once(':').map(|(_, r)| r) {
-            if let Some(alias) = after_resource.strip_prefix("alias/") {
-                return alias.to_string();
-            }
+    if let Some(resource) = strip_kms_arn_prefix(key_id) {
+        if let Some(alias) = resource.strip_prefix("alias/") {
+            return alias.to_string();
         }
     }
     key_id.strip_prefix("alias/").unwrap_or(key_id).to_string()
@@ -318,4 +327,34 @@ fn provision_aws_managed_key(
 
 fn key_id_from_arn(arn: &str) -> &str {
     arn.rsplit_once('/').map(|(_, k)| k).unwrap_or(arn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_arn_prefix_skips_region_and_account() {
+        assert_eq!(
+            strip_kms_arn_prefix("arn:aws:kms:us-east-1:000000000000:key/abc-123"),
+            Some("key/abc-123")
+        );
+        assert_eq!(
+            strip_kms_arn_prefix("arn:aws:kms:us-east-1:000000000000:alias/aws/secretsmanager"),
+            Some("alias/aws/secretsmanager")
+        );
+        assert_eq!(strip_kms_arn_prefix("not-an-arn"), None);
+        // Missing one of region/account should return None, not a half-stripped resource.
+        assert_eq!(strip_kms_arn_prefix("arn:aws:kms:key/abc"), None);
+    }
+
+    #[test]
+    fn normalize_alias_handles_arns_correctly() {
+        assert_eq!(
+            normalize_alias("arn:aws:kms:us-east-1:000000000000:alias/aws/secretsmanager"),
+            "aws/secretsmanager"
+        );
+        assert_eq!(normalize_alias("alias/aws/sqs"), "aws/sqs");
+        assert_eq!(normalize_alias("aws/s3"), "aws/s3");
+    }
 }

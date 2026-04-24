@@ -43,16 +43,21 @@ enum VersionIdempotency {
 /// version. AWS uses `ClientRequestToken` as a client-side idempotency
 /// key, so a repeat write of the exact same payload is a success but a
 /// repeat with a different payload is a `ResourceExistsException`.
+///
+/// `existing_plaintext` is the existing version's decrypted secret
+/// string — callers compute this via the KMS hook before invoking so
+/// the comparison happens on plaintext, not on stored ciphertext.
 fn check_secret_version_idempotency(
     versions: &HashMap<String, SecretVersion>,
     version_id: &str,
+    existing_plaintext: Option<String>,
     secret_string: &Option<String>,
     secret_binary: &Option<Vec<u8>>,
 ) -> VersionIdempotency {
     let Some(existing) = versions.get(version_id) else {
         return VersionIdempotency::NotFound;
     };
-    if &existing.secret_string == secret_string && &existing.secret_binary == secret_binary {
+    if &existing_plaintext == secret_string && &existing.secret_binary == secret_binary {
         VersionIdempotency::Match
     } else {
         VersionIdempotency::Conflict
@@ -214,9 +219,18 @@ impl SecretsManagerService {
 
         if let Some(existing) = state.secrets.get(&input.name) {
             if let Some(ref token) = input.client_request_token {
+                let existing_plaintext = existing.versions.get(token).and_then(|v| {
+                    self.maybe_decrypt_secret_string(
+                        &req.account_id,
+                        &existing.arn,
+                        existing.kms_key_id.as_deref(),
+                        v.secret_string.as_deref(),
+                    )
+                });
                 match check_secret_version_idempotency(
                     &existing.versions,
                     token,
+                    existing_plaintext,
                     &input.secret_string,
                     &input.secret_binary,
                 ) {
@@ -475,9 +489,18 @@ impl SecretsManagerService {
             .map(|s| s.to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+        let existing_plaintext = secret.versions.get(&version_id).and_then(|v| {
+            self.maybe_decrypt_secret_string(
+                &req.account_id,
+                &secret.arn,
+                secret.kms_key_id.as_deref(),
+                v.secret_string.as_deref(),
+            )
+        });
         match check_secret_version_idempotency(
             &secret.versions,
             &version_id,
+            existing_plaintext,
             &secret_string,
             &secret_binary,
         ) {
@@ -634,9 +657,18 @@ impl SecretsManagerService {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+            let existing_plaintext = secret.versions.get(&vid).and_then(|v| {
+                self.maybe_decrypt_secret_string(
+                    &req.account_id,
+                    &secret.arn,
+                    secret.kms_key_id.as_deref(),
+                    v.secret_string.as_deref(),
+                )
+            });
             match check_secret_version_idempotency(
                 &secret.versions,
                 &vid,
+                existing_plaintext,
                 &secret_string,
                 &secret_binary,
             ) {
@@ -4400,13 +4432,19 @@ mod tests {
 
         // Not found
         assert!(matches!(
-            check_secret_version_idempotency(&versions, "v2", &Some("x".to_string()), &None),
+            check_secret_version_idempotency(&versions, "v2", None, &Some("x".to_string()), &None),
             VersionIdempotency::NotFound
         ));
 
         // Match
         assert!(matches!(
-            check_secret_version_idempotency(&versions, "v1", &Some("hello".to_string()), &None),
+            check_secret_version_idempotency(
+                &versions,
+                "v1",
+                Some("hello".to_string()),
+                &Some("hello".to_string()),
+                &None
+            ),
             VersionIdempotency::Match
         ));
 
@@ -4415,6 +4453,7 @@ mod tests {
             check_secret_version_idempotency(
                 &versions,
                 "v1",
+                Some("hello".to_string()),
                 &Some("different".to_string()),
                 &None
             ),
