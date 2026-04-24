@@ -48,6 +48,7 @@ pub struct S3Service {
     state: SharedS3State,
     delivery: Arc<DeliveryBus>,
     kms_state: Option<SharedKmsState>,
+    pub(crate) kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
     #[allow(dead_code)]
     store: Arc<dyn S3Store>,
 }
@@ -88,6 +89,7 @@ impl S3Service {
             state,
             delivery,
             kms_state: None,
+            kms_hook: None,
             store,
         }
     }
@@ -95,6 +97,71 @@ impl S3Service {
     pub fn with_kms(mut self, kms_state: SharedKmsState) -> Self {
         self.kms_state = Some(kms_state);
         self
+    }
+
+    pub fn with_kms_hook(mut self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
+        self.kms_hook = Some(hook);
+        self
+    }
+
+    /// Encrypt object body bytes for SSE-KMS storage. Returns ciphertext as
+    /// raw bytes (a UTF-8 fakecloud-kms envelope), or the plaintext unchanged
+    /// when no hook is configured (preserving legacy in-process tests).
+    pub(crate) fn encrypt_object_body(
+        &self,
+        account_id: &str,
+        region: &str,
+        bucket: &str,
+        plaintext: &[u8],
+        kms_key_id: Option<&str>,
+    ) -> bytes::Bytes {
+        let Some(hook) = &self.kms_hook else {
+            return bytes::Bytes::copy_from_slice(plaintext);
+        };
+        let key = kms_key_id.filter(|k| !k.is_empty()).unwrap_or("aws/s3");
+        let bucket_arn = format!("arn:aws:s3:::{bucket}");
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("aws:s3:arn".to_string(), bucket_arn);
+        match hook.encrypt(account_id, region, key, plaintext, "s3.amazonaws.com", ctx) {
+            Ok(envelope) => bytes::Bytes::from(envelope.into_bytes()),
+            Err(err) => {
+                tracing::warn!(
+                    bucket = %bucket,
+                    error = %err,
+                    "KMS encrypt failed for S3 object; storing plaintext"
+                );
+                bytes::Bytes::copy_from_slice(plaintext)
+            }
+        }
+    }
+
+    /// Decrypt object body bytes that were stored as a fakecloud-kms
+    /// envelope. Caller is expected to gate this on
+    /// `obj.sse_algorithm == Some("aws:kms")`. Bytes that fail to decrypt
+    /// (legacy snapshots written before the hook landed) are returned
+    /// as-is rather than producing an error response.
+    pub(crate) fn decrypt_object_body(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        ciphertext: &[u8],
+    ) -> bytes::Bytes {
+        let Some(hook) = &self.kms_hook else {
+            return bytes::Bytes::copy_from_slice(ciphertext);
+        };
+        // Stored envelope is base64 ASCII; bytes outside that range can't
+        // be decrypted, so short-circuit to plaintext.
+        let envelope = match std::str::from_utf8(ciphertext) {
+            Ok(s) => s,
+            Err(_) => return bytes::Bytes::copy_from_slice(ciphertext),
+        };
+        let bucket_arn = format!("arn:aws:s3:::{bucket}");
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("aws:s3:arn".to_string(), bucket_arn);
+        match hook.decrypt(account_id, envelope, "s3.amazonaws.com", ctx) {
+            Ok(bytes) => bytes::Bytes::from(bytes),
+            Err(_) => bytes::Bytes::copy_from_slice(ciphertext),
+        }
     }
 }
 

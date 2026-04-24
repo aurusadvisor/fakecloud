@@ -989,8 +989,9 @@ async fn main() {
         } else {
             None
         };
-    let mut ssm_service =
-        SsmService::new(ssm_state).with_secretsmanager(secretsmanager_state.clone());
+    let mut ssm_service = SsmService::new(ssm_state)
+        .with_secretsmanager(secretsmanager_state.clone())
+        .with_kms_hook(kms_hook_for_services.clone());
     if let Some(store) = ssm_snapshot_store {
         ssm_service = ssm_service.with_snapshot_store(store);
     }
@@ -1359,7 +1360,8 @@ async fn main() {
     }
     registry.register(Arc::new(
         S3Service::with_store(s3_state.clone(), delivery_for_s3, s3_store.clone())
-            .with_kms(kms_state.clone()),
+            .with_kms(kms_state.clone())
+            .with_kms_hook(kms_hook_for_services.clone()),
     ));
     // Snapshot store is only wired in persistent mode. In memory mode we
     // leave it unset so the service doesn't pay the per-mutation
