@@ -432,7 +432,7 @@ async fn main() {
     let delivery_for_s3 = {
         let mut bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
-            .with_sns(sns_delivery)
+            .with_sns(sns_delivery.clone())
             .with_eventbridge(eb_delivery_for_s3);
         if let Some(ref ld) = lambda_delivery {
             bus = bus.with_lambda(ld.clone());
@@ -841,6 +841,7 @@ async fn main() {
     let eb_state_for_sfn = eb_state.clone();
     let eb_state_for_scheduler = eb_state.clone();
     let eb_state_for_rds = eb_state.clone();
+    let eb_state_for_lambda = eb_state.clone();
     let mut scheduler = fakecloud_eventbridge::scheduler::Scheduler::new(eb_state, delivery_for_eb)
         .with_lambda(lambda_state.clone())
         .with_logs(logs_state.clone());
@@ -995,6 +996,27 @@ async fn main() {
     if let Some(ref rt) = container_runtime {
         lambda_service = lambda_service.with_runtime(rt.clone());
     }
+    // Async-invoke destinations (OnSuccess/OnFailure) route to SQS / SNS /
+    // EventBridge / Lambda by ARN scheme.
+    let mut lambda_destinations_inner = DeliveryBus::new()
+        .with_sqs(sqs_delivery.clone())
+        .with_sns(sns_delivery.clone());
+    if let Some(ref ld) = lambda_delivery {
+        lambda_destinations_inner = lambda_destinations_inner.with_lambda(ld.clone());
+    }
+    let lambda_destinations_bus = Arc::new(
+        lambda_destinations_inner.with_eventbridge(Arc::new(
+            fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
+                eb_state_for_lambda,
+                Arc::new(
+                    DeliveryBus::new()
+                        .with_sqs(sqs_delivery.clone())
+                        .with_sns(sns_delivery.clone()),
+                ),
+            ),
+        )),
+    );
+    lambda_service = lambda_service.with_delivery_bus(lambda_destinations_bus);
     let lambda_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

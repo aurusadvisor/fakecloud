@@ -17,6 +17,8 @@ fakecloud implements **85 of 85** Lambda operations at 100% Smithy conformance. 
 - **Aliases and versions** — publish, point aliases at versions
 - **Concurrency controls** — reserved concurrency (recorded, not enforced)
 - **Warm container reuse** — subsequent invocations of the same function reuse the container
+- **Async invoke destinations** — `OnSuccess` / `OnFailure` routes the invocation result to SQS, SNS, EventBridge, or another Lambda by ARN scheme; record matches the AWS destinations schema (`requestContext`, `requestPayload`, `responseContext`, `responsePayload`)
+- **`InvocationType` honored** — `Event` returns 202 and runs in the background, `RequestResponse` blocks for the result, `DryRun` validates without executing
 
 ## Protocol
 
