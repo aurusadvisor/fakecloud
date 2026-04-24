@@ -1000,6 +1000,9 @@ async fn main() {
     let dynamodb_state_for_register = dynamodb_state.clone();
     let delivery_for_dynamodb_register = delivery_for_dynamodb;
     let mut lambda_service = LambdaService::new(lambda_state.clone());
+    lambda_service = lambda_service.with_role_trust_validator(
+        fakecloud_iam::pass_role::IamRoleTrustValidator::shared(iam_state.clone()),
+    );
     if let Some(ref rt) = container_runtime {
         lambda_service = lambda_service.with_runtime(rt.clone());
     }
@@ -1896,6 +1899,9 @@ async fn main() {
             None
         };
     let mut ecs_service = EcsService::new(ecs_state.clone());
+    ecs_service = ecs_service.with_role_trust_validator(
+        fakecloud_iam::pass_role::IamRoleTrustValidator::shared(iam_state.clone()),
+    );
     if let Some(store) = ecs_snapshot_store {
         ecs_service = ecs_service.with_snapshot_store(store);
     }

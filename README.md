@@ -59,7 +59,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | EventBridge Scheduler  |  12 | at/rate/cron, SQS targets, DLQ routing, one-shot self-delete           |
 | Lambda                 |  85 | Real code execution in Docker, 13 runtimes, event source mappings      |
 | DynamoDB               |  57 | Transactions, PartiQL, backups, global tables, streams                 |
-| IAM                    | 176 | Users, roles, policies, groups, instance profiles, OIDC/SAML           |
+| IAM                    | 176 | Users, roles, policies, groups, OIDC/SAML, **PassRole trust enforcement** |
 | STS                    |  11 | AssumeRole, session tokens, federation                                 |
 | SSM                    | 146 | Parameters, documents, commands, maintenance, patch baselines          |
 | Secrets Manager        |  23 | Versioning, rotation via Lambda, replication, **real KMS encrypt/decrypt** |

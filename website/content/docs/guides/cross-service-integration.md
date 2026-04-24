@@ -49,6 +49,7 @@ fakecloud actually executes the cross-service wiring. When an EventBridge rule m
 - **EventBridge Scheduler** — Cron and rate-based rules fire on schedule.
 - **RDS -> EventBridge** — DB instance and snapshot lifecycle ops (create, modify, delete, reboot, start, stop, snapshot create/delete, restore) emit `aws.rds` events that match the AWS event schema.
 - **ECS -> EventBridge** — Task state transitions emit `ECS Task State Change` events on the default bus.
+- **IAM PassRole trust enforcement** — Lambda `CreateFunction` / `UpdateFunctionConfiguration` and ECS `RegisterTaskDefinition` / `RunTask` overrides reject role ARNs whose `AssumeRolePolicyDocument` doesn't list the calling service principal (`lambda.amazonaws.com`, `ecs-tasks.amazonaws.com`), the same way real AWS does.
 
 ## Testing a cross-service flow
 

@@ -126,6 +126,7 @@ pub struct EcsService {
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
     runtime: Option<Arc<crate::runtime::EcsRuntime>>,
+    role_trust_validator: Option<Arc<dyn fakecloud_core::auth::RoleTrustValidator>>,
 }
 
 impl EcsService {
@@ -135,6 +136,7 @@ impl EcsService {
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             runtime: None,
+            role_trust_validator: None,
         }
     }
 
@@ -146,6 +148,28 @@ impl EcsService {
     pub fn with_runtime(mut self, runtime: Arc<crate::runtime::EcsRuntime>) -> Self {
         self.runtime = Some(runtime);
         self
+    }
+
+    pub fn with_role_trust_validator(
+        mut self,
+        validator: Arc<dyn fakecloud_core::auth::RoleTrustValidator>,
+    ) -> Self {
+        self.role_trust_validator = Some(validator);
+        self
+    }
+
+    fn check_pass_role(&self, account_id: &str, role_arn: &str) -> Result<(), AwsServiceError> {
+        let Some(ref validator) = self.role_trust_validator else {
+            return Ok(());
+        };
+        if let Err(err) = validator.validate(account_id, role_arn, "ecs-tasks.amazonaws.com") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                err.to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn state_handle(&self) -> &SharedEcsState {
@@ -831,6 +855,16 @@ impl EcsService {
                 ));
             }
         }
+        // PassRole trust check on the task + execution roles. Real AWS
+        // rejects RegisterTaskDefinition when the role's trust policy
+        // doesn't list `ecs-tasks.amazonaws.com`.
+        if let Some(role_arn) = opt_str(&body, "taskRoleArn") {
+            self.check_pass_role(&request.account_id, role_arn)?;
+        }
+        if let Some(role_arn) = opt_str(&body, "executionRoleArn") {
+            self.check_pass_role(&request.account_id, role_arn)?;
+        }
+
         let tags = parse_tags(&body);
         let requires_compatibilities: Vec<String> = body
             .get("requiresCompatibilities")
@@ -1451,6 +1485,20 @@ impl EcsService {
         let group = opt_str(&body, "group").map(String::from);
         let started_by = opt_str(&body, "startedBy").map(String::from);
         let tags = parse_tags(&body);
+
+        // PassRole trust check on any role overrides supplied via the
+        // overrides.taskRoleArn / overrides.executionRoleArn fields.
+        // The base task definition was already checked at Register time,
+        // but RunTask can override either role and AWS re-validates the
+        // trust policy on every call.
+        if let Some(overrides) = body.get("overrides") {
+            if let Some(role_arn) = opt_str(overrides, "taskRoleArn") {
+                self.check_pass_role(&request.account_id, role_arn)?;
+            }
+            if let Some(role_arn) = opt_str(overrides, "executionRoleArn") {
+                self.check_pass_role(&request.account_id, role_arn)?;
+            }
+        }
 
         let account = request.account_id.clone();
         let runtime = self.runtime.clone();

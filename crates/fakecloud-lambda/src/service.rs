@@ -233,6 +233,7 @@ pub struct LambdaService {
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
     pub(crate) delivery_bus: Option<Arc<fakecloud_core::delivery::DeliveryBus>>,
+    pub(crate) role_trust_validator: Option<Arc<dyn fakecloud_core::auth::RoleTrustValidator>>,
 }
 
 impl LambdaService {
@@ -243,6 +244,7 @@ impl LambdaService {
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             delivery_bus: None,
+            role_trust_validator: None,
         }
     }
 
@@ -258,6 +260,14 @@ impl LambdaService {
 
     pub fn with_delivery_bus(mut self, bus: Arc<fakecloud_core::delivery::DeliveryBus>) -> Self {
         self.delivery_bus = Some(bus);
+        self
+    }
+
+    pub fn with_role_trust_validator(
+        mut self,
+        validator: Arc<dyn fakecloud_core::auth::RoleTrustValidator>,
+    ) -> Self {
+        self.role_trust_validator = Some(validator);
         self
     }
 
@@ -727,6 +737,22 @@ impl LambdaService {
     fn create_function(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         let input = CreateFunctionInput::from_body(&body)?;
+
+        // PassRole trust-policy check: the supplied execution role must
+        // have a trust policy that allows lambda.amazonaws.com to call
+        // sts:AssumeRole. Real AWS rejects with InvalidParameterValueException
+        // when the trust policy doesn't include the service principal.
+        if let Some(ref validator) = self.role_trust_validator {
+            if let Err(err) =
+                validator.validate(&req.account_id, &input.role, "lambda.amazonaws.com")
+            {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    err.to_string(),
+                ));
+            }
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
