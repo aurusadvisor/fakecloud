@@ -6,17 +6,31 @@ weight = 22
 
 fakecloud implements Amazon Elastic Container Service (ECS) with a four-batch roadmap. This page tracks what's shipped.
 
-**Status: Batch 1 shipped — control-plane CRUD.** Subsequent batches add real task execution (Batch 2), services + rolling deployments (Batch 3), and completeness (Batch 4: container instances, capacity providers, task protection, `ExecuteCommand`).
+**Status: Batches 1 + 2 shipped — control-plane CRUD plus real task execution.** Subsequent batches add services + rolling deployments (Batch 3) and completeness (Batch 4: container instances, capacity providers, task protection, `ExecuteCommand`).
 
-## Supported today (Batch 1)
+## Supported today (Batches 1 + 2)
 
 - **Clusters** — `CreateCluster`, `DescribeClusters`, `DeleteCluster`, `ListClusters`, `UpdateCluster`, `UpdateClusterSettings`, `PutClusterCapacityProviders`
 - **Task definitions** — `RegisterTaskDefinition`, `DescribeTaskDefinition`, `DeregisterTaskDefinition`, `DeleteTaskDefinitions`, `ListTaskDefinitions`, `ListTaskDefinitionFamilies`
+- **Tasks** — `RunTask`, `StartTask`, `StopTask`, `DescribeTasks`, `ListTasks` with real Fargate-style execution via Docker/Podman
 - **Tagging** — `TagResource`, `UntagResource`, `ListTagsForResource` (clusters and task definitions)
 - **Account settings** — `PutAccountSetting`, `PutAccountSettingDefault`, `DeleteAccountSetting`, `ListAccountSettings`
-- **Introspection endpoint** — `GET /_fakecloud/ecs/clusters` dumps every cluster across every account, bypassing the public API
 
 Task-definition families track revisions monotonically; `DeleteTaskDefinitions` requires `DeregisterTaskDefinition` first (real AWS behaviour), and the result flips status to `DELETE_IN_PROGRESS`.
+
+## Task execution (Batch 2)
+
+`RunTask` records the task synchronously and kicks off a background docker execution per spawned task:
+
+1. `docker pull <image>` (timestamps captured on the task: `pullStartedAt` / `pullStoppedAt`)
+2. `docker run -d <image>` (container ID recorded on the task's container)
+3. `docker wait <id>` (blocks on container exit; exit code → `containers[].exitCode`)
+4. `docker logs <id>` (captured stdout/stderr stored on the task + exposed via the introspection endpoint)
+5. `docker rm <id>` (cleanup)
+
+Environment variables from the task definition are forwarded with `localhost` / `127.0.0.1` rewritten to `host.docker.internal` so containers reach fakecloud itself the same way Lambda does.
+
+Without a container runtime (docker/podman missing), `RunTask` still returns tasks but they immediately transition to `STOPPED` with `stopCode=TaskFailedToStart`. This keeps the API surface shape-correct so tests on CI agents without Docker can still drive the control-plane surface.
 
 ## Protocol
 
@@ -24,11 +38,21 @@ JSON protocol over `POST /`, with `X-Amz-Target: AmazonEC2ContainerServiceV20141
 
 ## Introspection
 
-```text
-GET /_fakecloud/ecs/clusters
-```
+Endpoints bypass the public AWS API so tests can assert deterministic state without pagination or role-assumption noise.
 
-Returns every cluster fakecloud has recorded, sorted by cluster ARN. Useful for asserting deterministic state in tests without dealing with public-API pagination.
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/_fakecloud/ecs/clusters` | GET | Dump every cluster across all accounts |
+| `/_fakecloud/ecs/tasks` | GET | Dump every task; filter with `?cluster=` / `?status=` |
+| `/_fakecloud/ecs/tasks/{taskId}` | GET | Single-task deep detail |
+| `/_fakecloud/ecs/tasks/{taskId}/logs` | GET | Captured docker stdout/stderr + exit code |
+| `/_fakecloud/ecs/tasks/{taskId}/force-stop` | POST | SIGTERM + SIGKILL the running container |
+| `/_fakecloud/ecs/tasks/{taskId}/mark-failed` | POST | Flip to STOPPED without killing the container (inject exit code + reason) |
+| `/_fakecloud/ecs/events` | GET | Replay the lifecycle event log |
+
+All endpoints are sorted deterministically (by ARN for clusters/tasks, by timestamp for events) so test assertions don't flake on map iteration order.
+
+### Clusters dump
 
 ```json
 {
@@ -78,9 +102,8 @@ let clusters = fc.ecs().get_clusters().await?;
 
 ## Roadmap
 
-- **Batch 2** — `RunTask`, `StartTask`, `StopTask`, `DescribeTasks`, `ListTasks`: real Fargate-style container execution via Docker, ECR image pull, awslogs driver wiring to CloudWatch Logs, EventBridge `ECS Task State Change` events
-- **Batch 3** — `CreateService`, `UpdateService`, rolling deployments with `minimumHealthyPercent`/`maximumPercent`, `CreateTaskSet`/`UpdateTaskSet` (EXTERNAL deployment controller), deployment circuit breaker
-- **Batch 4** — Container instances, attributes, capacity providers, task protection, ECS Exec (`ExecuteCommand` via `docker exec`), snapshot/restore of in-flight tasks
+- **Batch 3** — `CreateService`, `UpdateService`, rolling deployments with `minimumHealthyPercent`/`maximumPercent`, `CreateTaskSet`/`UpdateTaskSet` (EXTERNAL deployment controller), deployment circuit breaker. EventBridge `ECS Task State Change` events. awslogs driver wiring to CloudWatch Logs (today captured stdout/stderr live on the task; Batch 3 ships them to CW Logs automatically).
+- **Batch 4** — Container instances, attributes, capacity providers, task protection, ECS Exec (`ExecuteCommand` via `docker exec`), snapshot/restore of in-flight tasks, IAM task-role credential injection via `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`.
 
 ## Source
 

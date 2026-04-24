@@ -14,7 +14,7 @@ impl fakecloud_core::multi_account::AccountState for EcsState {
     }
 }
 
-pub const ECS_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const ECS_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Top-level persisted ECS snapshot. Mirrors the multi-account snapshot
 /// convention used by Kinesis/ECR/ElastiCache so `main.rs` can share the
@@ -44,6 +44,13 @@ pub struct EcsState {
     /// Per-principal account settings (PutAccountSetting). Keyed by
     /// principal ARN, then setting name.
     pub principal_account_settings: BTreeMap<String, BTreeMap<String, String>>,
+    /// Tasks keyed by task ID (the trailing segment of the task ARN).
+    #[serde(default)]
+    pub tasks: BTreeMap<String, Task>,
+    /// Lifecycle event log for introspection. Bounded at 1024 entries
+    /// (oldest dropped) so long-running servers don't grow unboundedly.
+    #[serde(default)]
+    pub events: Vec<LifecycleEvent>,
 }
 
 impl EcsState {
@@ -56,6 +63,8 @@ impl EcsState {
             next_revision: BTreeMap::new(),
             account_setting_defaults: BTreeMap::new(),
             principal_account_settings: BTreeMap::new(),
+            tasks: BTreeMap::new(),
+            events: Vec::new(),
         }
     }
 
@@ -65,6 +74,24 @@ impl EcsState {
         self.next_revision.clear();
         self.account_setting_defaults.clear();
         self.principal_account_settings.clear();
+        self.tasks.clear();
+        self.events.clear();
+    }
+
+    pub fn task_arn(&self, cluster_name: &str, task_id: &str) -> String {
+        format!(
+            "arn:aws:ecs:{}:{}:task/{}/{}",
+            self.region, self.account_id, cluster_name, task_id
+        )
+    }
+
+    /// Append a lifecycle event, trimming the oldest when the cap is hit.
+    pub fn push_event(&mut self, event: LifecycleEvent) {
+        const MAX_EVENTS: usize = 1024;
+        if self.events.len() >= MAX_EVENTS {
+            self.events.drain(0..self.events.len() - MAX_EVENTS + 1);
+        }
+        self.events.push(event);
     }
 
     pub fn cluster_arn(&self, cluster_name: &str) -> String {
@@ -201,6 +228,106 @@ pub struct TaskDefinition {
     #[serde(default)]
     pub tags: Vec<TagEntry>,
     pub enable_fault_injection: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Task {
+    pub task_arn: String,
+    pub task_id: String,
+    pub cluster_arn: String,
+    pub cluster_name: String,
+    pub task_definition_arn: String,
+    pub family: String,
+    pub revision: i32,
+    /// Current lifecycle state: PROVISIONING, PENDING, RUNNING,
+    /// DEPROVISIONING, STOPPED.
+    pub last_status: String,
+    /// What the caller asked for: usually RUNNING, or STOPPED once
+    /// `StopTask` / `StopService` hits.
+    pub desired_status: String,
+    pub launch_type: String,
+    pub platform_version: Option<String>,
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+    #[serde(default)]
+    pub containers: Vec<Container>,
+    #[serde(default)]
+    pub overrides: Value,
+    pub started_by: Option<String>,
+    pub group: Option<String>,
+    pub connectivity: String,
+    pub stop_code: Option<String>,
+    pub stopped_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub stopping_at: Option<DateTime<Utc>>,
+    pub stopped_at: Option<DateTime<Utc>>,
+    pub pull_started_at: Option<DateTime<Utc>>,
+    pub pull_stopped_at: Option<DateTime<Utc>>,
+    pub connectivity_at: Option<DateTime<Utc>>,
+    pub started_by_ref_id: Option<String>,
+    pub execution_role_arn: Option<String>,
+    pub task_role_arn: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<TagEntry>,
+    /// Log destination derived from the first container's awslogs driver.
+    /// `None` when no awslogs driver is configured — captured stdout/stderr
+    /// is still stored on the task for introspection.
+    pub awslogs: Option<AwsLogsConfig>,
+    /// Captured stdout/stderr from the container. Populated after the
+    /// container exits. Kept here so the introspection endpoint can serve
+    /// logs even when no awslogs driver is configured.
+    #[serde(default)]
+    pub captured_logs: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Container {
+    pub container_arn: String,
+    pub name: String,
+    pub image: String,
+    pub task_arn: String,
+    pub last_status: String,
+    pub exit_code: Option<i64>,
+    pub reason: Option<String>,
+    pub runtime_id: Option<String>,
+    pub essential: bool,
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+    pub memory_reservation: Option<String>,
+    #[serde(default)]
+    pub network_bindings: Vec<Value>,
+    #[serde(default)]
+    pub network_interfaces: Vec<Value>,
+    pub health_status: Option<String>,
+    pub managed_agents: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AwsLogsConfig {
+    pub group: String,
+    pub stream_prefix: Option<String>,
+    pub region: String,
+    pub container_name: String,
+}
+
+impl AwsLogsConfig {
+    pub fn stream_name(&self, task_id: &str) -> String {
+        match &self.stream_prefix {
+            Some(p) => format!("{}/{}/{}", p, self.container_name, task_id),
+            None => format!("{}/{}", self.container_name, task_id),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LifecycleEvent {
+    pub at: DateTime<Utc>,
+    pub event_type: String,
+    pub task_arn: Option<String>,
+    pub cluster_arn: Option<String>,
+    pub last_status: Option<String>,
+    pub detail: Value,
 }
 
 #[cfg(test)]

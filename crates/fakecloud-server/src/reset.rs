@@ -32,6 +32,7 @@ pub(crate) struct ResetState {
     pub container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     pub rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
+    pub ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
 }
 
 impl ResetState {
@@ -118,6 +119,10 @@ impl ResetState {
             }
             "ecs" => {
                 self.ecs.write().reset();
+                if let Some(ref rt) = self.ecs_runtime {
+                    let rt = rt.clone();
+                    tokio::spawn(async move { rt.stop_all().await });
+                }
             }
             "states" | "stepfunctions" => {
                 self.stepfunctions.write().reset();
@@ -346,6 +351,10 @@ impl ResetState {
         }
         self.ecr.write().reset();
         self.ecs.write().reset();
+        if let Some(ref rt) = self.ecs_runtime {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.stop_all().await });
+        }
         self.stepfunctions.write().reset();
         self.scheduler.write().reset();
         self.apigatewayv2.write().reset();
@@ -651,6 +660,7 @@ mod tests {
             container_runtime: None,
             rds_runtime: None,
             elasticache_runtime: None,
+            ecs_runtime: None,
         };
 
         state.reset_service("rds").expect("reset rds");

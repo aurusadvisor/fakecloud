@@ -101,6 +101,53 @@ pub(crate) fn ecr_pull_through_rule_response(
     }
 }
 
+pub(crate) fn ecs_task_response(task: &fakecloud_ecs::state::Task) -> types::EcsTask {
+    types::EcsTask {
+        task_arn: task.task_arn.clone(),
+        task_id: task.task_id.clone(),
+        cluster_arn: task.cluster_arn.clone(),
+        cluster_name: task.cluster_name.clone(),
+        task_definition_arn: task.task_definition_arn.clone(),
+        family: task.family.clone(),
+        revision: task.revision,
+        last_status: task.last_status.clone(),
+        desired_status: task.desired_status.clone(),
+        launch_type: task.launch_type.clone(),
+        created_at: task.created_at.to_rfc3339(),
+        started_at: task.started_at.map(|t| t.to_rfc3339()),
+        stopping_at: task.stopping_at.map(|t| t.to_rfc3339()),
+        stopped_at: task.stopped_at.map(|t| t.to_rfc3339()),
+        stop_code: task.stop_code.clone(),
+        stopped_reason: task.stopped_reason.clone(),
+        captured_log_bytes: task.captured_logs.len(),
+        containers: task
+            .containers
+            .iter()
+            .map(|c| types::EcsTaskContainer {
+                name: c.name.clone(),
+                image: c.image.clone(),
+                last_status: c.last_status.clone(),
+                exit_code: c.exit_code,
+                runtime_id: c.runtime_id.clone(),
+                essential: c.essential,
+            })
+            .collect(),
+    }
+}
+
+pub(crate) fn ecs_lifecycle_event(
+    event: &fakecloud_ecs::state::LifecycleEvent,
+) -> types::EcsLifecycleEvent {
+    types::EcsLifecycleEvent {
+        at: event.at.to_rfc3339(),
+        event_type: event.event_type.clone(),
+        task_arn: event.task_arn.clone(),
+        cluster_arn: event.cluster_arn.clone(),
+        last_status: event.last_status.clone(),
+        detail: event.detail.clone(),
+    }
+}
+
 pub(crate) fn ecs_cluster_response(cluster: &fakecloud_ecs::state::Cluster) -> types::EcsCluster {
     types::EcsCluster {
         cluster_name: cluster.cluster_name.clone(),

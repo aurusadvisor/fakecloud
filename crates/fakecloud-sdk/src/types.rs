@@ -742,6 +742,79 @@ pub struct EcsClustersResponse {
     pub clusters: Vec<EcsCluster>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsTaskContainer {
+    pub name: String,
+    pub image: String,
+    pub last_status: String,
+    pub exit_code: Option<i64>,
+    pub runtime_id: Option<String>,
+    pub essential: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsTask {
+    pub task_arn: String,
+    pub task_id: String,
+    pub cluster_arn: String,
+    pub cluster_name: String,
+    pub task_definition_arn: String,
+    pub family: String,
+    pub revision: i32,
+    pub last_status: String,
+    pub desired_status: String,
+    pub launch_type: String,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub stopping_at: Option<String>,
+    pub stopped_at: Option<String>,
+    pub stop_code: Option<String>,
+    pub stopped_reason: Option<String>,
+    pub containers: Vec<EcsTaskContainer>,
+    pub captured_log_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsTasksResponse {
+    pub tasks: Vec<EcsTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsTaskLogsResponse {
+    pub task_arn: String,
+    pub logs: String,
+    pub last_status: String,
+    pub exit_code: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsMarkFailedRequest {
+    pub exit_code: Option<i64>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsLifecycleEvent {
+    pub at: String,
+    pub event_type: String,
+    pub task_arn: Option<String>,
+    pub cluster_arn: Option<String>,
+    pub last_status: Option<String>,
+    pub detail: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsEventsResponse {
+    pub events: Vec<EcsLifecycleEvent>,
+}
+
 /// Request to bootstrap an IAM admin user in a specific account.
 /// Used by `/_fakecloud/iam/create-admin` to solve the multi-account
 /// bootstrap problem: there's no per-account root credential, so this

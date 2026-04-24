@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Dict, Optional
 
 import httpx
 
@@ -25,6 +25,11 @@ from fakecloud.types import (
     EcrPullThroughRulesResponse,
     EcrRepositoriesResponse,
     EcsClustersResponse,
+    EcsEventsResponse,
+    EcsMarkFailedRequest,
+    EcsTask,
+    EcsTaskLogsResponse,
+    EcsTasksResponse,
     ElastiCacheClustersResponse,
     ElastiCacheReplicationGroupsResponse,
     ElastiCacheServerlessCachesResponse,
@@ -177,6 +182,51 @@ class EcsClient:
         _check(resp)
         return EcsClustersResponse.from_dict(resp.json())
 
+    async def get_tasks(
+        self,
+        cluster: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> EcsTasksResponse:
+        params: Dict[str, str] = {}
+        if cluster is not None:
+            params["cluster"] = cluster
+        if status is not None:
+            params["status"] = status
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/ecs/tasks", params=params
+        )
+        _check(resp)
+        return EcsTasksResponse.from_dict(resp.json())
+
+    async def get_task_logs(self, task_id: str) -> EcsTaskLogsResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/ecs/tasks/{task_id}/logs"
+        )
+        _check(resp)
+        return EcsTaskLogsResponse.from_dict(resp.json())
+
+    async def force_stop_task(self, task_id: str) -> EcsTask:
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/ecs/tasks/{task_id}/force-stop"
+        )
+        _check(resp)
+        return EcsTask.from_dict(resp.json())
+
+    async def mark_task_failed(
+        self, task_id: str, req: EcsMarkFailedRequest
+    ) -> EcsTask:
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/ecs/tasks/{task_id}/mark-failed",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return EcsTask.from_dict(resp.json())
+
+    async def get_events(self) -> EcsEventsResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecs/events")
+        _check(resp)
+        return EcsEventsResponse.from_dict(resp.json())
+
 
 class _SyncEcsClient:
     """Sync ECS introspection client."""
@@ -189,6 +239,45 @@ class _SyncEcsClient:
         resp = self._client.get(f"{self._base}/_fakecloud/ecs/clusters")
         _check(resp)
         return EcsClustersResponse.from_dict(resp.json())
+
+    def get_tasks(
+        self,
+        cluster: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> EcsTasksResponse:
+        params: Dict[str, str] = {}
+        if cluster is not None:
+            params["cluster"] = cluster
+        if status is not None:
+            params["status"] = status
+        resp = self._client.get(f"{self._base}/_fakecloud/ecs/tasks", params=params)
+        _check(resp)
+        return EcsTasksResponse.from_dict(resp.json())
+
+    def get_task_logs(self, task_id: str) -> EcsTaskLogsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/ecs/tasks/{task_id}/logs")
+        _check(resp)
+        return EcsTaskLogsResponse.from_dict(resp.json())
+
+    def force_stop_task(self, task_id: str) -> EcsTask:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/ecs/tasks/{task_id}/force-stop"
+        )
+        _check(resp)
+        return EcsTask.from_dict(resp.json())
+
+    def mark_task_failed(self, task_id: str, req: EcsMarkFailedRequest) -> EcsTask:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/ecs/tasks/{task_id}/mark-failed",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return EcsTask.from_dict(resp.json())
+
+    def get_events(self) -> EcsEventsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/ecs/events")
+        _check(resp)
+        return EcsEventsResponse.from_dict(resp.json())
 
 
 class SesClient:

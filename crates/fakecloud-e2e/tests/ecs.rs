@@ -1,6 +1,7 @@
-//! ECS Batch 1: control-plane CRUD for clusters, task definitions,
-//! tagging, account settings. Execution (RunTask/CreateService/...) is
-//! covered in subsequent batches.
+//! ECS Batch 1 + 2: control-plane CRUD plus task lifecycle.
+//! Batch 1 covers clusters, task definitions, tagging, account settings.
+//! Batch 2 adds RunTask/StartTask/StopTask/DescribeTasks/ListTasks and
+//! introspection endpoints for inspecting task lifecycle.
 
 mod helpers;
 
@@ -401,4 +402,207 @@ async fn delete_cluster_with_tasks_fails() {
     assert!(arr
         .iter()
         .any(|c| c.get("clusterName").and_then(|v| v.as_str()) == Some("introspected")));
+}
+
+// ── Batch 2: task lifecycle ────────────────────────────────────────
+
+async fn register_runnable_task_def(client: &aws_sdk_ecs::Client, family: &str) {
+    client
+        .register_task_definition()
+        .family(family)
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn run_task_records_task_and_accepts_describe() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+
+    client
+        .create_cluster()
+        .cluster_name("rt-cluster")
+        .send()
+        .await
+        .unwrap();
+    register_runnable_task_def(&client, "rt-family").await;
+
+    let run = client
+        .run_task()
+        .cluster("rt-cluster")
+        .task_definition("rt-family")
+        .send()
+        .await
+        .expect("run_task");
+    assert_eq!(run.tasks().len(), 1);
+    assert!(run.failures().is_empty());
+
+    let task = &run.tasks()[0];
+    let arn = task.task_arn().unwrap().to_string();
+    assert!(arn.contains(":task/rt-cluster/"));
+    assert_eq!(task.launch_type().unwrap().as_str(), "FARGATE");
+    // Task is at least PENDING after RunTask returns; in CI without Docker
+    // it transitions to STOPPED with a TaskFailedToStart reason.
+    let status = task.last_status().unwrap();
+    assert!(
+        status == "PENDING"
+            || status == "RUNNING"
+            || status == "STOPPED"
+            || status == "PROVISIONING",
+        "unexpected status after RunTask: {status}"
+    );
+
+    let described = client
+        .describe_tasks()
+        .cluster("rt-cluster")
+        .tasks(arn.clone())
+        .send()
+        .await
+        .expect("describe_tasks");
+    assert_eq!(described.tasks().len(), 1);
+    assert!(described.failures().is_empty());
+
+    let listed = client
+        .list_tasks()
+        .cluster("rt-cluster")
+        .send()
+        .await
+        .expect("list_tasks");
+    assert!(listed.task_arns().iter().any(|a| a == &arn));
+}
+
+#[tokio::test]
+async fn stop_task_flips_desired_status() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+
+    client
+        .create_cluster()
+        .cluster_name("stop-cluster")
+        .send()
+        .await
+        .unwrap();
+    register_runnable_task_def(&client, "stop-family").await;
+
+    let arn = client
+        .run_task()
+        .cluster("stop-cluster")
+        .task_definition("stop-family")
+        .send()
+        .await
+        .unwrap()
+        .tasks()[0]
+        .task_arn()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .stop_task()
+        .cluster("stop-cluster")
+        .task(arn.clone())
+        .reason("e2e")
+        .send()
+        .await
+        .expect("stop_task");
+    let task = resp.task().unwrap();
+    assert_eq!(task.desired_status(), Some("STOPPED"));
+}
+
+#[tokio::test]
+async fn describe_unknown_task_returns_failure() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+
+    client
+        .create_cluster()
+        .cluster_name("empty-cluster")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .describe_tasks()
+        .cluster("empty-cluster")
+        .tasks("arn:aws:ecs:us-east-1:123456789012:task/empty-cluster/missing")
+        .send()
+        .await
+        .expect("describe_tasks");
+    assert!(resp.tasks().is_empty());
+    assert_eq!(resp.failures().len(), 1);
+    assert_eq!(resp.failures()[0].reason(), Some("MISSING"));
+}
+
+#[tokio::test]
+async fn introspection_tasks_endpoint_lists_ecs_state() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+
+    client
+        .create_cluster()
+        .cluster_name("intro-tasks")
+        .send()
+        .await
+        .unwrap();
+    register_runnable_task_def(&client, "intro-tasks-fam").await;
+    let arn = client
+        .run_task()
+        .cluster("intro-tasks")
+        .task_definition("intro-tasks-fam")
+        .send()
+        .await
+        .unwrap()
+        .tasks()[0]
+        .task_arn()
+        .unwrap()
+        .to_string();
+
+    let body: serde_json::Value =
+        reqwest::get(format!("{}/_fakecloud/ecs/tasks", server.endpoint()))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    let arr = body.get("tasks").and_then(|v| v.as_array()).unwrap();
+    assert!(arr
+        .iter()
+        .any(|t| t.get("taskArn").and_then(|v| v.as_str()) == Some(arn.as_str())));
+
+    // Mark-failed forces the task to STOPPED deterministically for tests.
+    let task_id = arn.rsplit('/').next().unwrap();
+    let url = format!(
+        "{}/_fakecloud/ecs/tasks/{}/mark-failed",
+        server.endpoint(),
+        task_id
+    );
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&serde_json::json!({"exitCode": 137, "reason": "e2e injected"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let flipped: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        flipped.get("lastStatus").and_then(|v| v.as_str()),
+        Some("STOPPED")
+    );
+
+    let events: serde_json::Value =
+        reqwest::get(format!("{}/_fakecloud/ecs/events", server.endpoint()))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    let ev = events.get("events").and_then(|v| v.as_array()).unwrap();
+    assert!(!ev.is_empty());
 }

@@ -643,3 +643,70 @@ type EcsCluster struct {
 type EcsClustersResponse struct {
 	Clusters []EcsCluster `json:"clusters"`
 }
+
+// EcsTaskContainer is a snapshot of one container in a task.
+type EcsTaskContainer struct {
+	Name       string `json:"name"`
+	Image      string `json:"image"`
+	LastStatus string `json:"lastStatus"`
+	ExitCode   *int64 `json:"exitCode,omitempty"`
+	RuntimeID  string `json:"runtimeId,omitempty"`
+	Essential  bool   `json:"essential"`
+}
+
+// EcsTask is a snapshot of one ECS task as fakecloud sees it.
+type EcsTask struct {
+	TaskArn           string             `json:"taskArn"`
+	TaskID            string             `json:"taskId"`
+	ClusterArn        string             `json:"clusterArn"`
+	ClusterName       string             `json:"clusterName"`
+	TaskDefinitionArn string             `json:"taskDefinitionArn"`
+	Family            string             `json:"family"`
+	Revision          int32              `json:"revision"`
+	LastStatus        string             `json:"lastStatus"`
+	DesiredStatus     string             `json:"desiredStatus"`
+	LaunchType        string             `json:"launchType"`
+	CreatedAt         string             `json:"createdAt"`
+	StartedAt         string             `json:"startedAt,omitempty"`
+	StoppingAt        string             `json:"stoppingAt,omitempty"`
+	StoppedAt         string             `json:"stoppedAt,omitempty"`
+	StopCode          string             `json:"stopCode,omitempty"`
+	StoppedReason     string             `json:"stoppedReason,omitempty"`
+	Containers        []EcsTaskContainer `json:"containers"`
+	CapturedLogBytes  int                `json:"capturedLogBytes"`
+}
+
+// EcsTasksResponse contains every task fakecloud is tracking.
+type EcsTasksResponse struct {
+	Tasks []EcsTask `json:"tasks"`
+}
+
+// EcsTaskLogsResponse returns the docker stdout/stderr captured for a
+// task, plus its exit code if known.
+type EcsTaskLogsResponse struct {
+	TaskArn    string `json:"taskArn"`
+	Logs       string `json:"logs"`
+	LastStatus string `json:"lastStatus"`
+	ExitCode   *int64 `json:"exitCode,omitempty"`
+}
+
+// EcsMarkFailedRequest is the payload for POST /ecs/tasks/{id}/mark-failed.
+type EcsMarkFailedRequest struct {
+	ExitCode *int64 `json:"exitCode,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// EcsLifecycleEvent is one entry in the introspection event log.
+type EcsLifecycleEvent struct {
+	At         string      `json:"at"`
+	EventType  string      `json:"eventType"`
+	TaskArn    string      `json:"taskArn,omitempty"`
+	ClusterArn string      `json:"clusterArn,omitempty"`
+	LastStatus string      `json:"lastStatus,omitempty"`
+	Detail     interface{} `json:"detail"`
+}
+
+// EcsEventsResponse contains the lifecycle event log.
+type EcsEventsResponse struct {
+	Events []EcsLifecycleEvent `json:"events"`
+}
