@@ -2357,6 +2357,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "fakecloud-core",
+ "fakecloud-logs",
  "fakecloud-persistence",
  "http 1.4.0",
  "parking_lot",

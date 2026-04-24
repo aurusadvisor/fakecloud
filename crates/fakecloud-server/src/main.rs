@@ -339,15 +339,11 @@ async fn main() {
         );
     }
 
-    let ecs_runtime = fakecloud_ecs::runtime::EcsRuntime::new(bound_addr.port()).map(Arc::new);
-    if let Some(ref rt) = ecs_runtime {
-        tracing::info!(
-            cli = rt.cli_name(),
-            "ECS task execution enabled via container runtime"
-        );
-    } else {
-        tracing::info!("Docker/Podman not available — ECS RunTask will return TaskFailedToStart");
-    }
+    // ECS runtime is constructed below, after the EventBridge + CloudWatch
+    // Logs wiring is in place. Placeholder kept here so downstream blocks
+    // that reference `ecs_runtime` don't need reordering — see the
+    // `ecs_runtime = ...` assignment after the delivery bus setup.
+    let ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>;
 
     // Cross-service delivery bus
     // Step 1: SQS delivery (SNS and EventBridge can push messages into SQS queues)
@@ -460,6 +456,32 @@ async fn main() {
     // Step 4b: DynamoDB delivery (Kinesis streaming destinations)
     let delivery_for_dynamodb =
         Arc::new(DeliveryBus::new().with_kinesis(kinesis_delivery_for_dynamodb));
+
+    // Step 4c: ECS runtime, wired with EventBridge + CloudWatch Logs so
+    // task state transitions emit `aws.ecs` events and `awslogs`-driver
+    // output forwards to CloudWatch Logs. Built here so `sqs_delivery`
+    // (the EventBridge SQS target) is available for rule fan-out.
+    let eb_delivery_for_ecs = Arc::new(
+        fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
+            eb_state.clone(),
+            Arc::new(DeliveryBus::new().with_sqs(sqs_delivery.clone())),
+        ),
+    );
+    let ecs_delivery_bus = Arc::new(DeliveryBus::new().with_eventbridge(eb_delivery_for_ecs));
+    ecs_runtime = fakecloud_ecs::runtime::EcsRuntime::new(bound_addr.port())
+        .map(|rt| {
+            rt.with_delivery_bus(ecs_delivery_bus.clone())
+                .with_logs(logs_state.clone())
+        })
+        .map(Arc::new);
+    if let Some(ref rt) = ecs_runtime {
+        tracing::info!(
+            cli = rt.cli_name(),
+            "ECS task execution enabled via container runtime"
+        );
+    } else {
+        tracing::info!("Docker/Podman not available — ECS RunTask will return TaskFailedToStart");
+    }
 
     // Clone state refs for internal endpoints
     let lambda_invocations_state = lambda_state.clone();

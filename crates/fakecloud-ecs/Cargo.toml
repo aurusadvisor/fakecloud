@@ -9,6 +9,7 @@ version.workspace = true
 
 [dependencies]
 fakecloud-core = { workspace = true }
+fakecloud-logs = { workspace = true }
 fakecloud-persistence = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
