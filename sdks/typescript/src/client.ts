@@ -48,6 +48,7 @@ import type {
   ExpireTokensResponse,
   AuthEventsResponse,
   StepFunctionsExecutionsResponse,
+  EcsClustersResponse,
 } from "./types.js";
 
 export class FakeCloudError extends Error {
@@ -482,6 +483,7 @@ export class FakeCloud {
   private readonly _apigatewayv2: ApiGatewayV2Client;
   private readonly _stepfunctions: StepFunctionsClient;
   private readonly _bedrock: BedrockClient;
+  private readonly _ecs: EcsClient;
 
   constructor(baseUrl: string = "http://localhost:4566") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -502,6 +504,7 @@ export class FakeCloud {
     this._apigatewayv2 = new ApiGatewayV2Client(this.baseUrl);
     this._stepfunctions = new StepFunctionsClient(this.baseUrl);
     this._bedrock = new BedrockClient(this.baseUrl);
+    this._ecs = new EcsClient(this.baseUrl);
   }
 
   // ── Health & Reset ─────────────────────────────────────────────
@@ -602,5 +605,19 @@ export class FakeCloud {
 
   get bedrock(): BedrockClient {
     return this._bedrock;
+  }
+
+  get ecs(): EcsClient {
+    return this._ecs;
+  }
+}
+
+export class EcsClient {
+  constructor(private baseUrl: string) {}
+
+  /** List every ECS cluster fakecloud has seen, across every account. */
+  async getClusters(): Promise<EcsClustersResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ecs/clusters`);
+    return parse(resp);
   }
 }

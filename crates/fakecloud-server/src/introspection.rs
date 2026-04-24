@@ -101,6 +101,28 @@ pub(crate) fn ecr_pull_through_rule_response(
     }
 }
 
+pub(crate) fn ecs_cluster_response(cluster: &fakecloud_ecs::state::Cluster) -> types::EcsCluster {
+    types::EcsCluster {
+        cluster_name: cluster.cluster_name.clone(),
+        cluster_arn: cluster.cluster_arn.clone(),
+        status: cluster.status.clone(),
+        running_tasks_count: cluster.running_tasks_count,
+        pending_tasks_count: cluster.pending_tasks_count,
+        active_services_count: cluster.active_services_count,
+        registered_container_instances_count: cluster.registered_container_instances_count,
+        capacity_providers: cluster.capacity_providers.clone(),
+        tags: cluster
+            .tags
+            .iter()
+            .map(|t| types::EcsTag {
+                key: t.key.clone(),
+                value: t.value.clone(),
+            })
+            .collect(),
+        created_at: cluster.created_at.to_rfc3339(),
+    }
+}
+
 pub(crate) fn elasticache_cluster_response(
     cluster: &fakecloud_elasticache::state::CacheCluster,
 ) -> types::ElastiCacheCluster {

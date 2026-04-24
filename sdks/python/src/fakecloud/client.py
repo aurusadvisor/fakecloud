@@ -24,6 +24,7 @@ from fakecloud.types import (
     EcrImagesResponse,
     EcrPullThroughRulesResponse,
     EcrRepositoriesResponse,
+    EcsClustersResponse,
     ElastiCacheClustersResponse,
     ElastiCacheReplicationGroupsResponse,
     ElastiCacheServerlessCachesResponse,
@@ -162,6 +163,32 @@ class EcrClient:
         resp = await self._client.get(f"{self._base}/_fakecloud/ecr/pull-through-rules")
         _check(resp)
         return EcrPullThroughRulesResponse.from_dict(resp.json())
+
+
+class EcsClient:
+    """Async ECS introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_clusters(self) -> EcsClustersResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecs/clusters")
+        _check(resp)
+        return EcsClustersResponse.from_dict(resp.json())
+
+
+class _SyncEcsClient:
+    """Sync ECS introspection client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_clusters(self) -> EcsClustersResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/ecs/clusters")
+        _check(resp)
+        return EcsClustersResponse.from_dict(resp.json())
 
 
 class SesClient:
@@ -923,6 +950,10 @@ class FakeCloud:
     def bedrock(self) -> BedrockClient:
         return BedrockClient(self._client, self._base)
 
+    @property
+    def ecs(self) -> EcsClient:
+        return EcsClient(self._client, self._base)
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def aclose(self) -> None:
@@ -1036,6 +1067,10 @@ class FakeCloudSync:
     @property
     def bedrock(self) -> _SyncBedrockClient:
         return _SyncBedrockClient(self._client, self._base)
+
+    @property
+    def ecs(self) -> _SyncEcsClient:
+        return _SyncEcsClient(self._client, self._base)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 

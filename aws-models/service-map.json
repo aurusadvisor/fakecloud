@@ -94,5 +94,9 @@
   "ecr": {
     "repo_dir": "ecr",
     "service_name": "ecr"
+  },
+  "ecs": {
+    "repo_dir": "ecs",
+    "service_name": "ecs"
   }
 }

@@ -714,6 +714,34 @@ pub struct EcrRepositoriesResponse {
     pub repositories: Vec<EcrRepository>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsCluster {
+    pub cluster_name: String,
+    pub cluster_arn: String,
+    pub status: String,
+    pub running_tasks_count: i32,
+    pub pending_tasks_count: i32,
+    pub active_services_count: i32,
+    pub registered_container_instances_count: i32,
+    pub capacity_providers: Vec<String>,
+    pub tags: Vec<EcsTag>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsTag {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsClustersResponse {
+    pub clusters: Vec<EcsCluster>,
+}
+
 /// Request to bootstrap an IAM admin user in a specific account.
 /// Used by `/_fakecloud/iam/create-admin` to solve the multi-account
 /// bootstrap problem: there's no per-account root credential, so this

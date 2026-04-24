@@ -299,6 +299,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         s if s.starts_with("AWSCognitoIdentityProviderService") => "cognito-idp",
         s if s.starts_with("Kinesis_20131202") => "kinesis",
         s if s.starts_with("AmazonEC2ContainerRegistry_V") => "ecr",
+        s if s.starts_with("AmazonEC2ContainerServiceV") => "ecs",
         s if s.starts_with("AWSStepFunctions") => "states",
         s if s.starts_with("AWSOrganizationsV") => "organizations",
         _ => return None,
@@ -505,10 +506,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_amz_target_rds() {
-        let result = parse_amz_target("AmazonEC2ContainerServiceV20141113.ListClusters");
-        // Not ECS — just verify doesn't panic on unknown prefixes
-        assert!(result.is_some() || result.is_none());
+    fn parse_amz_target_ecs() {
+        let result = parse_amz_target("AmazonEC2ContainerServiceV20141113.ListClusters").unwrap();
+        assert_eq!(result.service, "ecs");
+        assert_eq!(result.action, "ListClusters");
+        assert_eq!(result.protocol, AwsProtocol::Json);
     }
 
     #[test]

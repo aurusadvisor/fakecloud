@@ -543,3 +543,27 @@ export interface EcrPullThroughRule {
 export interface EcrPullThroughRulesResponse {
   rules: EcrPullThroughRule[];
 }
+
+// ── ECS ─────────────────────────────────────────────────────────────
+
+export interface EcsTag {
+  key: string;
+  value: string;
+}
+
+export interface EcsCluster {
+  clusterName: string;
+  clusterArn: string;
+  status: string;
+  runningTasksCount: number;
+  pendingTasksCount: number;
+  activeServicesCount: number;
+  registeredContainerInstancesCount: number;
+  capacityProviders: string[];
+  tags: EcsTag[];
+  createdAt: string;
+}
+
+export interface EcsClustersResponse {
+  clusters: EcsCluster[];
+}

@@ -14,5 +14,6 @@ export {
   SecretsManagerClient,
   CognitoClient,
   BedrockClient,
+  EcsClient,
 } from "./client.js";
 export type * from "./types.js";
