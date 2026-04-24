@@ -34,6 +34,7 @@ struct CreateFunctionInput {
     architectures: Vec<String>,
     code_zip: Option<Vec<u8>>,
     code_fallback: Vec<u8>,
+    image_uri: Option<String>,
 }
 
 impl CreateFunctionInput {
@@ -93,6 +94,20 @@ impl CreateFunctionInput {
 
         let code_fallback = serde_json::to_vec(&body["Code"]).unwrap_or_default();
 
+        let package_type = body["PackageType"].as_str().unwrap_or("Zip").to_string();
+        let image_uri = body["Code"]["ImageUri"].as_str().map(String::from);
+
+        // PackageType=Image requires Code.ImageUri; PackageType=Zip requires
+        // code content. Reject inconsistent shapes with AWS's error code so
+        // SDK-level validation tests see matching behaviour.
+        if package_type == "Image" && image_uri.is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "Code.ImageUri is required when PackageType is Image",
+            ));
+        }
+
         Ok(Self {
             function_name,
             runtime: body["Runtime"].as_str().unwrap_or("python3.12").to_string(),
@@ -104,12 +119,13 @@ impl CreateFunctionInput {
             description: body["Description"].as_str().unwrap_or("").to_string(),
             timeout: body["Timeout"].as_i64().unwrap_or(3),
             memory_size: body["MemorySize"].as_i64().unwrap_or(128),
-            package_type: body["PackageType"].as_str().unwrap_or("Zip").to_string(),
+            package_type,
             tags,
             environment,
             architectures,
             code_zip,
             code_fallback,
+            image_uri,
         })
     }
 }
@@ -652,6 +668,7 @@ impl LambdaService {
             architectures: input.architectures,
             package_type: input.package_type,
             code_zip: input.code_zip,
+            image_uri: input.image_uri,
             policy: None,
         };
 
@@ -683,13 +700,24 @@ impl LambdaService {
         })?;
 
         let config = self.function_config_json(func);
-        let response = json!({
-            "Code": {
-                "Location": format!("https://awslambda-{}-tasks.s3.{}.amazonaws.com/stub",
+        let code = if let Some(ref uri) = func.image_uri {
+            json!({
+                "ImageUri": uri,
+                "ResolvedImageUri": uri,
+                "RepositoryType": "ECR",
+            })
+        } else {
+            json!({
+                "Location": format!(
+                    "https://awslambda-{}-tasks.s3.{}.amazonaws.com/stub",
                     func.function_arn.split(':').nth(3).unwrap_or("us-east-1"),
-                    func.function_arn.split(':').nth(3).unwrap_or("us-east-1")),
-                "RepositoryType": "S3"
-            },
+                    func.function_arn.split(':').nth(3).unwrap_or("us-east-1")
+                ),
+                "RepositoryType": "S3",
+            })
+        };
+        let response = json!({
+            "Code": code,
             "Configuration": config,
             "Tags": func.tags,
         });
@@ -970,7 +998,7 @@ impl LambdaService {
             env_vars = json!({ "Variables": func.environment });
         }
 
-        json!({
+        let mut config = json!({
             "FunctionName": func.function_name,
             "FunctionArn": func.function_arn,
             "Runtime": func.runtime,
@@ -990,7 +1018,14 @@ impl LambdaService {
             "LastUpdateStatus": "Successful",
             "TracingConfig": { "Mode": "PassThrough" },
             "RevisionId": uuid::Uuid::new_v4().to_string(),
-        })
+        });
+        if let Some(ref uri) = func.image_uri {
+            config["Code"] = json!({
+                "ImageUri": uri,
+                "ResolvedImageUri": uri,
+            });
+        }
+        config
     }
 
     fn event_source_mapping_json(&self, mapping: &EventSourceMapping) -> Value {

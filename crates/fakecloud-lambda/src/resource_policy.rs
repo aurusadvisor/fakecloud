@@ -118,6 +118,7 @@ mod tests {
             architectures: Vec::new(),
             package_type: "Zip".to_string(),
             code_zip: None,
+            image_uri: None,
             policy: policy.map(str::to_string),
         }
     }

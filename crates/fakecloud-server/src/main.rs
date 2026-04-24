@@ -181,7 +181,8 @@ async fn main() {
     reaper::reap_stale_containers();
 
     // Auto-detect Docker/Podman for Lambda execution
-    let container_runtime = fakecloud_lambda::runtime::ContainerRuntime::new().map(Arc::new);
+    let container_runtime =
+        fakecloud_lambda::runtime::ContainerRuntime::new(bound_addr.port()).map(Arc::new);
     if let Some(ref rt) = container_runtime {
         tracing::info!(
             cli = rt.cli_name(),
@@ -338,7 +339,7 @@ async fn main() {
         );
     }
 
-    let ecs_runtime = fakecloud_ecs::runtime::EcsRuntime::new().map(Arc::new);
+    let ecs_runtime = fakecloud_ecs::runtime::EcsRuntime::new(bound_addr.port()).map(Arc::new);
     if let Some(ref rt) = ecs_runtime {
         tracing::info!(
             cli = rt.cli_name(),
