@@ -356,6 +356,28 @@ async fn put_and_list_account_settings() {
 }
 
 #[tokio::test]
+async fn list_clusters_with_out_of_range_next_token_is_not_a_panic() {
+    // Regression: an attacker-controlled or stale nextToken pointing past
+    // the end of the list must not panic the server.
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("only")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .list_clusters()
+        .next_token("9999")
+        .send()
+        .await
+        .expect("list_clusters with OOR token");
+    assert!(resp.cluster_arns().is_empty());
+    assert!(resp.next_token().is_none());
+}
+
+#[tokio::test]
 async fn delete_cluster_with_tasks_fails() {
     let server = TestServer::start().await;
     let client = server.ecs_client().await;

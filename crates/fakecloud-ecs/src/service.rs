@@ -566,7 +566,7 @@ impl EcsService {
                 .collect(),
             None => Vec::new(),
         };
-        let start = next_token.parse::<usize>().unwrap_or(0);
+        let start = next_token.parse::<usize>().unwrap_or(0).min(arns.len());
         let end = (start + max_results).min(arns.len());
         let page = arns[start..end].to_vec();
         let next = if end < arns.len() {
@@ -960,7 +960,7 @@ impl EcsService {
         } else {
             arns.sort();
         }
-        let start = next_token.parse::<usize>().unwrap_or(0);
+        let start = next_token.parse::<usize>().unwrap_or(0).min(arns.len());
         let end = (start + max_results).min(arns.len());
         let page = arns[start..end].to_vec();
         let mut out = json!({"taskDefinitionArns": page});
@@ -1011,7 +1011,7 @@ impl EcsService {
             }
         }
         families.sort();
-        let start = next_token.parse::<usize>().unwrap_or(0);
+        let start = next_token.parse::<usize>().unwrap_or(0).min(families.len());
         let end = (start + max_results).min(families.len());
         let page = families[start..end].to_vec();
         let mut out = json!({"families": page});
