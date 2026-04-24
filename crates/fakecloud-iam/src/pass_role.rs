@@ -47,25 +47,37 @@ fn role_name_from_arn(role_arn: &str) -> Option<&str> {
 }
 
 impl RoleTrustValidator for IamRoleTrustValidator {
+    /// Validate a role's trust policy against a service principal.
+    ///
+    /// fakecloud is intentionally permissive when the role is not
+    /// present in IAM state: real AWS requires the role to exist, but
+    /// long-standing fakecloud tests pass arbitrary role ARNs without
+    /// creating IAM roles first. To keep that test culture working we
+    /// only reject when the role *does* exist *and* its trust policy
+    /// explicitly excludes the calling service principal — the
+    /// high-signal failure mode users actually hit.
     fn validate(
         &self,
         account_id: &str,
         role_arn: &str,
         service_principal: &str,
     ) -> Result<(), PassRoleError> {
-        let name = role_name_from_arn(role_arn)
-            .ok_or_else(|| PassRoleError::RoleNotFound(role_arn.to_string()))?;
+        let Some(name) = role_name_from_arn(role_arn) else {
+            return Ok(());
+        };
 
         let mas = self.state.read();
         let Some(state) = mas.get(account_id) else {
-            return Err(PassRoleError::RoleNotFound(role_arn.to_string()));
+            return Ok(());
         };
         let Some(role) = state.roles.get(name) else {
-            return Err(PassRoleError::RoleNotFound(role_arn.to_string()));
+            return Ok(());
         };
 
-        let parsed: Value = serde_json::from_str(&role.assume_role_policy_document)
-            .map_err(|_| PassRoleError::InvalidTrustPolicy(role_arn.to_string()))?;
+        let parsed: Value = match serde_json::from_str(&role.assume_role_policy_document) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
 
         if trust_policy_allows(&parsed, service_principal) {
             Ok(())
