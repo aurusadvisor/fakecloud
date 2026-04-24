@@ -33,6 +33,7 @@ final class FakeCloud
     private ApiGatewayV2Client $apigatewayv2;
     private StepFunctionsClient $stepfunctions;
     private BedrockClient $bedrock;
+    private EcsClient $ecs;
 
     public function __construct(string $baseUrl = self::DEFAULT_BASE_URL)
     {
@@ -52,6 +53,7 @@ final class FakeCloud
         $this->apigatewayv2 = new ApiGatewayV2Client($this->http);
         $this->stepfunctions = new StepFunctionsClient($this->http);
         $this->bedrock = new BedrockClient($this->http);
+        $this->ecs = new EcsClient($this->http);
     }
 
     public function baseUrl(): string
@@ -108,6 +110,7 @@ final class FakeCloud
     public function apigatewayv2(): ApiGatewayV2Client { return $this->apigatewayv2; }
     public function stepfunctions(): StepFunctionsClient { return $this->stepfunctions; }
     public function bedrock(): BedrockClient { return $this->bedrock; }
+    public function ecs(): EcsClient { return $this->ecs; }
 }
 
 // ── Sub-clients ────────────────────────────────────────────────
@@ -478,6 +481,18 @@ final class BedrockClient
     {
         return BedrockStatusResponse::fromArray(
             $this->http->delete('/_fakecloud/bedrock/faults')
+        );
+    }
+}
+
+final class EcsClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    public function getClusters(): EcsClustersResponse
+    {
+        return EcsClustersResponse::fromArray(
+            $this->http->get('/_fakecloud/ecs/clusters')
         );
     }
 }

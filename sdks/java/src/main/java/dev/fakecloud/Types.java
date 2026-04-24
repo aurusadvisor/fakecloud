@@ -412,4 +412,25 @@ public final class Types {
             String secretAccessKey,
             String accountId,
             String arn) {}
+
+    // ── ECS ───────────────────────────────────────────────────────
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsTag(String key, String value) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsCluster(
+            String clusterName,
+            String clusterArn,
+            String status,
+            int runningTasksCount,
+            int pendingTasksCount,
+            int activeServicesCount,
+            int registeredContainerInstancesCount,
+            List<String> capacityProviders,
+            List<EcsTag> tags,
+            String createdAt) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcsClustersResponse(List<EcsCluster> clusters) {}
 }

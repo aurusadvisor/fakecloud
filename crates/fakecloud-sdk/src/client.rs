@@ -144,6 +144,10 @@ impl FakeCloud {
         BedrockClient { fc: self }
     }
 
+    pub fn ecs(&self) -> EcsClient<'_> {
+        EcsClient { fc: self }
+    }
+
     // ── Internal helpers ────────────────────────────────────────────
 
     async fn parse<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
@@ -786,6 +790,27 @@ impl BedrockClient<'_> {
             .fc
             .client
             .delete(format!("{}/_fakecloud/bedrock/faults", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── ECS ─────────────────────────────────────────────────────────────
+
+pub struct EcsClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl EcsClient<'_> {
+    /// List all ECS clusters across every account the server has seen.
+    /// Deterministic, sorted by cluster ARN. Bypasses the ECS control-plane
+    /// auth and pagination so tests can assert directly on raw state.
+    pub async fn get_clusters(&self) -> Result<EcsClustersResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/ecs/clusters", self.fc.base_url))
             .send()
             .await?;
         FakeCloud::parse(resp).await

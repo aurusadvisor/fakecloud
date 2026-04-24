@@ -17,6 +17,7 @@ import dev.fakecloud.Types.ConfirmSubscriptionResponse;
 import dev.fakecloud.Types.ConfirmUserRequest;
 import dev.fakecloud.Types.ConfirmUserResponse;
 import dev.fakecloud.Types.ConfirmationCodesResponse;
+import dev.fakecloud.Types.EcsClustersResponse;
 import dev.fakecloud.Types.ElastiCacheClustersResponse;
 import dev.fakecloud.Types.ElastiCacheReplicationGroupsResponse;
 import dev.fakecloud.Types.ElastiCacheServerlessCachesResponse;
@@ -82,6 +83,7 @@ public final class FakeCloud {
     private final ApiGatewayV2Client apigatewayv2;
     private final StepFunctionsClient stepfunctions;
     private final BedrockClient bedrock;
+    private final EcsClient ecs;
 
     public FakeCloud() {
         this(DEFAULT_BASE_URL);
@@ -104,6 +106,7 @@ public final class FakeCloud {
         this.apigatewayv2 = new ApiGatewayV2Client(http);
         this.stepfunctions = new StepFunctionsClient(http);
         this.bedrock = new BedrockClient(http);
+        this.ecs = new EcsClient(http);
     }
 
     static String trimTrailingSlashes(String url) {
@@ -158,6 +161,7 @@ public final class FakeCloud {
     public ApiGatewayV2Client apigatewayv2() { return apigatewayv2; }
     public StepFunctionsClient stepfunctions() { return stepfunctions; }
     public BedrockClient bedrock() { return bedrock; }
+    public EcsClient ecs() { return ecs; }
 
     // ── Sub-clients ────────────────────────────────────────────────
 
@@ -456,6 +460,15 @@ public final class FakeCloud {
 
         public BedrockStatusResponse clearFaults() {
             return http.delete("/_fakecloud/bedrock/faults", BedrockStatusResponse.class);
+        }
+    }
+
+    public static final class EcsClient {
+        private final HttpTransport http;
+        EcsClient(HttpTransport http) { this.http = http; }
+
+        public EcsClustersResponse getClusters() {
+            return http.get("/_fakecloud/ecs/clusters", EcsClustersResponse.class);
         }
     }
 }

@@ -24,8 +24,9 @@ mod stepfunctions_delivery;
 use cli::Cli;
 use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
 use introspection::{
-    ecr_repository_response, elasticache_cluster_response, elasticache_replication_group_response,
-    elasticache_serverless_cache_response, rds_instance_response,
+    ecr_repository_response, ecs_cluster_response, elasticache_cluster_response,
+    elasticache_replication_group_response, elasticache_serverless_cache_response,
+    rds_instance_response,
 };
 use kinesis_lambda_poller::KinesisLambdaPoller;
 use reset::ResetState;
@@ -37,6 +38,7 @@ use fakecloud_cloudformation::service::CloudFormationService;
 use fakecloud_cognito::service::CognitoService;
 use fakecloud_dynamodb::service::DynamoDbService;
 use fakecloud_ecr::service::EcrService;
+use fakecloud_ecs::service::EcsService;
 use fakecloud_elasticache::service::ElastiCacheService;
 use fakecloud_eventbridge::service::EventBridgeService;
 use fakecloud_iam::iam_service::IamService;
@@ -283,6 +285,14 @@ async fn main() {
         ),
     ));
 
+    let ecs_state: fakecloud_ecs::state::SharedEcsState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+
     let bedrock_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -450,6 +460,7 @@ async fn main() {
     let rds_introspection_state = rds_state.clone();
     let elasticache_introspection_state = elasticache_state.clone();
     let ecr_introspection_state = ecr_state.clone();
+    let ecs_introspection_state = ecs_state.clone();
     let dynamodb_ttl_state = dynamodb_state.clone();
     let secretsmanager_rotation_state = secretsmanager_state.clone();
 
@@ -495,6 +506,7 @@ async fn main() {
         rds: rds_state.clone(),
         elasticache: elasticache_state.clone(),
         ecr: ecr_state.clone(),
+        ecs: ecs_state.clone(),
         stepfunctions: stepfunctions_state.clone(),
         scheduler: scheduler_state.clone(),
         apigatewayv2: apigatewayv2_state.clone(),
@@ -1743,6 +1755,59 @@ async fn main() {
         ecr_service = ecr_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(ecr_service));
+
+    let ecs_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("ecs").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_ecs::state::EcsSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_ecs::state::ECS_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "ecs persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_ecs::state::ECS_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *ecs_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded ecs persistence snapshot (multi-account)"
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse ecs persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no ecs persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read ecs persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let mut ecs_service = EcsService::new(ecs_state.clone());
+    if let Some(store) = ecs_snapshot_store {
+        ecs_service = ecs_service.with_snapshot_store(store);
+    }
+    registry.register(Arc::new(ecs_service));
 
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {
@@ -3081,6 +3146,24 @@ async fn main() {
                             .map(ecr_repository_response)
                             .collect();
                         axum::Json(types::EcrRepositoriesResponse { repositories })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ecs/clusters",
+            axum::routing::get({
+                let ec = ecs_introspection_state.clone();
+                move || {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        let mut clusters: Vec<types::EcsCluster> = Vec::new();
+                        for (_, state) in accounts.iter() {
+                            clusters.extend(state.clusters.values().map(ecs_cluster_response));
+                        }
+                        clusters.sort_by(|a, b| a.cluster_arn.cmp(&b.cluster_arn));
+                        axum::Json(types::EcsClustersResponse { clusters })
                     }
                 }
             }),

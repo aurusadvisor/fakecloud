@@ -556,3 +556,30 @@ type ApiGatewayV2Request struct {
 type ApiGatewayV2RequestsResponse struct {
 	Requests []ApiGatewayV2Request `json:"requests"`
 }
+
+// ── ECS ────────────────────────────────────────────────────────────
+
+// EcsTag is a key/value pair attached to an ECS cluster or task definition.
+type EcsTag struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// EcsCluster is a snapshot of a single ECS cluster as seen by fakecloud.
+type EcsCluster struct {
+	ClusterName                          string   `json:"clusterName"`
+	ClusterArn                           string   `json:"clusterArn"`
+	Status                               string   `json:"status"`
+	RunningTasksCount                    int32    `json:"runningTasksCount"`
+	PendingTasksCount                    int32    `json:"pendingTasksCount"`
+	ActiveServicesCount                  int32    `json:"activeServicesCount"`
+	RegisteredContainerInstancesCount    int32    `json:"registeredContainerInstancesCount"`
+	CapacityProviders                    []string `json:"capacityProviders"`
+	Tags                                 []EcsTag `json:"tags"`
+	CreatedAt                            string   `json:"createdAt"`
+}
+
+// EcsClustersResponse contains all ECS clusters currently in state.
+type EcsClustersResponse struct {
+	Clusters []EcsCluster `json:"clusters"`
+}

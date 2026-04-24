@@ -1264,3 +1264,65 @@ final class CreateAdminResponse
         );
     }
 }
+
+// ── ECS ───────────────────────────────────────────────────────
+
+final class EcsTag
+{
+    public function __construct(
+        public readonly string $key,
+        public readonly string $value,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['key'], $data['value']);
+    }
+}
+
+final class EcsCluster
+{
+    public function __construct(
+        public readonly string $clusterName,
+        public readonly string $clusterArn,
+        public readonly string $status,
+        public readonly int $runningTasksCount,
+        public readonly int $pendingTasksCount,
+        public readonly int $activeServicesCount,
+        public readonly int $registeredContainerInstancesCount,
+        /** @var string[] */
+        public readonly array $capacityProviders,
+        /** @var EcsTag[] */
+        public readonly array $tags,
+        public readonly string $createdAt,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['clusterName'],
+            $data['clusterArn'],
+            $data['status'],
+            (int) ($data['runningTasksCount'] ?? 0),
+            (int) ($data['pendingTasksCount'] ?? 0),
+            (int) ($data['activeServicesCount'] ?? 0),
+            (int) ($data['registeredContainerInstancesCount'] ?? 0),
+            $data['capacityProviders'] ?? [],
+            array_map(EcsTag::fromArray(...), $data['tags'] ?? []),
+            $data['createdAt'] ?? '',
+        );
+    }
+}
+
+final class EcsClustersResponse
+{
+    public function __construct(
+        /** @var EcsCluster[] */
+        public readonly array $clusters,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(EcsCluster::fromArray(...), $data['clusters'] ?? []));
+    }
+}

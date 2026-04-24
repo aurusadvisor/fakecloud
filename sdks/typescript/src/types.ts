@@ -490,3 +490,27 @@ export interface FireScheduleResponse {
   scheduleArn: string;
   targetArn: string;
 }
+
+// ── ECS ─────────────────────────────────────────────────────────────
+
+export interface EcsTag {
+  key: string;
+  value: string;
+}
+
+export interface EcsCluster {
+  clusterName: string;
+  clusterArn: string;
+  status: string;
+  runningTasksCount: number;
+  pendingTasksCount: number;
+  activeServicesCount: number;
+  registeredContainerInstancesCount: number;
+  capacityProviders: string[];
+  tags: EcsTag[];
+  createdAt: string;
+}
+
+export interface EcsClustersResponse {
+  clusters: EcsCluster[];
+}

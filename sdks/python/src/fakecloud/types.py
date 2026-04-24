@@ -1083,3 +1083,47 @@ class ApiGatewayV2RequestsResponse:
                 ApiGatewayV2Request.from_dict(r) for r in data.get("requests", [])
             ],
         )
+
+
+# ── ECS ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class EcsTag:
+    key: str
+    value: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsTag:
+        return cls(**_convert_keys(data))
+
+
+@dataclass
+class EcsCluster:
+    cluster_name: str
+    cluster_arn: str
+    status: str
+    running_tasks_count: int
+    pending_tasks_count: int
+    active_services_count: int
+    registered_container_instances_count: int
+    capacity_providers: List[str]
+    tags: List[EcsTag]
+    created_at: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsCluster:
+        d = _convert_keys(data)
+        d["tags"] = [EcsTag.from_dict(t) for t in d.get("tags", [])]
+        return cls(**d)
+
+
+@dataclass
+class EcsClustersResponse:
+    clusters: List[EcsCluster]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsClustersResponse:
+        return cls(
+            clusters=[EcsCluster.from_dict(c) for c in data.get("clusters", [])],
+        )
