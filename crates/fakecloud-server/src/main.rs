@@ -472,6 +472,8 @@ async fn main() {
         .map(|rt| {
             rt.with_delivery_bus(ecs_delivery_bus.clone())
                 .with_logs(logs_state.clone())
+                .with_secretsmanager(secretsmanager_state.clone())
+                .with_ssm(ssm_state.clone())
         })
         .map(Arc::new);
     if let Some(ref rt) = ecs_runtime {
@@ -3334,6 +3336,48 @@ async fn main() {
                                     axum::http::StatusCode::OK,
                                     axum::Json(serde_json::to_value(resp).unwrap()),
                                 );
+                            }
+                        }
+                        (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "task not found"})),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            // ECS task-role credential endpoint. Containers started by
+            // ECS RunTask with a `taskRoleArn` have
+            // `AWS_CONTAINER_CREDENTIALS_FULL_URI` pointing here; AWS
+            // SDKs following the default credential-provider chain
+            // fetch IMDS-format creds from this path. Returns synthetic
+            // short-lived credentials since fakecloud STS accepts any
+            // access-key/secret.
+            "/_fakecloud/ecs/creds/{task_id}",
+            axum::routing::get({
+                let ec = ecs_introspection_state.clone();
+                move |axum::extract::Path(task_id): axum::extract::Path<String>| {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        for (_, state) in accounts.iter() {
+                            if let Some(t) = state.tasks.get(&task_id) {
+                                let role_arn = t.task_role_arn.clone().unwrap_or_else(|| {
+                                    format!(
+                                        "arn:aws:iam::{}:role/ecs-task-role",
+                                        state.account_id
+                                    )
+                                });
+                                let expiry = chrono::Utc::now() + chrono::Duration::minutes(15);
+                                let body = serde_json::json!({
+                                    "AccessKeyId": format!("ASIA{}", "F".repeat(16)),
+                                    "SecretAccessKey": "fakecloud-ecs-task-role-secret",
+                                    "Token": "fakecloud-ecs-task-role-token",
+                                    "Expiration": expiry.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                                    "RoleArn": role_arn,
+                                });
+                                return (axum::http::StatusCode::OK, axum::Json(body));
                             }
                         }
                         (

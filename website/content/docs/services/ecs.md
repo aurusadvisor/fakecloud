@@ -78,6 +78,35 @@ The runtime creates the log group on demand when `awslogs-create-group=true`, cr
 
 Task state transitions fire `aws.ecs` / `ECS Task State Change` events on the default EventBridge bus. Event `detail` carries the task ARN, cluster ARN, last status, stop code / reason on STOPPED, and a summary of each container including exit code. Rules matching `source: aws.ecs` receive these events and can route to SQS, SNS, Lambda, Step Functions — the standard target fan-out.
 
+### Task role credentials
+
+Tasks registered with a `taskRoleArn` get `AWS_CONTAINER_CREDENTIALS_FULL_URI` injected into every container. The URL points at a fakecloud-local endpoint — `http://host.docker.internal:<port>/_fakecloud/ecs/creds/<task-id>` — that returns IMDS-format credentials:
+
+```json
+{
+  "AccessKeyId": "ASIA...",
+  "SecretAccessKey": "...",
+  "Token": "...",
+  "Expiration": "2026-04-24T12:00:00Z",
+  "RoleArn": "arn:aws:iam::123456789012:role/app-task-role"
+}
+```
+
+AWS SDKs pick this up via the default credential-provider chain, so `aws sts get-caller-identity` (and any other SDK call) from inside the container works out of the box. fakecloud's STS accepts any `AccessKeyId`, so no pre-registration of the role is needed.
+
+### Secrets injection
+
+Container definitions can pull secrets from SecretsManager or SSM Parameter Store via the standard `secrets[]` field:
+
+```json
+"secrets": [
+  { "name": "DB_PASSWORD", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-password-AbCdEf" },
+  { "name": "API_KEY",     "valueFrom": "arn:aws:ssm:us-east-1:123456789012:parameter/app/api-key" }
+]
+```
+
+The runtime resolves both kinds of ARN synchronously against the in-process state and injects the values as environment variables before `docker run`. A missing secret or parameter fails the task with `stopCode=TaskFailedToStart`, matching real ECS's "failed to retrieve secret" behaviour.
+
 ## Protocol
 
 JSON protocol over `POST /`, with `X-Amz-Target: AmazonEC2ContainerServiceV20141113.<Action>`. Request + response bodies are JSON; tags use lowercase `key` / `value` (matches AWS SDK serialization).

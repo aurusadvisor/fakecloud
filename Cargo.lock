@@ -2359,6 +2359,8 @@ dependencies = [
  "fakecloud-core",
  "fakecloud-logs",
  "fakecloud-persistence",
+ "fakecloud-secretsmanager",
+ "fakecloud-ssm",
  "http 1.4.0",
  "parking_lot",
  "serde",

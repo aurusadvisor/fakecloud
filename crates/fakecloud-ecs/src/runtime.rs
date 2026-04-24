@@ -16,6 +16,8 @@ use chrono::Utc;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_logs::ingest::{append_events, IngestEvent};
 use fakecloud_logs::state::SharedLogsState;
+use fakecloud_secretsmanager::state::SharedSecretsManagerState;
+use fakecloud_ssm::state::SharedSsmState;
 use parking_lot::RwLock;
 use tempfile::TempDir;
 use tokio::process::Command;
@@ -59,6 +61,12 @@ pub struct EcsRuntime {
     /// declares the `awslogs` log driver get their captured stdout/stderr
     /// forwarded to a log group/stream under this shared state.
     logs_state: Option<SharedLogsState>,
+    /// SecretsManager state for resolving `containerDefinition.secrets[]`
+    /// entries whose `valueFrom` is a SecretsManager ARN.
+    secretsmanager_state: Option<SharedSecretsManagerState>,
+    /// SSM Parameter Store state for resolving `secrets[]` entries whose
+    /// `valueFrom` is an SSM parameter ARN.
+    ssm_state: Option<SharedSsmState>,
 }
 
 impl EcsRuntime {
@@ -94,6 +102,8 @@ impl EcsRuntime {
             containers: RwLock::new(std::collections::HashMap::new()),
             delivery_bus: None,
             logs_state: None,
+            secretsmanager_state: None,
+            ssm_state: None,
         })
     }
 
@@ -132,6 +142,20 @@ impl EcsRuntime {
         self
     }
 
+    /// Wire SecretsManager state so `secrets[].valueFrom` entries
+    /// pointing at SecretsManager ARNs resolve at task launch.
+    pub fn with_secretsmanager(mut self, state: SharedSecretsManagerState) -> Self {
+        self.secretsmanager_state = Some(state);
+        self
+    }
+
+    /// Wire SSM state so `secrets[].valueFrom` entries pointing at
+    /// Parameter Store ARNs resolve at task launch.
+    pub fn with_ssm(mut self, state: SharedSsmState) -> Self {
+        self.ssm_state = Some(state);
+        self
+    }
+
     /// Spawn the task asynchronously. Returns immediately after transitioning
     /// the task to `PENDING`; the background task advances it to `RUNNING`
     /// once the container is created and to `STOPPED` once the container
@@ -159,7 +183,7 @@ impl EcsRuntime {
         task_id: &str,
         account_id: &str,
     ) -> Result<(), RuntimeError> {
-        let (image, env, command, awslogs_container) = {
+        let (image, mut env, command, awslogs_container, secrets_refs, has_task_role) = {
             let accounts = state.read();
             let s = accounts
                 .get(account_id)
@@ -173,6 +197,20 @@ impl EcsRuntime {
                 .first()
                 .ok_or_else(|| RuntimeError::ContainerStart("task has no containers".into()))?;
             let def = find_container_definition(s, &task.family, task.revision, &container.name);
+            let secrets = def
+                .as_ref()
+                .and_then(|d| d.get("secrets").and_then(|v| v.as_array()).cloned())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| {
+                            let name = e.get("name").and_then(|v| v.as_str())?.to_string();
+                            let value_from =
+                                e.get("valueFrom").and_then(|v| v.as_str())?.to_string();
+                            Some((name, value_from))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             (
                 container.image.clone(),
                 def.as_ref()
@@ -196,8 +234,44 @@ impl EcsRuntime {
                     })
                     .unwrap_or_default(),
                 container.name.clone(),
+                secrets,
+                task.task_role_arn.is_some(),
             )
         };
+
+        // Resolve `containerDefinition.secrets[]` entries. Each entry is
+        // `{name, valueFrom}`; `valueFrom` is either a SecretsManager
+        // secret ARN (`arn:aws:secretsmanager:...:secret:name-AbCdEf`)
+        // or an SSM parameter ARN (`arn:aws:ssm:...:parameter/name`).
+        // Both are looked up synchronously against the in-process shared
+        // state and appended as env vars. Failed lookups fail the task —
+        // matching real ECS's "failed to retrieve secret" behaviour.
+        for (name, value_from) in &secrets_refs {
+            let resolved = self.resolve_secret(account_id, value_from);
+            match resolved {
+                Some(v) => env.push((name.clone(), v)),
+                None => {
+                    return Err(RuntimeError::ContainerStart(format!(
+                        "failed to resolve secret {name} from {value_from}"
+                    )))
+                }
+            }
+        }
+
+        // Inject `AWS_CONTAINER_CREDENTIALS_FULL_URI` when the task has
+        // a `taskRoleArn`. AWS SDKs pick this up via the default
+        // credential-provider chain. The endpoint runs on the main
+        // fakecloud server; the container reaches it via
+        // `host.docker.internal:<port>`.
+        if has_task_role {
+            env.push((
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI".into(),
+                format!(
+                    "http://host.docker.internal:{}/_fakecloud/ecs/creds/{}",
+                    self.server_port, task_id
+                ),
+            ));
+        }
 
         // Pull the image first so we can surface pull errors cleanly.
         // AWS private-ECR URIs (`<acct>.dkr.ecr.<region>.amazonaws.com/...`)
@@ -338,6 +412,46 @@ impl EcsRuntime {
             )),
         );
         Ok(())
+    }
+
+    /// Resolve a `secrets[].valueFrom` reference to the actual secret
+    /// payload. Supports SecretsManager secret ARNs and SSM parameter
+    /// ARNs; returns `None` when the referenced state isn't wired or
+    /// the lookup misses.
+    fn resolve_secret(&self, account_id: &str, value_from: &str) -> Option<String> {
+        if value_from.contains(":secret:") {
+            let state = self.secretsmanager_state.as_ref()?;
+            let accounts = state.read();
+            let sm = accounts.get(account_id)?;
+            // ARN shape: arn:aws:secretsmanager:<region>:<acct>:secret:<name>-<6char>
+            // Stored key is the secret name (no suffix). Strip the
+            // AWS-generated 6-char suffix when comparing.
+            let arn_tail = value_from.rsplit(":secret:").next()?;
+            let name = arn_tail
+                .rsplit_once('-')
+                .map(|(n, _)| n)
+                .unwrap_or(arn_tail);
+            let secret = sm.secrets.get(name).or_else(|| sm.secrets.get(arn_tail))?;
+            let version_id = secret.current_version_id.as_ref()?;
+            let v = secret.versions.get(version_id)?;
+            return v.secret_string.clone();
+        }
+        if value_from.contains(":parameter") {
+            let state = self.ssm_state.as_ref()?;
+            let accounts = state.read();
+            let ssm = accounts.get(account_id)?;
+            // ARN shape: arn:aws:ssm:<region>:<acct>:parameter/<name>
+            // Parameters are stored keyed by name (with leading slash)
+            // or without, depending on how they were created. Try both.
+            let after = value_from.rsplit(":parameter").next()?;
+            let name_with_slash = after.trim_start_matches('/');
+            return ssm
+                .parameters
+                .get(&format!("/{name_with_slash}"))
+                .or_else(|| ssm.parameters.get(name_with_slash))
+                .map(|p| p.value.clone());
+        }
+        None
     }
 
     /// Emit an `ECS Task State Change` EventBridge event. No-op when no
