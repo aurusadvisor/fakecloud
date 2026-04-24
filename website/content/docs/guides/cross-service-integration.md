@@ -43,6 +43,8 @@ fakecloud actually executes the cross-service wiring. When an EventBridge rule m
 - **Secrets Manager -> Lambda** — Rotation invokes Lambda for all 4 steps.
 - **S3 Lifecycle** — Background expiration and storage class transitions.
 - **EventBridge Scheduler** — Cron and rate-based rules fire on schedule.
+- **RDS -> EventBridge** — DB instance and snapshot lifecycle ops (create, modify, delete, reboot, start, stop, snapshot create/delete, restore) emit `aws.rds` events that match the AWS event schema.
+- **ECS -> EventBridge** — Task state transitions emit `ECS Task State Change` events on the default bus.
 
 ## Testing a cross-service flow
 
