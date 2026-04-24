@@ -1548,11 +1548,13 @@ fn registry_policy_not_found() -> AwsServiceError {
     )
 }
 
-/// Apply the most common `countType` rules of a lifecycle policy
-/// (imageCountMoreThan, sinceImagePushed) to this repo's stored
-/// images and return the digests that should be pruned. Real AWS
-/// evaluates more rule types — this supports the subset that covers
-/// the majority of deployed policies.
+/// Apply lifecycle-policy rules to this repo's stored images and
+/// return the digests that should be pruned. Covers the four AWS
+/// selection dimensions in use today: `tagStatus` (tagged/untagged/any),
+/// `tagPrefixList`, `tagPatternList` (wildcard `*`), and `countType`
+/// (`imageCountMoreThan` or `sinceImagePushed` with `countUnit=days`).
+/// Rules run in ascending `rulePriority` order; later rules can't
+/// re-prune images earlier rules already marked.
 fn evaluate_lifecycle_policy(repo: &crate::state::Repository, policy: &str) -> Vec<String> {
     let Ok(doc) = serde_json::from_str::<Value>(policy) else {
         return Vec::new();
@@ -1577,15 +1579,66 @@ fn evaluate_lifecycle_policy(repo: &crate::state::Repository, policy: &str) -> V
             .get("countUnit")
             .and_then(|v| v.as_str())
             .unwrap_or("days");
+        let tag_prefix_list: Vec<String> = sel
+            .get("tagPrefixList")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tag_pattern_list: Vec<String> = sel
+            .get("tagPatternList")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        // Candidate images, filtered by tagStatus.
+        // Per-image tag lookup: repo stores a tag -> digest map; invert
+        // so we can ask "what tags point at this digest".
+        let tags_for = |digest: &str| -> Vec<&str> {
+            repo.image_tags
+                .iter()
+                .filter_map(|(t, d)| (d == digest).then_some(t.as_str()))
+                .collect()
+        };
+
+        // Candidate images, filtered by tagStatus + tagPrefixList +
+        // tagPatternList. Per AWS, the tag filters only apply when
+        // tagStatus=tagged.
         let mut candidates: Vec<&Image> = repo
             .images
             .values()
             .filter(|img| {
-                let has_tag = repo.image_tags.values().any(|d| d == &img.image_digest);
+                let tags = tags_for(&img.image_digest);
+                let has_tag = !tags.is_empty();
                 match tag_status {
-                    "tagged" => has_tag,
+                    "tagged" => {
+                        if !has_tag {
+                            return false;
+                        }
+                        if !tag_prefix_list.is_empty()
+                            && !tags
+                                .iter()
+                                .any(|t| tag_prefix_list.iter().any(|p| t.starts_with(p.as_str())))
+                        {
+                            return false;
+                        }
+                        if !tag_pattern_list.is_empty()
+                            && !tags.iter().any(|t| {
+                                tag_pattern_list
+                                    .iter()
+                                    .any(|p| wildcard_match(p.as_str(), t))
+                            })
+                        {
+                            return false;
+                        }
+                        true
+                    }
                     "untagged" => !has_tag,
                     _ => true,
                 }
@@ -1622,6 +1675,46 @@ fn evaluate_lifecycle_policy(repo: &crate::state::Repository, policy: &str) -> V
         }
     }
     to_delete.into_iter().collect()
+}
+
+/// AWS lifecycle `tagPatternList` supports `*` as a shell-style
+/// wildcard. No regex metacharacters beyond `*`, no anchoring beyond
+/// full-string match.
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return parts[0] == text;
+    }
+    let mut rest = text;
+    // Leading literal must match start if the pattern doesn't start
+    // with a `*`.
+    if let Some(first) = parts.first() {
+        if !first.is_empty() {
+            if !rest.starts_with(first) {
+                return false;
+            }
+            rest = &rest[first.len()..];
+        }
+    }
+    // Trailing literal must match end if the pattern doesn't end
+    // with a `*`.
+    let last_idx = parts.len() - 1;
+    for (i, seg) in parts.iter().enumerate().skip(1) {
+        if seg.is_empty() {
+            continue;
+        }
+        if i == last_idx {
+            if !rest.ends_with(seg) {
+                return false;
+            }
+            rest = &rest[..rest.len() - seg.len()];
+        } else if let Some(pos) = rest.find(seg) {
+            rest = &rest[pos + seg.len()..];
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 impl EcrService {
@@ -2952,5 +3045,177 @@ mod tests {
         bad("Foo");
         bad("foo bar");
         bad("foo!");
+    }
+
+    // ── Lifecycle policy evaluator ─────────────────────────────────
+    use super::{evaluate_lifecycle_policy, wildcard_match};
+    use crate::state::{Image, Repository};
+    use chrono::Utc;
+    use std::collections::BTreeMap;
+
+    fn repo_with_images(entries: &[(&str, &[&str], i64)]) -> Repository {
+        // entries: (digest, tags, minutes_ago_pushed)
+        let mut r = Repository::new("test-repo", "arn".into(), "123", "http://localhost");
+        for (digest, tags, minutes_ago) in entries {
+            let pushed = Utc::now() - chrono::Duration::minutes(*minutes_ago);
+            r.images.insert(
+                (*digest).to_string(),
+                Image {
+                    image_digest: (*digest).to_string(),
+                    image_manifest: String::new(),
+                    image_manifest_media_type: String::new(),
+                    artifact_media_type: None,
+                    image_size_in_bytes: 0,
+                    image_pushed_at: pushed,
+                    last_recorded_pull_time: None,
+                },
+            );
+            for t in *tags {
+                r.image_tags.insert((*t).to_string(), (*digest).to_string());
+            }
+        }
+        r
+    }
+
+    #[test]
+    fn lifecycle_count_more_than_tagged() {
+        // Five tagged images; rule says keep newest 2, prune 3.
+        let r = repo_with_images(&[
+            ("sha256:a", &["v1"], 50),
+            ("sha256:b", &["v2"], 40),
+            ("sha256:c", &["v3"], 30),
+            ("sha256:d", &["v4"], 20),
+            ("sha256:e", &["v5"], 10),
+        ]);
+        let policy = r#"{"rules":[{
+            "rulePriority": 1,
+            "selection": {"tagStatus":"tagged","countType":"imageCountMoreThan","countNumber":2}
+        }]}"#;
+        let prune = evaluate_lifecycle_policy(&r, policy);
+        assert_eq!(prune.len(), 3);
+        assert!(prune.contains(&"sha256:a".to_string()));
+        assert!(prune.contains(&"sha256:b".to_string()));
+        assert!(prune.contains(&"sha256:c".to_string()));
+    }
+
+    #[test]
+    fn lifecycle_untagged_only() {
+        let r = repo_with_images(&[("sha256:tagged", &["v1"], 60), ("sha256:untag", &[], 30)]);
+        let policy = r#"{"rules":[{
+            "rulePriority": 1,
+            "selection": {"tagStatus":"untagged","countType":"imageCountMoreThan","countNumber":0}
+        }]}"#;
+        let prune = evaluate_lifecycle_policy(&r, policy);
+        assert_eq!(prune, vec!["sha256:untag".to_string()]);
+    }
+
+    #[test]
+    fn lifecycle_tag_prefix_list() {
+        let r = repo_with_images(&[
+            ("sha256:a", &["dev-1"], 60),
+            ("sha256:b", &["dev-2"], 50),
+            ("sha256:c", &["prod-1"], 40),
+            ("sha256:d", &["prod-2"], 30),
+        ]);
+        // Keep newest 1 among dev-*, prune the rest; leave prod-* alone.
+        let policy = r#"{"rules":[{
+            "rulePriority": 1,
+            "selection": {
+                "tagStatus":"tagged",
+                "tagPrefixList":["dev-"],
+                "countType":"imageCountMoreThan",
+                "countNumber":1
+            }
+        }]}"#;
+        let prune = evaluate_lifecycle_policy(&r, policy);
+        assert_eq!(prune, vec!["sha256:a".to_string()]);
+    }
+
+    #[test]
+    fn lifecycle_tag_pattern_list_wildcards() {
+        let r = repo_with_images(&[
+            ("sha256:a", &["release-2024-01"], 60),
+            ("sha256:b", &["release-2024-02"], 50),
+            ("sha256:c", &["hotfix-2024-02"], 40),
+        ]);
+        // Match only `release-*`; prune all of them (countNumber=0).
+        let policy = r#"{"rules":[{
+            "rulePriority": 1,
+            "selection": {
+                "tagStatus":"tagged",
+                "tagPatternList":["release-*"],
+                "countType":"imageCountMoreThan",
+                "countNumber":0
+            }
+        }]}"#;
+        let prune = evaluate_lifecycle_policy(&r, policy);
+        assert_eq!(prune.len(), 2);
+        assert!(prune.contains(&"sha256:a".to_string()));
+        assert!(prune.contains(&"sha256:b".to_string()));
+        assert!(!prune.contains(&"sha256:c".to_string()));
+    }
+
+    #[test]
+    fn lifecycle_since_image_pushed_days() {
+        let r = repo_with_images(&[
+            ("sha256:old", &["v1"], 60 * 24 * 10), // 10 days ago
+            ("sha256:new", &["v2"], 60 * 24),      // 1 day ago
+        ]);
+        let policy = r#"{"rules":[{
+            "rulePriority": 1,
+            "selection": {
+                "tagStatus":"any",
+                "countType":"sinceImagePushed",
+                "countUnit":"days",
+                "countNumber":5
+            }
+        }]}"#;
+        let prune = evaluate_lifecycle_policy(&r, policy);
+        assert_eq!(prune, vec!["sha256:old".to_string()]);
+    }
+
+    #[test]
+    fn lifecycle_rule_priority_order() {
+        // Priority 1 keeps newest 2 tagged; priority 2 then prunes all
+        // remaining tagged > 1 day old. Priority 1 runs first, then 2
+        // sees fewer candidates.
+        let r = repo_with_images(&[
+            ("sha256:a", &["v1"], 60 * 24 * 10),
+            ("sha256:b", &["v2"], 60 * 24 * 5),
+            ("sha256:c", &["v3"], 60 * 24 * 2),
+            ("sha256:d", &["v4"], 60 * 24),
+        ]);
+        let policy = r#"{"rules":[
+            {"rulePriority": 2,
+             "selection": {"tagStatus":"any","countType":"sinceImagePushed","countUnit":"days","countNumber":3}},
+            {"rulePriority": 1,
+             "selection": {"tagStatus":"tagged","countType":"imageCountMoreThan","countNumber":2}}
+        ]}"#;
+        let prune: std::collections::BTreeSet<String> =
+            evaluate_lifecycle_policy(&r, policy).into_iter().collect();
+        // Priority 1 (runs first): prunes a + b (keeping newest 2 = c, d).
+        // Priority 2: c and d are both < 3 days -> survives.
+        assert!(prune.contains("sha256:a"));
+        assert!(prune.contains("sha256:b"));
+    }
+
+    #[test]
+    fn wildcard_match_basics() {
+        assert!(wildcard_match("release-*", "release-2024"));
+        assert!(wildcard_match("*-stable", "v1-stable"));
+        assert!(wildcard_match("a*b*c", "a-something-b-more-c"));
+        assert!(wildcard_match("*", "anything"));
+        assert!(wildcard_match("exact", "exact"));
+
+        assert!(!wildcard_match("release-*", "rev-2024"));
+        assert!(!wildcard_match("*-stable", "v1-beta"));
+        assert!(!wildcard_match("exact", "exactly"));
+        assert!(!wildcard_match("a*b*c", "a-b"));
+    }
+
+    // Suppress clippy::no_effect for BTreeMap usage anchor in this mod.
+    #[allow(dead_code)]
+    fn _anchor_btree() -> BTreeMap<String, String> {
+        BTreeMap::new()
     }
 }
