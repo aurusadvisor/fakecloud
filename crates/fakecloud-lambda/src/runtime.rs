@@ -239,12 +239,23 @@ impl ContainerRuntime {
                 String::from_utf8_lossy(&pull_out.stderr)
             )));
         }
-        if let Some(ref local_uri) = local_pull_uri {
-            let _ = tokio::process::Command::new(&self.cli)
-                .args(["tag", local_uri, image])
-                .output()
-                .await;
-        }
+        // Retag the local pull URI to the AWS URI so `docker create`
+        // finds the image under the user-visible name. Digest-pinned
+        // refs can't be `docker tag` targets, so fall through and
+        // create under the local URI instead.
+        let run_image = if let Some(ref local_uri) = local_pull_uri {
+            if fakecloud_core::ecr_uri::is_digest_ref(image) {
+                local_uri.clone()
+            } else {
+                let _ = tokio::process::Command::new(&self.cli)
+                    .args(["tag", local_uri, image])
+                    .output()
+                    .await;
+                image.to_string()
+            }
+        } else {
+            image.to_string()
+        };
 
         let mut cmd = tokio::process::Command::new(&self.cli);
         cmd.arg("create")
@@ -268,7 +279,7 @@ impl ContainerRuntime {
         cmd.arg("-e")
             .arg(format!("AWS_LAMBDA_FUNCTION_TIMEOUT={}", func.timeout));
 
-        cmd.arg(image);
+        cmd.arg(&run_image);
 
         let output = cmd
             .output()

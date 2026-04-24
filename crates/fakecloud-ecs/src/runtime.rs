@@ -182,16 +182,25 @@ impl EcsRuntime {
             let err = String::from_utf8_lossy(&pull_out.stderr).to_string();
             return Err(RuntimeError::ImagePull(err));
         }
-        if let Some(ref local_uri) = local_pull_uri {
-            // Retag so `docker run <aws-uri>` finds the image; ignore
-            // errors from an already-existing tag (idempotent across
-            // concurrent tasks using the same image).
-            let _ = self
-                .cli_command()
-                .args(["tag", local_uri, &image])
-                .output()
-                .await;
-        }
+        // Retag the local pull URI to the AWS URI so `docker run` finds
+        // the image under the user-facing name. Digest-pinned refs can't
+        // be `docker tag` targets, so we fall through and run under the
+        // local URI in that case (cosmetic tradeoff — the task's image
+        // field will show the 127.0.0.1 URI instead of the AWS digest).
+        let run_image = if let Some(ref local_uri) = local_pull_uri {
+            if fakecloud_core::ecr_uri::is_digest_ref(&image) {
+                local_uri.clone()
+            } else {
+                let _ = self
+                    .cli_command()
+                    .args(["tag", local_uri, &image])
+                    .output()
+                    .await;
+                image.clone()
+            }
+        } else {
+            image.clone()
+        };
         mark_pull_stopped(state, account_id, task_id);
 
         // Run the container detached so we can track its ID and wait
@@ -207,11 +216,11 @@ impl EcsRuntime {
             let transformed = v
                 .replace("http://127.0.0.1:", "http://host.docker.internal:")
                 .replace("https://127.0.0.1:", "https://host.docker.internal:")
-                .replace("http://127.0.0.1:", "http://host.docker.internal:")
-                .replace("https://127.0.0.1:", "https://host.docker.internal:");
+                .replace("http://localhost:", "http://host.docker.internal:")
+                .replace("https://localhost:", "https://host.docker.internal:");
             cmd.arg("-e").arg(format!("{}={}", k, transformed));
         }
-        cmd.arg(&image);
+        cmd.arg(&run_image);
         for arg in &command {
             cmd.arg(arg);
         }

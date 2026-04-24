@@ -95,7 +95,15 @@ impl CreateFunctionInput {
         let code_fallback = serde_json::to_vec(&body["Code"]).unwrap_or_default();
 
         let package_type = body["PackageType"].as_str().unwrap_or("Zip").to_string();
-        let image_uri = body["Code"]["ImageUri"].as_str().map(String::from);
+        // ImageUri belongs to `PackageType=Image` functions. Silently
+        // dropping it on `Zip` functions avoids GetFunction returning
+        // ECR code metadata for a Zip-based function (AWS ignores the
+        // field entirely in that case too).
+        let image_uri = if package_type == "Image" {
+            body["Code"]["ImageUri"].as_str().map(String::from)
+        } else {
+            None
+        };
 
         // PackageType=Image requires Code.ImageUri; PackageType=Zip requires
         // code content. Reject inconsistent shapes with AWS's error code so

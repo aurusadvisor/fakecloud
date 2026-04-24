@@ -11,8 +11,14 @@
 
 /// Detect whether `image` is an AWS private-ECR URI. Match shape:
 /// `<any>.dkr.ecr.<any>.amazonaws.com/<path>[:<tag>|@sha256:<digest>]`.
+/// The registry host is anchored so arbitrary-path substrings like
+/// `docker.io/user/.dkr.ecr.whatever.amazonaws.com/bar` don't get
+/// misclassified.
 pub fn is_aws_ecr_uri(image: &str) -> bool {
-    image.contains(".dkr.ecr.") && image.contains(".amazonaws.com/")
+    let Some((registry, _path)) = image.split_once('/') else {
+        return false;
+    };
+    registry.contains(".dkr.ecr.") && registry.ends_with(".amazonaws.com")
 }
 
 /// If `image` is an AWS private-ECR URI, return the local-registry URI
@@ -26,11 +32,18 @@ pub fn translate_to_local(image: &str, server_port: u16) -> Option<String> {
     if !is_aws_ecr_uri(image) {
         return None;
     }
-    let (_registry, path) = image.split_once(".amazonaws.com/")?;
+    let (_registry, path) = image.split_once('/')?;
     if path.is_empty() {
         return None;
     }
     Some(format!("127.0.0.1:{server_port}/{path}"))
+}
+
+/// Is `image` a digest-pinned reference (`repo@sha256:...`)? Docker's
+/// `tag` subcommand cannot target a digest ref, so the runtime must
+/// skip retagging and run the container under the local URI directly.
+pub fn is_digest_ref(image: &str) -> bool {
+    image.contains("@sha256:")
 }
 
 #[cfg(test)]
@@ -48,6 +61,20 @@ mod tests {
         assert!(!is_aws_ecr_uri("public.ecr.aws/lambda/python:3.12"));
         assert!(!is_aws_ecr_uri("docker.io/library/alpine:3.20"));
         assert!(!is_aws_ecr_uri("alpine:3.20"));
+        // Host anchoring — path containing the tokens must NOT match.
+        assert!(!is_aws_ecr_uri(
+            "docker.io/team/evil.dkr.ecr.us-east-1.amazonaws.com/repo:tag"
+        ));
+    }
+
+    #[test]
+    fn detects_digest_ref() {
+        assert!(is_digest_ref(
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/repo@sha256:abc"
+        ));
+        assert!(!is_digest_ref(
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:tag"
+        ));
     }
 
     #[test]
