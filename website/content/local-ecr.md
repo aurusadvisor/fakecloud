@@ -28,17 +28,17 @@ Point your AWS SDK at `http://localhost:4566`. `docker push` / `docker pull` wor
 fakecloud &
 
 # Log Docker into the fake registry.
-aws --endpoint http://localhost:4566 ecr get-login-password \
+aws --endpoint-url http://localhost:4566 ecr get-login-password \
   | docker login --username AWS --password-stdin localhost:4566
 
 # Create the repo, push an image.
-aws --endpoint http://localhost:4566 ecr create-repository --repository-name demo
+aws --endpoint-url http://localhost:4566 ecr create-repository --repository-name demo
 docker pull busybox:latest
 docker tag busybox:latest localhost:4566/demo:latest
 docker push localhost:4566/demo:latest
 
 # Verify with the AWS SDK.
-aws --endpoint http://localhost:4566 ecr describe-images --repository-name demo
+aws --endpoint-url http://localhost:4566 ecr describe-images --repository-name demo
 ```
 
 ## Assert on what was pushed (first-party SDKs)

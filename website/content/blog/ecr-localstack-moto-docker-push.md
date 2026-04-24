@@ -25,17 +25,17 @@ curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh
 fakecloud &
 
 # Docker login works.
-aws --endpoint http://localhost:4566 ecr get-login-password \
+aws --endpoint-url http://localhost:4566 ecr get-login-password \
   | docker login --username AWS --password-stdin localhost:4566
 
 # Push an image.
-aws --endpoint http://localhost:4566 ecr create-repository --repository-name demo
+aws --endpoint-url http://localhost:4566 ecr create-repository --repository-name demo
 docker pull busybox:latest
 docker tag busybox:latest localhost:4566/demo:latest
 docker push localhost:4566/demo:latest
 
 # The AWS SDK sees it.
-aws --endpoint http://localhost:4566 ecr describe-images --repository-name demo
+aws --endpoint-url http://localhost:4566 ecr describe-images --repository-name demo
 ```
 
 `GetAuthorizationToken` returns `base64("AWS:<token>")` with a 12-hour expiry matching real AWS. The `/v2/` endpoints honor Basic Auth and issue a `WWW-Authenticate: Basic realm="fakecloud-ecr"` challenge on the initial unauthenticated request, so Docker's two-phase login does its handshake cleanly.

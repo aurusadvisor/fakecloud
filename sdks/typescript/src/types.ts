@@ -533,9 +533,9 @@ export interface EcrImagesResponse {
 export interface EcrPullThroughRule {
   ecrRepositoryPrefix: string;
   upstreamRegistryUrl: string;
-  upstreamRegistry?: string;
-  credentialArn?: string;
-  customRoleArn?: string;
+  upstreamRegistry?: string | null;
+  credentialArn?: string | null;
+  customRoleArn?: string | null;
   createdAt: string;
   updatedAt: string;
 }
