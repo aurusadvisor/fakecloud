@@ -74,10 +74,8 @@ impl RoleTrustValidator for IamRoleTrustValidator {
             return Ok(());
         };
 
-        let parsed: Value = match serde_json::from_str(&role.assume_role_policy_document) {
-            Ok(v) => v,
-            Err(_) => return Ok(()),
-        };
+        let parsed: Value = serde_json::from_str(&role.assume_role_policy_document)
+            .map_err(|_| PassRoleError::InvalidTrustPolicy(role_arn.to_string()))?;
 
         if trust_policy_allows(&parsed, service_principal) {
             Ok(())
