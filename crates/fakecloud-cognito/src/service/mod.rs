@@ -63,8 +63,11 @@ impl CognitoService {
     }
 
     /// Dispatch a Cognito verification email. Routes through the
-    /// CustomEmailSender Lambda when configured on the pool, otherwise
-    /// through the wired SES dispatcher. No-op when neither is wired.
+    /// CustomEmailSender Lambda when configured on the pool; otherwise
+    /// invokes the CustomMessage trigger (synchronously, so its response
+    /// can override subject+body) and then sends through the wired SES
+    /// dispatcher. No-op when neither is wired. Returns immediately —
+    /// all work happens in a spawned task.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn dispatch_verification_email(
         &self,
@@ -74,7 +77,7 @@ impl CognitoService {
         user_attributes: &[crate::state::UserAttribute],
         to_email: &str,
         code: &str,
-        trigger_source: crate::triggers::TriggerSource,
+        custom_message_trigger: crate::triggers::TriggerSource,
         custom_sender_trigger: crate::triggers::TriggerSource,
         region: &str,
         account_id: &str,
@@ -104,6 +107,8 @@ impl CognitoService {
         let Some(ref dispatcher) = ctx.email else {
             return;
         };
+        let custom_message_arn =
+            crate::triggers::get_trigger_arn(&self.state, pool_id, custom_message_trigger);
         let pool_settings = {
             let accounts = self.state.read();
             accounts
@@ -121,32 +126,62 @@ impl CognitoService {
                 .unwrap_or((None, None))
         };
         let (from_addr, vmt) = pool_settings;
-        let (subject_tpl, msg_tpl) = vmt
+        let (subject_tpl_default, msg_tpl_default) = vmt
             .map(|t| (t.email_subject, t.email_message))
             .unwrap_or((None, None));
-        // Fall back to ForgotPassword templates when those are set.
-        let rendered = crate::triggers::render_verification_email(
-            from_addr.as_deref(),
-            subject_tpl.as_deref(),
-            msg_tpl.as_deref(),
-            username,
-            code,
-        );
-        // Fire-and-forget to keep the request hot-path snappy.
+
         let dispatcher = dispatcher.clone();
-        let acct = account_id.to_string();
-        let to_email = to_email.to_string();
+        let ctx = ctx.clone();
+        let username_owned = username.to_string();
+        let client_id_owned = client_id.map(|s| s.to_string());
+        let pool_id_owned = pool_id.to_string();
+        let region_owned = region.to_string();
+        let account_id_owned = account_id.to_string();
+        let user_attrs_owned: Vec<crate::state::UserAttribute> = user_attributes.to_vec();
+        let to_email_owned = to_email.to_string();
+        let code_owned = code.to_string();
         tokio::spawn(async move {
+            let mut subject_tpl = subject_tpl_default;
+            let mut msg_tpl = msg_tpl_default;
+            if let Some(function_arn) = custom_message_arn {
+                let mut event = crate::triggers::build_trigger_event(
+                    custom_message_trigger,
+                    &pool_id_owned,
+                    client_id_owned.as_deref(),
+                    &username_owned,
+                    &user_attrs_owned,
+                    &region_owned,
+                    &account_id_owned,
+                );
+                event["request"]["codeParameter"] = serde_json::json!("{####}");
+                event["request"]["usernameParameter"] = serde_json::json!(username_owned);
+                if let Some(resp) =
+                    crate::triggers::invoke_trigger(&ctx, &function_arn, &event).await
+                {
+                    if let Some(s) = resp["response"]["emailSubject"].as_str() {
+                        subject_tpl = Some(s.to_string());
+                    }
+                    if let Some(m) = resp["response"]["emailMessage"].as_str() {
+                        msg_tpl = Some(m.to_string());
+                    }
+                }
+            }
+            let rendered = crate::triggers::render_verification_email(
+                from_addr.as_deref(),
+                subject_tpl.as_deref(),
+                msg_tpl.as_deref(),
+                &username_owned,
+                &code_owned,
+            );
             dispatcher.send_email(
-                &acct,
+                &account_id_owned,
                 &rendered.from,
-                &to_email,
+                &to_email_owned,
                 &rendered.subject,
                 &rendered.body_text,
                 rendered.body_html.as_deref(),
             );
         });
-        let _ = trigger_source;
     }
 
     /// Dispatch a Cognito verification SMS. Routes through the

@@ -466,6 +466,16 @@ pub fn build_custom_sender_event(
         .map(|a| (a.name.clone(), Value::String(a.value.clone())))
         .collect::<serde_json::Map<String, Value>>()
         .into();
+    let request_type = match trigger_source {
+        TriggerSource::CustomSmsSenderSignUp
+        | TriggerSource::CustomSmsSenderForgotPassword
+        | TriggerSource::CustomSmsSenderResendCode
+        | TriggerSource::CustomSmsSenderAuthentication
+        | TriggerSource::CustomSmsSenderAdminCreateUser
+        | TriggerSource::CustomSmsSenderUpdateUserAttribute
+        | TriggerSource::CustomSmsSenderVerifyUserAttribute => "customSMSSenderRequestV1",
+        _ => "customEmailSenderRequestV1",
+    };
     json!({
         "version": "1",
         "triggerSource": trigger_source.as_str(),
@@ -480,7 +490,7 @@ pub fn build_custom_sender_event(
         "request": {
             "userAttributes": user_attrs,
             "code": base64::engine::general_purpose::STANDARD.encode(code.as_bytes()),
-            "type": "customEmailSenderRequestV1",
+            "type": request_type,
         },
         "response": {},
     })
