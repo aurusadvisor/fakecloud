@@ -148,7 +148,9 @@ class EcrClient:
         _check(resp)
         return EcrRepositoriesResponse.from_dict(resp.json())
 
-    async def get_images(self, repository_name: Optional[str] = None) -> EcrImagesResponse:
+    async def get_images(
+        self, repository_name: Optional[str] = None
+    ) -> EcrImagesResponse:
         path = f"{self._base}/_fakecloud/ecr/images"
         if repository_name:
             path += f"?repo={repository_name}"

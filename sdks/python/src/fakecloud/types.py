@@ -1126,7 +1126,9 @@ class EcrRepositoriesResponse:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EcrRepositoriesResponse:
         return cls(
-            repositories=[EcrRepository.from_dict(r) for r in data.get("repositories", [])],
+            repositories=[
+                EcrRepository.from_dict(r) for r in data.get("repositories", [])
+            ],
         )
 
 
@@ -1176,4 +1178,6 @@ class EcrPullThroughRulesResponse:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EcrPullThroughRulesResponse:
-        return cls(rules=[EcrPullThroughRule.from_dict(r) for r in data.get("rules", [])])
+        return cls(
+            rules=[EcrPullThroughRule.from_dict(r) for r in data.get("rules", [])],
+        )
