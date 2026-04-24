@@ -413,6 +413,54 @@ public final class Types {
             String accountId,
             String arn) {}
 
+    // ── ECR ────────────────────────────────────────────────────────
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcrTag(String key, String value) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcrRepository(
+            String repositoryName,
+            String repositoryArn,
+            String registryId,
+            String repositoryUri,
+            String imageTagMutability,
+            boolean scanOnPush,
+            String createdAt,
+            List<EcrTag> tags,
+            boolean hasPolicy,
+            boolean hasLifecyclePolicy,
+            long imageCount,
+            long layerCount) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcrRepositoriesResponse(List<EcrRepository> repositories) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcrImage(
+            String repositoryName,
+            String imageDigest,
+            List<String> imageTags,
+            long imageSizeInBytes,
+            String imageManifestMediaType,
+            String imagePushedAt) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcrImagesResponse(List<EcrImage> images) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcrPullThroughRule(
+            String ecrRepositoryPrefix,
+            String upstreamRegistryUrl,
+            String upstreamRegistry,
+            String credentialArn,
+            String customRoleArn,
+            String createdAt,
+            String updatedAt) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EcrPullThroughRulesResponse(List<EcrPullThroughRule> rules) {}
+
     // ── ECS ───────────────────────────────────────────────────────
 
     @JsonIgnoreProperties(ignoreUnknown = true)

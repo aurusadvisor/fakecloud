@@ -17,6 +17,9 @@ import dev.fakecloud.Types.ConfirmSubscriptionResponse;
 import dev.fakecloud.Types.ConfirmUserRequest;
 import dev.fakecloud.Types.ConfirmUserResponse;
 import dev.fakecloud.Types.ConfirmationCodesResponse;
+import dev.fakecloud.Types.EcrImagesResponse;
+import dev.fakecloud.Types.EcrPullThroughRulesResponse;
+import dev.fakecloud.Types.EcrRepositoriesResponse;
 import dev.fakecloud.Types.EcsClustersResponse;
 import dev.fakecloud.Types.ElastiCacheClustersResponse;
 import dev.fakecloud.Types.ElastiCacheReplicationGroupsResponse;
@@ -71,6 +74,7 @@ public final class FakeCloud {
     private final LambdaClient lambda;
     private final RdsClient rds;
     private final ElastiCacheClient elasticache;
+    private final EcrClient ecr;
     private final SesClient ses;
     private final SnsClient sns;
     private final SqsClient sqs;
@@ -94,6 +98,7 @@ public final class FakeCloud {
         this.lambda = new LambdaClient(http);
         this.rds = new RdsClient(http);
         this.elasticache = new ElastiCacheClient(http);
+        this.ecr = new EcrClient(http);
         this.ses = new SesClient(http);
         this.sns = new SnsClient(http);
         this.sqs = new SqsClient(http);
@@ -149,6 +154,7 @@ public final class FakeCloud {
     public LambdaClient lambda() { return lambda; }
     public RdsClient rds() { return rds; }
     public ElastiCacheClient elasticache() { return elasticache; }
+    public EcrClient ecr() { return ecr; }
     public SesClient ses() { return ses; }
     public SnsClient sns() { return sns; }
     public SqsClient sqs() { return sqs; }
@@ -211,6 +217,32 @@ public final class FakeCloud {
             return http.get(
                     "/_fakecloud/elasticache/serverless-caches",
                     ElastiCacheServerlessCachesResponse.class);
+        }
+    }
+
+    public static final class EcrClient {
+        private final HttpTransport http;
+        EcrClient(HttpTransport http) { this.http = http; }
+
+        public EcrRepositoriesResponse getRepositories() {
+            return http.get("/_fakecloud/ecr/repositories", EcrRepositoriesResponse.class);
+        }
+
+        public EcrImagesResponse getImages() {
+            return http.get("/_fakecloud/ecr/images", EcrImagesResponse.class);
+        }
+
+        public EcrImagesResponse getImagesForRepository(String repositoryName) {
+            return http.get(
+                    "/_fakecloud/ecr/images?repo="
+                            + java.net.URLEncoder.encode(
+                                    repositoryName, java.nio.charset.StandardCharsets.UTF_8),
+                    EcrImagesResponse.class);
+        }
+
+        public EcrPullThroughRulesResponse getPullThroughRules() {
+            return http.get(
+                    "/_fakecloud/ecr/pull-through-rules", EcrPullThroughRulesResponse.class);
         }
     }
 

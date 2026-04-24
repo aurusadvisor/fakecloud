@@ -3,6 +3,7 @@ export {
   LambdaClient,
   RdsClient,
   ElastiCacheClient,
+  EcrClient,
   SesClient,
   SnsClient,
   SqsClient,
