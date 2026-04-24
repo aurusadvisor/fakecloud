@@ -28,7 +28,13 @@ fakecloud implements **110 of 110** SES v2 operations at 100% Smithy conformance
 - **Receipt rule sets** — CRUD, active rule set management
 - **Receipt rules** — CRUD, scan rules
 - **Receipt filters** — IP filters
-- **Real inbound pipeline** — `/_fakecloud/ses/inbound` simulates receiving an email, evaluates receipt rules, and **actually executes** the configured actions (S3 PutObject, SNS Publish, Lambda Invoke)
+- **Real inbound pipeline** — `/_fakecloud/ses/inbound` simulates receiving an email, evaluates receipt rules, and **actually executes** the configured actions:
+  - **S3 action** — writes the (header-augmented) message to the bucket
+  - **SNS action** — publishes a `Received` notification to the topic
+  - **Lambda action** — invokes the function with the `aws:ses` event envelope
+  - **AddHeader action** — prepends headers to the message before downstream actions see it
+  - **Bounce action** — enqueues a bounce email back to the sender (visible at `/_fakecloud/ses/emails`) and publishes a `Bounce` notification to the optional topic
+  - **Stop action** — halts subsequent rules; publishes a notification when a topic is configured
 
 ## Protocol
 
@@ -42,7 +48,7 @@ SES v2 uses REST. SES v1 inbound uses Query protocol.
 ## Cross-service delivery
 
 - **SES -> SNS / EventBridge** — Send/delivery/bounce/complaint events fan out via configured event destinations
-- **SES Inbound -> S3 / SNS / Lambda** — Receipt rules evaluate and execute actions on inbound mail
+- **SES Inbound -> S3 / SNS / Lambda / Bounce / AddHeader / Stop** — Receipt rules evaluate and execute every supported action type
 
 ## Why this matters
 
