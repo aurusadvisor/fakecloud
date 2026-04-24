@@ -1538,9 +1538,12 @@ impl EcsService {
             }
         } else {
             // No runtime available — fail fast so the task doesn't stay
-            // PENDING forever.
+            // PENDING forever. We incremented pending_tasks_count above;
+            // decrement it here so the cluster counter doesn't drift and
+            // block later DeleteCluster calls.
             let mut accounts = self.state.write();
             if let Some(state) = accounts.get_mut(&account) {
+                let mut cluster_drains: Vec<String> = Vec::new();
                 for id in &spawned_tasks {
                     if let Some(t) = state.tasks.get_mut(id) {
                         t.last_status = "STOPPED".into();
@@ -1552,6 +1555,14 @@ impl EcsService {
                         t.stopped_at = Some(Utc::now());
                         for c in t.containers.iter_mut() {
                             c.last_status = "STOPPED".into();
+                        }
+                        cluster_drains.push(t.cluster_name.clone());
+                    }
+                }
+                for name in cluster_drains {
+                    if let Some(cluster) = state.clusters.get_mut(&name) {
+                        if cluster.pending_tasks_count > 0 {
+                            cluster.pending_tasks_count -= 1;
                         }
                     }
                 }

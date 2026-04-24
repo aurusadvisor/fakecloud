@@ -646,15 +646,17 @@ type EcsClustersResponse struct {
 
 // EcsTaskContainer is a snapshot of one container in a task.
 type EcsTaskContainer struct {
-	Name       string `json:"name"`
-	Image      string `json:"image"`
-	LastStatus string `json:"lastStatus"`
-	ExitCode   *int64 `json:"exitCode,omitempty"`
-	RuntimeID  string `json:"runtimeId,omitempty"`
-	Essential  bool   `json:"essential"`
+	Name       string  `json:"name"`
+	Image      string  `json:"image"`
+	LastStatus string  `json:"lastStatus"`
+	ExitCode   *int64  `json:"exitCode,omitempty"`
+	RuntimeID  *string `json:"runtimeId,omitempty"`
+	Essential  bool    `json:"essential"`
 }
 
 // EcsTask is a snapshot of one ECS task as fakecloud sees it.
+// Optional fields are pointers so JSON decoding accepts both absent and
+// explicit `null` values from the server.
 type EcsTask struct {
 	TaskArn           string             `json:"taskArn"`
 	TaskID            string             `json:"taskId"`
@@ -667,11 +669,11 @@ type EcsTask struct {
 	DesiredStatus     string             `json:"desiredStatus"`
 	LaunchType        string             `json:"launchType"`
 	CreatedAt         string             `json:"createdAt"`
-	StartedAt         string             `json:"startedAt,omitempty"`
-	StoppingAt        string             `json:"stoppingAt,omitempty"`
-	StoppedAt         string             `json:"stoppedAt,omitempty"`
-	StopCode          string             `json:"stopCode,omitempty"`
-	StoppedReason     string             `json:"stoppedReason,omitempty"`
+	StartedAt         *string            `json:"startedAt,omitempty"`
+	StoppingAt        *string            `json:"stoppingAt,omitempty"`
+	StoppedAt         *string            `json:"stoppedAt,omitempty"`
+	StopCode          *string            `json:"stopCode,omitempty"`
+	StoppedReason     *string            `json:"stoppedReason,omitempty"`
 	Containers        []EcsTaskContainer `json:"containers"`
 	CapturedLogBytes  int                `json:"capturedLogBytes"`
 }
@@ -692,17 +694,18 @@ type EcsTaskLogsResponse struct {
 
 // EcsMarkFailedRequest is the payload for POST /ecs/tasks/{id}/mark-failed.
 type EcsMarkFailedRequest struct {
-	ExitCode *int64 `json:"exitCode,omitempty"`
-	Reason   string `json:"reason,omitempty"`
+	ExitCode *int64  `json:"exitCode,omitempty"`
+	Reason   *string `json:"reason,omitempty"`
 }
 
 // EcsLifecycleEvent is one entry in the introspection event log.
+// Optional fields are pointers so null-safe JSON decoding works.
 type EcsLifecycleEvent struct {
 	At         string      `json:"at"`
 	EventType  string      `json:"eventType"`
-	TaskArn    string      `json:"taskArn,omitempty"`
-	ClusterArn string      `json:"clusterArn,omitempty"`
-	LastStatus string      `json:"lastStatus,omitempty"`
+	TaskArn    *string     `json:"taskArn,omitempty"`
+	ClusterArn *string     `json:"clusterArn,omitempty"`
+	LastStatus *string     `json:"lastStatus,omitempty"`
 	Detail     interface{} `json:"detail"`
 }
 

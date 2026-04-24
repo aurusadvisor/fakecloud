@@ -190,6 +190,13 @@ impl EcsRuntime {
             .output()
             .await
             .map_err(|e| RuntimeError::Wait(e.to_string()))?;
+        if !wait_out.status.success() {
+            // `docker wait` itself failed — treat this as a Wait error so
+            // the task flips via `finalize_failure` rather than silently
+            // claiming the container exited normally.
+            let err = String::from_utf8_lossy(&wait_out.stderr).to_string();
+            return Err(RuntimeError::Wait(err));
+        }
         let exit_code: i64 = String::from_utf8_lossy(&wait_out.stdout)
             .trim()
             .parse()
@@ -420,6 +427,12 @@ fn finalize_failure(state: &SharedEcsState, account_id: &str, task_id: &str, rea
         let Some(task) = s.tasks.get_mut(task_id) else {
             return;
         };
+        // Capture the prior status before we clobber it: if the task had
+        // already reached RUNNING when execution failed (e.g. `docker wait`
+        // blew up after the container started), we owe the cluster a
+        // running-tasks decrement. Tasks that died before RUNNING only
+        // ever incremented pendingTasksCount.
+        let was_running = task.last_status == "RUNNING";
         task.last_status = "STOPPED".into();
         task.desired_status = "STOPPED".into();
         task.stopped_at = Some(Utc::now());
@@ -430,7 +443,11 @@ fn finalize_failure(state: &SharedEcsState, account_id: &str, task_id: &str, rea
             c.reason = Some(reason.to_string());
         }
         if let Some(cluster) = s.clusters.get_mut(&task.cluster_name) {
-            if cluster.pending_tasks_count > 0 {
+            if was_running {
+                if cluster.running_tasks_count > 0 {
+                    cluster.running_tasks_count -= 1;
+                }
+            } else if cluster.pending_tasks_count > 0 {
                 cluster.pending_tasks_count -= 1;
             }
         }
