@@ -13,11 +13,14 @@ use std::time::Duration;
 
 use base64::Engine;
 use chrono::Utc;
+use fakecloud_core::delivery::DeliveryBus;
+use fakecloud_logs::ingest::{append_events, IngestEvent};
+use fakecloud_logs::state::SharedLogsState;
 use parking_lot::RwLock;
 use tempfile::TempDir;
 use tokio::process::Command;
 
-use crate::state::{LifecycleEvent, SharedEcsState};
+use crate::state::{LifecycleEvent, SharedEcsState, Task};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -48,6 +51,14 @@ pub struct EcsRuntime {
     /// Tracks container IDs per task ID so `stop_task` can kill in-flight
     /// work without needing to block on the spawned executor future.
     containers: RwLock<std::collections::HashMap<String, String>>,
+    /// Cross-service delivery bus — emits `aws.ecs` EventBridge events
+    /// on task state transitions when wired. `None` if the server started
+    /// without EventBridge configured (or for unit tests).
+    delivery_bus: Option<Arc<DeliveryBus>>,
+    /// CloudWatch Logs state — when set, tasks whose container definition
+    /// declares the `awslogs` log driver get their captured stdout/stderr
+    /// forwarded to a log group/stream under this shared state.
+    logs_state: Option<SharedLogsState>,
 }
 
 impl EcsRuntime {
@@ -81,6 +92,8 @@ impl EcsRuntime {
             server_port,
             docker_config,
             containers: RwLock::new(std::collections::HashMap::new()),
+            delivery_bus: None,
+            logs_state: None,
         })
     }
 
@@ -105,15 +118,37 @@ impl EcsRuntime {
         &self.cli
     }
 
+    /// Wire EventBridge delivery so task state transitions emit
+    /// `aws.ecs` / `ECS Task State Change` events.
+    pub fn with_delivery_bus(mut self, bus: Arc<DeliveryBus>) -> Self {
+        self.delivery_bus = Some(bus);
+        self
+    }
+
+    /// Wire CloudWatch Logs state so tasks using the `awslogs` driver
+    /// get their captured stdout/stderr forwarded.
+    pub fn with_logs(mut self, logs: SharedLogsState) -> Self {
+        self.logs_state = Some(logs);
+        self
+    }
+
     /// Spawn the task asynchronously. Returns immediately after transitioning
     /// the task to `PENDING`; the background task advances it to `RUNNING`
     /// once the container is created and to `STOPPED` once the container
     /// exits.
     pub fn run_task(self: Arc<Self>, state: SharedEcsState, task_id: String, account_id: String) {
+        let rt = self.clone();
         tokio::spawn(async move {
-            if let Err(err) = self.run_task_inner(&state, &task_id, &account_id).await {
+            if let Err(err) = rt.run_task_inner(&state, &task_id, &account_id).await {
                 tracing::warn!(%err, task = %task_id, "ecs task execution failed");
                 finalize_failure(&state, &account_id, &task_id, &err.to_string());
+                rt.emit_state_change(
+                    &state,
+                    &account_id,
+                    &task_id,
+                    "STOPPED",
+                    Some(("TaskFailedToStart", err.to_string())),
+                );
             }
         });
     }
@@ -243,6 +278,7 @@ impl EcsRuntime {
             &container_id,
             &awslogs_container,
         );
+        self.emit_state_change(state, account_id, task_id, "RUNNING", None);
 
         // Wait for the container to exit. `docker wait` blocks until exit
         // and prints the numeric exit code to stdout.
@@ -290,7 +326,111 @@ impl EcsRuntime {
             "EssentialContainerExited",
             None,
         );
+        self.forward_awslogs_if_configured(state, account_id, task_id, &captured);
+        self.emit_state_change(
+            state,
+            account_id,
+            task_id,
+            "STOPPED",
+            Some((
+                "EssentialContainerExited",
+                format!("Exit code {}", exit_code),
+            )),
+        );
         Ok(())
+    }
+
+    /// Emit an `ECS Task State Change` EventBridge event. No-op when no
+    /// delivery bus is wired. Matches AWS event shape so downstream
+    /// rules can filter on `detail.lastStatus`, `detail.stopCode`, etc.
+    fn emit_state_change(
+        &self,
+        state: &SharedEcsState,
+        account_id: &str,
+        task_id: &str,
+        last_status: &str,
+        stop: Option<(&str, String)>,
+    ) {
+        let Some(ref bus) = self.delivery_bus else {
+            return;
+        };
+        let Some(task_view) = snapshot_task(state, account_id, task_id) else {
+            return;
+        };
+        let mut detail = serde_json::json!({
+            "taskArn": task_view.task_arn,
+            "clusterArn": task_view.cluster_arn,
+            "lastStatus": last_status,
+            "desiredStatus": if last_status == "STOPPED" { "STOPPED" } else { "RUNNING" },
+            "launchType": task_view.launch_type,
+            "group": task_view.group,
+            "taskDefinitionArn": task_view.task_definition_arn,
+            "containers": task_view.containers,
+        });
+        if let Some((code, reason)) = stop {
+            detail["stopCode"] = code.into();
+            detail["stoppedReason"] = reason.into();
+        }
+        bus.put_event_to_eventbridge(
+            "aws.ecs",
+            "ECS Task State Change",
+            &detail.to_string(),
+            "default",
+        );
+    }
+
+    /// Forward captured stdout/stderr to CloudWatch Logs when the task's
+    /// container definition declares the `awslogs` log driver. No-op when
+    /// logs_state isn't wired or the task has no awslogs config.
+    fn forward_awslogs_if_configured(
+        &self,
+        state: &SharedEcsState,
+        account_id: &str,
+        task_id: &str,
+        captured: &str,
+    ) {
+        let Some(ref logs) = self.logs_state else {
+            return;
+        };
+        // Clone out of the read guard so we don't hold it across the logs
+        // state write.
+        let (cfg, task_region) = {
+            let accounts = state.read();
+            let Some(s) = accounts.get(account_id) else {
+                return;
+            };
+            let Some(task) = s.tasks.get(task_id) else {
+                return;
+            };
+            let Some(ref cfg) = task.awslogs else {
+                return;
+            };
+            (cfg.clone(), s.region.clone())
+        };
+        if captured.is_empty() {
+            return;
+        }
+        let now = Utc::now().timestamp_millis();
+        let stream_name = cfg.stream_name(task_id);
+        let events: Vec<IngestEvent> = captured
+            .lines()
+            .enumerate()
+            .map(|(i, line)| IngestEvent {
+                // Stagger within the same millisecond so CloudWatch's
+                // chronological-order invariant holds without relying on
+                // the host clock's resolution.
+                timestamp_ms: now.saturating_add(i as i64),
+                message: line.to_string(),
+            })
+            .collect();
+        append_events(
+            logs,
+            account_id,
+            &task_region,
+            &cfg.group,
+            &stream_name,
+            &events,
+        );
     }
 
     /// Kill the container behind a task (if any) with the configured stop
@@ -323,6 +463,47 @@ impl EcsRuntime {
         self.containers.write().clear();
     }
 }
+
+struct TaskSnapshot {
+    task_arn: String,
+    cluster_arn: String,
+    launch_type: String,
+    group: Option<String>,
+    task_definition_arn: String,
+    containers: serde_json::Value,
+}
+
+fn snapshot_task(state: &SharedEcsState, account_id: &str, task_id: &str) -> Option<TaskSnapshot> {
+    let accounts = state.read();
+    let s = accounts.get(account_id)?;
+    let task = s.tasks.get(task_id)?;
+    Some(TaskSnapshot {
+        task_arn: task.task_arn.clone(),
+        cluster_arn: task.cluster_arn.clone(),
+        launch_type: task.launch_type.clone(),
+        group: task.group.clone(),
+        task_definition_arn: task.task_definition_arn.clone(),
+        containers: serde_json::Value::Array(
+            task.containers
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "containerArn": c.container_arn,
+                        "name": c.name,
+                        "image": c.image,
+                        "lastStatus": c.last_status,
+                        "exitCode": c.exit_code,
+                        "reason": c.reason,
+                    })
+                })
+                .collect(),
+        ),
+    })
+}
+
+/// Unused silencer: keep `Task` in scope for future snapshot extensions.
+#[allow(dead_code)]
+fn _task_type_anchor(_t: &Task) {}
 
 fn cli_works(cli: &str) -> bool {
     std::process::Command::new(cli)
