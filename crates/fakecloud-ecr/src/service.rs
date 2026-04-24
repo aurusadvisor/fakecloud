@@ -2721,6 +2721,7 @@ impl EcrService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        use crate::signing::TrustedKey;
         use crate::state::SigningConfiguration;
         let body = request.json_body();
         let cfg = body
@@ -2731,11 +2732,59 @@ impl EcrService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+
+        // Extract trusted keys from the rules. AWS's real signing-config
+        // schema is nested; we accept the minimal fakecloud-friendly
+        // shape `{trustedKeys: [{keyId, pem, algorithm}]}` per rule.
+        // Rules that don't carry recognised keys are still
+        // round-trippable via the raw `rules` passthrough.
+        let mut trusted_keys: Vec<TrustedKey> = Vec::new();
+        for rule in &rules {
+            let keys = match rule.get("trustedKeys").and_then(|v| v.as_array()) {
+                Some(k) => k,
+                None => continue,
+            };
+            for k in keys {
+                let key_id = k
+                    .get("keyId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let pem = match k.get("pem").and_then(|v| v.as_str()) {
+                    Some(p) => p.to_string(),
+                    None => continue,
+                };
+                let algorithm = k
+                    .get("algorithm")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ECDSA-P256")
+                    .to_string();
+                // Validate the PEM up front so bad rules fail
+                // PutSigningConfiguration rather than silently skipping
+                // verification at describe time.
+                if <p256::ecdsa::VerifyingKey as p256::pkcs8::DecodePublicKey>::from_public_key_pem(
+                    &pem,
+                )
+                .is_err()
+                {
+                    return Err(invalid_parameter(format!(
+                        "trusted key {key_id} is not a valid ECDSA-P256 PEM-encoded public key"
+                    )));
+                }
+                trusted_keys.push(TrustedKey {
+                    key_id,
+                    pem,
+                    algorithm,
+                });
+            }
+        }
+
         let account = target_account_id(request, &body);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&account);
         state.signing_configuration = Some(SigningConfiguration {
             rules: rules.clone(),
+            trusted_keys,
         });
         Ok(AwsResponse::ok_json(json!({
             "signingConfiguration": {"rules": rules},
@@ -2773,15 +2822,156 @@ impl EcrService {
             .repositories
             .get(&name)
             .ok_or_else(|| repository_not_found(&name))?;
-        if resolve_image_digest(repo, &image_id).is_none() {
-            return Err(image_not_found(&name, &image_id));
+        let image_digest = resolve_image_digest(repo, &image_id)
+            .ok_or_else(|| image_not_found(&name, &image_id))?;
+
+        let trusted_keys: &[crate::signing::TrustedKey] = state
+            .signing_configuration
+            .as_ref()
+            .map(|c| c.trusted_keys.as_slice())
+            .unwrap_or(&[]);
+
+        // Locate the cosign companion signature tag
+        // (`sha256-<hex>.sig`) in the same repo. Absent -> UNSIGNED.
+        let sig_tag = match crate::signing::companion_sig_tag(&image_digest) {
+            Some(t) => t,
+            None => {
+                return Ok(AwsResponse::ok_json(json!({
+                    "registryId": repo.registry_id,
+                    "repositoryName": name,
+                    "imageId": image_id,
+                    "imageSignatures": [],
+                    "signingStatus": "UNSIGNED",
+                })));
+            }
+        };
+        let sig_manifest_digest = match repo.image_tags.get(&sig_tag) {
+            Some(d) => d,
+            None => {
+                return Ok(AwsResponse::ok_json(json!({
+                    "registryId": repo.registry_id,
+                    "repositoryName": name,
+                    "imageId": image_id,
+                    "imageSignatures": [],
+                    "signingStatus": "UNSIGNED",
+                })));
+            }
+        };
+        let sig_image = match repo.images.get(sig_manifest_digest) {
+            Some(i) => i,
+            None => {
+                return Ok(AwsResponse::ok_json(json!({
+                    "registryId": repo.registry_id,
+                    "repositoryName": name,
+                    "imageId": image_id,
+                    "imageSignatures": [],
+                    "signingStatus": "UNSIGNED",
+                })));
+            }
+        };
+
+        let manifest_json: Value = match serde_json::from_str(&sig_image.image_manifest) {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(AwsResponse::ok_json(json!({
+                    "registryId": repo.registry_id,
+                    "repositoryName": name,
+                    "imageId": image_id,
+                    "imageSignatures": [],
+                    "signingStatus": "INVALID_SIGNATURE",
+                })));
+            }
+        };
+        let (layer_digest, signature_b64) =
+            match crate::signing::extract_signature_annotation(&manifest_json) {
+                Some(x) => x,
+                None => {
+                    return Ok(AwsResponse::ok_json(json!({
+                        "registryId": repo.registry_id,
+                        "repositoryName": name,
+                        "imageId": image_id,
+                        "imageSignatures": [],
+                        "signingStatus": "UNSIGNED",
+                    })));
+                }
+            };
+
+        // Fetch the payload (signed bytes = simple-signing JSON blob).
+        let payload_bytes: Vec<u8> = match repo.layers.get(&layer_digest) {
+            Some(layer) => base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                layer.blob_b64.as_bytes(),
+            )
+            .unwrap_or_default(),
+            None => {
+                return Ok(AwsResponse::ok_json(json!({
+                    "registryId": repo.registry_id,
+                    "repositoryName": name,
+                    "imageId": image_id,
+                    "imageSignatures": [],
+                    "signingStatus": "UNSIGNED",
+                })));
+            }
+        };
+
+        // The payload must name the signed image — catches copy-paste
+        // of one image's signature onto another.
+        if let Some(named) = crate::signing::referenced_image_digest(&payload_bytes) {
+            if named != image_digest {
+                return Ok(AwsResponse::ok_json(json!({
+                    "registryId": repo.registry_id,
+                    "repositoryName": name,
+                    "imageId": image_id,
+                    "imageSignatures": [],
+                    "signingStatus": "INVALID_SIGNATURE",
+                    "statusReason": "signature payload references a different image digest",
+                })));
+            }
         }
-        Ok(AwsResponse::ok_json(json!({
+
+        // Verify against each trusted key until one matches.
+        let mut matched: Option<&crate::signing::TrustedKey> = None;
+        for key in trusted_keys {
+            if crate::signing::verify_cosign_signature(&key.pem, &payload_bytes, &signature_b64)
+                .is_ok()
+            {
+                matched = Some(key);
+                break;
+            }
+        }
+
+        let mut response = json!({
             "registryId": repo.registry_id,
             "repositoryName": name,
             "imageId": image_id,
-            "imageSignatures": [],
-        })))
+        });
+        if let Some(key) = matched {
+            response["imageSignatures"] = json!([{
+                "signatureFormat": "COSIGN",
+                "keyId": key.key_id,
+                "algorithm": key.algorithm,
+                "valid": true,
+            }]);
+            response["signingStatus"] = json!("SIGNED");
+        } else if trusted_keys.is_empty() {
+            // A valid-looking signature exists but no trusted keys are
+            // configured to verify against — surface the signature but
+            // mark it UNVERIFIED so the caller knows to configure keys.
+            response["imageSignatures"] = json!([{
+                "signatureFormat": "COSIGN",
+                "valid": false,
+                "statusReason": "no trusted keys configured"
+            }]);
+            response["signingStatus"] = json!("UNVERIFIED");
+        } else {
+            response["imageSignatures"] = json!([{
+                "signatureFormat": "COSIGN",
+                "valid": false,
+                "statusReason": "signature did not match any trusted key"
+            }]);
+            response["signingStatus"] = json!("INVALID_SIGNATURE");
+        }
+        Ok(AwsResponse::ok_json(response))
     }
 
     fn register_pull_time_update_exclusion(
