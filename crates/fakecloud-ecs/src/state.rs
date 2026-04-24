@@ -117,16 +117,76 @@ impl EcsState {
     }
 
     pub fn service_arn(&self, cluster_name: &str, service_name: &str) -> String {
-        format!(
-            "arn:aws:ecs:{}:{}:service/{}/{}",
-            self.region, self.account_id, cluster_name, service_name
-        )
+        if self.arn_format_disabled("serviceLongArnFormat") {
+            // Pre-Nov-2018 short form: no cluster segment.
+            format!(
+                "arn:aws:ecs:{}:{}:service/{}",
+                self.region, self.account_id, service_name
+            )
+        } else {
+            format!(
+                "arn:aws:ecs:{}:{}:service/{}/{}",
+                self.region, self.account_id, cluster_name, service_name
+            )
+        }
     }
 
     pub fn task_arn(&self, cluster_name: &str, task_id: &str) -> String {
-        format!(
-            "arn:aws:ecs:{}:{}:task/{}/{}",
-            self.region, self.account_id, cluster_name, task_id
+        if self.arn_format_disabled("taskLongArnFormat") {
+            format!(
+                "arn:aws:ecs:{}:{}:task/{}",
+                self.region, self.account_id, task_id
+            )
+        } else {
+            format!(
+                "arn:aws:ecs:{}:{}:task/{}/{}",
+                self.region, self.account_id, cluster_name, task_id
+            )
+        }
+    }
+
+    pub fn container_instance_arn(&self, cluster_name: &str, instance_id: &str) -> String {
+        if self.arn_format_disabled("containerInstanceLongArnFormat") {
+            format!(
+                "arn:aws:ecs:{}:{}:container-instance/{}",
+                self.region, self.account_id, instance_id
+            )
+        } else {
+            format!(
+                "arn:aws:ecs:{}:{}:container-instance/{}/{}",
+                self.region, self.account_id, cluster_name, instance_id
+            )
+        }
+    }
+
+    /// Resolve the effective value of an account setting. Principal
+    /// overrides win over account-level defaults, matching AWS's
+    /// PutAccountSetting / PutAccountSettingDefault layering. With no
+    /// `principal_arn` argument the caller gets the account default.
+    pub fn effective_account_setting(
+        &self,
+        name: &str,
+        principal_arn: Option<&str>,
+    ) -> Option<String> {
+        if let Some(arn) = principal_arn {
+            if let Some(p) = self.principal_account_settings.get(arn) {
+                if let Some(v) = p.get(name) {
+                    return Some(v.clone());
+                }
+            }
+        }
+        self.account_setting_defaults.get(name).cloned()
+    }
+
+    /// `true` when the given `*LongArnFormat` setting has been set to
+    /// `disabled`. The default (including unset) is long format —
+    /// matches AWS's current behaviour where long ARNs are mandatory
+    /// since Jan 2020 but the settings still flip for backward-compat.
+    fn arn_format_disabled(&self, setting_name: &str) -> bool {
+        matches!(
+            self.effective_account_setting(setting_name, None)
+                .as_deref(),
+            Some("disabled")
         )
     }
 
@@ -577,6 +637,70 @@ mod tests {
         assert_eq!(
             s.task_definition_arn("web", 3),
             "arn:aws:ecs:us-east-1:111122223333:task-definition/web:3"
+        );
+    }
+
+    #[test]
+    fn task_arn_long_format_default() {
+        let s = EcsState::new("111122223333", "us-east-1");
+        assert_eq!(
+            s.task_arn("prod", "abc123"),
+            "arn:aws:ecs:us-east-1:111122223333:task/prod/abc123"
+        );
+    }
+
+    #[test]
+    fn task_arn_short_when_disabled() {
+        let mut s = EcsState::new("111122223333", "us-east-1");
+        s.account_setting_defaults
+            .insert("taskLongArnFormat".into(), "disabled".into());
+        assert_eq!(
+            s.task_arn("prod", "abc123"),
+            "arn:aws:ecs:us-east-1:111122223333:task/abc123"
+        );
+    }
+
+    #[test]
+    fn service_arn_short_when_disabled() {
+        let mut s = EcsState::new("111122223333", "us-east-1");
+        s.account_setting_defaults
+            .insert("serviceLongArnFormat".into(), "disabled".into());
+        assert_eq!(
+            s.service_arn("prod", "web"),
+            "arn:aws:ecs:us-east-1:111122223333:service/web"
+        );
+    }
+
+    #[test]
+    fn container_instance_arn_short_when_disabled() {
+        let mut s = EcsState::new("111122223333", "us-east-1");
+        s.account_setting_defaults
+            .insert("containerInstanceLongArnFormat".into(), "disabled".into());
+        assert_eq!(
+            s.container_instance_arn("prod", "i-abc"),
+            "arn:aws:ecs:us-east-1:111122223333:container-instance/i-abc"
+        );
+    }
+
+    #[test]
+    fn principal_setting_overrides_default() {
+        let mut s = EcsState::new("111122223333", "us-east-1");
+        s.account_setting_defaults
+            .insert("taskLongArnFormat".into(), "disabled".into());
+        let principal = "arn:aws:iam::111122223333:user/alice".to_string();
+        let mut p = BTreeMap::new();
+        p.insert("taskLongArnFormat".into(), "enabled".into());
+        s.principal_account_settings.insert(principal.clone(), p);
+        assert_eq!(
+            s.effective_account_setting("taskLongArnFormat", Some(&principal))
+                .as_deref(),
+            Some("enabled")
+        );
+        // Without principal, default wins.
+        assert_eq!(
+            s.effective_account_setting("taskLongArnFormat", None)
+                .as_deref(),
+            Some("disabled")
         );
     }
 
