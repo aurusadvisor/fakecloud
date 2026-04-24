@@ -138,11 +138,101 @@ impl CreateFunctionInput {
     }
 }
 
+/// AWS Lambda's InvocationType: synchronous, async (event), or dry-run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvocationType {
+    RequestResponse,
+    Event,
+    DryRun,
+}
+
+impl InvocationType {
+    pub fn from_header(value: Option<&str>) -> Self {
+        match value {
+            Some("Event") => Self::Event,
+            Some("DryRun") => Self::DryRun,
+            _ => Self::RequestResponse,
+        }
+    }
+}
+
+/// Route an async-invoke result to the configured OnSuccess / OnFailure
+/// destination. Destination is matched by ARN scheme: SQS, SNS, EventBridge,
+/// or another Lambda. Mirrors the AWS Lambda destinations record schema.
+fn route_to_destination(
+    bus: Arc<fakecloud_core::delivery::DeliveryBus>,
+    function_arn: &str,
+    request_payload: &[u8],
+    result: &Result<Vec<u8>, String>,
+    destination_config: Option<&serde_json::Value>,
+) {
+    let Some(cfg) = destination_config else {
+        return;
+    };
+    let (key, condition, response_value): (&str, &str, serde_json::Value) = match result {
+        Ok(bytes) => (
+            "OnSuccess",
+            "Success",
+            serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null),
+        ),
+        Err(err) => (
+            "OnFailure",
+            "RetriesExhausted",
+            serde_json::json!({ "errorMessage": err }),
+        ),
+    };
+    let Some(dest) = cfg
+        .get(key)
+        .and_then(|v| v.get("Destination"))
+        .and_then(|v| v.as_str())
+    else {
+        return;
+    };
+    let request_payload_v: serde_json::Value =
+        serde_json::from_slice(request_payload).unwrap_or(serde_json::Value::Null);
+    let record = serde_json::json!({
+        "version": "1.0",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "requestContext": {
+            "requestId": uuid::Uuid::new_v4().to_string(),
+            "functionArn": format!("{function_arn}:$LATEST"),
+            "condition": condition,
+            "approximateInvokeCount": 1,
+        },
+        "requestPayload": request_payload_v,
+        "responseContext": {
+            "statusCode": 200,
+            "executedVersion": "$LATEST",
+        },
+        "responsePayload": response_value,
+    });
+    let body = record.to_string();
+    if dest.contains(":sqs:") {
+        bus.send_to_sqs(dest, &body, &std::collections::HashMap::new());
+    } else if dest.contains(":sns:") {
+        bus.publish_to_sns(dest, &body, None);
+    } else if dest.contains(":lambda:") {
+        let dest = dest.to_string();
+        let payload = body.clone();
+        tokio::spawn(async move {
+            let _ = bus.invoke_lambda(&dest, &payload).await;
+        });
+    } else if dest.contains(":events:") || dest.contains(":eventbridge:") {
+        let detail_type = if result.is_ok() {
+            "Lambda Function Invocation Result - Success"
+        } else {
+            "Lambda Function Invocation Result - Failure"
+        };
+        bus.put_event_to_eventbridge("lambda", detail_type, &body, "default");
+    }
+}
+
 pub struct LambdaService {
     pub(crate) state: SharedLambdaState,
     runtime: Option<Arc<ContainerRuntime>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    pub(crate) delivery_bus: Option<Arc<fakecloud_core::delivery::DeliveryBus>>,
 }
 
 impl LambdaService {
@@ -152,6 +242,7 @@ impl LambdaService {
             runtime: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            delivery_bus: None,
         }
     }
 
@@ -162,6 +253,11 @@ impl LambdaService {
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self
+    }
+
+    pub fn with_delivery_bus(mut self, bus: Arc<fakecloud_core::delivery::DeliveryBus>) -> Self {
+        self.delivery_bus = Some(bus);
         self
     }
 
@@ -785,6 +881,7 @@ impl LambdaService {
         function_name: &str,
         payload: &[u8],
         account_id: &str,
+        invocation_type: InvocationType,
     ) -> Result<AwsResponse, AwsServiceError> {
         let func = {
             let accounts = self.state.read();
@@ -802,14 +899,6 @@ impl LambdaService {
             })?
         };
 
-        let runtime = self.runtime.as_ref().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "ServiceException",
-                "Docker/Podman is required for Lambda execution but is not available",
-            )
-        })?;
-
         if func.code_zip.is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -818,24 +907,118 @@ impl LambdaService {
             ));
         }
 
-        match runtime.invoke(&func, payload).await {
-            Ok(response_bytes) => {
-                let mut resp = AwsResponse::json(StatusCode::OK, response_bytes);
+        if matches!(invocation_type, InvocationType::DryRun) {
+            let mut resp = AwsResponse::json(StatusCode::NO_CONTENT, "");
+            resp.headers.insert(
+                http::header::HeaderName::from_static("x-amz-executed-version"),
+                http::header::HeaderValue::from_static("$LATEST"),
+            );
+            return Ok(resp);
+        }
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ServiceException",
+                "Docker/Podman is required for Lambda execution but is not available",
+            )
+        })?;
+
+        match invocation_type {
+            InvocationType::Event => {
+                // Fire-and-forget. AWS returns 202 with no body.
+                let runtime = runtime.clone();
+                let func_clone = func.clone();
+                let payload_vec = payload.to_vec();
+                let bus = self.delivery_bus.clone();
+                let destination_config = self.lookup_destination_config(&func, account_id);
+                let function_arn = func.function_arn.clone();
+                tokio::spawn(async move {
+                    let result = match runtime.invoke(&func_clone, &payload_vec).await {
+                        Ok(bytes) => {
+                            // Lambda runtime returns 200 even on uncaught
+                            // function errors; the body has errorMessage /
+                            // errorType. Treat that as failure for routing.
+                            let parsed: Option<serde_json::Value> =
+                                serde_json::from_slice(&bytes).ok();
+                            let is_error = parsed
+                                .as_ref()
+                                .and_then(|v| v.as_object())
+                                .map(|m| {
+                                    m.contains_key("errorMessage") || m.contains_key("errorType")
+                                })
+                                .unwrap_or(false);
+                            if is_error {
+                                let msg = parsed
+                                    .as_ref()
+                                    .and_then(|v| v.get("errorMessage"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("function error")
+                                    .to_string();
+                                Err(msg)
+                            } else {
+                                Ok(bytes)
+                            }
+                        }
+                        Err(e) => Err(e.to_string()),
+                    };
+                    if let Some(bus) = bus {
+                        route_to_destination(
+                            bus,
+                            &function_arn,
+                            &payload_vec,
+                            &result,
+                            destination_config.as_ref(),
+                        );
+                    }
+                });
+                let mut resp = AwsResponse::json(StatusCode::ACCEPTED, "");
                 resp.headers.insert(
                     http::header::HeaderName::from_static("x-amz-executed-version"),
                     http::header::HeaderValue::from_static("$LATEST"),
                 );
                 Ok(resp)
             }
-            Err(e) => {
-                tracing::error!(function = %function_name, error = %e, "Lambda invocation failed");
-                Err(AwsServiceError::aws_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "ServiceException",
-                    format!("Lambda execution failed: {e}"),
-                ))
+            InvocationType::RequestResponse | InvocationType::DryRun => {
+                match runtime.invoke(&func, payload).await {
+                    Ok(response_bytes) => {
+                        let mut resp = AwsResponse::json(StatusCode::OK, response_bytes);
+                        resp.headers.insert(
+                            http::header::HeaderName::from_static("x-amz-executed-version"),
+                            http::header::HeaderValue::from_static("$LATEST"),
+                        );
+                        Ok(resp)
+                    }
+                    Err(e) => {
+                        tracing::error!(function = %function_name, error = %e, "Lambda invocation failed");
+                        Err(AwsServiceError::aws_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "ServiceException",
+                            format!("Lambda execution failed: {e}"),
+                        ))
+                    }
+                }
             }
         }
+    }
+
+    /// Pull EventInvokeConfig.DestinationConfig for the function. The
+    /// stored key is `<function_name>:<qualifier>`; treat unqualified
+    /// invokes as the empty qualifier (matches `parse_qualifier` in
+    /// `extras.rs` when no `Qualifier` is supplied).
+    fn lookup_destination_config(
+        &self,
+        func: &crate::state::LambdaFunction,
+        account_id: &str,
+    ) -> Option<serde_json::Value> {
+        let accounts = self.state.read();
+        let state = accounts.get(account_id)?;
+        let key = format!("{}:$LATEST", func.function_name);
+        state
+            .event_invoke_configs
+            .get(&key)
+            .map(|cfg| cfg.destination_config.clone())
+            .filter(|v| !v.is_null() && !v.as_object().map(|o| o.is_empty()).unwrap_or(false))
     }
 
     fn publish_version(
@@ -1362,8 +1545,27 @@ impl AwsService for LambdaService {
             ),
             "DeleteFunction" => self.delete_function(resource_name.as_deref().unwrap_or(""), aid),
             "Invoke" => {
-                self.invoke(resource_name.as_deref().unwrap_or(""), &req.body, aid)
-                    .await
+                let invocation_type = InvocationType::from_header(
+                    req.headers
+                        .get("x-amz-invocation-type")
+                        .and_then(|v| v.to_str().ok()),
+                );
+                self.invoke(
+                    resource_name.as_deref().unwrap_or(""),
+                    &req.body,
+                    aid,
+                    invocation_type,
+                )
+                .await
+            }
+            "InvokeAsync" => {
+                self.invoke(
+                    resource_name.as_deref().unwrap_or(""),
+                    &req.body,
+                    aid,
+                    InvocationType::Event,
+                )
+                .await
             }
             "PublishVersion" => self.publish_version(resource_name.as_deref().unwrap_or(""), aid),
             "AddPermission" => self.add_permission(resource_name.as_deref().unwrap_or(""), &req),

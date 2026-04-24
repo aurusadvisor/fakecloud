@@ -22,6 +22,7 @@ fakecloud actually executes the cross-service wiring. When an EventBridge rule m
 - **DynamoDB Streams -> Lambda** — Event source mapping polls stream records and invokes.
 - **DynamoDB -> Kinesis** — Table changes stream to Kinesis Data Streams.
 - **CloudWatch Logs -> Lambda / Kinesis / SQS** — Subscription filters deliver log events.
+- **Lambda async destinations -> SQS / SNS / EventBridge / Lambda** — `InvocationType=Event` invocations route their result through `OnSuccess` / `OnFailure` using AWS's standard destinations record schema.
 
 **Identity and auth:**
 
