@@ -188,7 +188,7 @@ impl AwsService for EcrService {
             .map(|s| s == "v2")
             .unwrap_or(false)
         {
-            let result = crate::oci::dispatch(self, &request);
+            let result = crate::oci::dispatch(self, &request).await;
             let mutates_oci = matches!(
                 request.method,
                 http::Method::POST | http::Method::PUT | http::Method::PATCH | http::Method::DELETE
