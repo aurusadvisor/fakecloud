@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::service::RdsService;
+use crate::service::{RdsService, RdsSourceType};
 
 const NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
 
@@ -465,7 +465,33 @@ impl RdsService {
 
             // ── Database read replicas ──
             "PromoteReadReplica" => Ok(xml_response("PromoteReadReplica", "    <DBInstance/>".to_string(), &rid)),
-            "StartDBInstance" | "StopDBInstance" => Ok(xml_response(action.as_str(), "    <DBInstance/>".to_string(), &rid)),
+            "StartDBInstance" | "StopDBInstance" => {
+                if let Some(id) = get_param(req, "DBInstanceIdentifier") {
+                    let (event_id, categories, msg) = if action == "StartDBInstance" {
+                        ("RDS-EVENT-0088", ["notification"], "DB instance started")
+                    } else {
+                        ("RDS-EVENT-0089", ["notification"], "DB instance stopped")
+                    };
+                    let arn = {
+                        let accounts = self.state_handle().read();
+                        accounts
+                            .get(&aid)
+                            .and_then(|s| s.instances.get(&id).map(|i| i.db_instance_arn.clone()))
+                            .unwrap_or_else(|| {
+                                format!("arn:aws:rds:{region}:{aid}:db:{id}")
+                            })
+                    };
+                    self.emit_event(
+                        RdsSourceType::DbInstance,
+                        &id,
+                        &arn,
+                        event_id,
+                        &categories,
+                        msg,
+                    );
+                }
+                Ok(xml_response(action.as_str(), "    <DBInstance/>".to_string(), &rid))
+            }
             "StartDBInstanceAutomatedBackupsReplication" | "StopDBInstanceAutomatedBackupsReplication" => Ok(xml_response(action.as_str(), "    <DBInstanceAutomatedBackup/>".to_string(), &rid)),
             "DeleteDBInstanceAutomatedBackup" => Ok(xml_response("DeleteDBInstanceAutomatedBackup", "    <DBInstanceAutomatedBackup/>".to_string(), &rid)),
             "DescribeDBInstanceAutomatedBackups" => Ok(xml_response("DescribeDBInstanceAutomatedBackups", "    <DBInstanceAutomatedBackups/>".to_string(), &rid)),

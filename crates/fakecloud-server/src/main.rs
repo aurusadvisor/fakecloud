@@ -422,6 +422,7 @@ async fn main() {
     let sns_delivery_for_scheduler = sns_delivery.clone();
     let sns_delivery_for_scheduler_eb = sns_delivery.clone();
     let sns_delivery_for_scheduler_sfn_eb = sns_delivery.clone();
+    let sns_delivery_for_rds = sns_delivery.clone();
     let eb_delivery_for_s3 = Arc::new(
         fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
             eb_state.clone(),
@@ -839,6 +840,7 @@ async fn main() {
     let eb_state_for_ses = eb_state.clone();
     let eb_state_for_sfn = eb_state.clone();
     let eb_state_for_scheduler = eb_state.clone();
+    let eb_state_for_rds = eb_state.clone();
     let mut scheduler = fakecloud_eventbridge::scheduler::Scheduler::new(eb_state, delivery_for_eb)
         .with_lambda(lambda_state.clone())
         .with_logs(logs_state.clone());
@@ -1672,6 +1674,20 @@ async fn main() {
     if let Some(store) = rds_snapshot_store {
         rds_service = rds_service.with_snapshot_store(store);
     }
+    // aws.rds events on lifecycle ops: rule targets see SQS/SNS via the
+    // inner bus; more targets mirror what ECS wires.
+    let eb_delivery_for_rds = Arc::new(
+        fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
+            eb_state_for_rds,
+            Arc::new(
+                DeliveryBus::new()
+                    .with_sqs(sqs_delivery.clone())
+                    .with_sns(sns_delivery_for_rds),
+            ),
+        ),
+    );
+    let rds_delivery_bus = Arc::new(DeliveryBus::new().with_eventbridge(eb_delivery_for_rds));
+    rds_service = rds_service.with_delivery_bus(rds_delivery_bus);
     registry.register(Arc::new(rds_service));
     let elasticache_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

@@ -21,6 +21,30 @@ fakecloud implements **163 of 163** RDS operations at 100% Smithy conformance. D
 - **Tagging** — AddTagsToResource, RemoveTagsFromResource
 - **Dump and restore** — MySQL and MariaDB database dumps for snapshot/restore flows
 - **License models** — tracking
+- **EventBridge events** — lifecycle ops emit `aws.rds` events on the `default` bus, deliverable to SQS, SNS, Lambda, etc. via standard EB rules
+
+## EventBridge integration
+
+Lifecycle ops emit events matching the AWS event schema (`source: "aws.rds"`, detail-type per source kind):
+
+| Operation                       | EventID         | Source type        | Categories            |
+|---------------------------------|-----------------|--------------------|-----------------------|
+| `CreateDBInstance`              | RDS-EVENT-0005  | DB_INSTANCE        | creation              |
+| `DeleteDBInstance`              | RDS-EVENT-0003  | DB_INSTANCE        | deletion              |
+| `ModifyDBInstance`              | RDS-EVENT-0014  | DB_INSTANCE        | configuration change  |
+| `RebootDBInstance`              | RDS-EVENT-0006  | DB_INSTANCE        | availability          |
+| `StartDBInstance`               | RDS-EVENT-0088  | DB_INSTANCE        | notification          |
+| `StopDBInstance`                | RDS-EVENT-0089  | DB_INSTANCE        | notification          |
+| `CreateDBInstanceReadReplica`   | RDS-EVENT-0005  | DB_INSTANCE        | creation, read replica|
+| `RestoreDBInstanceFromDBSnapshot` | RDS-EVENT-0043 | DB_INSTANCE       | creation              |
+| `CreateDBSnapshot`              | RDS-EVENT-0042  | DB_SNAPSHOT        | creation              |
+| `DeleteDBSnapshot`              | RDS-EVENT-0041  | DB_SNAPSHOT        | deletion              |
+
+Match with an EventBridge rule pattern like:
+
+```json
+{ "source": ["aws.rds"], "detail-type": ["RDS DB Instance Event"] }
+```
 
 ## Protocol
 

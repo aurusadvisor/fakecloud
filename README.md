@@ -69,7 +69,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | SES (v2 + v1 inbound)  | 110 | Sending, templates, DKIM, **real receipt rule execution**              |
 | Cognito User Pools     | 122 | Pools, clients, MFA, identity providers, full auth flows               |
 | Kinesis                |  39 | Streams, records, shard iterators, retention                           |
-| RDS                    | 163 | Real Postgres, MySQL, MariaDB via Docker                               |
+| RDS                    | 163 | Real Postgres, MySQL, MariaDB via Docker; lifecycle ops emit `aws.rds` EventBridge events |
 | ElastiCache            |  75 | Real Redis, Valkey via Docker                                          |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
 | API Gateway v2         |  28 | HTTP APIs, Lambda proxy, JWT/Lambda authorizers, CORS                  |

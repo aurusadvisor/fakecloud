@@ -8,6 +8,7 @@ use http::StatusCode;
 use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_aws::xml::xml_escape;
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
@@ -242,6 +243,34 @@ pub struct RdsService {
     runtime: Option<Arc<RdsRuntime>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    pub(crate) delivery_bus: Option<Arc<DeliveryBus>>,
+}
+
+/// Source type for RDS EventBridge events. Maps `aws.rds` detail-type.
+#[derive(Clone, Copy)]
+#[allow(dead_code, clippy::enum_variant_names)]
+pub(crate) enum RdsSourceType {
+    DbInstance,
+    DbSnapshot,
+    DbParameterGroup,
+}
+
+impl RdsSourceType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DbInstance => "DB_INSTANCE",
+            Self::DbSnapshot => "DB_SNAPSHOT",
+            Self::DbParameterGroup => "DB_PARAMETER_GROUP",
+        }
+    }
+
+    fn detail_type(self) -> &'static str {
+        match self {
+            Self::DbInstance => "RDS DB Instance Event",
+            Self::DbSnapshot => "RDS DB Snapshot Event",
+            Self::DbParameterGroup => "RDS DB Parameter Group Event",
+        }
+    }
 }
 
 impl RdsService {
@@ -257,6 +286,7 @@ impl RdsService {
             runtime: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            delivery_bus: None,
         }
     }
 
@@ -268,6 +298,42 @@ impl RdsService {
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
+    }
+
+    pub fn with_delivery_bus(mut self, bus: Arc<DeliveryBus>) -> Self {
+        self.delivery_bus = Some(bus);
+        self
+    }
+
+    /// Emit an `aws.rds` EventBridge event mirroring the AWS RDS event schema.
+    /// No-op when the delivery bus isn't wired (tests, minimal configs).
+    pub(crate) fn emit_event(
+        &self,
+        source_type: RdsSourceType,
+        source_identifier: &str,
+        source_arn: &str,
+        event_id: &str,
+        event_categories: &[&str],
+        message: &str,
+    ) {
+        let Some(ref bus) = self.delivery_bus else {
+            return;
+        };
+        let detail = serde_json::json!({
+            "EventCategories": event_categories,
+            "SourceType": source_type.as_str(),
+            "SourceArn": source_arn,
+            "Date": Utc::now().to_rfc3339(),
+            "Message": message,
+            "SourceIdentifier": source_identifier,
+            "EventID": event_id,
+        });
+        bus.put_event_to_eventbridge(
+            "aws.rds",
+            source_type.detail_type(),
+            &detail.to_string(),
+            "default",
+        );
     }
 
     async fn save_snapshot(&self) {
@@ -487,6 +553,17 @@ impl RdsService {
             pending_modified_values: None,
         };
         state.finish_instance_creation(instance.clone());
+        let instance_arn = instance.db_instance_arn.clone();
+        drop(accounts);
+
+        self.emit_event(
+            RdsSourceType::DbInstance,
+            &db_instance_identifier,
+            &instance_arn,
+            "RDS-EVENT-0005",
+            &["creation"],
+            "DB instance created",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -585,6 +662,15 @@ impl RdsService {
         if let Some(runtime) = &self.runtime {
             runtime.stop_container(&db_instance_identifier).await;
         }
+
+        self.emit_event(
+            RdsSourceType::DbInstance,
+            &db_instance_identifier,
+            &instance.db_instance_arn,
+            "RDS-EVENT-0003",
+            &["deletion"],
+            "DB instance deleted",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -769,18 +855,27 @@ impl RdsService {
                 instance.vpc_security_group_ids = security_group_ids;
             }
         }
-
-        Ok(AwsResponse::xml(
-            StatusCode::OK,
-            xml_wrap(
-                "ModifyDBInstance",
-                &format!(
-                    "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(instance, Some("modifying"))
-                ),
-                &request.request_id,
+        let instance_arn = instance.db_instance_arn.clone();
+        let xml = xml_wrap(
+            "ModifyDBInstance",
+            &format!(
+                "<DBInstance>{}</DBInstance>",
+                db_instance_xml(instance, Some("modifying"))
             ),
-        ))
+            &request.request_id,
+        );
+        drop(accounts);
+
+        self.emit_event(
+            RdsSourceType::DbInstance,
+            &db_instance_identifier,
+            &instance_arn,
+            "RDS-EVENT-0014",
+            &["configuration change"],
+            "DB instance was modified",
+        );
+
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 
     async fn reboot_db_instance(
@@ -859,6 +954,15 @@ impl RdsService {
 
             instance.clone()
         };
+
+        self.emit_event(
+            RdsSourceType::DbInstance,
+            &db_instance_identifier,
+            &instance.db_instance_arn,
+            "RDS-EVENT-0006",
+            &["availability"],
+            "DB instance restarted",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -1174,7 +1278,18 @@ impl RdsService {
 
         state
             .snapshots
-            .insert(db_snapshot_identifier, snapshot.clone());
+            .insert(db_snapshot_identifier.clone(), snapshot.clone());
+        let snapshot_arn = snapshot.db_snapshot_arn.clone();
+        drop(accounts);
+
+        self.emit_event(
+            RdsSourceType::DbSnapshot,
+            &db_snapshot_identifier,
+            &snapshot_arn,
+            "RDS-EVENT-0042",
+            &["creation"],
+            "Manual snapshot created",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -1286,6 +1401,17 @@ impl RdsService {
             .snapshots
             .remove(&db_snapshot_identifier)
             .ok_or_else(|| db_snapshot_not_found(&db_snapshot_identifier))?;
+        let snapshot_arn = snapshot.db_snapshot_arn.clone();
+        drop(accounts);
+
+        self.emit_event(
+            RdsSourceType::DbSnapshot,
+            &db_snapshot_identifier,
+            &snapshot_arn,
+            "RDS-EVENT-0041",
+            &["deletion"],
+            "Manual snapshot deleted",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -1392,6 +1518,15 @@ impl RdsService {
             .write()
             .get_or_create(&request.account_id)
             .finish_instance_creation(instance.clone());
+
+        self.emit_event(
+            RdsSourceType::DbInstance,
+            &db_instance_identifier,
+            &instance.db_instance_arn,
+            "RDS-EVENT-0043",
+            &["creation"],
+            "DB instance restored from snapshot",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -1555,6 +1690,15 @@ impl RdsService {
             runtime.stop_container(&db_instance_identifier).await;
             return Err(db_instance_not_found(&source_db_instance_identifier));
         }
+
+        self.emit_event(
+            RdsSourceType::DbInstance,
+            &db_instance_identifier,
+            &replica.db_instance_arn,
+            "RDS-EVENT-0005",
+            &["creation", "read replica"],
+            "Read replica DB instance created",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -2939,8 +3083,10 @@ mod tests {
     use super::{
         db_instance_xml, filter_engine_versions, filter_orderable_options, merge_tags,
         optional_i32_param, parse_tag_keys, parse_tags, validate_create_request, RdsService,
+        RdsSourceType,
     };
     use crate::state::{default_engine_versions, default_orderable_options, DbInstance, RdsTag};
+    use fakecloud_core::delivery::DeliveryBus;
     use fakecloud_core::service::{AwsRequest, AwsService, AwsServiceError};
 
     #[test]
@@ -3143,6 +3289,91 @@ mod tests {
         RdsService::new(Arc::new(RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
         )))
+    }
+
+    #[derive(Default)]
+    struct CapturedEvent {
+        source: String,
+        detail_type: String,
+        detail: String,
+    }
+
+    #[derive(Default)]
+    struct RecordingEb {
+        events: std::sync::Mutex<Vec<CapturedEvent>>,
+    }
+
+    impl fakecloud_core::delivery::EventBridgeDelivery for RecordingEb {
+        fn put_event(&self, source: &str, detail_type: &str, detail: &str, _bus: &str) {
+            self.events.lock().unwrap().push(CapturedEvent {
+                source: source.to_string(),
+                detail_type: detail_type.to_string(),
+                detail: detail.to_string(),
+            });
+        }
+    }
+
+    fn make_service_with_recorder() -> (RdsService, Arc<RecordingEb>) {
+        let recorder = Arc::new(RecordingEb::default());
+        let bus = Arc::new(DeliveryBus::new().with_eventbridge(recorder.clone()));
+        let svc = RdsService::new(Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        )))
+        .with_delivery_bus(bus);
+        (svc, recorder)
+    }
+
+    #[test]
+    fn emit_event_emits_aws_rds_event_via_bus() {
+        let (svc, rec) = make_service_with_recorder();
+        svc.emit_event(
+            RdsSourceType::DbInstance,
+            "my-db",
+            "arn:aws:rds:us-east-1:123456789012:db:my-db",
+            "RDS-EVENT-0005",
+            &["creation"],
+            "DB instance created",
+        );
+        let events = rec.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.source, "aws.rds");
+        assert_eq!(e.detail_type, "RDS DB Instance Event");
+        let detail: serde_json::Value = serde_json::from_str(&e.detail).unwrap();
+        assert_eq!(detail["EventID"], "RDS-EVENT-0005");
+        assert_eq!(detail["SourceType"], "DB_INSTANCE");
+        assert_eq!(detail["SourceIdentifier"], "my-db");
+        assert_eq!(detail["Message"], "DB instance created");
+        assert_eq!(detail["EventCategories"][0], "creation");
+    }
+
+    #[test]
+    fn emit_event_no_op_without_bus() {
+        let svc = make_service();
+        svc.emit_event(
+            RdsSourceType::DbSnapshot,
+            "snap",
+            "arn:aws:rds:us-east-1:123456789012:snapshot:snap",
+            "RDS-EVENT-0042",
+            &["creation"],
+            "Manual snapshot created",
+        );
+    }
+
+    #[test]
+    fn rds_source_type_detail_type_mapping() {
+        assert_eq!(
+            RdsSourceType::DbInstance.detail_type(),
+            "RDS DB Instance Event"
+        );
+        assert_eq!(
+            RdsSourceType::DbSnapshot.detail_type(),
+            "RDS DB Snapshot Event"
+        );
+        assert_eq!(
+            RdsSourceType::DbParameterGroup.detail_type(),
+            "RDS DB Parameter Group Event"
+        );
     }
 
     fn body_of(resp: fakecloud_core::service::AwsResponse) -> String {
