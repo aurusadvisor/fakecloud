@@ -67,7 +67,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | KMS                    |  53 | Encryption, aliases, grants, real ECDH, key import                     |
 | CloudFormation         |  90 | Template parsing, resource provisioning, custom resources              |
 | SES (v2 + v1 inbound)  | 110 | Sending, templates, DKIM, **real receipt rule execution**              |
-| Cognito User Pools     | 122 | Pools, clients, MFA, identity providers, full auth flows               |
+| Cognito User Pools     | 122 | Pools, clients, MFA, identity providers, full auth flows; verification email -> SES, SMS -> SNS, all 12 Lambda triggers |
 | Kinesis                |  39 | Streams, records, shard iterators, retention                           |
 | RDS                    | 163 | Real Postgres, MySQL, MariaDB via Docker                               |
 | ElastiCache            |  75 | Real Redis, Valkey via Docker                                          |

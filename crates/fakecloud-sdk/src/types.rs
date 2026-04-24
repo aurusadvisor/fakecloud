@@ -171,6 +171,19 @@ pub struct SnsMessagesResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SnsSmsMessage {
+    pub phone_number: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnsSmsResponse {
+    pub messages: Vec<SnsSmsMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingConfirmation {
     pub subscription_arn: String,
     pub topic_arn: String,

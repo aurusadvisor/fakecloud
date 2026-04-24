@@ -490,6 +490,7 @@ async fn main() {
     let ses_emails_state = ses_state.clone();
     let ses_inbound_state = ses_state.clone();
     let sns_introspection_state = sns_state.clone();
+    let sns_sms_state = sns_state.clone();
     let sqs_introspection_state = sqs_state.clone();
     let eb_introspection_state = eb_state.clone();
     let s3_introspection_state = s3_state.clone();
@@ -1467,7 +1468,7 @@ async fn main() {
         } else {
             None
         };
-    let mut ses_service = SesV2Service::new(ses_state).with_delivery(ses_delivery_ctx);
+    let mut ses_service = SesV2Service::new(ses_state.clone()).with_delivery(ses_delivery_ctx);
     if let Some(store) = ses_snapshot_store {
         ses_service = ses_service.with_snapshot_store(store);
     }
@@ -1479,9 +1480,18 @@ async fn main() {
         }
         Arc::new(bus)
     };
-    let cognito_delivery_ctx = fakecloud_cognito::triggers::CognitoDeliveryContext {
-        delivery_bus: delivery_for_cognito,
-    };
+    let cognito_email_dispatcher: Arc<dyn fakecloud_core::delivery::EmailDispatcher> =
+        Arc::new(SesEmailDispatcher {
+            state: ses_state.clone(),
+        });
+    let cognito_sms_dispatcher: Arc<dyn fakecloud_core::delivery::SmsDispatcher> =
+        Arc::new(SnsSmsDispatcher {
+            state: sns_state.clone(),
+        });
+    let cognito_delivery_ctx =
+        fakecloud_cognito::triggers::CognitoDeliveryContext::new(delivery_for_cognito)
+            .with_email(cognito_email_dispatcher)
+            .with_sms(cognito_sms_dispatcher);
     let cognito_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -2580,6 +2590,24 @@ async fn main() {
                         })
                         .collect();
                     axum::Json(types::SnsMessagesResponse { messages })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/sns/sms",
+            axum::routing::get({
+                let ss = sns_sms_state;
+                move || async move {
+                    let mas = ss.read();
+                    let messages = mas
+                        .iter()
+                        .flat_map(|(_, state)| state.sms_messages.iter())
+                        .map(|(phone_number, message)| types::SnsSmsMessage {
+                            phone_number: phone_number.clone(),
+                            message: message.clone(),
+                        })
+                        .collect();
+                    axum::Json(types::SnsSmsResponse { messages })
                 }
             }),
         )
@@ -3938,6 +3966,58 @@ fn install_panic_hook() {
 const PORT_HANDSHAKE_PREFIX: &str = "FAKECLOUD_PORT=";
 
 /// Bind a `TcpListener` and return the listener together with the address
+/// Email dispatcher used by Cognito's verification flow: append a
+/// `SentEmail` to the SES state for the right account so the email is
+/// observable through the standard `/_fakecloud/ses/sent` introspection.
+struct SesEmailDispatcher {
+    state: fakecloud_ses::state::SharedSesState,
+}
+
+impl fakecloud_core::delivery::EmailDispatcher for SesEmailDispatcher {
+    fn send_email(
+        &self,
+        account_id: &str,
+        from: &str,
+        to: &str,
+        subject: &str,
+        body_text: &str,
+        body_html: Option<&str>,
+    ) {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        state.sent_emails.push(fakecloud_ses::state::SentEmail {
+            message_id: format!("cognito-{}", uuid::Uuid::new_v4()),
+            from: from.to_string(),
+            to: vec![to.to_string()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: Some(subject.to_string()),
+            html_body: body_html.map(|s| s.to_string()),
+            text_body: Some(body_text.to_string()),
+            raw_data: None,
+            template_name: None,
+            template_data: None,
+            timestamp: chrono::Utc::now(),
+        });
+    }
+}
+
+/// SMS dispatcher used by Cognito's verification flow: append to the SNS
+/// account's `sms_messages` so test code can assert on what landed.
+struct SnsSmsDispatcher {
+    state: fakecloud_sns::state::SharedSnsState,
+}
+
+impl fakecloud_core::delivery::SmsDispatcher for SnsSmsDispatcher {
+    fn send_sms(&self, account_id: &str, phone_number: &str, message: &str) {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        state
+            .sms_messages
+            .push((phone_number.to_string(), message.to_string()));
+    }
+}
+
 /// the OS actually chose. Separated from `main` so the happy/error paths
 /// are reachable from unit tests.
 async fn bind_listener(addr: &str) -> std::io::Result<(TcpListener, std::net::SocketAddr)> {
