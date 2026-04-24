@@ -97,6 +97,34 @@ async fn run_docker(args: &[&str]) {
     }
 }
 
+/// `docker pull` against `public.ecr.aws` is rate-limited per IP
+/// (1 req/sec anonymous). Shared CI runner IPs hit `toomanyrequests`
+/// often enough that a single attempt is flaky. Retry with exponential
+/// backoff so a transient rate-limit doesn't fail the whole suite.
+async fn run_docker_pull_with_retry(image: &str) {
+    let mut last_err = String::new();
+    for attempt in 0..6 {
+        if attempt > 0 {
+            let delay = 5u64 * (1u64 << (attempt - 1)).min(8);
+            tokio::time::sleep(Duration::from_secs(delay)).await;
+        }
+        let out = Command::new("docker")
+            .args(["pull", "--quiet", image])
+            .output()
+            .await
+            .expect("spawn docker");
+        if out.status.success() {
+            return;
+        }
+        last_err = String::from_utf8_lossy(&out.stderr).to_string();
+        if !last_err.contains("toomanyrequests") && !last_err.contains("Rate exceeded") {
+            // Hard failure that retries won't fix.
+            panic!("docker pull {image} failed: stderr={last_err}");
+        }
+    }
+    panic!("docker pull {image} rate-limited after 6 attempts: stderr={last_err}");
+}
+
 /// Seed fakecloud ECR with a minimal alpine image under `repo:tag`.
 /// Returns the AWS-style ECR URI that consumers (ECS/Lambda) will
 /// reference.
@@ -105,7 +133,7 @@ async fn seed_image(endpoint: &str, repo: &str, tag: &str) -> String {
     let local_uri = format!("127.0.0.1:{port}/{repo}:{tag}");
     let aws_uri = format!("{AWS_ACCOUNT}.dkr.ecr.{AWS_REGION}.amazonaws.com/{repo}:{tag}");
 
-    run_docker(&["pull", "--quiet", SEED_IMAGE]).await;
+    run_docker_pull_with_retry(SEED_IMAGE).await;
     run_docker(&["tag", SEED_IMAGE, &local_uri]).await;
 
     // Write a docker config.json with Basic auth for our registry port.
