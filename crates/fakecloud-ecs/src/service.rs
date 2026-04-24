@@ -2853,10 +2853,7 @@ impl EcsService {
             .map(|c| c.cluster_arn.clone())
             .unwrap_or_else(|| state.cluster_arn(&cluster_name));
         let uuid = uuid::Uuid::new_v4().to_string();
-        let ci_arn = format!(
-            "arn:aws:ecs:{}:{}:container-instance/{}/{}",
-            state.region, state.account_id, cluster_name, uuid
-        );
+        let ci_arn = state.container_instance_arn(&cluster_name, &uuid);
         let key = format!("{}/{}", cluster_name, uuid);
         let ci = ContainerInstance {
             container_instance_arn: ci_arn.clone(),

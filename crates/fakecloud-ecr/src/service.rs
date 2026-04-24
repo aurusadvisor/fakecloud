@@ -1962,6 +1962,13 @@ impl EcrService {
                 "vulnerabilitySourceUpdatedAt": findings.vulnerability_source_updated_at.map(|t| t.timestamp()),
                 "findings": findings.findings,
                 "findingSeverityCounts": findings.finding_severity_counts,
+                // fakecloud-specific marker: these findings are synthetic
+                // and do not reflect real CVE data. AWS SDKs using Smithy
+                // codegen ignore unknown fields, so this is purely a
+                // signal for introspection callers and security-tooling
+                // integration tests that want to assert they're running
+                // against fakecloud rather than real Inspector output.
+                "isSynthetic": true,
             },
         })))
     }
