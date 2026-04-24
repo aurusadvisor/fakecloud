@@ -143,7 +143,9 @@ export class EcrClient {
   }
 
   async getPullThroughRules(): Promise<EcrPullThroughRulesResponse> {
-    const resp = await fetch(`${this.baseUrl}/_fakecloud/ecr/pull-through-rules`);
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ecr/pull-through-rules`,
+    );
     return parse(resp);
   }
 }
