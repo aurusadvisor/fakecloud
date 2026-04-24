@@ -121,12 +121,28 @@ fn action_includes(action: Option<&Value>, target: &str) -> bool {
 }
 
 fn principal_service_includes(principal: &Value, service_principal: &str) -> bool {
+    // `"Principal": "*"` (or the equivalent `{"AWS": "*"}`) trusts any
+    // principal — service principals included.
+    if let Value::String(s) = principal {
+        return s == "*";
+    }
+    if let Some(aws) = principal.get("AWS") {
+        match aws {
+            Value::String(s) if s == "*" => return true,
+            Value::Array(arr) if arr.iter().any(|v| v.as_str() == Some("*")) => return true,
+            _ => {}
+        }
+    }
     let Some(svc) = principal.get("Service") else {
         return false;
     };
     match svc {
-        Value::String(s) => s == service_principal,
-        Value::Array(arr) => arr.iter().any(|v| v.as_str() == Some(service_principal)),
+        Value::String(s) => s == "*" || s == service_principal,
+        Value::Array(arr) => arr.iter().any(|v| match v.as_str() {
+            Some("*") => true,
+            Some(p) => p == service_principal,
+            None => false,
+        }),
         _ => false,
     }
 }
@@ -182,6 +198,42 @@ mod tests {
                 "Effect": "Allow",
                 "Action": ["sts:AssumeRole"],
                 "Principal": {"Service": ["lambda.amazonaws.com", "ec2.amazonaws.com"]}
+            }]
+        });
+        assert!(trust_policy_allows(&policy, "ec2.amazonaws.com"));
+    }
+
+    #[test]
+    fn allows_wildcard_principal_string() {
+        let policy = serde_json::json!({
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "sts:AssumeRole",
+                "Principal": "*"
+            }]
+        });
+        assert!(trust_policy_allows(&policy, "lambda.amazonaws.com"));
+    }
+
+    #[test]
+    fn allows_wildcard_principal_aws() {
+        let policy = serde_json::json!({
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "sts:AssumeRole",
+                "Principal": {"AWS": "*"}
+            }]
+        });
+        assert!(trust_policy_allows(&policy, "ecs-tasks.amazonaws.com"));
+    }
+
+    #[test]
+    fn allows_wildcard_service() {
+        let policy = serde_json::json!({
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "sts:AssumeRole",
+                "Principal": {"Service": "*"}
             }]
         });
         assert!(trust_policy_allows(&policy, "ec2.amazonaws.com"));
