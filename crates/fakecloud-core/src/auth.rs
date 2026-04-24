@@ -413,6 +413,62 @@ pub trait ResourcePolicyProvider: Send + Sync {
     fn resource_policy(&self, service: &str, resource_arn: &str) -> Option<String>;
 }
 
+/// Failure mode for IAM PassRole trust-policy validation.
+///
+/// Exists in `fakecloud-core` so service crates (Lambda, ECS, …) can
+/// surface a wire-shaped error without taking a dependency on
+/// `fakecloud-iam`. The server crate wires the concrete validator that
+/// reads the IAM state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PassRoleError {
+    /// No role with this ARN exists in the IAM state.
+    RoleNotFound(String),
+    /// Role exists but its `AssumeRolePolicyDocument` does not allow the
+    /// service principal to call `sts:AssumeRole`. Real AWS returns
+    /// `InvalidParameterValueException` in this shape.
+    TrustPolicyDenies {
+        role_arn: String,
+        service_principal: String,
+    },
+    /// Role's `AssumeRolePolicyDocument` could not be parsed as JSON.
+    InvalidTrustPolicy(String),
+}
+
+impl std::fmt::Display for PassRoleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RoleNotFound(arn) => write!(f, "role not found: {arn}"),
+            Self::TrustPolicyDenies {
+                role_arn,
+                service_principal,
+            } => write!(
+                f,
+                "Role's trust policy does not allow {service_principal} to assume the role: {role_arn}"
+            ),
+            Self::InvalidTrustPolicy(arn) => {
+                write!(f, "invalid trust policy on role {arn}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PassRoleError {}
+
+/// Validator that checks whether a role can be passed to a given
+/// service. Used by Lambda / ECS / EC2 etc. to reject `CreateFunction`,
+/// `RegisterTaskDefinition`, etc. when the supplied role's trust policy
+/// doesn't allow the service principal — matching the `iam:PassRole`
+/// trust-side behavior real AWS enforces unconditionally (separate from
+/// identity-policy `iam:PassRole`, which sits behind the IAM evaluator).
+pub trait RoleTrustValidator: Send + Sync {
+    fn validate(
+        &self,
+        account_id: &str,
+        role_arn: &str,
+        service_principal: &str,
+    ) -> Result<(), PassRoleError>;
+}
+
 /// Composite [`ResourcePolicyProvider`] that delegates to a list of
 /// sub-providers in order, returning the first `Some` hit.
 ///
