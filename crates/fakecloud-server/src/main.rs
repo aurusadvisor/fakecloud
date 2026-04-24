@@ -25,8 +25,9 @@ use cli::Cli;
 use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
 use introspection::{
     ecr_image_response, ecr_pull_through_rule_response, ecr_repository_response,
-    ecs_cluster_response, elasticache_cluster_response, elasticache_replication_group_response,
-    elasticache_serverless_cache_response, rds_instance_response,
+    ecs_cluster_response, ecs_lifecycle_event, ecs_task_response, elasticache_cluster_response,
+    elasticache_replication_group_response, elasticache_serverless_cache_response,
+    rds_instance_response,
 };
 use kinesis_lambda_poller::KinesisLambdaPoller;
 use reset::ResetState;
@@ -337,6 +338,16 @@ async fn main() {
         );
     }
 
+    let ecs_runtime = fakecloud_ecs::runtime::EcsRuntime::new().map(Arc::new);
+    if let Some(ref rt) = ecs_runtime {
+        tracing::info!(
+            cli = rt.cli_name(),
+            "ECS task execution enabled via container runtime"
+        );
+    } else {
+        tracing::info!("Docker/Podman not available — ECS RunTask will return TaskFailedToStart");
+    }
+
     // Cross-service delivery bus
     // Step 1: SQS delivery (SNS and EventBridge can push messages into SQS queues)
     let sqs_delivery = Arc::new(fakecloud_sqs::delivery::SqsDeliveryImpl::new(
@@ -515,6 +526,7 @@ async fn main() {
         container_runtime: container_runtime.clone(),
         rds_runtime: rds_runtime.clone(),
         elasticache_runtime: elasticache_runtime.clone(),
+        ecs_runtime: ecs_runtime.clone(),
     };
 
     // Step 5: CloudFormation delivery (custom resources can invoke Lambda)
@@ -1806,6 +1818,9 @@ async fn main() {
     let mut ecs_service = EcsService::new(ecs_state.clone());
     if let Some(store) = ecs_snapshot_store {
         ecs_service = ecs_service.with_snapshot_store(store);
+    }
+    if let Some(ref rt) = ecs_runtime {
+        ecs_service = ecs_service.with_runtime(rt.clone());
     }
     registry.register(Arc::new(ecs_service));
 
@@ -3211,6 +3226,201 @@ async fn main() {
                         }
                         clusters.sort_by(|a, b| a.cluster_arn.cmp(&b.cluster_arn));
                         axum::Json(types::EcsClustersResponse { clusters })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ecs/tasks",
+            axum::routing::get({
+                let ec = ecs_introspection_state.clone();
+                move |axum::extract::Query(q): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| {
+                    let ec = ec.clone();
+                    async move {
+                        let cluster_filter = q.get("cluster").cloned();
+                        let status_filter = q.get("status").cloned();
+                        let accounts = ec.read();
+                        let mut tasks: Vec<types::EcsTask> = Vec::new();
+                        for (_, state) in accounts.iter() {
+                            for t in state.tasks.values() {
+                                if let Some(ref c) = cluster_filter {
+                                    if &t.cluster_name != c && &t.cluster_arn != c {
+                                        continue;
+                                    }
+                                }
+                                if let Some(ref s) = status_filter {
+                                    if &t.last_status != s {
+                                        continue;
+                                    }
+                                }
+                                tasks.push(ecs_task_response(t));
+                            }
+                        }
+                        tasks.sort_by(|a, b| a.task_arn.cmp(&b.task_arn));
+                        axum::Json(types::EcsTasksResponse { tasks })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ecs/tasks/{task_id}",
+            axum::routing::get({
+                let ec = ecs_introspection_state.clone();
+                move |axum::extract::Path(task_id): axum::extract::Path<String>| {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        for (_, state) in accounts.iter() {
+                            if let Some(t) = state.tasks.get(&task_id) {
+                                return (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::to_value(ecs_task_response(t)).unwrap()),
+                                );
+                            }
+                        }
+                        (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "task not found"})),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ecs/tasks/{task_id}/logs",
+            axum::routing::get({
+                let ec = ecs_introspection_state.clone();
+                move |axum::extract::Path(task_id): axum::extract::Path<String>| {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        for (_, state) in accounts.iter() {
+                            if let Some(t) = state.tasks.get(&task_id) {
+                                let resp = types::EcsTaskLogsResponse {
+                                    task_arn: t.task_arn.clone(),
+                                    logs: t.captured_logs.clone(),
+                                    last_status: t.last_status.clone(),
+                                    exit_code: t
+                                        .containers
+                                        .iter()
+                                        .find_map(|c| c.exit_code),
+                                };
+                                return (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::to_value(resp).unwrap()),
+                                );
+                            }
+                        }
+                        (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "task not found"})),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ecs/tasks/{task_id}/force-stop",
+            axum::routing::post({
+                let ec = ecs_introspection_state.clone();
+                let rt = ecs_runtime.clone();
+                move |axum::extract::Path(task_id): axum::extract::Path<String>| {
+                    let ec = ec.clone();
+                    let rt = rt.clone();
+                    async move {
+                        if let Some(runtime) = rt {
+                            runtime
+                                .stop_task(&task_id, "IntrospectionForceStop")
+                                .await;
+                        }
+                        let accounts = ec.read();
+                        for (_, state) in accounts.iter() {
+                            if let Some(t) = state.tasks.get(&task_id) {
+                                return (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::to_value(ecs_task_response(t)).unwrap()),
+                                );
+                            }
+                        }
+                        (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "task not found"})),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ecs/tasks/{task_id}/mark-failed",
+            axum::routing::post({
+                let ec = ecs_introspection_state.clone();
+                move |axum::extract::Path(task_id): axum::extract::Path<String>,
+                      axum::Json(req): axum::Json<types::EcsMarkFailedRequest>| {
+                    let ec = ec.clone();
+                    async move {
+                        let mut accounts = ec.write();
+                        for (_, state) in accounts.iter_mut() {
+                            if state.tasks.contains_key(&task_id) {
+                                let event_detail = serde_json::json!({
+                                    "exitCode": req.exit_code.unwrap_or(-1),
+                                    "stopCode": "IntrospectionMarkFailed",
+                                });
+                                let (task_arn, cluster_arn) = {
+                                    let t = state.tasks.get_mut(&task_id).unwrap();
+                                    t.last_status = "STOPPED".into();
+                                    t.desired_status = "STOPPED".into();
+                                    t.stopped_at = Some(chrono::Utc::now());
+                                    t.stop_code = Some("IntrospectionMarkFailed".into());
+                                    t.stopped_reason = req
+                                        .reason
+                                        .clone()
+                                        .or(Some("Forced by introspection".into()));
+                                    for c in t.containers.iter_mut() {
+                                        c.last_status = "STOPPED".into();
+                                        c.exit_code =
+                                            Some(req.exit_code.unwrap_or(-1));
+                                    }
+                                    (t.task_arn.clone(), t.cluster_arn.clone())
+                                };
+                                state.push_event(fakecloud_ecs::state::LifecycleEvent {
+                                    at: chrono::Utc::now(),
+                                    event_type: "TaskStateChange".into(),
+                                    task_arn: Some(task_arn),
+                                    cluster_arn: Some(cluster_arn),
+                                    last_status: Some("STOPPED".into()),
+                                    detail: event_detail,
+                                });
+                                let t = state.tasks.get(&task_id).unwrap();
+                                return (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::to_value(ecs_task_response(t)).unwrap()),
+                                );
+                            }
+                        }
+                        (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "task not found"})),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ecs/events",
+            axum::routing::get({
+                let ec = ecs_introspection_state.clone();
+                move || {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        let mut events: Vec<types::EcsLifecycleEvent> = Vec::new();
+                        for (_, state) in accounts.iter() {
+                            events.extend(state.events.iter().map(ecs_lifecycle_event));
+                        }
+                        events.sort_by(|a, b| a.at.cmp(&b.at));
+                        axum::Json(types::EcsEventsResponse { events })
                     }
                 }
             }),

@@ -815,4 +815,101 @@ impl EcsClient<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// List every task the server has seen. Optional `cluster` / `status`
+    /// filters restrict the dump when supplied.
+    pub async fn get_tasks(
+        &self,
+        cluster: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<EcsTasksResponse, Error> {
+        fn encode(s: &str) -> String {
+            let mut out = String::with_capacity(s.len());
+            for b in s.bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(b as char);
+                    }
+                    _ => out.push_str(&format!("%{:02X}", b)),
+                }
+            }
+            out
+        }
+        let mut url = format!("{}/_fakecloud/ecs/tasks", self.fc.base_url);
+        let mut sep = '?';
+        if let Some(c) = cluster {
+            url.push(sep);
+            url.push_str("cluster=");
+            url.push_str(&encode(c));
+            sep = '&';
+        }
+        if let Some(s) = status {
+            url.push(sep);
+            url.push_str("status=");
+            url.push_str(&encode(s));
+        }
+        let resp = self.fc.client.get(url).send().await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Tail stored container stdout/stderr for a single task. Works even
+    /// when no `awslogs` driver is configured — fakecloud always captures
+    /// docker stdout/stderr on exit and keeps it on the task.
+    pub async fn get_task_logs(&self, task_id: &str) -> Result<EcsTaskLogsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/ecs/tasks/{}/logs",
+                self.fc.base_url, task_id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Force the running container behind a task to stop.
+    pub async fn force_stop_task(&self, task_id: &str) -> Result<EcsTask, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/ecs/tasks/{}/force-stop",
+                self.fc.base_url, task_id
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Flip the task to STOPPED without killing the underlying container
+    /// — useful for simulating task failures in tests.
+    pub async fn mark_task_failed(
+        &self,
+        task_id: &str,
+        req: &EcsMarkFailedRequest,
+    ) -> Result<EcsTask, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/ecs/tasks/{}/mark-failed",
+                self.fc.base_url, task_id
+            ))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
+    /// Replay the lifecycle event log.
+    pub async fn get_events(&self) -> Result<EcsEventsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!("{}/_fakecloud/ecs/events", self.fc.base_url))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }

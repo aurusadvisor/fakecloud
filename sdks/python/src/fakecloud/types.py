@@ -1228,3 +1228,108 @@ class EcsClustersResponse:
         return cls(
             clusters=[EcsCluster.from_dict(c) for c in data.get("clusters", [])],
         )
+
+
+@dataclass
+class EcsTaskContainer:
+    name: str
+    image: str
+    last_status: str
+    essential: bool
+    exit_code: Optional[int] = None
+    runtime_id: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsTaskContainer:
+        return cls(**_convert_keys(data))
+
+
+@dataclass
+class EcsTask:
+    task_arn: str
+    task_id: str
+    cluster_arn: str
+    cluster_name: str
+    task_definition_arn: str
+    family: str
+    revision: int
+    last_status: str
+    desired_status: str
+    launch_type: str
+    created_at: str
+    containers: List[EcsTaskContainer]
+    captured_log_bytes: int
+    started_at: Optional[str] = None
+    stopping_at: Optional[str] = None
+    stopped_at: Optional[str] = None
+    stop_code: Optional[str] = None
+    stopped_reason: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsTask:
+        d = _convert_keys(data)
+        d["containers"] = [
+            EcsTaskContainer.from_dict(c) for c in d.get("containers", [])
+        ]
+        return cls(**d)
+
+
+@dataclass
+class EcsTasksResponse:
+    tasks: List[EcsTask]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsTasksResponse:
+        return cls(tasks=[EcsTask.from_dict(t) for t in data.get("tasks", [])])
+
+
+@dataclass
+class EcsTaskLogsResponse:
+    task_arn: str
+    logs: str
+    last_status: str
+    exit_code: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsTaskLogsResponse:
+        return cls(**_convert_keys(data))
+
+
+@dataclass
+class EcsMarkFailedRequest:
+    exit_code: Optional[int] = None
+    reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        if self.exit_code is not None:
+            out["exitCode"] = self.exit_code
+        if self.reason is not None:
+            out["reason"] = self.reason
+        return out
+
+
+@dataclass
+class EcsLifecycleEvent:
+    at: str
+    event_type: str
+    detail: Any
+    task_arn: Optional[str] = None
+    cluster_arn: Optional[str] = None
+    last_status: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsLifecycleEvent:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class EcsEventsResponse:
+    events: List[EcsLifecycleEvent]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcsEventsResponse:
+        return cls(
+            events=[EcsLifecycleEvent.from_dict(e) for e in data.get("events", [])],
+        )

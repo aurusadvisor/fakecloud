@@ -461,3 +461,156 @@ async fn ecs_list_account_settings() {
     // empty-or-populated settings list.
     let _ = resp.settings().len();
 }
+
+// ── Batch 2: task lifecycle ────────────────────────────────────────
+
+async fn register_conformance_task_def(client: &aws_sdk_ecs::Client, family: &str) {
+    client
+        .register_task_definition()
+        .family(family)
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecs", "RunTask", checksum = "f0ae3fb6")]
+#[tokio::test]
+async fn ecs_run_task() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-run")
+        .send()
+        .await
+        .unwrap();
+    register_conformance_task_def(&client, "confo-run-td").await;
+    let resp = client
+        .run_task()
+        .cluster("confo-run")
+        .task_definition("confo-run-td")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tasks().len(), 1);
+    assert!(resp.failures().is_empty());
+}
+
+#[test_action("ecs", "StartTask", checksum = "75d41d3b")]
+#[tokio::test]
+async fn ecs_start_task() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-start")
+        .send()
+        .await
+        .unwrap();
+    register_conformance_task_def(&client, "confo-start-td").await;
+    let resp = client
+        .start_task()
+        .cluster("confo-start")
+        .task_definition("confo-start-td")
+        .container_instances("ci-placeholder")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tasks().len(), 1);
+}
+
+#[test_action("ecs", "DescribeTasks", checksum = "84135240")]
+#[tokio::test]
+async fn ecs_describe_tasks() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-desc")
+        .send()
+        .await
+        .unwrap();
+    register_conformance_task_def(&client, "confo-desc-td").await;
+    let run = client
+        .run_task()
+        .cluster("confo-desc")
+        .task_definition("confo-desc-td")
+        .send()
+        .await
+        .unwrap();
+    let arn = run.tasks()[0].task_arn().unwrap().to_string();
+    let described = client
+        .describe_tasks()
+        .cluster("confo-desc")
+        .tasks(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(described.tasks().len(), 1);
+}
+
+#[test_action("ecs", "ListTasks", checksum = "5e257f00")]
+#[tokio::test]
+async fn ecs_list_tasks() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-list-t")
+        .send()
+        .await
+        .unwrap();
+    register_conformance_task_def(&client, "confo-list-t-td").await;
+    client
+        .run_task()
+        .cluster("confo-list-t")
+        .task_definition("confo-list-t-td")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .list_tasks()
+        .cluster("confo-list-t")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.task_arns().is_empty());
+}
+
+#[test_action("ecs", "StopTask", checksum = "b4f8ca9a")]
+#[tokio::test]
+async fn ecs_stop_task() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-stop")
+        .send()
+        .await
+        .unwrap();
+    register_conformance_task_def(&client, "confo-stop-td").await;
+    let run = client
+        .run_task()
+        .cluster("confo-stop")
+        .task_definition("confo-stop-td")
+        .send()
+        .await
+        .unwrap();
+    let arn = run.tasks()[0].task_arn().unwrap().to_string();
+    let resp = client
+        .stop_task()
+        .cluster("confo-stop")
+        .task(arn)
+        .reason("test")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.task().is_some());
+}
