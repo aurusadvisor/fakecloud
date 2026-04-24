@@ -218,12 +218,12 @@ fn route_to_destination(
             let _ = bus.invoke_lambda(&dest, &payload).await;
         });
     } else if dest.contains(":events:") || dest.contains(":eventbridge:") {
-        bus.put_event_to_eventbridge(
-            "lambda",
-            "Lambda Function Invocation Result - Success",
-            &body,
-            "default",
-        );
+        let detail_type = if matches!(result, Ok(_)) {
+            "Lambda Function Invocation Result - Success"
+        } else {
+            "Lambda Function Invocation Result - Failure"
+        };
+        bus.put_event_to_eventbridge("lambda", detail_type, &body, "default");
     }
 }
 
