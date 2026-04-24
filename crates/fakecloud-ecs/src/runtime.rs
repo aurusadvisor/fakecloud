@@ -183,7 +183,7 @@ impl EcsRuntime {
         task_id: &str,
         account_id: &str,
     ) -> Result<(), RuntimeError> {
-        let (image, mut env, command, awslogs_container, secrets_refs, has_task_role) = {
+        let (image, mut env, entry_point, command, awslogs_container, secrets_refs, has_task_role) = {
             let accounts = state.read();
             let s = accounts
                 .get(account_id)
@@ -211,6 +211,16 @@ impl EcsRuntime {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let str_array = |key: &str| -> Vec<String> {
+                def.as_ref()
+                    .and_then(|d| d.get(key).and_then(|v| v.as_array()).cloned())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
             (
                 container.image.clone(),
                 def.as_ref()
@@ -225,14 +235,8 @@ impl EcsRuntime {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default(),
-                def.as_ref()
-                    .and_then(|d| d.get("command").and_then(|v| v.as_array()).cloned())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
+                str_array("entryPoint"),
+                str_array("command"),
                 container.name.clone(),
                 secrets,
                 task.task_role_arn.is_some(),
@@ -329,7 +333,18 @@ impl EcsRuntime {
                 .replace("https://localhost:", "https://host.docker.internal:");
             cmd.arg("-e").arg(format!("{}={}", k, transformed));
         }
+        // `containerDefinition.entryPoint` overrides the image's ENTRYPOINT.
+        // Docker CLI's `--entrypoint` only takes a single executable; any
+        // additional entryPoint elements are appended as positional args
+        // before the user-supplied `command[]`, which matches how docker
+        // composes ENTRYPOINT + CMD at exec time.
+        if let Some(first) = entry_point.first() {
+            cmd.args(["--entrypoint", first]);
+        }
         cmd.arg(&run_image);
+        for arg in entry_point.iter().skip(1) {
+            cmd.arg(arg);
+        }
         for arg in &command {
             cmd.arg(arg);
         }
