@@ -372,6 +372,10 @@ fn cache_blob(
             size: bytes.len() as u64,
             blob_b64: B64.encode(bytes),
             media_type: media_type.to_string(),
+            // Pull-through proxy caches blobs as fetched upstream; the
+            // local repo for the pull-through prefix never has
+            // encryption_configuration.kms, so plaintext is correct.
+            encrypted_with_kms_key: None,
         },
     );
 }
