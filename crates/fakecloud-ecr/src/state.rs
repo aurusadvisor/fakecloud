@@ -216,7 +216,16 @@ pub struct RepositoryCreationTemplate {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SigningConfiguration {
+    /// Raw rule payload from `PutSigningConfiguration`. Round-trippable
+    /// via `GetSigningConfiguration` even when a rule specifies a
+    /// key algorithm we can't verify against.
     pub rules: Vec<Value>,
+    /// PEM-parsed public keys that `DescribeImageSigningStatus` will
+    /// use to verify companion cosign signatures. Populated lazily
+    /// from `rules` at `PutSigningConfiguration` time; unrecognised
+    /// rule shapes just leave this empty.
+    #[serde(default)]
+    pub trusted_keys: Vec<crate::signing::TrustedKey>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
