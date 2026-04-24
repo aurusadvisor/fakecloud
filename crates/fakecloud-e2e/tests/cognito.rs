@@ -4356,7 +4356,7 @@ async fn cognito_simulation_confirmation_codes_and_force_confirm() {
         .await
         .expect("sign up");
 
-    // List all confirmation codes (should be empty initially since SignUp doesn't auto-generate codes)
+    // SignUp generates a verification confirmation code (matches AWS).
     let resp: serde_json::Value = http
         .get(format!(
             "{}/_fakecloud/cognito/confirmation-codes",
@@ -4368,11 +4368,11 @@ async fn cognito_simulation_confirmation_codes_and_force_confirm() {
         .json()
         .await
         .unwrap();
-
     let codes = resp["codes"].as_array().unwrap();
-    assert!(
-        codes.is_empty(),
-        "Should have no codes before ForgotPassword"
+    assert_eq!(
+        codes.len(),
+        1,
+        "SignUp should generate one verification code"
     );
 
     // Force-confirm user so we can then trigger ForgotPassword

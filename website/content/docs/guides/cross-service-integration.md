@@ -25,7 +25,9 @@ fakecloud actually executes the cross-service wiring. When an EventBridge rule m
 
 **Identity and auth:**
 
-- **Cognito -> Lambda** — Pre-signup, post-confirmation, pre/post-auth, custom message, token generation, migration, and custom auth challenge triggers.
+- **Cognito -> Lambda** — All 12 triggers: PreSignUp, PostConfirmation, PreAuthentication, PostAuthentication, CustomMessage, PreTokenGeneration, UserMigration, DefineAuthChallenge, CreateAuthChallenge, VerifyAuthChallengeResponse, CustomEmailSender, CustomSMSSender.
+- **Cognito -> SES** — Verification emails for SignUp / ResendConfirmationCode / ForgotPassword / GetUserAttributeVerificationCode dispatch through SES (CustomEmailSender Lambda takes precedence when configured).
+- **Cognito -> SNS** — SMS verification codes dispatch through SNS as `sms_messages` (CustomSMSSender Lambda takes precedence when configured).
 
 **Email:**
 

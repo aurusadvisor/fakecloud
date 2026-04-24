@@ -62,6 +62,190 @@ impl CognitoService {
         self
     }
 
+    /// Dispatch a Cognito verification email. Routes through the
+    /// CustomEmailSender Lambda when configured on the pool; otherwise
+    /// invokes the CustomMessage trigger (synchronously, so its response
+    /// can override subject+body) and then sends through the wired SES
+    /// dispatcher. No-op when neither is wired. Returns immediately —
+    /// all work happens in a spawned task.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_verification_email(
+        &self,
+        pool_id: &str,
+        client_id: Option<&str>,
+        username: &str,
+        user_attributes: &[crate::state::UserAttribute],
+        to_email: &str,
+        code: &str,
+        custom_message_trigger: crate::triggers::TriggerSource,
+        custom_sender_trigger: crate::triggers::TriggerSource,
+        region: &str,
+        account_id: &str,
+    ) {
+        let Some(ref ctx) = self.delivery_ctx else {
+            return;
+        };
+
+        // Custom sender path takes precedence per AWS behavior.
+        if let Some(function_arn) =
+            crate::triggers::get_trigger_arn(&self.state, pool_id, custom_sender_trigger)
+        {
+            let event = crate::triggers::build_custom_sender_event(
+                custom_sender_trigger,
+                pool_id,
+                client_id,
+                username,
+                user_attributes,
+                code,
+                region,
+                account_id,
+            );
+            crate::triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+            return;
+        }
+
+        let Some(ref dispatcher) = ctx.email else {
+            return;
+        };
+        let custom_message_arn =
+            crate::triggers::get_trigger_arn(&self.state, pool_id, custom_message_trigger);
+        let pool_settings = {
+            let accounts = self.state.read();
+            accounts
+                .default_ref()
+                .user_pools
+                .get(pool_id)
+                .map(|p| {
+                    let from = p
+                        .email_configuration
+                        .as_ref()
+                        .and_then(|c| c.from_email_address.clone());
+                    let template = p.verification_message_template.clone();
+                    (from, template)
+                })
+                .unwrap_or((None, None))
+        };
+        let (from_addr, vmt) = pool_settings;
+        let (subject_tpl_default, msg_tpl_default) = vmt
+            .map(|t| (t.email_subject, t.email_message))
+            .unwrap_or((None, None));
+
+        let dispatcher = dispatcher.clone();
+        let ctx = ctx.clone();
+        let username_owned = username.to_string();
+        let client_id_owned = client_id.map(|s| s.to_string());
+        let pool_id_owned = pool_id.to_string();
+        let region_owned = region.to_string();
+        let account_id_owned = account_id.to_string();
+        let user_attrs_owned: Vec<crate::state::UserAttribute> = user_attributes.to_vec();
+        let to_email_owned = to_email.to_string();
+        let code_owned = code.to_string();
+        tokio::spawn(async move {
+            let mut subject_tpl = subject_tpl_default;
+            let mut msg_tpl = msg_tpl_default;
+            if let Some(function_arn) = custom_message_arn {
+                let mut event = crate::triggers::build_trigger_event(
+                    custom_message_trigger,
+                    &pool_id_owned,
+                    client_id_owned.as_deref(),
+                    &username_owned,
+                    &user_attrs_owned,
+                    &region_owned,
+                    &account_id_owned,
+                );
+                event["request"]["codeParameter"] = serde_json::json!("{####}");
+                event["request"]["usernameParameter"] = serde_json::json!(username_owned);
+                if let Some(resp) =
+                    crate::triggers::invoke_trigger(&ctx, &function_arn, &event).await
+                {
+                    if let Some(s) = resp["response"]["emailSubject"].as_str() {
+                        subject_tpl = Some(s.to_string());
+                    }
+                    if let Some(m) = resp["response"]["emailMessage"].as_str() {
+                        msg_tpl = Some(m.to_string());
+                    }
+                }
+            }
+            let rendered = crate::triggers::render_verification_email(
+                from_addr.as_deref(),
+                subject_tpl.as_deref(),
+                msg_tpl.as_deref(),
+                &username_owned,
+                &code_owned,
+            );
+            dispatcher.send_email(
+                &account_id_owned,
+                &rendered.from,
+                &to_email_owned,
+                &rendered.subject,
+                &rendered.body_text,
+                rendered.body_html.as_deref(),
+            );
+        });
+    }
+
+    /// Dispatch a Cognito verification SMS. Routes through the
+    /// CustomSMSSender Lambda when configured, otherwise through the
+    /// wired SNS dispatcher. No-op when neither is wired.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_verification_sms(
+        &self,
+        pool_id: &str,
+        client_id: Option<&str>,
+        username: &str,
+        user_attributes: &[crate::state::UserAttribute],
+        phone_number: &str,
+        code: &str,
+        custom_sender_trigger: crate::triggers::TriggerSource,
+        region: &str,
+        account_id: &str,
+    ) {
+        let Some(ref ctx) = self.delivery_ctx else {
+            return;
+        };
+
+        if let Some(function_arn) =
+            crate::triggers::get_trigger_arn(&self.state, pool_id, custom_sender_trigger)
+        {
+            let event = crate::triggers::build_custom_sender_event(
+                custom_sender_trigger,
+                pool_id,
+                client_id,
+                username,
+                user_attributes,
+                code,
+                region,
+                account_id,
+            );
+            crate::triggers::invoke_trigger_fire_and_forget(ctx, function_arn, event);
+            return;
+        }
+
+        let Some(ref dispatcher) = ctx.sms else {
+            return;
+        };
+        let sms_template = {
+            let accounts = self.state.read();
+            accounts
+                .default_ref()
+                .user_pools
+                .get(pool_id)
+                .and_then(|p| {
+                    p.verification_message_template
+                        .as_ref()
+                        .and_then(|t| t.sms_message.clone())
+                })
+        };
+        let message =
+            crate::triggers::render_verification_sms(sms_template.as_deref(), username, code);
+        let dispatcher = dispatcher.clone();
+        let acct = account_id.to_string();
+        let phone = phone_number.to_string();
+        tokio::spawn(async move {
+            dispatcher.send_sms(&acct, &phone, &message);
+        });
+    }
+
     /// Persist current state as a snapshot. Held across the
     /// clone-serialize-write sequence to prevent stale-last writes,
     /// with serde + file I/O offloaded to the blocking pool.
@@ -3725,9 +3909,7 @@ mod tests {
             ),
         ));
         let delivery_bus = std::sync::Arc::new(fakecloud_core::delivery::DeliveryBus::new());
-        let ctx = triggers::CognitoDeliveryContext {
-            delivery_bus: delivery_bus.clone(),
-        };
+        let ctx = triggers::CognitoDeliveryContext::new(delivery_bus.clone());
         let svc = CognitoService::new(state.clone()).with_delivery(ctx);
 
         // Create pool WITHOUT DefineAuthChallenge Lambda configured

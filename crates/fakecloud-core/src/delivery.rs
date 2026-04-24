@@ -136,6 +136,27 @@ pub trait StepFunctionsDelivery: Send + Sync {
     fn start_execution(&self, state_machine_arn: &str, input: &str);
 }
 
+/// Outbound email dispatch used by services that emulate AWS flows that
+/// route through SES (Cognito verification, etc.) without taking a direct
+/// dependency on the SES crate.
+pub trait EmailDispatcher: Send + Sync {
+    fn send_email(
+        &self,
+        account_id: &str,
+        from: &str,
+        to: &str,
+        subject: &str,
+        body_text: &str,
+        body_html: Option<&str>,
+    );
+}
+
+/// Outbound SMS dispatch used by services that emulate AWS flows that route
+/// through SNS phone-number publish (Cognito SMS MFA, etc.).
+pub trait SmsDispatcher: Send + Sync {
+    fn send_sms(&self, account_id: &str, phone_number: &str, message: &str);
+}
+
 impl DeliveryBus {
     pub fn new() -> Self {
         Self {

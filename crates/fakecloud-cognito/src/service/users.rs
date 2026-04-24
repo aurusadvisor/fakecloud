@@ -866,7 +866,20 @@ impl CognitoService {
 
         let code = generate_confirmation_code();
         user.attribute_verification_codes
-            .insert(attribute_name.to_string(), code);
+            .insert(attribute_name.to_string(), code.clone());
+        let user_attrs = user.attributes.clone();
+        let user_phone = user
+            .attributes
+            .iter()
+            .find(|a| a.name == "phone_number")
+            .map(|a| a.value.clone());
+        let user_email = user
+            .attributes
+            .iter()
+            .find(|a| a.name == "email")
+            .map(|a| a.value.clone());
+        let region = state.region.clone();
+        let account_id = state.account_id.clone();
 
         // Determine delivery details based on attribute
         let (delivery_medium, destination) = if attribute_name == "phone_number" {
@@ -904,6 +917,39 @@ impl CognitoService {
                 .unwrap_or_else(|| "***".to_string());
             ("EMAIL", email)
         };
+
+        drop(accounts);
+
+        if attribute_name == "phone_number" {
+            if let Some(phone) = user_phone {
+                self.dispatch_verification_sms(
+                    &pool_id,
+                    None,
+                    &username,
+                    &user_attrs,
+                    &phone,
+                    &code,
+                    crate::triggers::TriggerSource::CustomSmsSenderVerifyUserAttribute,
+                    &region,
+                    &account_id,
+                );
+            }
+        } else if attribute_name == "email" {
+            if let Some(addr) = user_email {
+                self.dispatch_verification_email(
+                    &pool_id,
+                    None,
+                    &username,
+                    &user_attrs,
+                    &addr,
+                    &code,
+                    crate::triggers::TriggerSource::CustomMessageSignUp,
+                    crate::triggers::TriggerSource::CustomEmailSenderVerifyUserAttribute,
+                    &region,
+                    &account_id,
+                );
+            }
+        }
 
         Ok(AwsResponse::ok_json(json!({
             "CodeDeliveryDetails": {
@@ -1025,7 +1071,7 @@ impl CognitoService {
             })?;
 
         let code = generate_confirmation_code();
-        user.confirmation_code = Some(code);
+        user.confirmation_code = Some(code.clone());
 
         // Find email from user attributes for CodeDeliveryDetails
         let email = user
@@ -1033,8 +1079,12 @@ impl CognitoService {
             .iter()
             .find(|a| a.name == "email")
             .map(|a| a.value.clone());
+        let user_attrs = user.attributes.clone();
+        let region = state.region.clone();
+        let account_id = state.account_id.clone();
 
         let destination = email
+            .clone()
             .map(|e| {
                 if let Some(at_pos) = e.find('@') {
                     let first = e.chars().next().unwrap_or('*');
@@ -1045,6 +1095,23 @@ impl CognitoService {
                 }
             })
             .unwrap_or_else(|| "***".to_string());
+
+        drop(accounts);
+
+        if let Some(addr) = email {
+            self.dispatch_verification_email(
+                &pool_id,
+                Some(client_id),
+                username,
+                &user_attrs,
+                &addr,
+                &code,
+                crate::triggers::TriggerSource::CustomMessageSignUp,
+                crate::triggers::TriggerSource::CustomEmailSenderResendCode,
+                &region,
+                &account_id,
+            );
+        }
 
         Ok(AwsResponse::ok_json(json!({
             "CodeDeliveryDetails": {

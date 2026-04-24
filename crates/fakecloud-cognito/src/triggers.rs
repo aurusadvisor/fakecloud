@@ -8,14 +8,37 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use fakecloud_core::delivery::DeliveryBus;
+use fakecloud_core::delivery::{DeliveryBus, EmailDispatcher, SmsDispatcher};
 
 use crate::state::{ChallengeResult, SharedCognitoState, User, UserAttribute};
 
-/// Shared references needed for Lambda trigger delivery.
+/// Shared references needed for Lambda trigger delivery and outbound
+/// notification dispatch (verification email via SES, SMS MFA via SNS).
 #[derive(Clone)]
 pub struct CognitoDeliveryContext {
     pub delivery_bus: Arc<DeliveryBus>,
+    pub email: Option<Arc<dyn EmailDispatcher>>,
+    pub sms: Option<Arc<dyn SmsDispatcher>>,
+}
+
+impl CognitoDeliveryContext {
+    pub fn new(delivery_bus: Arc<DeliveryBus>) -> Self {
+        Self {
+            delivery_bus,
+            email: None,
+            sms: None,
+        }
+    }
+
+    pub fn with_email(mut self, email: Arc<dyn EmailDispatcher>) -> Self {
+        self.email = Some(email);
+        self
+    }
+
+    pub fn with_sms(mut self, sms: Arc<dyn SmsDispatcher>) -> Self {
+        self.sms = Some(sms);
+        self
+    }
 }
 
 /// The trigger source identifies which Cognito action initiated the trigger.
@@ -34,6 +57,20 @@ pub enum TriggerSource {
     DefineAuthChallengeAuthentication,
     CreateAuthChallengeAuthentication,
     VerifyAuthChallengeResponseAuthentication,
+    CustomEmailSenderSignUp,
+    CustomEmailSenderForgotPassword,
+    CustomEmailSenderResendCode,
+    CustomEmailSenderUpdateUserAttribute,
+    CustomEmailSenderVerifyUserAttribute,
+    CustomEmailSenderAdminCreateUser,
+    CustomEmailSenderAccountTakeOverNotification,
+    CustomSmsSenderSignUp,
+    CustomSmsSenderForgotPassword,
+    CustomSmsSenderResendCode,
+    CustomSmsSenderAuthentication,
+    CustomSmsSenderAdminCreateUser,
+    CustomSmsSenderUpdateUserAttribute,
+    CustomSmsSenderVerifyUserAttribute,
 }
 
 impl TriggerSource {
@@ -54,6 +91,22 @@ impl TriggerSource {
             Self::VerifyAuthChallengeResponseAuthentication => {
                 "VerifyAuthChallengeResponse_Authentication"
             }
+            Self::CustomEmailSenderSignUp => "CustomEmailSender_SignUp",
+            Self::CustomEmailSenderForgotPassword => "CustomEmailSender_ForgotPassword",
+            Self::CustomEmailSenderResendCode => "CustomEmailSender_ResendCode",
+            Self::CustomEmailSenderUpdateUserAttribute => "CustomEmailSender_UpdateUserAttribute",
+            Self::CustomEmailSenderVerifyUserAttribute => "CustomEmailSender_VerifyUserAttribute",
+            Self::CustomEmailSenderAdminCreateUser => "CustomEmailSender_AdminCreateUser",
+            Self::CustomEmailSenderAccountTakeOverNotification => {
+                "CustomEmailSender_AccountTakeOverNotification"
+            }
+            Self::CustomSmsSenderSignUp => "CustomSMSSender_SignUp",
+            Self::CustomSmsSenderForgotPassword => "CustomSMSSender_ForgotPassword",
+            Self::CustomSmsSenderResendCode => "CustomSMSSender_ResendCode",
+            Self::CustomSmsSenderAuthentication => "CustomSMSSender_Authentication",
+            Self::CustomSmsSenderAdminCreateUser => "CustomSMSSender_AdminCreateUser",
+            Self::CustomSmsSenderUpdateUserAttribute => "CustomSMSSender_UpdateUserAttribute",
+            Self::CustomSmsSenderVerifyUserAttribute => "CustomSMSSender_VerifyUserAttribute",
         }
     }
 
@@ -72,11 +125,30 @@ impl TriggerSource {
             Self::DefineAuthChallengeAuthentication => "DefineAuthChallenge",
             Self::CreateAuthChallengeAuthentication => "CreateAuthChallenge",
             Self::VerifyAuthChallengeResponseAuthentication => "VerifyAuthChallengeResponse",
+            Self::CustomEmailSenderSignUp
+            | Self::CustomEmailSenderForgotPassword
+            | Self::CustomEmailSenderResendCode
+            | Self::CustomEmailSenderUpdateUserAttribute
+            | Self::CustomEmailSenderVerifyUserAttribute
+            | Self::CustomEmailSenderAdminCreateUser
+            | Self::CustomEmailSenderAccountTakeOverNotification => "CustomEmailSender",
+            Self::CustomSmsSenderSignUp
+            | Self::CustomSmsSenderForgotPassword
+            | Self::CustomSmsSenderResendCode
+            | Self::CustomSmsSenderAuthentication
+            | Self::CustomSmsSenderAdminCreateUser
+            | Self::CustomSmsSenderUpdateUserAttribute
+            | Self::CustomSmsSenderVerifyUserAttribute => "CustomSMSSender",
         }
     }
 }
 
 /// Look up the Lambda function ARN from the pool's LambdaConfig for a trigger.
+///
+/// Most triggers are stored as `LambdaConfig.<Trigger> = "<arn>"`.
+/// CustomEmailSender / CustomSMSSender are nested:
+///   `LambdaConfig.CustomEmailSender = { LambdaArn, LambdaVersion }`
+/// — fall back to that shape when the flat string form isn't present.
 pub fn get_trigger_arn(
     cognito_state: &SharedCognitoState,
     pool_id: &str,
@@ -87,8 +159,12 @@ pub fn get_trigger_arn(
     let pool = state.user_pools.get(pool_id)?;
     let lambda_config = pool.lambda_config.as_ref()?;
     let key = trigger_source.lambda_config_key();
-    lambda_config
-        .get(key)
+    let raw = lambda_config.get(key)?;
+    if let Some(s) = raw.as_str() {
+        return Some(s.to_string());
+    }
+    raw.get("LambdaArn")
+        .or_else(|| raw.get("lambdaArn"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
@@ -366,6 +442,118 @@ pub fn build_verify_auth_challenge_event(
 /// Helper: collect user attributes from state for trigger event construction.
 pub fn collect_user_attributes(user: &User) -> Vec<UserAttribute> {
     user.attributes.clone()
+}
+
+/// Build a CustomEmailSender / CustomSMSSender trigger event payload.
+/// AWS includes the verification code under `request.code` (encrypted in
+/// real AWS via the user pool's KMS key; we pass it base64-encoded so a
+/// receiving Lambda has something deterministic to assert on, ahead of the
+/// KMS-hooks batch wiring real envelope encryption here).
+#[allow(clippy::too_many_arguments)]
+pub fn build_custom_sender_event(
+    trigger_source: TriggerSource,
+    pool_id: &str,
+    client_id: Option<&str>,
+    username: &str,
+    user_attributes: &[UserAttribute],
+    code: &str,
+    region: &str,
+    account_id: &str,
+) -> Value {
+    use base64::Engine;
+    let user_attrs: Value = user_attributes
+        .iter()
+        .map(|a| (a.name.clone(), Value::String(a.value.clone())))
+        .collect::<serde_json::Map<String, Value>>()
+        .into();
+    let request_type = match trigger_source {
+        TriggerSource::CustomSmsSenderSignUp
+        | TriggerSource::CustomSmsSenderForgotPassword
+        | TriggerSource::CustomSmsSenderResendCode
+        | TriggerSource::CustomSmsSenderAuthentication
+        | TriggerSource::CustomSmsSenderAdminCreateUser
+        | TriggerSource::CustomSmsSenderUpdateUserAttribute
+        | TriggerSource::CustomSmsSenderVerifyUserAttribute => "customSMSSenderRequestV1",
+        _ => "customEmailSenderRequestV1",
+    };
+    json!({
+        "version": "1",
+        "triggerSource": trigger_source.as_str(),
+        "region": region,
+        "userPoolId": pool_id,
+        "userName": username,
+        "callerContext": {
+            "awsSdkVersion": "fakecloud",
+            "clientId": client_id.unwrap_or(""),
+            "accountId": account_id,
+        },
+        "request": {
+            "userAttributes": user_attrs,
+            "code": base64::engine::general_purpose::STANDARD.encode(code.as_bytes()),
+            "type": request_type,
+        },
+        "response": {},
+    })
+}
+
+/// Email message materialized from a verification template.
+pub struct VerificationEmail {
+    pub from: String,
+    pub subject: String,
+    pub body_text: String,
+    pub body_html: Option<String>,
+}
+
+/// Render a Cognito verification email message by substituting the
+/// `{####}` and `{username}` placeholders. Falls back to defaults that
+/// match Cognito's out-of-the-box templates when the pool has no
+/// custom `VerificationMessageTemplate`.
+pub fn render_verification_email(
+    from_address: Option<&str>,
+    subject_template: Option<&str>,
+    message_template: Option<&str>,
+    username: &str,
+    code: &str,
+) -> VerificationEmail {
+    let subject = subject_template
+        .unwrap_or("Your verification code")
+        .replace("{####}", code)
+        .replace("{username}", username);
+    let body_template = message_template.unwrap_or("Your confirmation code is {####}");
+    let body_html = body_template
+        .replace("{####}", code)
+        .replace("{username}", username);
+    let body_text = strip_html(&body_html);
+    VerificationEmail {
+        from: from_address
+            .unwrap_or("no-reply@fakecloud.local")
+            .to_string(),
+        subject,
+        body_text,
+        body_html: Some(body_html),
+    }
+}
+
+fn strip_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Render an SMS verification message by substituting placeholders.
+pub fn render_verification_sms(sms_template: Option<&str>, username: &str, code: &str) -> String {
+    sms_template
+        .unwrap_or("Your verification code is {####}")
+        .replace("{####}", code)
+        .replace("{username}", username)
 }
 
 #[cfg(test)]

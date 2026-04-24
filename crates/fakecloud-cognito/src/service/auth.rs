@@ -1685,6 +1685,43 @@ impl CognitoService {
                 u.user_status = user_status::CONFIRMED.to_string();
                 u.user_last_modified_date = Utc::now();
             }
+        } else {
+            // Generate a verification code and dispatch through SES (or
+            // CustomEmailSender if the pool has it wired).
+            let code = generate_confirmation_code();
+            let user_attrs = {
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(&req.account_id);
+                let attrs = if let Some(u) = state
+                    .users
+                    .get_mut(&pool_id)
+                    .and_then(|users| users.get_mut(username))
+                {
+                    u.confirmation_code = Some(code.clone());
+                    u.attributes.clone()
+                } else {
+                    Vec::new()
+                };
+                attrs
+            };
+            if let Some(email) = user_attrs
+                .iter()
+                .find(|a| a.name == "email")
+                .map(|a| a.value.clone())
+            {
+                self.dispatch_verification_email(
+                    &pool_id,
+                    Some(client_id),
+                    username,
+                    &user_attrs,
+                    &email,
+                    &code,
+                    TriggerSource::CustomMessageSignUp,
+                    TriggerSource::CustomEmailSenderSignUp,
+                    &region,
+                    &account_id,
+                );
+            }
         }
 
         Ok(AwsResponse::ok_json(json!({
@@ -1941,7 +1978,7 @@ impl CognitoService {
             })?;
 
         let code = generate_confirmation_code();
-        user.confirmation_code = Some(code);
+        user.confirmation_code = Some(code.clone());
 
         // Find email from user attributes for CodeDeliveryDetails
         let email = user
@@ -1953,6 +1990,7 @@ impl CognitoService {
         let user_attrs = triggers::collect_user_attributes(user);
 
         let destination = email
+            .clone()
             .map(|e| {
                 // Mask email: show first char + *** + @domain
                 if let Some(at_pos) = e.find('@') {
@@ -1980,6 +2018,21 @@ impl CognitoService {
         });
 
         drop(accounts);
+
+        if let Some(addr) = email {
+            self.dispatch_verification_email(
+                &pool_id,
+                Some(client_id),
+                username,
+                &user_attrs,
+                &addr,
+                &code,
+                TriggerSource::CustomMessageForgotPassword,
+                TriggerSource::CustomEmailSenderForgotPassword,
+                &region,
+                &account_id,
+            );
+        }
 
         // CustomMessage_ForgotPassword trigger (fire-and-forget)
         if let Some(ref ctx) = self.delivery_ctx {
