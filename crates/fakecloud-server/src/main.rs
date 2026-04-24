@@ -422,6 +422,7 @@ async fn main() {
     let sns_delivery_for_scheduler = sns_delivery.clone();
     let sns_delivery_for_scheduler_eb = sns_delivery.clone();
     let sns_delivery_for_scheduler_sfn_eb = sns_delivery.clone();
+    let sns_delivery_for_rds = sns_delivery.clone();
     let eb_delivery_for_s3 = Arc::new(
         fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
             eb_state.clone(),
@@ -1678,7 +1679,11 @@ async fn main() {
     let eb_delivery_for_rds = Arc::new(
         fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
             eb_state_for_rds,
-            Arc::new(DeliveryBus::new().with_sqs(sqs_delivery.clone())),
+            Arc::new(
+                DeliveryBus::new()
+                    .with_sqs(sqs_delivery.clone())
+                    .with_sns(sns_delivery_for_rds),
+            ),
         ),
     );
     let rds_delivery_bus = Arc::new(DeliveryBus::new().with_eventbridge(eb_delivery_for_rds));
