@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import httpx
 
 from fakecloud.types import (
@@ -19,6 +21,9 @@ from fakecloud.types import (
     ConfirmUserRequest,
     ConfirmUserResponse,
     CreateAdminResponse,
+    EcrImagesResponse,
+    EcrPullThroughRulesResponse,
+    EcrRepositoriesResponse,
     ElastiCacheClustersResponse,
     ElastiCacheReplicationGroupsResponse,
     ElastiCacheServerlessCachesResponse,
@@ -129,6 +134,34 @@ class ElastiCacheClient:
         )
         _check(resp)
         return ElastiCacheServerlessCachesResponse.from_dict(resp.json())
+
+
+class EcrClient:
+    """Async ECR introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_repositories(self) -> EcrRepositoriesResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecr/repositories")
+        _check(resp)
+        return EcrRepositoriesResponse.from_dict(resp.json())
+
+    async def get_images(
+        self, repository_name: Optional[str] = None
+    ) -> EcrImagesResponse:
+        path = f"{self._base}/_fakecloud/ecr/images"
+        if repository_name:
+            path += f"?repo={repository_name}"
+        resp = await self._client.get(path)
+        _check(resp)
+        return EcrImagesResponse.from_dict(resp.json())
+
+    async def get_pull_through_rules(self) -> EcrPullThroughRulesResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/ecr/pull-through-rules")
+        _check(resp)
+        return EcrPullThroughRulesResponse.from_dict(resp.json())
 
 
 class SesClient:
@@ -837,6 +870,10 @@ class FakeCloud:
     @property
     def elasticache(self) -> ElastiCacheClient:
         return ElastiCacheClient(self._client, self._base)
+
+    @property
+    def ecr(self) -> EcrClient:
+        return EcrClient(self._client, self._base)
 
     @property
     def ses(self) -> SesClient:

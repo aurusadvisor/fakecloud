@@ -661,6 +661,44 @@ pub struct EcrRepository {
     pub created_at: String,
     pub tags: Vec<EcrTag>,
     pub has_policy: bool,
+    pub has_lifecycle_policy: bool,
+    pub image_count: u64,
+    pub layer_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcrImage {
+    pub repository_name: String,
+    pub image_digest: String,
+    pub image_tags: Vec<String>,
+    pub image_size_in_bytes: u64,
+    pub image_manifest_media_type: String,
+    pub image_pushed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcrImagesResponse {
+    pub images: Vec<EcrImage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcrPullThroughRule {
+    pub ecr_repository_prefix: String,
+    pub upstream_registry_url: String,
+    pub upstream_registry: Option<String>,
+    pub credential_arn: Option<String>,
+    pub custom_role_arn: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcrPullThroughRulesResponse {
+    pub rules: Vec<EcrPullThroughRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

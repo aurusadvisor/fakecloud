@@ -556,3 +556,63 @@ type ApiGatewayV2Request struct {
 type ApiGatewayV2RequestsResponse struct {
 	Requests []ApiGatewayV2Request `json:"requests"`
 }
+
+// ── ECR ────────────────────────────────────────────────────────────
+
+// ECRTag is a key/value tag attached to an ECR repository.
+type ECRTag struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// ECRRepository describes a fakecloud-managed ECR repository.
+type ECRRepository struct {
+	RepositoryName     string   `json:"repositoryName"`
+	RepositoryArn      string   `json:"repositoryArn"`
+	RegistryID         string   `json:"registryId"`
+	RepositoryURI      string   `json:"repositoryUri"`
+	ImageTagMutability string   `json:"imageTagMutability"`
+	ScanOnPush         bool     `json:"scanOnPush"`
+	CreatedAt          string   `json:"createdAt"`
+	Tags               []ECRTag `json:"tags"`
+	HasPolicy          bool     `json:"hasPolicy"`
+	HasLifecyclePolicy bool     `json:"hasLifecyclePolicy"`
+	ImageCount         uint64   `json:"imageCount"`
+	LayerCount         uint64   `json:"layerCount"`
+}
+
+// ECRRepositoriesResponse is returned by GET /_fakecloud/ecr/repositories.
+type ECRRepositoriesResponse struct {
+	Repositories []ECRRepository `json:"repositories"`
+}
+
+// ECRImage describes a stored container image.
+type ECRImage struct {
+	RepositoryName         string   `json:"repositoryName"`
+	ImageDigest            string   `json:"imageDigest"`
+	ImageTags              []string `json:"imageTags"`
+	ImageSizeInBytes       uint64   `json:"imageSizeInBytes"`
+	ImageManifestMediaType string   `json:"imageManifestMediaType"`
+	ImagePushedAt          string   `json:"imagePushedAt"`
+}
+
+// ECRImagesResponse is returned by GET /_fakecloud/ecr/images.
+type ECRImagesResponse struct {
+	Images []ECRImage `json:"images"`
+}
+
+// ECRPullThroughRule describes a pull-through cache rule.
+type ECRPullThroughRule struct {
+	ECRRepositoryPrefix string  `json:"ecrRepositoryPrefix"`
+	UpstreamRegistryURL string  `json:"upstreamRegistryUrl"`
+	UpstreamRegistry    *string `json:"upstreamRegistry,omitempty"`
+	CredentialArn       *string `json:"credentialArn,omitempty"`
+	CustomRoleArn       *string `json:"customRoleArn,omitempty"`
+	CreatedAt           string  `json:"createdAt"`
+	UpdatedAt           string  `json:"updatedAt"`
+}
+
+// ECRPullThroughRulesResponse is returned by GET /_fakecloud/ecr/pull-through-rules.
+type ECRPullThroughRulesResponse struct {
+	Rules []ECRPullThroughRule `json:"rules"`
+}

@@ -24,7 +24,8 @@ mod stepfunctions_delivery;
 use cli::Cli;
 use dynamodb_streams_lambda_poller::DynamoDbStreamsLambdaPoller;
 use introspection::{
-    ecr_repository_response, elasticache_cluster_response, elasticache_replication_group_response,
+    ecr_image_response, ecr_pull_through_rule_response, ecr_repository_response,
+    elasticache_cluster_response, elasticache_replication_group_response,
     elasticache_serverless_cache_response, rds_instance_response,
 };
 use kinesis_lambda_poller::KinesisLambdaPoller;
@@ -3081,6 +3082,53 @@ async fn main() {
                             .map(ecr_repository_response)
                             .collect();
                         axum::Json(types::EcrRepositoriesResponse { repositories })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ecr/images",
+            axum::routing::get({
+                let ec = ecr_introspection_state.clone();
+                move |axum::extract::Query(q): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        let state = accounts.default_ref();
+                        let repo_filter = q.get("repo").cloned();
+                        let mut images: Vec<types::EcrImage> = Vec::new();
+                        for repo in state.repositories.values() {
+                            if let Some(ref r) = repo_filter {
+                                if &repo.repository_name != r {
+                                    continue;
+                                }
+                            }
+                            for image in repo.images.values() {
+                                images.push(ecr_image_response(repo, image));
+                            }
+                        }
+                        axum::Json(types::EcrImagesResponse { images })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ecr/pull-through-rules",
+            axum::routing::get({
+                let ec = ecr_introspection_state;
+                move || {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        let state = accounts.default_ref();
+                        let rules: Vec<types::EcrPullThroughRule> = state
+                            .pull_through_cache_rules
+                            .values()
+                            .map(ecr_pull_through_rule_response)
+                            .collect();
+                        axum::Json(types::EcrPullThroughRulesResponse { rules })
                     }
                 }
             }),

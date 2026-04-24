@@ -14,6 +14,9 @@ import type {
   ElastiCacheClustersResponse,
   ElastiCacheReplicationGroupsResponse,
   ElastiCacheServerlessCachesResponse,
+  EcrRepositoriesResponse,
+  EcrImagesResponse,
+  EcrPullThroughRulesResponse,
   LambdaInvocationsResponse,
   WarmContainersResponse,
   EvictContainerResponse,
@@ -118,6 +121,30 @@ export class ElastiCacheClient {
   async getServerlessCaches(): Promise<ElastiCacheServerlessCachesResponse> {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/elasticache/serverless-caches`,
+    );
+    return parse(resp);
+  }
+}
+
+export class EcrClient {
+  constructor(private baseUrl: string) {}
+
+  async getRepositories(): Promise<EcrRepositoriesResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/ecr/repositories`);
+    return parse(resp);
+  }
+
+  async getImages(repositoryName?: string): Promise<EcrImagesResponse> {
+    const url = repositoryName
+      ? `${this.baseUrl}/_fakecloud/ecr/images?repo=${encodeURIComponent(repositoryName)}`
+      : `${this.baseUrl}/_fakecloud/ecr/images`;
+    const resp = await fetch(url);
+    return parse(resp);
+  }
+
+  async getPullThroughRules(): Promise<EcrPullThroughRulesResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/ecr/pull-through-rules`,
     );
     return parse(resp);
   }
@@ -442,6 +469,7 @@ export class FakeCloud {
   private readonly _lambda: LambdaClient;
   private readonly _rds: RdsClient;
   private readonly _elasticache: ElastiCacheClient;
+  private readonly _ecr: EcrClient;
   private readonly _ses: SesClient;
   private readonly _sns: SnsClient;
   private readonly _sqs: SqsClient;
@@ -461,6 +489,7 @@ export class FakeCloud {
     this._lambda = new LambdaClient(this.baseUrl);
     this._rds = new RdsClient(this.baseUrl);
     this._elasticache = new ElastiCacheClient(this.baseUrl);
+    this._ecr = new EcrClient(this.baseUrl);
     this._ses = new SesClient(this.baseUrl);
     this._sns = new SnsClient(this.baseUrl);
     this._sqs = new SqsClient(this.baseUrl);
@@ -521,6 +550,10 @@ export class FakeCloud {
 
   get elasticache(): ElastiCacheClient {
     return this._elasticache;
+  }
+
+  get ecr(): EcrClient {
+    return this._ecr;
   }
 
   get ses(): SesClient {

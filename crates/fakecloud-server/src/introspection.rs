@@ -42,6 +42,8 @@ pub(crate) fn rds_instance_response(
 pub(crate) fn ecr_repository_response(
     repo: &fakecloud_ecr::state::Repository,
 ) -> types::EcrRepository {
+    let image_count = repo.images.len() as u64;
+    let layer_count = repo.layers.len() as u64;
     types::EcrRepository {
         repository_name: repo.repository_name.clone(),
         repository_arn: repo.repository_arn.clone(),
@@ -59,6 +61,43 @@ pub(crate) fn ecr_repository_response(
             })
             .collect(),
         has_policy: repo.policy.is_some(),
+        has_lifecycle_policy: repo.lifecycle_policy.is_some(),
+        image_count,
+        layer_count,
+    }
+}
+
+pub(crate) fn ecr_image_response(
+    repo: &fakecloud_ecr::state::Repository,
+    image: &fakecloud_ecr::state::Image,
+) -> types::EcrImage {
+    let tags: Vec<String> = repo
+        .image_tags
+        .iter()
+        .filter(|(_, d)| d.as_str() == image.image_digest)
+        .map(|(t, _)| t.clone())
+        .collect();
+    types::EcrImage {
+        repository_name: repo.repository_name.clone(),
+        image_digest: image.image_digest.clone(),
+        image_tags: tags,
+        image_size_in_bytes: image.image_size_in_bytes,
+        image_manifest_media_type: image.image_manifest_media_type.clone(),
+        image_pushed_at: image.image_pushed_at.to_rfc3339(),
+    }
+}
+
+pub(crate) fn ecr_pull_through_rule_response(
+    rule: &fakecloud_ecr::state::PullThroughCacheRule,
+) -> types::EcrPullThroughRule {
+    types::EcrPullThroughRule {
+        ecr_repository_prefix: rule.ecr_repository_prefix.clone(),
+        upstream_registry_url: rule.upstream_registry_url.clone(),
+        upstream_registry: rule.upstream_registry.clone(),
+        credential_arn: rule.credential_arn.clone(),
+        custom_role_arn: rule.custom_role_arn.clone(),
+        created_at: rule.created_at.to_rfc3339(),
+        updated_at: rule.updated_at.to_rfc3339(),
     }
 }
 

@@ -25,9 +25,10 @@ fakecloud is a different tool for a different problem.
 | Real Lambda execution | Yes (13 runtimes, real containers) | **No** (stubbed responses) |
 | Real RDS databases | Yes (PostgreSQL/MySQL/MariaDB via Docker) | **No** (in-memory stubs) |
 | Real ElastiCache | Yes (Redis/Valkey via Docker) | **No** |
+| Real `docker push`/`pull` to ECR | Yes (OCI v2 Distribution) | **No** (Moto ships the JSON control plane only) |
 | Real cross-service wiring | Yes (S3 -> Lambda, SNS fan-out, etc fire end-to-end) | Partial (Moto simulates some events, not real execution) |
 | Setup for Python unit tests | HTTP endpoint override + fakecloud running | `@mock_aws` decorator |
-| Service count | 23 at 100% conformance (depth-first) | 100+ at varying depth (breadth-first) |
+| Service count | 24 at 100% conformance (depth-first) | 100+ at varying depth (breadth-first) |
 | Conformance methodology | Smithy-validated, 54k+ test variants on every commit | Not published |
 | License | AGPL-3.0 | Apache-2.0 |
 

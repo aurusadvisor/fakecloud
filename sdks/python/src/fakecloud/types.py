@@ -1083,3 +1083,101 @@ class ApiGatewayV2RequestsResponse:
                 ApiGatewayV2Request.from_dict(r) for r in data.get("requests", [])
             ],
         )
+
+
+@dataclass
+class EcrTag:
+    key: str
+    value: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcrTag:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class EcrRepository:
+    repository_name: str
+    repository_arn: str
+    registry_id: str
+    repository_uri: str
+    image_tag_mutability: str
+    scan_on_push: bool
+    created_at: str
+    tags: List[EcrTag]
+    has_policy: bool
+    has_lifecycle_policy: bool
+    image_count: int
+    layer_count: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcrRepository:
+        tags = [EcrTag.from_dict(t) for t in data.get("tags", [])]
+        d = _convert_keys(data)
+        d["tags"] = tags
+        return cls(**d)
+
+
+@dataclass
+class EcrRepositoriesResponse:
+    repositories: List[EcrRepository]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcrRepositoriesResponse:
+        return cls(
+            repositories=[
+                EcrRepository.from_dict(r) for r in data.get("repositories", [])
+            ],
+        )
+
+
+@dataclass
+class EcrImage:
+    repository_name: str
+    image_digest: str
+    image_tags: List[str]
+    image_size_in_bytes: int
+    image_manifest_media_type: str
+    image_pushed_at: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcrImage:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class EcrImagesResponse:
+    images: List[EcrImage]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcrImagesResponse:
+        return cls(images=[EcrImage.from_dict(i) for i in data.get("images", [])])
+
+
+@dataclass
+class EcrPullThroughRule:
+    ecr_repository_prefix: str
+    upstream_registry_url: str
+    created_at: str
+    updated_at: str
+    upstream_registry: Optional[str] = None
+    credential_arn: Optional[str] = None
+    custom_role_arn: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcrPullThroughRule:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class EcrPullThroughRulesResponse:
+    rules: List[EcrPullThroughRule]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EcrPullThroughRulesResponse:
+        return cls(
+            rules=[EcrPullThroughRule.from_dict(r) for r in data.get("rules", [])],
+        )

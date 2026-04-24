@@ -1264,3 +1264,145 @@ final class CreateAdminResponse
         );
     }
 }
+
+// ── ECR ────────────────────────────────────────────────────────────
+
+final class EcrTag
+{
+    public function __construct(
+        public readonly string $key,
+        public readonly string $value,
+    ) {}
+
+    public static function fromArray(array $d): self
+    {
+        return new self($d['key'] ?? '', $d['value'] ?? '');
+    }
+}
+
+final class EcrRepository
+{
+    /** @param EcrTag[] $tags */
+    public function __construct(
+        public readonly string $repositoryName,
+        public readonly string $repositoryArn,
+        public readonly string $registryId,
+        public readonly string $repositoryUri,
+        public readonly string $imageTagMutability,
+        public readonly bool $scanOnPush,
+        public readonly string $createdAt,
+        public readonly array $tags,
+        public readonly bool $hasPolicy,
+        public readonly bool $hasLifecyclePolicy,
+        public readonly int $imageCount,
+        public readonly int $layerCount,
+    ) {}
+
+    public static function fromArray(array $d): self
+    {
+        return new self(
+            $d['repositoryName'],
+            $d['repositoryArn'],
+            $d['registryId'],
+            $d['repositoryUri'],
+            $d['imageTagMutability'],
+            $d['scanOnPush'] ?? false,
+            $d['createdAt'],
+            array_map(static fn($t) => EcrTag::fromArray($t), $d['tags'] ?? []),
+            $d['hasPolicy'] ?? false,
+            $d['hasLifecyclePolicy'] ?? false,
+            $d['imageCount'] ?? 0,
+            $d['layerCount'] ?? 0,
+        );
+    }
+}
+
+final class EcrRepositoriesResponse
+{
+    /** @param EcrRepository[] $repositories */
+    public function __construct(public readonly array $repositories) {}
+
+    public static function fromArray(array $d): self
+    {
+        return new self(
+            array_map(static fn($r) => EcrRepository::fromArray($r), $d['repositories'] ?? []),
+        );
+    }
+}
+
+final class EcrImage
+{
+    /** @param string[] $imageTags */
+    public function __construct(
+        public readonly string $repositoryName,
+        public readonly string $imageDigest,
+        public readonly array $imageTags,
+        public readonly int $imageSizeInBytes,
+        public readonly string $imageManifestMediaType,
+        public readonly string $imagePushedAt,
+    ) {}
+
+    public static function fromArray(array $d): self
+    {
+        return new self(
+            $d['repositoryName'],
+            $d['imageDigest'],
+            $d['imageTags'] ?? [],
+            $d['imageSizeInBytes'] ?? 0,
+            $d['imageManifestMediaType'] ?? '',
+            $d['imagePushedAt'] ?? '',
+        );
+    }
+}
+
+final class EcrImagesResponse
+{
+    /** @param EcrImage[] $images */
+    public function __construct(public readonly array $images) {}
+
+    public static function fromArray(array $d): self
+    {
+        return new self(
+            array_map(static fn($i) => EcrImage::fromArray($i), $d['images'] ?? []),
+        );
+    }
+}
+
+final class EcrPullThroughRule
+{
+    public function __construct(
+        public readonly string $ecrRepositoryPrefix,
+        public readonly string $upstreamRegistryUrl,
+        public readonly string $createdAt,
+        public readonly string $updatedAt,
+        public readonly ?string $upstreamRegistry = null,
+        public readonly ?string $credentialArn = null,
+        public readonly ?string $customRoleArn = null,
+    ) {}
+
+    public static function fromArray(array $d): self
+    {
+        return new self(
+            $d['ecrRepositoryPrefix'],
+            $d['upstreamRegistryUrl'],
+            $d['createdAt'],
+            $d['updatedAt'],
+            $d['upstreamRegistry'] ?? null,
+            $d['credentialArn'] ?? null,
+            $d['customRoleArn'] ?? null,
+        );
+    }
+}
+
+final class EcrPullThroughRulesResponse
+{
+    /** @param EcrPullThroughRule[] $rules */
+    public function __construct(public readonly array $rules) {}
+
+    public static function fromArray(array $d): self
+    {
+        return new self(
+            array_map(static fn($r) => EcrPullThroughRule::fromArray($r), $d['rules'] ?? []),
+        );
+    }
+}
