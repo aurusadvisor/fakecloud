@@ -768,3 +768,780 @@ async fn ecs_delete_service() {
         .unwrap();
     assert!(resp.service().is_some());
 }
+
+// ── Batch 4: completeness ──────────────────────────────────────────
+
+#[test_action("ecs", "RegisterContainerInstance", checksum = "007c13b4")]
+#[tokio::test]
+async fn ecs_register_container_instance() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-ci")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .register_container_instance()
+        .cluster("confo-ci")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.container_instance().is_some());
+}
+
+#[test_action("ecs", "DeregisterContainerInstance", checksum = "9247dbb3")]
+#[tokio::test]
+async fn ecs_deregister_container_instance() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-ci-dereg")
+        .send()
+        .await
+        .unwrap();
+    let ci = client
+        .register_container_instance()
+        .cluster("confo-ci-dereg")
+        .send()
+        .await
+        .unwrap();
+    let arn = ci
+        .container_instance()
+        .unwrap()
+        .container_instance_arn()
+        .unwrap()
+        .to_string();
+    let resp = client
+        .deregister_container_instance()
+        .cluster("confo-ci-dereg")
+        .container_instance(arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.container_instance().is_some());
+}
+
+#[test_action("ecs", "DescribeContainerInstances", checksum = "f4b80fa6")]
+#[tokio::test]
+async fn ecs_describe_container_instances() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-ci-desc")
+        .send()
+        .await
+        .unwrap();
+    let ci = client
+        .register_container_instance()
+        .cluster("confo-ci-desc")
+        .send()
+        .await
+        .unwrap();
+    let arn = ci
+        .container_instance()
+        .unwrap()
+        .container_instance_arn()
+        .unwrap()
+        .to_string();
+    let resp = client
+        .describe_container_instances()
+        .cluster("confo-ci-desc")
+        .container_instances(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.container_instances().len(), 1);
+}
+
+#[test_action("ecs", "ListContainerInstances", checksum = "6cb88efb")]
+#[tokio::test]
+async fn ecs_list_container_instances() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-ci-list")
+        .send()
+        .await
+        .unwrap();
+    client
+        .register_container_instance()
+        .cluster("confo-ci-list")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .list_container_instances()
+        .cluster("confo-ci-list")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.container_instance_arns().is_empty());
+}
+
+#[test_action("ecs", "UpdateContainerAgent", checksum = "01df0bc6")]
+#[tokio::test]
+async fn ecs_update_container_agent() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-ci-agent")
+        .send()
+        .await
+        .unwrap();
+    let ci = client
+        .register_container_instance()
+        .cluster("confo-ci-agent")
+        .send()
+        .await
+        .unwrap();
+    let arn = ci
+        .container_instance()
+        .unwrap()
+        .container_instance_arn()
+        .unwrap()
+        .to_string();
+    let resp = client
+        .update_container_agent()
+        .cluster("confo-ci-agent")
+        .container_instance(arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.container_instance().is_some());
+}
+
+#[test_action("ecs", "UpdateContainerInstancesState", checksum = "527fe01a")]
+#[tokio::test]
+async fn ecs_update_container_instances_state() {
+    use aws_sdk_ecs::types::ContainerInstanceStatus;
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-ci-state")
+        .send()
+        .await
+        .unwrap();
+    let ci = client
+        .register_container_instance()
+        .cluster("confo-ci-state")
+        .send()
+        .await
+        .unwrap();
+    let arn = ci
+        .container_instance()
+        .unwrap()
+        .container_instance_arn()
+        .unwrap()
+        .to_string();
+    let resp = client
+        .update_container_instances_state()
+        .cluster("confo-ci-state")
+        .container_instances(arn)
+        .status(ContainerInstanceStatus::Draining)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.container_instances().len(), 1);
+}
+
+#[test_action("ecs", "PutAttributes", checksum = "c99d393b")]
+#[tokio::test]
+async fn ecs_put_attributes() {
+    use aws_sdk_ecs::types::{Attribute, TargetType};
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-attr")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .put_attributes()
+        .cluster("confo-attr")
+        .attributes(
+            Attribute::builder()
+                .name("env")
+                .value("prod")
+                .target_type(TargetType::ContainerInstance)
+                .target_id("ci-1")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.attributes().is_empty());
+}
+
+#[test_action("ecs", "DeleteAttributes", checksum = "e60bd0b7")]
+#[tokio::test]
+async fn ecs_delete_attributes() {
+    use aws_sdk_ecs::types::{Attribute, TargetType};
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-attr-del")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_attributes()
+        .cluster("confo-attr-del")
+        .attributes(
+            Attribute::builder()
+                .name("env")
+                .target_type(TargetType::ContainerInstance)
+                .target_id("ci-1")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .delete_attributes()
+        .cluster("confo-attr-del")
+        .attributes(
+            Attribute::builder()
+                .name("env")
+                .target_type(TargetType::ContainerInstance)
+                .target_id("ci-1")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.attributes().len();
+}
+
+#[test_action("ecs", "ListAttributes", checksum = "c4f675bd")]
+#[tokio::test]
+async fn ecs_list_attributes() {
+    use aws_sdk_ecs::types::TargetType;
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-attr-list")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .list_attributes()
+        .cluster("confo-attr-list")
+        .target_type(TargetType::ContainerInstance)
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.attributes().len();
+}
+
+#[test_action("ecs", "CreateCapacityProvider", checksum = "0b1e10ac")]
+#[tokio::test]
+async fn ecs_create_capacity_provider() {
+    use aws_sdk_ecs::types::{
+        AutoScalingGroupProvider, ManagedScaling, ManagedTerminationProtection,
+    };
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    let resp = client
+        .create_capacity_provider()
+        .name("my-provider")
+        .auto_scaling_group_provider(
+            AutoScalingGroupProvider::builder()
+                .auto_scaling_group_arn(
+                    "arn:aws:autoscaling:us-east-1:111122223333:autoScalingGroup:1",
+                )
+                .managed_scaling(ManagedScaling::builder().build())
+                .managed_termination_protection(ManagedTerminationProtection::Disabled)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.capacity_provider().is_some());
+}
+
+#[test_action("ecs", "DeleteCapacityProvider", checksum = "edd5d031")]
+#[tokio::test]
+async fn ecs_delete_capacity_provider() {
+    use aws_sdk_ecs::types::{
+        AutoScalingGroupProvider, ManagedScaling, ManagedTerminationProtection,
+    };
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_capacity_provider()
+        .name("my-provider-del")
+        .auto_scaling_group_provider(
+            AutoScalingGroupProvider::builder()
+                .auto_scaling_group_arn(
+                    "arn:aws:autoscaling:us-east-1:111122223333:autoScalingGroup:1",
+                )
+                .managed_scaling(ManagedScaling::builder().build())
+                .managed_termination_protection(ManagedTerminationProtection::Disabled)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .delete_capacity_provider()
+        .capacity_provider("my-provider-del")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.capacity_provider().is_some());
+}
+
+#[test_action("ecs", "DescribeCapacityProviders", checksum = "30d26f80")]
+#[tokio::test]
+async fn ecs_describe_capacity_providers() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    let resp = client.describe_capacity_providers().send().await.unwrap();
+    let _ = resp.capacity_providers().len();
+}
+
+#[test_action("ecs", "UpdateCapacityProvider", checksum = "def5b8f2")]
+#[tokio::test]
+async fn ecs_update_capacity_provider() {
+    use aws_sdk_ecs::types::{
+        AutoScalingGroupProvider, AutoScalingGroupProviderUpdate, ManagedScaling,
+        ManagedTerminationProtection,
+    };
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_capacity_provider()
+        .name("my-provider-up")
+        .auto_scaling_group_provider(
+            AutoScalingGroupProvider::builder()
+                .auto_scaling_group_arn(
+                    "arn:aws:autoscaling:us-east-1:111122223333:autoScalingGroup:1",
+                )
+                .managed_scaling(ManagedScaling::builder().build())
+                .managed_termination_protection(ManagedTerminationProtection::Disabled)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .update_capacity_provider()
+        .name("my-provider-up")
+        .auto_scaling_group_provider(
+            AutoScalingGroupProviderUpdate::builder()
+                .managed_scaling(ManagedScaling::builder().build())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.capacity_provider().is_some());
+}
+
+#[test_action("ecs", "GetTaskProtection", checksum = "487581f2")]
+#[tokio::test]
+async fn ecs_get_task_protection() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-prot")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .get_task_protection()
+        .cluster("confo-prot")
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.protected_tasks().len();
+}
+
+#[test_action("ecs", "UpdateTaskProtection", checksum = "5b5526a7")]
+#[tokio::test]
+async fn ecs_update_task_protection() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-prot-up")
+        .send()
+        .await
+        .unwrap();
+    register_conformance_task_def(&client, "confo-prot-up-td").await;
+    let run = client
+        .run_task()
+        .cluster("confo-prot-up")
+        .task_definition("confo-prot-up-td")
+        .send()
+        .await
+        .unwrap();
+    let arn = run.tasks()[0].task_arn().unwrap().to_string();
+    let resp = client
+        .update_task_protection()
+        .cluster("confo-prot-up")
+        .tasks(arn)
+        .protection_enabled(true)
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.protected_tasks().len();
+}
+
+#[test_action("ecs", "CreateTaskSet", checksum = "bf51b8b6")]
+#[tokio::test]
+async fn ecs_create_task_set() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-ts", "confo-ts-td").await;
+    client
+        .create_service()
+        .cluster("confo-ts")
+        .service_name("svc")
+        .task_definition("confo-ts-td")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .create_task_set()
+        .cluster("confo-ts")
+        .service("svc")
+        .task_definition("confo-ts-td")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.task_set().is_some());
+}
+
+#[test_action("ecs", "UpdateTaskSet", checksum = "b4f9a7ab")]
+#[tokio::test]
+async fn ecs_update_task_set() {
+    use aws_sdk_ecs::types::{Scale, ScaleUnit};
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-ts-up", "confo-ts-up-td").await;
+    client
+        .create_service()
+        .cluster("confo-ts-up")
+        .service_name("svc")
+        .task_definition("confo-ts-up-td")
+        .send()
+        .await
+        .unwrap();
+    let ts = client
+        .create_task_set()
+        .cluster("confo-ts-up")
+        .service("svc")
+        .task_definition("confo-ts-up-td")
+        .send()
+        .await
+        .unwrap();
+    let id = ts.task_set().unwrap().id().unwrap().to_string();
+    let resp = client
+        .update_task_set()
+        .cluster("confo-ts-up")
+        .service("svc")
+        .task_set(id)
+        .scale(
+            Scale::builder()
+                .unit(ScaleUnit::Percent)
+                .value(50.0)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.task_set().is_some());
+}
+
+#[test_action("ecs", "DeleteTaskSet", checksum = "5da66385")]
+#[tokio::test]
+async fn ecs_delete_task_set() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-ts-del", "confo-ts-del-td").await;
+    client
+        .create_service()
+        .cluster("confo-ts-del")
+        .service_name("svc")
+        .task_definition("confo-ts-del-td")
+        .send()
+        .await
+        .unwrap();
+    let ts = client
+        .create_task_set()
+        .cluster("confo-ts-del")
+        .service("svc")
+        .task_definition("confo-ts-del-td")
+        .send()
+        .await
+        .unwrap();
+    let id = ts.task_set().unwrap().id().unwrap().to_string();
+    let resp = client
+        .delete_task_set()
+        .cluster("confo-ts-del")
+        .service("svc")
+        .task_set(id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.task_set().is_some());
+}
+
+#[test_action("ecs", "DescribeTaskSets", checksum = "443b23f3")]
+#[tokio::test]
+async fn ecs_describe_task_sets() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-ts-desc", "confo-ts-desc-td").await;
+    client
+        .create_service()
+        .cluster("confo-ts-desc")
+        .service_name("svc")
+        .task_definition("confo-ts-desc-td")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_task_set()
+        .cluster("confo-ts-desc")
+        .service("svc")
+        .task_definition("confo-ts-desc-td")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .describe_task_sets()
+        .cluster("confo-ts-desc")
+        .service("svc")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.task_sets().is_empty());
+}
+
+#[test_action("ecs", "UpdateServicePrimaryTaskSet", checksum = "4c3b87f0")]
+#[tokio::test]
+async fn ecs_update_service_primary_task_set() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-ts-primary", "confo-ts-primary-td").await;
+    client
+        .create_service()
+        .cluster("confo-ts-primary")
+        .service_name("svc")
+        .task_definition("confo-ts-primary-td")
+        .send()
+        .await
+        .unwrap();
+    let ts = client
+        .create_task_set()
+        .cluster("confo-ts-primary")
+        .service("svc")
+        .task_definition("confo-ts-primary-td")
+        .send()
+        .await
+        .unwrap();
+    let id = ts.task_set().unwrap().id().unwrap().to_string();
+    let resp = client
+        .update_service_primary_task_set()
+        .cluster("confo-ts-primary")
+        .service("svc")
+        .primary_task_set(id)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.task_set().is_some());
+}
+
+#[test_action("ecs", "ExecuteCommand", checksum = "8a4b9a25")]
+#[tokio::test]
+async fn ecs_execute_command() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    client
+        .create_cluster()
+        .cluster_name("confo-exec")
+        .send()
+        .await
+        .unwrap();
+    register_conformance_task_def(&client, "confo-exec-td").await;
+    let run = client
+        .run_task()
+        .cluster("confo-exec")
+        .task_definition("confo-exec-td")
+        .send()
+        .await
+        .unwrap();
+    let arn = run.tasks()[0].task_arn().unwrap().to_string();
+    let resp = client
+        .execute_command()
+        .cluster("confo-exec")
+        .task(arn)
+        .command("ls")
+        .interactive(false)
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.session();
+}
+
+#[test_action("ecs", "SubmitContainerStateChange", checksum = "129dc8b3")]
+#[tokio::test]
+async fn ecs_submit_container_state_change() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    let resp = client
+        .submit_container_state_change()
+        .cluster("any")
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.acknowledgment();
+}
+
+#[test_action("ecs", "SubmitTaskStateChange", checksum = "8dbcf4ff")]
+#[tokio::test]
+async fn ecs_submit_task_state_change() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    let resp = client.submit_task_state_change().send().await.unwrap();
+    let _ = resp.acknowledgment();
+}
+
+#[test_action("ecs", "SubmitAttachmentStateChanges", checksum = "95374e0d")]
+#[tokio::test]
+async fn ecs_submit_attachment_state_changes() {
+    use aws_sdk_ecs::types::AttachmentStateChange;
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    let resp = client
+        .submit_attachment_state_changes()
+        .attachments(
+            AttachmentStateChange::builder()
+                .attachment_arn("arn:aws:ecs:us-east-1:111122223333:attachment/x")
+                .status("ATTACHED")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.acknowledgment();
+}
+
+#[test_action("ecs", "DiscoverPollEndpoint", checksum = "c9e6854a")]
+#[tokio::test]
+async fn ecs_discover_poll_endpoint() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    let resp = client.discover_poll_endpoint().send().await.unwrap();
+    assert!(resp.endpoint().is_some());
+}
+
+#[test_action("ecs", "StopServiceDeployment", checksum = "aecfb385")]
+#[tokio::test]
+async fn ecs_stop_service_deployment() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-sd-stop", "confo-sd-stop-td").await;
+    let created = client
+        .create_service()
+        .cluster("confo-sd-stop")
+        .service_name("svc")
+        .task_definition("confo-sd-stop-td")
+        .send()
+        .await
+        .unwrap();
+    let svc = created.service().unwrap();
+    let dep_id = svc.deployments()[0].id().unwrap();
+    let arn = format!("{}/{}", svc.service_arn().unwrap(), dep_id);
+    let resp = client
+        .stop_service_deployment()
+        .service_deployment_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.service_deployment_arn();
+}
+
+#[test_action("ecs", "ListServiceDeployments", checksum = "7c21263a")]
+#[tokio::test]
+async fn ecs_list_service_deployments() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-sd-list", "confo-sd-list-td").await;
+    client
+        .create_service()
+        .cluster("confo-sd-list")
+        .service_name("svc")
+        .task_definition("confo-sd-list-td")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .list_service_deployments()
+        .cluster("confo-sd-list")
+        .service("svc")
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.service_deployments().len();
+}
+
+#[test_action("ecs", "DescribeServiceDeployments", checksum = "cd7d2a70")]
+#[tokio::test]
+async fn ecs_describe_service_deployments() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-sd-desc", "confo-sd-desc-td").await;
+    let created = client
+        .create_service()
+        .cluster("confo-sd-desc")
+        .service_name("svc")
+        .task_definition("confo-sd-desc-td")
+        .send()
+        .await
+        .unwrap();
+    let svc = created.service().unwrap();
+    let dep_id = svc.deployments()[0].id().unwrap();
+    let arn = format!("{}/{}", svc.service_arn().unwrap(), dep_id);
+    let resp = client
+        .describe_service_deployments()
+        .service_deployment_arns(arn)
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.service_deployments().len();
+}
+
+#[test_action("ecs", "DescribeServiceRevisions", checksum = "324b5e93")]
+#[tokio::test]
+async fn ecs_describe_service_revisions() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    let resp = client
+        .describe_service_revisions()
+        .service_revision_arns("arn:aws:ecs:us-east-1:111122223333:service-revision/c/s/1")
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.service_revisions().len();
+}
