@@ -1676,6 +1676,31 @@ impl LambdaService {
                 state.region, state.account_id, name
             );
         }
+        if let Some(filters) = body
+            .get("FilterCriteria")
+            .and_then(|v| v.get("Filters"))
+            .and_then(|v| v.as_array())
+        {
+            esm.filter_patterns = filters
+                .iter()
+                .filter_map(|f| f.get("Pattern").and_then(|p| p.as_str()).map(String::from))
+                .collect();
+        }
+        if let Some(types) = body.get("FunctionResponseTypes").and_then(|v| v.as_array()) {
+            esm.function_response_types = types
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+        if let Some(w) = body
+            .get("MaximumBatchingWindowInSeconds")
+            .and_then(|v| v.as_i64())
+        {
+            esm.maximum_batching_window_in_seconds = Some(w);
+        }
+        if let Some(p) = body.get("ParallelizationFactor").and_then(|v| v.as_i64()) {
+            esm.parallelization_factor = Some(p);
+        }
         let body_json = json!({
             "UUID": esm.uuid,
             "FunctionArn": esm.function_arn,

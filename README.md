@@ -57,7 +57,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | SNS                    |  42 | Fan-out to SQS/Lambda/HTTP, filter policies                            |
 | EventBridge            |  57 | Pattern matching, schedules, archives, replay, API destinations        |
 | EventBridge Scheduler  |  12 | at/rate/cron, SQS targets, DLQ routing, one-shot self-delete           |
-| Lambda                 |  85 | Real code execution in Docker, 13 runtimes, event source mappings      |
+| Lambda                 |  85 | Real Docker, 13 runtimes, ESM with FilterCriteria + partial-batch failure |
 | DynamoDB               |  57 | Transactions, PartiQL, backups, global tables, streams                 |
 | IAM                    | 176 | Users, roles, policies, groups, instance profiles, OIDC/SAML           |
 | STS                    |  11 | AssumeRole, session tokens, federation                                 |

@@ -1100,6 +1100,37 @@ impl LambdaService {
         let mapping_uuid = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
 
+        let filter_patterns: Vec<String> = body
+            .get("FilterCriteria")
+            .and_then(|v| v.get("Filters"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|f| f.get("Pattern").and_then(|p| p.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let function_response_types: Vec<String> = body
+            .get("FunctionResponseTypes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let starting_position = body
+            .get("StartingPosition")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let starting_position_timestamp = body
+            .get("StartingPositionTimestamp")
+            .and_then(|v| v.as_f64());
+        let parallelization_factor = body.get("ParallelizationFactor").and_then(|v| v.as_i64());
+        let maximum_batching_window_in_seconds = body
+            .get("MaximumBatchingWindowInSeconds")
+            .and_then(|v| v.as_i64());
+
         let mapping = EventSourceMapping {
             uuid: mapping_uuid.clone(),
             function_arn: function_arn.clone(),
@@ -1112,6 +1143,12 @@ impl LambdaService {
                 "Disabled".to_string()
             },
             last_modified: now,
+            filter_patterns,
+            maximum_batching_window_in_seconds,
+            starting_position,
+            starting_position_timestamp,
+            parallelization_factor,
+            function_response_types,
         };
 
         let response = self.event_source_mapping_json(&mapping);
@@ -1220,14 +1257,42 @@ impl LambdaService {
     }
 
     fn event_source_mapping_json(&self, mapping: &EventSourceMapping) -> Value {
-        json!({
+        let mut out = json!({
             "UUID": mapping.uuid,
             "FunctionArn": mapping.function_arn,
             "EventSourceArn": mapping.event_source_arn,
             "BatchSize": mapping.batch_size,
             "State": mapping.state,
             "LastModified": mapping.last_modified.timestamp_millis() as f64 / 1000.0,
-        })
+        });
+        let obj = out.as_object_mut().expect("json! built object");
+        if !mapping.filter_patterns.is_empty() {
+            obj.insert(
+                "FilterCriteria".into(),
+                json!({
+                    "Filters": mapping.filter_patterns.iter().map(|p| json!({"Pattern": p})).collect::<Vec<_>>(),
+                }),
+            );
+        }
+        if !mapping.function_response_types.is_empty() {
+            obj.insert(
+                "FunctionResponseTypes".into(),
+                json!(mapping.function_response_types),
+            );
+        }
+        if let Some(sp) = &mapping.starting_position {
+            obj.insert("StartingPosition".into(), json!(sp));
+        }
+        if let Some(ts) = mapping.starting_position_timestamp {
+            obj.insert("StartingPositionTimestamp".into(), json!(ts));
+        }
+        if let Some(pf) = mapping.parallelization_factor {
+            obj.insert("ParallelizationFactor".into(), json!(pf));
+        }
+        if let Some(w) = mapping.maximum_batching_window_in_seconds {
+            obj.insert("MaximumBatchingWindowInSeconds".into(), json!(w));
+        }
+        out
     }
 
     /// Grant a permission on a Lambda function by appending a
