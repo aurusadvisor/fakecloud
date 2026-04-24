@@ -614,3 +614,157 @@ async fn ecs_stop_task() {
         .unwrap();
     assert!(resp.task().is_some());
 }
+
+// ── Batch 3: services ──────────────────────────────────────────────
+
+async fn bootstrap_service_fixtures(client: &aws_sdk_ecs::Client, cluster: &str, family: &str) {
+    client
+        .create_cluster()
+        .cluster_name(cluster)
+        .send()
+        .await
+        .unwrap();
+    client
+        .register_task_definition()
+        .family(family)
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("ecs", "CreateService", checksum = "15a6dbd5")]
+#[tokio::test]
+async fn ecs_create_service() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-svc", "confo-svc-td").await;
+    let resp = client
+        .create_service()
+        .cluster("confo-svc")
+        .service_name("svc-a")
+        .task_definition("confo-svc-td")
+        .desired_count(1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.service().unwrap().service_name(), Some("svc-a"));
+}
+
+#[test_action("ecs", "DescribeServices", checksum = "ca07d4ee")]
+#[tokio::test]
+async fn ecs_describe_services() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-svc-desc", "confo-svc-desc-td").await;
+    client
+        .create_service()
+        .cluster("confo-svc-desc")
+        .service_name("svc-d")
+        .task_definition("confo-svc-desc-td")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .describe_services()
+        .cluster("confo-svc-desc")
+        .services("svc-d")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.services().len(), 1);
+}
+
+#[test_action("ecs", "ListServices", checksum = "4bc85a42")]
+#[tokio::test]
+async fn ecs_list_services() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-svc-list", "confo-svc-list-td").await;
+    client
+        .create_service()
+        .cluster("confo-svc-list")
+        .service_name("svc-l")
+        .task_definition("confo-svc-list-td")
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .list_services()
+        .cluster("confo-svc-list")
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.service_arns().is_empty());
+}
+
+#[test_action("ecs", "ListServicesByNamespace", checksum = "13f69425")]
+#[tokio::test]
+async fn ecs_list_services_by_namespace() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    let resp = client
+        .list_services_by_namespace()
+        .namespace("arn:aws:servicediscovery:us-east-1:111122223333:namespace/ns-1")
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.service_arns().len();
+}
+
+#[test_action("ecs", "UpdateService", checksum = "c1482ff6")]
+#[tokio::test]
+async fn ecs_update_service() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-svc-up", "confo-svc-up-td").await;
+    client
+        .create_service()
+        .cluster("confo-svc-up")
+        .service_name("svc-u")
+        .task_definition("confo-svc-up-td")
+        .desired_count(1)
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .update_service()
+        .cluster("confo-svc-up")
+        .service("svc-u")
+        .desired_count(2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.service().unwrap().desired_count(), 2);
+}
+
+#[test_action("ecs", "DeleteService", checksum = "d4f5fbe7")]
+#[tokio::test]
+async fn ecs_delete_service() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "confo-svc-del", "confo-svc-del-td").await;
+    client
+        .create_service()
+        .cluster("confo-svc-del")
+        .service_name("svc-del")
+        .task_definition("confo-svc-del-td")
+        .desired_count(0)
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .delete_service()
+        .cluster("confo-svc-del")
+        .service("svc-del")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.service().is_some());
+}

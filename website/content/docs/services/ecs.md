@@ -6,15 +6,25 @@ weight = 22
 
 fakecloud implements Amazon Elastic Container Service (ECS) with a four-batch roadmap. This page tracks what's shipped.
 
-**Status: Batches 1 + 2 shipped — control-plane CRUD plus real task execution.** Subsequent batches add services + rolling deployments (Batch 3) and completeness (Batch 4: container instances, capacity providers, task protection, `ExecuteCommand`).
+**Status: Batches 1 + 2 + 3 shipped — control-plane CRUD, real task execution, services with rolling deployments.** Batch 4 adds completeness (container instances, capacity providers, task protection, `ExecuteCommand`).
 
-## Supported today (Batches 1 + 2)
+## Supported today (Batches 1 + 2 + 3)
 
 - **Clusters** — `CreateCluster`, `DescribeClusters`, `DeleteCluster`, `ListClusters`, `UpdateCluster`, `UpdateClusterSettings`, `PutClusterCapacityProviders`
 - **Task definitions** — `RegisterTaskDefinition`, `DescribeTaskDefinition`, `DeregisterTaskDefinition`, `DeleteTaskDefinitions`, `ListTaskDefinitions`, `ListTaskDefinitionFamilies`
 - **Tasks** — `RunTask`, `StartTask`, `StopTask`, `DescribeTasks`, `ListTasks` with real Fargate-style execution via Docker/Podman
+- **Services** — `CreateService`, `UpdateService`, `DeleteService`, `DescribeServices`, `ListServices`, `ListServicesByNamespace` with desired-count enforcement and rolling deployments
 - **Tagging** — `TagResource`, `UntagResource`, `ListTagsForResource` (clusters and task definitions)
 - **Account settings** — `PutAccountSetting`, `PutAccountSettingDefault`, `DeleteAccountSetting`, `ListAccountSettings`
+
+### Services + rolling deployments (Batch 3)
+
+`CreateService` spawns tasks to match `desiredCount` under the service, tagging each with `startedBy=ecs-svc/<name>` so the tasks reconcile back to the service. `UpdateService` supports two independent mutations:
+
+- **Scale** — set a new `desiredCount`. The service spawns additional tasks when scaling up and flips excess tasks to `desiredStatus=STOPPED` (runtime kill on the container) when scaling down.
+- **Rolling deployment** — pass a new `taskDefinition`. The service marks the previous PRIMARY deployment as `ACTIVE`, creates a new `PRIMARY` deployment for the target revision, and drains tasks on the old task definition while new ones come up. Deployment circuit breaker + `minimumHealthyPercent` / `maximumPercent` are honoured in `deploymentConfiguration`.
+
+`DeleteService` refuses while `desiredCount > 0` unless `force=true`; the forced path scales to 0 and stops every running task under the service before removing it.
 
 Task-definition families track revisions monotonically; `DeleteTaskDefinitions` requires `DeregisterTaskDefinition` first (real AWS behaviour), and the result flips status to `DELETE_IN_PROGRESS`.
 
@@ -102,8 +112,7 @@ let clusters = fc.ecs().get_clusters().await?;
 
 ## Roadmap
 
-- **Batch 3** — `CreateService`, `UpdateService`, rolling deployments with `minimumHealthyPercent`/`maximumPercent`, `CreateTaskSet`/`UpdateTaskSet` (EXTERNAL deployment controller), deployment circuit breaker. EventBridge `ECS Task State Change` events. awslogs driver wiring to CloudWatch Logs (today captured stdout/stderr live on the task; Batch 3 ships them to CW Logs automatically).
-- **Batch 4** — Container instances, attributes, capacity providers, task protection, ECS Exec (`ExecuteCommand` via `docker exec`), snapshot/restore of in-flight tasks, IAM task-role credential injection via `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`.
+- **Batch 4** — Container instances, attributes, capacity providers, task protection, ECS Exec (`ExecuteCommand` via `docker exec`), task sets (EXTERNAL deployment controller), snapshot/restore of in-flight tasks, IAM task-role credential injection via `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, EventBridge `ECS Task State Change` events, awslogs-driver CloudWatch Logs streaming.
 
 ## Source
 

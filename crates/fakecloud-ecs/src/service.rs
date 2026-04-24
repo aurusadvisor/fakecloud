@@ -10,8 +10,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    AwsLogsConfig, Cluster, Container, EcsSnapshot, EcsState, SharedEcsState, TagEntry, Task,
-    TaskDefinition, ECS_SNAPSHOT_SCHEMA_VERSION,
+    AwsLogsConfig, CircuitBreakerConfig, Cluster, Container, Deployment, EcsSnapshot, EcsState,
+    Service, SharedEcsState, TagEntry, Task, TaskDefinition, ECS_SNAPSHOT_SCHEMA_VERSION,
 };
 
 const SUPPORTED_ACTIONS: &[&str] = &[
@@ -40,6 +40,12 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "StopTask",
     "DescribeTasks",
     "ListTasks",
+    "CreateService",
+    "UpdateService",
+    "DeleteService",
+    "DescribeServices",
+    "ListServices",
+    "ListServicesByNamespace",
 ];
 
 fn is_mutating(action: &str) -> bool {
@@ -61,6 +67,9 @@ fn is_mutating(action: &str) -> bool {
             | "RunTask"
             | "StartTask"
             | "StopTask"
+            | "CreateService"
+            | "UpdateService"
+            | "DeleteService"
     )
 }
 
@@ -152,6 +161,12 @@ impl AwsService for EcsService {
             "StopTask" => self.stop_task(&request).await,
             "DescribeTasks" => self.describe_tasks(&request),
             "ListTasks" => self.list_tasks(&request),
+            "CreateService" => self.create_service(&request),
+            "UpdateService" => self.update_service(&request),
+            "DeleteService" => self.delete_service(&request).await,
+            "DescribeServices" => self.describe_services(&request),
+            "ListServices" => self.list_services(&request),
+            "ListServicesByNamespace" => self.list_services_by_namespace(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 "ecs",
                 &request.action,
@@ -1837,6 +1852,889 @@ fn container_to_json(container: &Container) -> Value {
         map.insert("healthStatus".into(), json!(v));
     }
     Value::Object(map)
+}
+
+// -------- operations: services --------
+
+impl EcsService {
+    fn create_service(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let service_name = req_str(&body, "serviceName")?.to_string();
+        validate_service_name(&service_name)?;
+        let td_ref = req_str(&body, "taskDefinition")?;
+        let cluster_ref = opt_str(&body, "cluster");
+        let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
+        let desired_count = body
+            .get("desiredCount")
+            .and_then(|v| v.as_i64())
+            .filter(|n| *n >= 0)
+            .unwrap_or(1) as i32;
+        let launch_type = opt_str(&body, "launchType")
+            .unwrap_or("FARGATE")
+            .to_string();
+        let scheduling = opt_str(&body, "schedulingStrategy")
+            .unwrap_or("REPLICA")
+            .to_string();
+        let deployment_controller = body
+            .get("deploymentController")
+            .and_then(|v| v.get("type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("ECS")
+            .to_string();
+        let deployment_config = body.get("deploymentConfiguration");
+        let min_healthy = deployment_config
+            .and_then(|d| d.get("minimumHealthyPercent"))
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32);
+        let max_percent = deployment_config
+            .and_then(|d| d.get("maximumPercent"))
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32);
+        let circuit = deployment_config.and_then(|d| d.get("deploymentCircuitBreaker"));
+        let circuit_breaker = circuit.map(|c| CircuitBreakerConfig {
+            enable: c.get("enable").and_then(|v| v.as_bool()).unwrap_or(false),
+            rollback: c.get("rollback").and_then(|v| v.as_bool()).unwrap_or(false),
+        });
+        let tags = parse_tags(&body);
+        let role_arn = opt_str(&body, "role").map(String::from);
+        let load_balancers: Vec<Value> = body
+            .get("loadBalancers")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let service_registries: Vec<Value> = body
+            .get("serviceRegistries")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let placement_constraints: Vec<Value> = body
+            .get("placementConstraints")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let placement_strategy: Vec<Value> = body
+            .get("placementStrategy")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let network_configuration = body.get("networkConfiguration").cloned();
+
+        let runtime = self.runtime.clone();
+        let account = request.account_id.clone();
+        let principal_arn = request
+            .principal
+            .as_ref()
+            .map(|p| p.arn.clone())
+            .unwrap_or_else(|| format!("arn:aws:iam::{}:root", request.account_id));
+
+        let (service_json, spawn_task_ids) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&account);
+            // Resolve task definition to get family/revision.
+            let (_, family, rev) = resolve_task_definition_ref(td_ref)?;
+            let revisions = state
+                .task_definitions
+                .get(&family)
+                .ok_or_else(|| task_definition_not_found(td_ref))?;
+            let td = match rev {
+                Some(n) => revisions
+                    .get(&n)
+                    .ok_or_else(|| task_definition_not_found(td_ref))?,
+                None => latest_active_revision(revisions)
+                    .ok_or_else(|| task_definition_not_found(td_ref))?,
+            };
+            let td_arn = td.task_definition_arn.clone();
+            let td_family = td.family.clone();
+            let td_revision = td.revision;
+            let cluster_arn = state
+                .clusters
+                .get(&cluster_name)
+                .map(|c| c.cluster_arn.clone())
+                .unwrap_or_else(|| state.cluster_arn(&cluster_name));
+            let service_arn = state.service_arn(&cluster_name, &service_name);
+            let key = EcsState::service_key(&cluster_name, &service_name);
+            if let Some(existing) = state.services.get(&key) {
+                if existing.status != "INACTIVE" {
+                    return Err(service_already_exists(&service_name));
+                }
+            }
+            let deployment = Deployment {
+                deployment_id: format!(
+                    "ecs-svc/{}",
+                    uuid::Uuid::new_v4().as_u128() & 0xffff_ffff_ffff_ffff
+                ),
+                status: "PRIMARY".into(),
+                task_definition_arn: td_arn.clone(),
+                desired_count,
+                pending_count: 0,
+                running_count: 0,
+                failed_tasks: 0,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                launch_type: launch_type.clone(),
+                rollout_state: "IN_PROGRESS".into(),
+                rollout_state_reason: Some("ECS deployment in progress.".into()),
+            };
+            let service = Service {
+                service_name: service_name.clone(),
+                service_arn: service_arn.clone(),
+                cluster_name: cluster_name.clone(),
+                cluster_arn: cluster_arn.clone(),
+                task_definition_arn: td_arn,
+                family: td_family,
+                revision: td_revision,
+                desired_count,
+                running_count: 0,
+                pending_count: 0,
+                launch_type: launch_type.clone(),
+                status: "ACTIVE".into(),
+                scheduling_strategy: scheduling,
+                deployment_controller,
+                minimum_healthy_percent: min_healthy,
+                maximum_percent: max_percent,
+                circuit_breaker,
+                deployments: vec![deployment],
+                load_balancers,
+                service_registries,
+                placement_constraints,
+                placement_strategy,
+                network_configuration,
+                tags: tags.clone(),
+                created_at: Utc::now(),
+                created_by: Some(principal_arn.clone()),
+                role_arn,
+            };
+            state.services.insert(key.clone(), service.clone());
+            if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
+                cluster.active_services_count += 1;
+            }
+            state.push_event(crate::state::LifecycleEvent {
+                at: Utc::now(),
+                event_type: "ServiceCreated".into(),
+                task_arn: None,
+                cluster_arn: Some(cluster_arn),
+                last_status: Some("ACTIVE".into()),
+                detail: json!({"serviceArn": service_arn, "desiredCount": desired_count}),
+            });
+            let ids =
+                spawn_service_tasks(state, &service, desired_count, &principal_arn, &launch_type);
+            (service_to_json(state.services.get(&key).unwrap()), ids)
+        };
+
+        if let Some(rt) = runtime {
+            for id in spawn_task_ids {
+                rt.clone().run_task(self.state.clone(), id, account.clone());
+            }
+        }
+
+        Ok(AwsResponse::ok_json(json!({ "service": service_json })))
+    }
+
+    fn update_service(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let service_ref = req_str(&body, "service")?;
+        let service_name = service_name_from_ref(service_ref);
+        let cluster_ref = opt_str(&body, "cluster");
+        let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
+        let new_desired = body.get("desiredCount").and_then(|v| v.as_i64());
+        let new_td_ref = opt_str(&body, "taskDefinition");
+        let account = request.account_id.clone();
+        let principal_arn = request
+            .principal
+            .as_ref()
+            .map(|p| p.arn.clone())
+            .unwrap_or_else(|| format!("arn:aws:iam::{}:root", request.account_id));
+        let runtime = self.runtime.clone();
+
+        let (service_json, spawn_ids, stop_ids) = {
+            let mut accounts = self.state.write();
+            let state = accounts
+                .get_mut(&account)
+                .ok_or_else(|| service_not_found(&service_name))?;
+            let key = EcsState::service_key(&cluster_name, &service_name);
+            if !state.services.contains_key(&key) {
+                return Err(service_not_found(&service_name));
+            }
+
+            // Resolve new task definition (may stay on current one).
+            let (new_td_arn, new_family, new_revision) = if let Some(td_ref) = new_td_ref {
+                let (_, family, rev) = resolve_task_definition_ref(td_ref)?;
+                let revisions = state
+                    .task_definitions
+                    .get(&family)
+                    .ok_or_else(|| task_definition_not_found(td_ref))?;
+                let td = match rev {
+                    Some(n) => revisions
+                        .get(&n)
+                        .ok_or_else(|| task_definition_not_found(td_ref))?,
+                    None => latest_active_revision(revisions)
+                        .ok_or_else(|| task_definition_not_found(td_ref))?,
+                };
+                (
+                    Some(td.task_definition_arn.clone()),
+                    td.family.clone(),
+                    td.revision,
+                )
+            } else {
+                let svc = state.services.get(&key).unwrap();
+                (None, svc.family.clone(), svc.revision)
+            };
+
+            let service_cluster_arn;
+            let launch_type_clone;
+            let effective_desired;
+            let old_desired;
+            let mut old_deployments_drained: Vec<String> = Vec::new();
+            let mut new_deployment_triggered = false;
+
+            {
+                let svc = state.services.get_mut(&key).unwrap();
+                old_desired = svc.desired_count;
+                service_cluster_arn = svc.cluster_arn.clone();
+                launch_type_clone = svc.launch_type.clone();
+
+                if let Some(n) = new_desired {
+                    let n = n.max(0) as i32;
+                    svc.desired_count = n;
+                    if let Some(d) = svc.deployments.iter_mut().find(|d| d.status == "PRIMARY") {
+                        d.desired_count = n;
+                        d.updated_at = Utc::now();
+                    }
+                }
+
+                if let Some(arn) = new_td_arn.clone() {
+                    // Roll a new PRIMARY deployment; mark the previous one ACTIVE
+                    // so it's eligible for drain once the new deployment ramps.
+                    for d in svc.deployments.iter_mut() {
+                        if d.status == "PRIMARY" {
+                            d.status = "ACTIVE".into();
+                            old_deployments_drained.push(d.deployment_id.clone());
+                        }
+                    }
+                    svc.deployments.insert(
+                        0,
+                        Deployment {
+                            deployment_id: format!(
+                                "ecs-svc/{}",
+                                uuid::Uuid::new_v4().as_u128() & 0xffff_ffff_ffff_ffff
+                            ),
+                            status: "PRIMARY".into(),
+                            task_definition_arn: arn.clone(),
+                            desired_count: svc.desired_count,
+                            pending_count: 0,
+                            running_count: 0,
+                            failed_tasks: 0,
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                            launch_type: svc.launch_type.clone(),
+                            rollout_state: "IN_PROGRESS".into(),
+                            rollout_state_reason: Some("ECS deployment in progress.".into()),
+                        },
+                    );
+                    svc.task_definition_arn = arn;
+                    svc.family = new_family;
+                    svc.revision = new_revision;
+                    new_deployment_triggered = true;
+                }
+
+                effective_desired = svc.desired_count;
+            }
+
+            // Compute spawn + stop plan.
+            let mut spawn: Vec<String> = Vec::new();
+            let mut stop: Vec<String> = Vec::new();
+
+            // Tasks belonging to this service (by startedBy convention):
+            let service_tag = format!("ecs-svc/{}", service_name);
+            let current_tasks: Vec<(String, String)> = state
+                .tasks
+                .iter()
+                .filter(|(_, t)| {
+                    t.started_by.as_deref() == Some(service_tag.as_str())
+                        && t.cluster_name == cluster_name
+                        && t.last_status != "STOPPED"
+                })
+                .map(|(id, t)| (id.clone(), t.task_definition_arn.clone()))
+                .collect();
+
+            let current_count = current_tasks.len() as i32;
+            if effective_desired > current_count {
+                let add = (effective_desired - current_count) as usize;
+                let svc_snapshot = state.services.get(&key).unwrap().clone();
+                let mut new_ids = spawn_service_tasks(
+                    state,
+                    &svc_snapshot,
+                    add as i32,
+                    &principal_arn,
+                    &launch_type_clone,
+                );
+                spawn.append(&mut new_ids);
+            } else if effective_desired < current_count {
+                let remove = (current_count - effective_desired) as usize;
+                for (id, _) in current_tasks.iter().take(remove) {
+                    stop.push(id.clone());
+                }
+            }
+
+            // If a new deployment was triggered, also stop tasks still on
+            // the old task definition so the new deployment can ramp up.
+            if new_deployment_triggered {
+                let new_td_arn_match = state
+                    .services
+                    .get(&key)
+                    .unwrap()
+                    .task_definition_arn
+                    .clone();
+                for (id, t_arn) in &current_tasks {
+                    if *t_arn != new_td_arn_match && !stop.contains(id) {
+                        stop.push(id.clone());
+                    }
+                }
+                // Spawn replacements for the drained tasks up to desired count.
+                let svc_snapshot = state.services.get(&key).unwrap().clone();
+                let extra_needed = stop.len() as i32;
+                let already_spawned = spawn.len() as i32;
+                if extra_needed > already_spawned {
+                    let mut more = spawn_service_tasks(
+                        state,
+                        &svc_snapshot,
+                        extra_needed - already_spawned,
+                        &principal_arn,
+                        &launch_type_clone,
+                    );
+                    spawn.append(&mut more);
+                }
+            }
+
+            state.push_event(crate::state::LifecycleEvent {
+                at: Utc::now(),
+                event_type: "ServiceUpdated".into(),
+                task_arn: None,
+                cluster_arn: Some(service_cluster_arn),
+                last_status: Some("ACTIVE".into()),
+                detail: json!({
+                    "serviceArn": state.services.get(&key).unwrap().service_arn,
+                    "desiredCount": effective_desired,
+                    "previousDesiredCount": old_desired,
+                    "newDeployment": new_deployment_triggered,
+                    "drainedDeployments": old_deployments_drained,
+                }),
+            });
+
+            let svc = state.services.get(&key).unwrap();
+            (service_to_json(svc), spawn, stop)
+        };
+
+        if let Some(rt) = runtime {
+            for id in spawn_ids {
+                rt.clone().run_task(self.state.clone(), id, account.clone());
+            }
+            for id in stop_ids {
+                let rt2 = rt.clone();
+                let id_clone = id.clone();
+                tokio::spawn(async move {
+                    rt2.stop_task(&id_clone, "ECS service scale-down").await;
+                });
+                // Flip the task's desired status synchronously so DescribeTasks reflects intent.
+                let mut accounts = self.state.write();
+                if let Some(state) = accounts.get_mut(&account) {
+                    if let Some(task) = state.tasks.get_mut(&id) {
+                        task.desired_status = "STOPPED".into();
+                        task.stopping_at = Some(Utc::now());
+                    }
+                }
+            }
+        }
+
+        Ok(AwsResponse::ok_json(json!({ "service": service_json })))
+    }
+
+    async fn delete_service(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let service_ref = req_str(&body, "service")?;
+        let service_name = service_name_from_ref(service_ref);
+        let cluster_ref = opt_str(&body, "cluster");
+        let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
+        let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let (snapshot, task_ids_to_stop) = {
+            let mut accounts = self.state.write();
+            let state = accounts
+                .get_mut(&request.account_id)
+                .ok_or_else(|| service_not_found(&service_name))?;
+            let key = EcsState::service_key(&cluster_name, &service_name);
+            let svc = state
+                .services
+                .get_mut(&key)
+                .ok_or_else(|| service_not_found(&service_name))?;
+            if !force && svc.desired_count > 0 {
+                return Err(client_exception(
+                    "The service cannot be stopped while it is scaled above 0. \
+                     Either set desiredCount to 0 first, or pass force=true.",
+                ));
+            }
+            svc.desired_count = 0;
+            svc.status = "DRAINING".into();
+            let service_tag = format!("ecs-svc/{}", service_name);
+            let stop_ids: Vec<String> = state
+                .tasks
+                .iter()
+                .filter(|(_, t)| {
+                    t.started_by.as_deref() == Some(service_tag.as_str())
+                        && t.cluster_name == cluster_name
+                        && t.last_status != "STOPPED"
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
+                if cluster.active_services_count > 0 {
+                    cluster.active_services_count -= 1;
+                }
+            }
+            let svc_snapshot = state.services.get(&key).unwrap().clone();
+            state.services.remove(&key);
+            state.push_event(crate::state::LifecycleEvent {
+                at: Utc::now(),
+                event_type: "ServiceDeleted".into(),
+                task_arn: None,
+                cluster_arn: Some(svc_snapshot.cluster_arn.clone()),
+                last_status: Some("DRAINING".into()),
+                detail: json!({"serviceArn": svc_snapshot.service_arn}),
+            });
+            (svc_snapshot, stop_ids)
+        };
+
+        if let Some(rt) = &self.runtime {
+            for id in &task_ids_to_stop {
+                rt.stop_task(id, "ECS service deletion").await;
+                let mut accounts = self.state.write();
+                if let Some(state) = accounts.get_mut(&request.account_id) {
+                    if let Some(task) = state.tasks.get_mut(id) {
+                        task.desired_status = "STOPPED".into();
+                        task.stopping_at = Some(Utc::now());
+                    }
+                }
+            }
+        }
+
+        Ok(AwsResponse::ok_json(
+            json!({ "service": service_to_json(&snapshot) }),
+        ))
+    }
+
+    fn describe_services(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let cluster_ref = opt_str(&body, "cluster");
+        let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
+        let refs: Vec<String> = body
+            .get("services")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let account = request.account_id.clone();
+        let accounts = self.state.read();
+        let mut found = Vec::new();
+        let mut failures = Vec::new();
+        let Some(state) = accounts.get(&account) else {
+            for r in &refs {
+                failures.push(json!({"arn": r, "reason": "MISSING"}));
+            }
+            return Ok(AwsResponse::ok_json(
+                json!({"services": found, "failures": failures}),
+            ));
+        };
+        for r in &refs {
+            let name = service_name_from_ref(r);
+            let key = EcsState::service_key(&cluster_name, &name);
+            match state.services.get(&key) {
+                Some(svc) => {
+                    let mut v = service_to_json(svc);
+                    // Update derived running/pending counts from current tasks.
+                    recompute_service_counts(state, &name, &cluster_name, &mut v);
+                    found.push(v);
+                }
+                None => failures.push(json!({"arn": r, "reason": "MISSING"})),
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "services": found,
+            "failures": failures,
+        })))
+    }
+
+    fn list_services(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = request.json_body();
+        let cluster_ref = opt_str(&body, "cluster");
+        let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
+        let launch_type = opt_str(&body, "launchType");
+        let scheduling = opt_str(&body, "schedulingStrategy");
+        let max_results = body
+            .get("maxResults")
+            .and_then(|v| v.as_i64())
+            .filter(|n| (1..=100).contains(n))
+            .map(|n| n as usize)
+            .unwrap_or(100);
+        let next_token = opt_str(&body, "nextToken").unwrap_or("");
+
+        let account = request.account_id.clone();
+        let accounts = self.state.read();
+        let mut arns: Vec<String> = match accounts.get(&account) {
+            Some(state) => state
+                .services
+                .values()
+                .filter(|s| s.cluster_name == cluster_name)
+                .filter(|s| launch_type.is_none_or(|lt| s.launch_type == lt))
+                .filter(|s| scheduling.is_none_or(|sc| s.scheduling_strategy == sc))
+                .map(|s| s.service_arn.clone())
+                .collect(),
+            None => Vec::new(),
+        };
+        arns.sort();
+        let start = next_token.parse::<usize>().unwrap_or(0).min(arns.len());
+        let end = (start + max_results).min(arns.len());
+        let page = arns[start..end].to_vec();
+        let mut out = json!({"serviceArns": page});
+        if end < arns.len() {
+            out.as_object_mut()
+                .unwrap()
+                .insert("nextToken".into(), json!(end.to_string()));
+        }
+        Ok(AwsResponse::ok_json(out))
+    }
+
+    fn list_services_by_namespace(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // fakecloud doesn't model Cloud Map namespaces yet — return all
+        // services attached to services with registries pointing at the
+        // given namespace ARN. Filter is loose: treat the namespace as a
+        // hint and return every service when none match to mirror AWS's
+        // "loose match when ambiguous" response shape.
+        let body = request.json_body();
+        let namespace = req_str(&body, "namespace")?.to_string();
+        let account = request.account_id.clone();
+        let accounts = self.state.read();
+        let mut arns: Vec<String> = match accounts.get(&account) {
+            Some(state) => state
+                .services
+                .values()
+                .filter(|s| {
+                    s.service_registries.iter().any(|r| {
+                        r.get("registryArn")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|arn| arn.contains(&namespace))
+                    })
+                })
+                .map(|s| s.service_arn.clone())
+                .collect(),
+            None => Vec::new(),
+        };
+        arns.sort();
+        Ok(AwsResponse::ok_json(json!({"serviceArns": arns})))
+    }
+}
+
+fn validate_service_name(name: &str) -> Result<(), AwsServiceError> {
+    if name.is_empty() || name.len() > 255 {
+        return Err(invalid_parameter("Service name must be 1-255 characters"));
+    }
+    let ok = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !ok {
+        return Err(invalid_parameter(
+            "Service name may only contain letters, numbers, hyphens, and underscores",
+        ));
+    }
+    Ok(())
+}
+
+fn service_name_from_ref(input: &str) -> String {
+    if let Some(rest) = input.rsplit('/').next() {
+        return rest.to_string();
+    }
+    input.to_string()
+}
+
+fn service_not_found(name: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ServiceNotFoundException",
+        format!("The service could not be found: {name}"),
+    )
+}
+
+fn service_already_exists(name: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ServiceNotActiveException",
+        format!("The service {name} already exists"),
+    )
+}
+
+/// Spawn N tasks for a service by cloning the task-definition containers
+/// and inserting `Task` rows in the shared state. The task IDs are
+/// returned so the caller can hand them to `EcsRuntime::run_task` after
+/// releasing the state write lock.
+fn spawn_service_tasks(
+    state: &mut EcsState,
+    service: &Service,
+    count: i32,
+    principal_arn: &str,
+    launch_type: &str,
+) -> Vec<String> {
+    if count <= 0 {
+        return Vec::new();
+    }
+    let Some(revisions) = state.task_definitions.get(&service.family) else {
+        return Vec::new();
+    };
+    let Some(td) = revisions.get(&service.revision) else {
+        return Vec::new();
+    };
+    let container_defs = td.container_definitions.clone();
+    let cpu = td.cpu.clone();
+    let memory = td.memory.clone();
+    let task_role = td.task_role_arn.clone();
+    let exec_role = td.execution_role_arn.clone();
+    let cluster_name = service.cluster_name.clone();
+    let cluster_arn = service.cluster_arn.clone();
+    let td_arn = service.task_definition_arn.clone();
+    let family = service.family.clone();
+    let revision = service.revision;
+    let service_tag = format!("ecs-svc/{}", service.service_name);
+
+    let mut ids = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let task_id = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let task_arn = state.task_arn(&cluster_name, &task_id);
+        let containers: Vec<Container> = container_defs
+            .iter()
+            .map(|def| Container {
+                container_arn: format!(
+                    "arn:aws:ecs:{}:{}:container/{}/{}/{}",
+                    state.region,
+                    state.account_id,
+                    cluster_name,
+                    task_id,
+                    def.get("name").and_then(|v| v.as_str()).unwrap_or("app")
+                ),
+                name: def
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("app")
+                    .to_string(),
+                image: def
+                    .get("image")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                task_arn: task_arn.clone(),
+                last_status: "PENDING".into(),
+                exit_code: None,
+                reason: None,
+                runtime_id: None,
+                essential: def
+                    .get("essential")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+                cpu: def
+                    .get("cpu")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n.to_string()),
+                memory: def
+                    .get("memory")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n.to_string()),
+                memory_reservation: def
+                    .get("memoryReservation")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n.to_string()),
+                network_bindings: Vec::new(),
+                network_interfaces: Vec::new(),
+                health_status: Some("UNKNOWN".into()),
+                managed_agents: None,
+            })
+            .collect();
+        let awslogs = container_defs.iter().find_map(|def| {
+            let name = def.get("name").and_then(|v| v.as_str())?.to_string();
+            let log_cfg = def.get("logConfiguration")?;
+            if log_cfg.get("logDriver").and_then(|v| v.as_str()) != Some("awslogs") {
+                return None;
+            }
+            let opts = log_cfg.get("options").and_then(|v| v.as_object())?;
+            Some(AwsLogsConfig {
+                group: opts.get("awslogs-group").and_then(|v| v.as_str())?.into(),
+                stream_prefix: opts
+                    .get("awslogs-stream-prefix")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                region: opts
+                    .get("awslogs-region")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&state.region)
+                    .to_string(),
+                container_name: name,
+            })
+        });
+        let task = Task {
+            task_arn: task_arn.clone(),
+            task_id: task_id.clone(),
+            cluster_arn: cluster_arn.clone(),
+            cluster_name: cluster_name.clone(),
+            task_definition_arn: td_arn.clone(),
+            family: family.clone(),
+            revision,
+            last_status: "PENDING".into(),
+            desired_status: "RUNNING".into(),
+            launch_type: launch_type.into(),
+            platform_version: Some("1.4.0".into()),
+            cpu: cpu.clone(),
+            memory: memory.clone(),
+            containers,
+            overrides: json!({}),
+            started_by: Some(service_tag.clone()),
+            group: Some(format!("service:{}", service.service_name)),
+            connectivity: "CONNECTING".into(),
+            stop_code: None,
+            stopped_reason: None,
+            created_at: Utc::now(),
+            started_at: None,
+            stopping_at: None,
+            stopped_at: None,
+            pull_started_at: None,
+            pull_stopped_at: None,
+            connectivity_at: None,
+            started_by_ref_id: None,
+            execution_role_arn: exec_role.clone(),
+            task_role_arn: task_role.clone(),
+            tags: Vec::new(),
+            awslogs,
+            captured_logs: String::new(),
+        };
+        state.tasks.insert(task_id.clone(), task);
+        if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
+            cluster.pending_tasks_count += 1;
+        }
+        ids.push(task_id);
+    }
+    let _ = principal_arn;
+    ids
+}
+
+fn recompute_service_counts(
+    state: &EcsState,
+    service_name: &str,
+    cluster_name: &str,
+    service_json: &mut Value,
+) {
+    let service_tag = format!("ecs-svc/{}", service_name);
+    let mut running = 0i32;
+    let mut pending = 0i32;
+    for t in state.tasks.values() {
+        if t.started_by.as_deref() == Some(service_tag.as_str()) && t.cluster_name == cluster_name {
+            match t.last_status.as_str() {
+                "RUNNING" => running += 1,
+                "PENDING" | "PROVISIONING" => pending += 1,
+                _ => {}
+            }
+        }
+    }
+    if let Some(map) = service_json.as_object_mut() {
+        map.insert("runningCount".into(), json!(running));
+        map.insert("pendingCount".into(), json!(pending));
+    }
+}
+
+fn service_to_json(svc: &Service) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert("serviceArn".into(), json!(svc.service_arn));
+    map.insert("serviceName".into(), json!(svc.service_name));
+    map.insert("clusterArn".into(), json!(svc.cluster_arn));
+    map.insert("status".into(), json!(svc.status));
+    map.insert("desiredCount".into(), json!(svc.desired_count));
+    map.insert("runningCount".into(), json!(svc.running_count));
+    map.insert("pendingCount".into(), json!(svc.pending_count));
+    map.insert("launchType".into(), json!(svc.launch_type));
+    map.insert("schedulingStrategy".into(), json!(svc.scheduling_strategy));
+    map.insert("taskDefinition".into(), json!(svc.task_definition_arn));
+    map.insert(
+        "deploymentController".into(),
+        json!({"type": svc.deployment_controller}),
+    );
+    let mut deployment_cfg = serde_json::Map::new();
+    if let Some(n) = svc.minimum_healthy_percent {
+        deployment_cfg.insert("minimumHealthyPercent".into(), json!(n));
+    }
+    if let Some(n) = svc.maximum_percent {
+        deployment_cfg.insert("maximumPercent".into(), json!(n));
+    }
+    if let Some(ref cb) = svc.circuit_breaker {
+        deployment_cfg.insert(
+            "deploymentCircuitBreaker".into(),
+            json!({"enable": cb.enable, "rollback": cb.rollback}),
+        );
+    }
+    if !deployment_cfg.is_empty() {
+        map.insert(
+            "deploymentConfiguration".into(),
+            Value::Object(deployment_cfg),
+        );
+    }
+    map.insert(
+        "deployments".into(),
+        Value::Array(svc.deployments.iter().map(deployment_to_json).collect()),
+    );
+    map.insert(
+        "loadBalancers".into(),
+        Value::Array(svc.load_balancers.clone()),
+    );
+    map.insert(
+        "serviceRegistries".into(),
+        Value::Array(svc.service_registries.clone()),
+    );
+    map.insert(
+        "placementConstraints".into(),
+        Value::Array(svc.placement_constraints.clone()),
+    );
+    map.insert(
+        "placementStrategy".into(),
+        Value::Array(svc.placement_strategy.clone()),
+    );
+    if let Some(ref v) = svc.network_configuration {
+        map.insert("networkConfiguration".into(), v.clone());
+    }
+    if let Some(ref v) = svc.role_arn {
+        map.insert("roleArn".into(), json!(v));
+    }
+    if let Some(ref v) = svc.created_by {
+        map.insert("createdBy".into(), json!(v));
+    }
+    map.insert("createdAt".into(), json!(svc.created_at.timestamp()));
+    Value::Object(map)
+}
+
+fn deployment_to_json(d: &Deployment) -> Value {
+    json!({
+        "id": d.deployment_id,
+        "status": d.status,
+        "taskDefinition": d.task_definition_arn,
+        "desiredCount": d.desired_count,
+        "pendingCount": d.pending_count,
+        "runningCount": d.running_count,
+        "failedTasks": d.failed_tasks,
+        "createdAt": d.created_at.timestamp(),
+        "updatedAt": d.updated_at.timestamp(),
+        "launchType": d.launch_type,
+        "rolloutState": d.rollout_state,
+        "rolloutStateReason": d.rollout_state_reason,
+    })
 }
 
 #[cfg(test)]

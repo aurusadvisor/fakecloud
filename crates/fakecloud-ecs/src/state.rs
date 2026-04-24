@@ -14,7 +14,7 @@ impl fakecloud_core::multi_account::AccountState for EcsState {
     }
 }
 
-pub const ECS_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+pub const ECS_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 /// Top-level persisted ECS snapshot. Mirrors the multi-account snapshot
 /// convention used by Kinesis/ECR/ElastiCache so `main.rs` can share the
@@ -51,6 +51,12 @@ pub struct EcsState {
     /// (oldest dropped) so long-running servers don't grow unboundedly.
     #[serde(default)]
     pub events: Vec<LifecycleEvent>,
+    /// Services keyed by service name within an account. ECS requires
+    /// unique service names per cluster, and since service names are
+    /// already unique per-cluster globally we scope keys by
+    /// `cluster_name:service_name` in [`EcsState::service_key`].
+    #[serde(default)]
+    pub services: BTreeMap<String, Service>,
 }
 
 impl EcsState {
@@ -65,6 +71,7 @@ impl EcsState {
             principal_account_settings: BTreeMap::new(),
             tasks: BTreeMap::new(),
             events: Vec::new(),
+            services: BTreeMap::new(),
         }
     }
 
@@ -76,6 +83,21 @@ impl EcsState {
         self.principal_account_settings.clear();
         self.tasks.clear();
         self.events.clear();
+        self.services.clear();
+    }
+
+    /// Services are uniquely identified by `(cluster, name)` within an
+    /// account; this helper composes the storage key used in
+    /// `self.services`.
+    pub fn service_key(cluster_name: &str, service_name: &str) -> String {
+        format!("{}/{}", cluster_name, service_name)
+    }
+
+    pub fn service_arn(&self, cluster_name: &str, service_name: &str) -> String {
+        format!(
+            "arn:aws:ecs:{}:{}:service/{}/{}",
+            self.region, self.account_id, cluster_name, service_name
+        )
     }
 
     pub fn task_arn(&self, cluster_name: &str, task_id: &str) -> String {
@@ -328,6 +350,67 @@ pub struct LifecycleEvent {
     pub cluster_arn: Option<String>,
     pub last_status: Option<String>,
     pub detail: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Service {
+    pub service_name: String,
+    pub service_arn: String,
+    pub cluster_name: String,
+    pub cluster_arn: String,
+    pub task_definition_arn: String,
+    pub family: String,
+    pub revision: i32,
+    pub desired_count: i32,
+    pub running_count: i32,
+    pub pending_count: i32,
+    pub launch_type: String,
+    pub status: String,
+    pub scheduling_strategy: String,
+    pub deployment_controller: String,
+    pub minimum_healthy_percent: Option<i32>,
+    pub maximum_percent: Option<i32>,
+    /// Deployment circuit breaker config (opt-in via deploymentConfiguration).
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+    #[serde(default)]
+    pub deployments: Vec<Deployment>,
+    #[serde(default)]
+    pub load_balancers: Vec<Value>,
+    #[serde(default)]
+    pub service_registries: Vec<Value>,
+    #[serde(default)]
+    pub placement_constraints: Vec<Value>,
+    #[serde(default)]
+    pub placement_strategy: Vec<Value>,
+    #[serde(default)]
+    pub network_configuration: Option<Value>,
+    #[serde(default)]
+    pub tags: Vec<TagEntry>,
+    pub created_at: DateTime<Utc>,
+    pub created_by: Option<String>,
+    pub role_arn: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CircuitBreakerConfig {
+    pub enable: bool,
+    pub rollback: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Deployment {
+    pub deployment_id: String,
+    pub status: String,
+    pub task_definition_arn: String,
+    pub desired_count: i32,
+    pub pending_count: i32,
+    pub running_count: i32,
+    pub failed_tasks: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub launch_type: String,
+    pub rollout_state: String,
+    pub rollout_state_reason: Option<String>,
 }
 
 #[cfg(test)]
