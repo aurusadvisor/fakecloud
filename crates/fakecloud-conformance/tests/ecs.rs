@@ -639,6 +639,33 @@ async fn bootstrap_service_fixtures(client: &aws_sdk_ecs::Client, cluster: &str,
         .unwrap();
 }
 
+/// Task sets require a service with `deploymentController=EXTERNAL`. This
+/// helper provisions cluster + task def + service wired up that way so the
+/// Batch 4 task-set tests exercise the realistic AWS path.
+async fn bootstrap_external_service_fixtures(
+    client: &aws_sdk_ecs::Client,
+    cluster: &str,
+    family: &str,
+    service: &str,
+) {
+    use aws_sdk_ecs::types::{DeploymentController, DeploymentControllerType};
+    bootstrap_service_fixtures(client, cluster, family).await;
+    client
+        .create_service()
+        .cluster(cluster)
+        .service_name(service)
+        .task_definition(family)
+        .deployment_controller(
+            DeploymentController::builder()
+                .r#type(DeploymentControllerType::External)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
 #[test_action("ecs", "CreateService", checksum = "15a6dbd5")]
 #[tokio::test]
 async fn ecs_create_service() {
@@ -1210,15 +1237,7 @@ async fn ecs_update_task_protection() {
 async fn ecs_create_task_set() {
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
-    bootstrap_service_fixtures(&client, "confo-ts", "confo-ts-td").await;
-    client
-        .create_service()
-        .cluster("confo-ts")
-        .service_name("svc")
-        .task_definition("confo-ts-td")
-        .send()
-        .await
-        .unwrap();
+    bootstrap_external_service_fixtures(&client, "confo-ts", "confo-ts-td", "svc").await;
     let resp = client
         .create_task_set()
         .cluster("confo-ts")
@@ -1236,15 +1255,7 @@ async fn ecs_update_task_set() {
     use aws_sdk_ecs::types::{Scale, ScaleUnit};
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
-    bootstrap_service_fixtures(&client, "confo-ts-up", "confo-ts-up-td").await;
-    client
-        .create_service()
-        .cluster("confo-ts-up")
-        .service_name("svc")
-        .task_definition("confo-ts-up-td")
-        .send()
-        .await
-        .unwrap();
+    bootstrap_external_service_fixtures(&client, "confo-ts-up", "confo-ts-up-td", "svc").await;
     let ts = client
         .create_task_set()
         .cluster("confo-ts-up")
@@ -1276,15 +1287,7 @@ async fn ecs_update_task_set() {
 async fn ecs_delete_task_set() {
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
-    bootstrap_service_fixtures(&client, "confo-ts-del", "confo-ts-del-td").await;
-    client
-        .create_service()
-        .cluster("confo-ts-del")
-        .service_name("svc")
-        .task_definition("confo-ts-del-td")
-        .send()
-        .await
-        .unwrap();
+    bootstrap_external_service_fixtures(&client, "confo-ts-del", "confo-ts-del-td", "svc").await;
     let ts = client
         .create_task_set()
         .cluster("confo-ts-del")
@@ -1310,15 +1313,7 @@ async fn ecs_delete_task_set() {
 async fn ecs_describe_task_sets() {
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
-    bootstrap_service_fixtures(&client, "confo-ts-desc", "confo-ts-desc-td").await;
-    client
-        .create_service()
-        .cluster("confo-ts-desc")
-        .service_name("svc")
-        .task_definition("confo-ts-desc-td")
-        .send()
-        .await
-        .unwrap();
+    bootstrap_external_service_fixtures(&client, "confo-ts-desc", "confo-ts-desc-td", "svc").await;
     client
         .create_task_set()
         .cluster("confo-ts-desc")
@@ -1342,15 +1337,8 @@ async fn ecs_describe_task_sets() {
 async fn ecs_update_service_primary_task_set() {
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
-    bootstrap_service_fixtures(&client, "confo-ts-primary", "confo-ts-primary-td").await;
-    client
-        .create_service()
-        .cluster("confo-ts-primary")
-        .service_name("svc")
-        .task_definition("confo-ts-primary-td")
-        .send()
-        .await
-        .unwrap();
+    bootstrap_external_service_fixtures(&client, "confo-ts-primary", "confo-ts-primary-td", "svc")
+        .await;
     let ts = client
         .create_task_set()
         .cluster("confo-ts-primary")
@@ -1387,6 +1375,7 @@ async fn ecs_execute_command() {
         .run_task()
         .cluster("confo-exec")
         .task_definition("confo-exec-td")
+        .enable_execute_command(true)
         .send()
         .await
         .unwrap();
@@ -1396,7 +1385,7 @@ async fn ecs_execute_command() {
         .cluster("confo-exec")
         .task(arn)
         .command("ls")
-        .interactive(false)
+        .interactive(true)
         .send()
         .await
         .unwrap();

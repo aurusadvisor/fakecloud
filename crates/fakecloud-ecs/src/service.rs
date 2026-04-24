@@ -3437,6 +3437,12 @@ impl EcsService {
             .services
             .get(&service_key)
             .ok_or_else(|| service_not_found(&service_name))?;
+        if svc.deployment_controller != "EXTERNAL" {
+            return Err(client_exception(
+                "CreateTaskSet requires the service to be created with \
+                 deploymentController.type = EXTERNAL",
+            ));
+        }
         let ts_id = format!("ecs-svc-{}", uuid::Uuid::new_v4().simple());
         let task_set = TaskSet {
             task_set_id: ts_id.clone(),
@@ -3583,10 +3589,23 @@ impl EcsService {
         let state = accounts
             .get_mut(&request.account_id)
             .ok_or_else(|| client_exception("task set not found"))?;
-        let ts = state
-            .task_sets
-            .get_mut(&key)
-            .ok_or_else(|| client_exception(format!("task set not found: {}", ts_ref)))?;
+        if !state.task_sets.contains_key(&key) {
+            return Err(client_exception(format!("task set not found: {}", ts_ref)));
+        }
+        // Demote any existing PRIMARY on this service to ACTIVE before
+        // promoting the new one. Otherwise the service would be left with
+        // two PRIMARY task sets, which AWS forbids.
+        for ts in state.task_sets.values_mut() {
+            if ts.service_name == service_name
+                && ts.cluster_name == cluster_name
+                && ts.status == "PRIMARY"
+                && ts.task_set_id != ts_id
+            {
+                ts.status = "ACTIVE".into();
+                ts.updated_at = Utc::now();
+            }
+        }
+        let ts = state.task_sets.get_mut(&key).unwrap();
         ts.status = "PRIMARY".into();
         ts.updated_at = Utc::now();
         Ok(AwsResponse::ok_json(json!({
