@@ -4,16 +4,24 @@ description = "Elastic Container Service — clusters, task definitions, (later)
 weight = 22
 +++
 
-fakecloud implements Amazon Elastic Container Service (ECS) with a four-batch roadmap. This page tracks what's shipped.
+fakecloud implements Amazon Elastic Container Service (ECS) with full API coverage. 60 operations, shipped across four batches.
 
-**Status: Batches 1 + 2 + 3 shipped — control-plane CRUD, real task execution, services with rolling deployments.** Batch 4 adds completeness (container instances, capacity providers, task protection, `ExecuteCommand`).
+**Status: all four batches shipped — full API.** Covers clusters, task definitions, real Fargate-style task execution, services with rolling deployments, task sets, container instances, capacity providers, attributes, task protection, ECS Exec, and the agent-side `Submit*` / `DiscoverPollEndpoint` surface.
 
-## Supported today (Batches 1 + 2 + 3)
+## Supported today (full API)
 
 - **Clusters** — `CreateCluster`, `DescribeClusters`, `DeleteCluster`, `ListClusters`, `UpdateCluster`, `UpdateClusterSettings`, `PutClusterCapacityProviders`
 - **Task definitions** — `RegisterTaskDefinition`, `DescribeTaskDefinition`, `DeregisterTaskDefinition`, `DeleteTaskDefinitions`, `ListTaskDefinitions`, `ListTaskDefinitionFamilies`
 - **Tasks** — `RunTask`, `StartTask`, `StopTask`, `DescribeTasks`, `ListTasks` with real Fargate-style execution via Docker/Podman
 - **Services** — `CreateService`, `UpdateService`, `DeleteService`, `DescribeServices`, `ListServices`, `ListServicesByNamespace` with desired-count enforcement and rolling deployments
+- **Service deployments** — `StopServiceDeployment`, `ListServiceDeployments`, `DescribeServiceDeployments`, `DescribeServiceRevisions`
+- **Task sets** — `CreateTaskSet`, `UpdateTaskSet`, `DeleteTaskSet`, `DescribeTaskSets`, `UpdateServicePrimaryTaskSet` (EXTERNAL deployment controller)
+- **Container instances** — `RegisterContainerInstance`, `DeregisterContainerInstance`, `DescribeContainerInstances`, `ListContainerInstances`, `UpdateContainerAgent`, `UpdateContainerInstancesState`
+- **Attributes** — `PutAttributes`, `DeleteAttributes`, `ListAttributes`
+- **Capacity providers** — `CreateCapacityProvider`, `DeleteCapacityProvider`, `DescribeCapacityProviders`, `UpdateCapacityProvider`
+- **Task protection** — `GetTaskProtection`, `UpdateTaskProtection`
+- **ECS Exec** — `ExecuteCommand` proxies to `docker exec` against the task's running container
+- **Agent surface** — `SubmitContainerStateChange`, `SubmitTaskStateChange`, `SubmitAttachmentStateChanges`, `DiscoverPollEndpoint`
 - **Tagging** — `TagResource`, `UntagResource`, `ListTagsForResource` (clusters and task definitions)
 - **Account settings** — `PutAccountSetting`, `PutAccountSettingDefault`, `DeleteAccountSetting`, `ListAccountSettings`
 

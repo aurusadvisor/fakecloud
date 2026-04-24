@@ -14,7 +14,7 @@ impl fakecloud_core::multi_account::AccountState for EcsState {
     }
 }
 
-pub const ECS_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+pub const ECS_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
 
 /// Top-level persisted ECS snapshot. Mirrors the multi-account snapshot
 /// convention used by Kinesis/ECR/ElastiCache so `main.rs` can share the
@@ -57,6 +57,21 @@ pub struct EcsState {
     /// `cluster_name:service_name` in [`EcsState::service_key`].
     #[serde(default)]
     pub services: BTreeMap<String, Service>,
+    /// Container instances keyed by `cluster/arn-suffix`. Users register
+    /// EC2 hosts here; fakecloud still runs tasks via Docker regardless,
+    /// but the control-plane records remain so `DescribeContainerInstances`
+    /// round-trips.
+    #[serde(default)]
+    pub container_instances: BTreeMap<String, ContainerInstance>,
+    /// Custom attributes keyed by `cluster/target-arn-or-id/name`.
+    #[serde(default)]
+    pub attributes: BTreeMap<String, Attribute>,
+    /// Capacity providers keyed by name.
+    #[serde(default)]
+    pub capacity_providers: BTreeMap<String, CapacityProvider>,
+    /// Task sets keyed by `cluster/service/task-set-id`.
+    #[serde(default)]
+    pub task_sets: BTreeMap<String, TaskSet>,
 }
 
 impl EcsState {
@@ -72,6 +87,10 @@ impl EcsState {
             tasks: BTreeMap::new(),
             events: Vec::new(),
             services: BTreeMap::new(),
+            container_instances: BTreeMap::new(),
+            attributes: BTreeMap::new(),
+            capacity_providers: BTreeMap::new(),
+            task_sets: BTreeMap::new(),
         }
     }
 
@@ -84,6 +103,10 @@ impl EcsState {
         self.tasks.clear();
         self.events.clear();
         self.services.clear();
+        self.container_instances.clear();
+        self.attributes.clear();
+        self.capacity_providers.clear();
+        self.task_sets.clear();
     }
 
     /// Services are uniquely identified by `(cluster, name)` within an
@@ -301,6 +324,15 @@ pub struct Task {
     /// logs even when no awslogs driver is configured.
     #[serde(default)]
     pub captured_logs: String,
+    /// Task protection state (UpdateTaskProtection). When set, scale-in
+    /// and update-service deployments skip this task until the expiry.
+    pub protection: Option<TaskProtection>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskProtection {
+    pub enabled: bool,
+    pub expiration: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -411,6 +443,90 @@ pub struct Deployment {
     pub launch_type: String,
     pub rollout_state: String,
     pub rollout_state_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContainerInstance {
+    pub container_instance_arn: String,
+    pub ec2_instance_id: Option<String>,
+    pub cluster_name: String,
+    pub cluster_arn: String,
+    pub status: String,
+    pub version: i64,
+    pub version_info: Option<Value>,
+    pub agent_connected: bool,
+    pub agent_update_status: Option<String>,
+    pub remaining_resources: Vec<Value>,
+    pub registered_resources: Vec<Value>,
+    pub running_tasks_count: i32,
+    pub pending_tasks_count: i32,
+    pub registered_at: DateTime<Utc>,
+    #[serde(default)]
+    pub attributes: Vec<AttributeRef>,
+    #[serde(default)]
+    pub tags: Vec<TagEntry>,
+    pub capacity_provider_name: Option<String>,
+    pub health_status: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttributeRef {
+    pub name: String,
+    pub value: Option<String>,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Attribute {
+    pub cluster_name: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub name: String,
+    pub value: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CapacityProvider {
+    pub name: String,
+    pub arn: String,
+    pub status: String,
+    pub auto_scaling_group_provider: Option<Value>,
+    pub update_status: Option<String>,
+    pub update_status_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub tags: Vec<TagEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskSet {
+    pub task_set_id: String,
+    pub task_set_arn: String,
+    pub service_arn: String,
+    pub cluster_arn: String,
+    pub service_name: String,
+    pub cluster_name: String,
+    pub external_id: Option<String>,
+    pub status: String,
+    pub task_definition: String,
+    pub computed_desired_count: i32,
+    pub pending_count: i32,
+    pub running_count: i32,
+    pub launch_type: Option<String>,
+    pub platform_version: Option<String>,
+    pub scale: Option<Value>,
+    pub stability_status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub load_balancers: Vec<Value>,
+    #[serde(default)]
+    pub service_registries: Vec<Value>,
+    #[serde(default)]
+    pub capacity_provider_strategy: Vec<Value>,
+    #[serde(default)]
+    pub tags: Vec<TagEntry>,
 }
 
 #[cfg(test)]
