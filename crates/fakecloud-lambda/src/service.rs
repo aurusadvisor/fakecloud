@@ -218,7 +218,7 @@ fn route_to_destination(
             let _ = bus.invoke_lambda(&dest, &payload).await;
         });
     } else if dest.contains(":events:") || dest.contains(":eventbridge:") {
-        let detail_type = if matches!(result, Ok(_)) {
+        let detail_type = if result.is_ok() {
             "Lambda Function Invocation Result - Success"
         } else {
             "Lambda Function Invocation Result - Failure"
