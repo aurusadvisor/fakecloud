@@ -220,6 +220,12 @@ async fn main() {
             &endpoint_url,
         ),
     ));
+    let kms_usage_state: fakecloud_kms::hook::SharedKmsUsageState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_kms::hook::KmsUsageState::default()),
+    );
+    let kms_hook_for_services: Arc<dyn fakecloud_core::delivery::KmsHook> = Arc::new(
+        KmsHookAdapter::new(kms_state.clone(), kms_usage_state.clone()),
+    );
     let cloudformation_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -1154,6 +1160,7 @@ async fn main() {
         };
     let mut secretsmanager_service =
         SecretsManagerService::new(secretsmanager_state).with_delivery(delivery_for_secretsmanager);
+    secretsmanager_service = secretsmanager_service.with_kms_hook(kms_hook_for_services.clone());
     if let Some(store) = secretsmanager_snapshot_store {
         secretsmanager_service = secretsmanager_service.with_snapshot_store(store);
     }
@@ -2373,6 +2380,28 @@ async fn main() {
                         })
                         .collect();
                     axum::Json(types::LambdaInvocationsResponse { invocations })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/kms/usage",
+            axum::routing::get({
+                let ks = kms_usage_state.clone();
+                move || async move {
+                    let recs = ks
+                        .read()
+                        .records()
+                        .iter()
+                        .map(|r| serde_json::json!({
+                            "timestamp": r.timestamp.to_rfc3339(),
+                            "operation": r.operation,
+                            "servicePrincipal": r.service_principal,
+                            "accountId": r.account_id,
+                            "keyArn": r.key_arn,
+                            "encryptionContext": r.encryption_context,
+                        }))
+                        .collect::<Vec<_>>();
+                    axum::Json(serde_json::json!({"records": recs}))
                 }
             }),
         )
@@ -4078,6 +4107,64 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("shutting down");
+}
+
+/// Adapter that exposes the `fakecloud-kms` hook through the
+/// `fakecloud-core::delivery::KmsHook` trait so non-KMS services can
+/// call into KMS without a direct crate dependency.
+struct KmsHookAdapter {
+    inner: fakecloud_kms::hook::KmsServiceHook,
+}
+
+impl KmsHookAdapter {
+    fn new(
+        state: fakecloud_kms::state::SharedKmsState,
+        usage: fakecloud_kms::hook::SharedKmsUsageState,
+    ) -> Self {
+        Self {
+            inner: fakecloud_kms::hook::KmsServiceHook::new(state, usage),
+        }
+    }
+}
+
+impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
+    fn encrypt(
+        &self,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        plaintext: &[u8],
+        service_principal: &str,
+        encryption_context: std::collections::HashMap<String, String>,
+    ) -> Result<String, String> {
+        self.inner
+            .encrypt(
+                account_id,
+                region,
+                key_id,
+                plaintext,
+                service_principal,
+                encryption_context,
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    fn decrypt(
+        &self,
+        account_id: &str,
+        ciphertext_b64: &str,
+        service_principal: &str,
+        encryption_context: std::collections::HashMap<String, String>,
+    ) -> Result<Vec<u8>, String> {
+        self.inner
+            .decrypt(
+                account_id,
+                ciphertext_b64,
+                service_principal,
+                encryption_context,
+            )
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Emit a fatal error through the tracing pipeline, flush stderr so the

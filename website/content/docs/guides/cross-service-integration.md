@@ -44,6 +44,7 @@ fakecloud actually executes the cross-service wiring. When an EventBridge rule m
 
 - **CloudFormation -> Lambda / SNS** — Custom resources invoke via `ServiceToken`, stack events notify via `NotificationARNs`.
 - **Secrets Manager -> Lambda** — Rotation invokes Lambda for all 4 steps.
+- **Secrets Manager -> KMS** — When a secret has `KmsKeyId`, `CreateSecret` / `PutSecretValue` call `kms:GenerateDataKey` and `GetSecretValue` calls `kms:Decrypt` with the AWS-shaped encryption context `{aws:secretsmanager:secretArn: <arn>}`. Auto-provisions the `aws/secretsmanager` AWS-managed key on first use. All KMS calls are recorded at `/_fakecloud/kms/usage`.
 - **S3 Lifecycle** — Background expiration and storage class transitions.
 - **EventBridge Scheduler** — Cron and rate-based rules fire on schedule.
 - **RDS -> EventBridge** — DB instance and snapshot lifecycle ops (create, modify, delete, reboot, start, stop, snapshot create/delete, restore) emit `aws.rds` events that match the AWS event schema.

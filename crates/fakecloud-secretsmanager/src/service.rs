@@ -43,16 +43,21 @@ enum VersionIdempotency {
 /// version. AWS uses `ClientRequestToken` as a client-side idempotency
 /// key, so a repeat write of the exact same payload is a success but a
 /// repeat with a different payload is a `ResourceExistsException`.
+///
+/// `existing_plaintext` is the existing version's decrypted secret
+/// string — callers compute this via the KMS hook before invoking so
+/// the comparison happens on plaintext, not on stored ciphertext.
 fn check_secret_version_idempotency(
     versions: &HashMap<String, SecretVersion>,
     version_id: &str,
+    existing_plaintext: Option<String>,
     secret_string: &Option<String>,
     secret_binary: &Option<Vec<u8>>,
 ) -> VersionIdempotency {
     let Some(existing) = versions.get(version_id) else {
         return VersionIdempotency::NotFound;
     };
-    if &existing.secret_string == secret_string && &existing.secret_binary == secret_binary {
+    if &existing_plaintext == secret_string && &existing.secret_binary == secret_binary {
         VersionIdempotency::Match
     } else {
         VersionIdempotency::Conflict
@@ -86,6 +91,7 @@ pub struct SecretsManagerService {
     delivery_bus: Option<Arc<DeliveryBus>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
 }
 
 impl SecretsManagerService {
@@ -95,6 +101,7 @@ impl SecretsManagerService {
             delivery_bus: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            kms_hook: None,
         }
     }
 
@@ -106,6 +113,75 @@ impl SecretsManagerService {
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
+    }
+
+    pub fn with_kms_hook(mut self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
+        self.kms_hook = Some(hook);
+        self
+    }
+
+    fn maybe_encrypt_secret_string(
+        &self,
+        account_id: &str,
+        region: &str,
+        secret_arn: &str,
+        kms_key_id: Option<&str>,
+        plaintext: Option<String>,
+    ) -> Option<String> {
+        let pt = plaintext?;
+        let (Some(hook), Some(key)) = (&self.kms_hook, kms_key_id) else {
+            return Some(pt);
+        };
+        let key = if key.is_empty() {
+            "aws/secretsmanager"
+        } else {
+            key
+        };
+        let mut ctx = HashMap::new();
+        ctx.insert(
+            "aws:secretsmanager:secretArn".to_string(),
+            secret_arn.to_string(),
+        );
+        match hook.encrypt(
+            account_id,
+            region,
+            key,
+            pt.as_bytes(),
+            "secretsmanager.amazonaws.com",
+            ctx,
+        ) {
+            Ok(ciphertext) => Some(ciphertext),
+            Err(err) => {
+                tracing::warn!(
+                    secret_arn = %secret_arn,
+                    error = %err,
+                    "KMS encrypt failed for secret; storing plaintext"
+                );
+                Some(pt)
+            }
+        }
+    }
+
+    fn maybe_decrypt_secret_string(
+        &self,
+        account_id: &str,
+        secret_arn: &str,
+        kms_key_id: Option<&str>,
+        stored: Option<&str>,
+    ) -> Option<String> {
+        let stored = stored?;
+        let (Some(hook), Some(_)) = (&self.kms_hook, kms_key_id) else {
+            return Some(stored.to_string());
+        };
+        let mut ctx = HashMap::new();
+        ctx.insert(
+            "aws:secretsmanager:secretArn".to_string(),
+            secret_arn.to_string(),
+        );
+        match hook.decrypt(account_id, stored, "secretsmanager.amazonaws.com", ctx) {
+            Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
+            Err(_) => Some(stored.to_string()),
+        }
     }
 
     /// Persist current state as a snapshot. Held across the
@@ -143,9 +219,18 @@ impl SecretsManagerService {
 
         if let Some(existing) = state.secrets.get(&input.name) {
             if let Some(ref token) = input.client_request_token {
+                let existing_plaintext = existing.versions.get(token).and_then(|v| {
+                    self.maybe_decrypt_secret_string(
+                        &req.account_id,
+                        &existing.arn,
+                        existing.kms_key_id.as_deref(),
+                        v.secret_string.as_deref(),
+                    )
+                });
                 match check_secret_version_idempotency(
                     &existing.versions,
                     token,
+                    existing_plaintext,
                     &input.secret_string,
                     &input.secret_binary,
                 ) {
@@ -198,9 +283,16 @@ impl SecretsManagerService {
                 .client_request_token
                 .clone()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let stored_string = self.maybe_encrypt_secret_string(
+                &req.account_id,
+                &req.region,
+                &arn,
+                input.kms_key_id.as_deref(),
+                input.secret_string,
+            );
             let version = SecretVersion {
                 version_id: vid.clone(),
-                secret_string: input.secret_string,
+                secret_string: stored_string,
                 secret_binary: input.secret_binary,
                 stages: vec!["AWSCURRENT".to_string()],
                 created_at: now,
@@ -327,8 +419,18 @@ impl SecretsManagerService {
             "CreatedDate": version.created_at.timestamp_millis() as f64 / 1000.0,
         });
 
+        let kms_for_decrypt = secret.kms_key_id.clone();
+        let arn_for_decrypt = secret.arn.clone();
         if let Some(ref s) = version.secret_string {
-            response["SecretString"] = json!(s);
+            let plaintext = self
+                .maybe_decrypt_secret_string(
+                    &req.account_id,
+                    &arn_for_decrypt,
+                    kms_for_decrypt.as_deref(),
+                    Some(s.as_str()),
+                )
+                .unwrap_or_else(|| s.clone());
+            response["SecretString"] = json!(plaintext);
         }
         if let Some(ref b) = version.secret_binary {
             response["SecretBinary"] = json!(base64_encode(b));
@@ -387,9 +489,18 @@ impl SecretsManagerService {
             .map(|s| s.to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+        let existing_plaintext = secret.versions.get(&version_id).and_then(|v| {
+            self.maybe_decrypt_secret_string(
+                &req.account_id,
+                &secret.arn,
+                secret.kms_key_id.as_deref(),
+                v.secret_string.as_deref(),
+            )
+        });
         match check_secret_version_idempotency(
             &secret.versions,
             &version_id,
+            existing_plaintext,
             &secret_string,
             &secret_binary,
         ) {
@@ -465,9 +576,18 @@ impl SecretsManagerService {
         // Remove versions with no stages
         secret.versions.retain(|_, v| !v.stages.is_empty());
 
+        let kms_key_for_enc = secret.kms_key_id.clone();
+        let arn_for_enc = secret.arn.clone();
+        let stored_secret_string = self.maybe_encrypt_secret_string(
+            &req.account_id,
+            &req.region,
+            &arn_for_enc,
+            kms_key_for_enc.as_deref(),
+            secret_string,
+        );
         let version = SecretVersion {
             version_id: version_id.clone(),
-            secret_string,
+            secret_string: stored_secret_string,
             secret_binary,
             stages: version_stages.clone(),
             created_at: now,
@@ -537,9 +657,18 @@ impl SecretsManagerService {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+            let existing_plaintext = secret.versions.get(&vid).and_then(|v| {
+                self.maybe_decrypt_secret_string(
+                    &req.account_id,
+                    &secret.arn,
+                    secret.kms_key_id.as_deref(),
+                    v.secret_string.as_deref(),
+                )
+            });
             match check_secret_version_idempotency(
                 &secret.versions,
                 &vid,
+                existing_plaintext,
                 &secret_string,
                 &secret_binary,
             ) {
@@ -4303,13 +4432,19 @@ mod tests {
 
         // Not found
         assert!(matches!(
-            check_secret_version_idempotency(&versions, "v2", &Some("x".to_string()), &None),
+            check_secret_version_idempotency(&versions, "v2", None, &Some("x".to_string()), &None),
             VersionIdempotency::NotFound
         ));
 
         // Match
         assert!(matches!(
-            check_secret_version_idempotency(&versions, "v1", &Some("hello".to_string()), &None),
+            check_secret_version_idempotency(
+                &versions,
+                "v1",
+                Some("hello".to_string()),
+                &Some("hello".to_string()),
+                &None
+            ),
             VersionIdempotency::Match
         ));
 
@@ -4318,6 +4453,7 @@ mod tests {
             check_secret_version_idempotency(
                 &versions,
                 "v1",
+                Some("hello".to_string()),
                 &Some("different".to_string()),
                 &None
             ),
