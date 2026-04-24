@@ -2177,7 +2177,10 @@ impl EcsService {
             }
 
             // If a new deployment was triggered, also stop tasks still on
-            // the old task definition so the new deployment can ramp up.
+            // the old task definition so the new deployment can ramp up,
+            // then spawn replacements — but only enough to hit the
+            // effective desired count (not `stop.len()`, which conflates
+            // scale-down drain with TD-drain and would over-spawn).
             if new_deployment_triggered {
                 let new_td_arn_match = state
                     .services
@@ -2185,20 +2188,26 @@ impl EcsService {
                     .unwrap()
                     .task_definition_arn
                     .clone();
+                // Tasks already on the new task definition that we're NOT
+                // stopping (scale-down may have picked the first N; those
+                // are skipped here via `stop.contains(id)`).
+                let kept_on_new_td: i32 = current_tasks
+                    .iter()
+                    .filter(|(id, t_arn)| *t_arn == new_td_arn_match && !stop.contains(id))
+                    .count() as i32;
                 for (id, t_arn) in &current_tasks {
                     if *t_arn != new_td_arn_match && !stop.contains(id) {
                         stop.push(id.clone());
                     }
                 }
-                // Spawn replacements for the drained tasks up to desired count.
-                let svc_snapshot = state.services.get(&key).unwrap().clone();
-                let extra_needed = stop.len() as i32;
                 let already_spawned = spawn.len() as i32;
-                if extra_needed > already_spawned {
+                let need = (effective_desired - kept_on_new_td - already_spawned).max(0);
+                if need > 0 {
+                    let svc_snapshot = state.services.get(&key).unwrap().clone();
                     let mut more = spawn_service_tasks(
                         state,
                         &svc_snapshot,
-                        extra_needed - already_spawned,
+                        need,
                         &principal_arn,
                         &launch_type_clone,
                     );
