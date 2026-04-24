@@ -2426,6 +2426,7 @@ async fn main() {
                     }
                     Arc::new(bus)
                 };
+                let ses_state_for_inbound_actions = ses_inbound_state.clone();
                 move |axum::Json(body): axum::Json<types::InboundEmailRequest>| async move {
                     let (message_id, matched_rules, actions) =
                         fakecloud_ses::v1::evaluate_inbound_email(
@@ -2435,6 +2436,31 @@ async fn main() {
                             &body.subject,
                             &body.body,
                         );
+
+                    // AddHeader actions are processed inline first so
+                    // downstream S3 / Lambda / SNS payloads see the new
+                    // headers (matches AWS evaluation order: AddHeader is
+                    // applied to the in-flight message).
+                    let mut extra_headers: Vec<(String, String)> = Vec::new();
+                    for (_rule, action) in &actions {
+                        if let fakecloud_ses::state::ReceiptAction::AddHeader {
+                            header_name,
+                            header_value,
+                        } = action
+                        {
+                            extra_headers.push((header_name.clone(), header_value.clone()));
+                        }
+                    }
+                    let augmented_body = if extra_headers.is_empty() {
+                        body.body.clone()
+                    } else {
+                        let header_block = extra_headers
+                            .iter()
+                            .map(|(k, v)| format!("{k}: {v}"))
+                            .collect::<Vec<_>>()
+                            .join("\r\n");
+                        format!("{header_block}\r\n{}", body.body)
+                    };
 
                     // Execute actions for real
                     for (_rule, action) in &actions {
@@ -2447,7 +2473,7 @@ async fn main() {
                                 let prefix = object_key_prefix.as_deref().unwrap_or("");
                                 let key = format!("{prefix}{message_id}");
                                 let now = chrono::Utc::now();
-                                let data = bytes::Bytes::from(body.body.clone());
+                                let data = bytes::Bytes::from(augmented_body.clone());
                                 let size = data.len() as u64;
                                 let etag = format!("\"{:x}\"", md5::Md5::digest(&data));
                                 let obj = fakecloud_s3::state::S3Object {
@@ -2506,7 +2532,7 @@ async fn main() {
                                             "subject": &body.subject,
                                         }
                                     },
-                                    "content": &body.body,
+                                    "content": &augmented_body,
                                 });
                                 tracing::info!(
                                     topic_arn = %topic_arn,
@@ -2579,8 +2605,90 @@ async fn main() {
                                     }
                                 });
                             }
-                            // Bounce, AddHeader, Stop are metadata-only — no cross-service delivery
-                            _ => {}
+                            fakecloud_ses::state::ReceiptAction::Bounce {
+                                smtp_reply_code,
+                                message,
+                                sender,
+                                status_code,
+                                topic_arn,
+                            } => {
+                                // Real AWS sends a bounce email back to the
+                                // original sender. Append a SentEmail entry
+                                // mirroring the bounce payload so test code
+                                // can read it back via /_fakecloud/ses/emails.
+                                let bounce_subject = format!(
+                                    "Delivery Status Notification (Failure) for {}",
+                                    body.from
+                                );
+                                let bounce_body = format!(
+                                    "Your message could not be delivered.\r\n\r\nSMTP code: {smtp_reply_code}\r\nStatus: {}\r\nMessage: {message}\r\n",
+                                    status_code.as_deref().unwrap_or("5.0.0")
+                                );
+                                let bounce_record = fakecloud_ses::state::SentEmail {
+                                    message_id: format!("bounce-{}", uuid::Uuid::new_v4()),
+                                    from: sender.clone(),
+                                    to: vec![body.from.clone()],
+                                    cc: Vec::new(),
+                                    bcc: Vec::new(),
+                                    subject: Some(bounce_subject),
+                                    html_body: None,
+                                    text_body: Some(bounce_body),
+                                    raw_data: None,
+                                    template_name: None,
+                                    template_data: None,
+                                    timestamp: chrono::Utc::now(),
+                                };
+                                {
+                                    let mut mas = ses_state_for_inbound_actions.write();
+                                    let st = mas.default_mut();
+                                    st.sent_emails.push(bounce_record);
+                                }
+                                // Optional notification topic.
+                                if let Some(topic) = topic_arn {
+                                    let notification = serde_json::json!({
+                                        "notificationType": "Bounce",
+                                        "bounce": {
+                                            "bounceType": "Permanent",
+                                            "bounceSubType": "General",
+                                            "bouncedRecipients": [{
+                                                "emailAddress": &body.from,
+                                                "status": status_code,
+                                                "diagnosticCode": message,
+                                            }],
+                                            "smtpReplyCode": smtp_reply_code,
+                                        },
+                                        "mail": {
+                                            "messageId": message_id,
+                                            "source": &body.from,
+                                            "destination": &body.to,
+                                        },
+                                    });
+                                    delivery_for_inbound.publish_to_sns(
+                                        topic,
+                                        &notification.to_string(),
+                                        Some("SES Bounce"),
+                                    );
+                                }
+                            }
+                            fakecloud_ses::state::ReceiptAction::Stop { topic_arn, .. } => {
+                                if let Some(topic) = topic_arn {
+                                    let notification = serde_json::json!({
+                                        "notificationType": "ReceiptRuleStop",
+                                        "mail": {
+                                            "messageId": message_id,
+                                            "source": &body.from,
+                                            "destination": &body.to,
+                                        },
+                                    });
+                                    delivery_for_inbound.publish_to_sns(
+                                        topic,
+                                        &notification.to_string(),
+                                        Some("SES ReceiptRule Stop"),
+                                    );
+                                }
+                            }
+                            // AddHeader is processed inline above
+                            fakecloud_ses::state::ReceiptAction::AddHeader { .. } => {}
                         }
                     }
 
