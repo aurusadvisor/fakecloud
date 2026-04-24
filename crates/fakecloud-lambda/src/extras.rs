@@ -1701,7 +1701,7 @@ impl LambdaService {
         if let Some(p) = body.get("ParallelizationFactor").and_then(|v| v.as_i64()) {
             esm.parallelization_factor = Some(p);
         }
-        let body_json = json!({
+        let mut body_json = json!({
             "UUID": esm.uuid,
             "FunctionArn": esm.function_arn,
             "EventSourceArn": esm.event_source_arn,
@@ -1710,6 +1710,31 @@ impl LambdaService {
             "StateTransitionReason": "USER_INITIATED",
             "LastModified": chrono::Utc::now().timestamp() as f64,
         });
+        let obj = body_json.as_object_mut().expect("json! built object");
+        if !esm.filter_patterns.is_empty() {
+            obj.insert(
+                "FilterCriteria".into(),
+                json!({
+                    "Filters": esm
+                        .filter_patterns
+                        .iter()
+                        .map(|p| json!({"Pattern": p}))
+                        .collect::<Vec<_>>(),
+                }),
+            );
+        }
+        if !esm.function_response_types.is_empty() {
+            obj.insert(
+                "FunctionResponseTypes".into(),
+                json!(esm.function_response_types),
+            );
+        }
+        if let Some(w) = esm.maximum_batching_window_in_seconds {
+            obj.insert("MaximumBatchingWindowInSeconds".into(), json!(w));
+        }
+        if let Some(p) = esm.parallelization_factor {
+            obj.insert("ParallelizationFactor".into(), json!(p));
+        }
         ok(body_json)
     }
 

@@ -1110,6 +1110,14 @@ impl LambdaService {
                     .collect()
             })
             .unwrap_or_default();
+        // AWS rejects malformed FilterCriteria at create time.
+        if let Err(err) = crate::filter::FilterSet::validate(filter_patterns.iter()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                err,
+            ));
+        }
         let function_response_types: Vec<String> = body
             .get("FunctionResponseTypes")
             .and_then(|v| v.as_array())

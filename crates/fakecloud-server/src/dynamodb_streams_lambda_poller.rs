@@ -209,28 +209,29 @@ impl DynamoDbStreamsLambdaPoller {
                 })
                 .collect();
 
-            // Always advance the checkpoint past everything we read,
-            // even if the filter dropped every record.
-            if let Some(seq) = last_seq.clone() {
-                self.checkpoints.write().insert(mapping_id.clone(), seq);
-            }
-
+            // If the filter dropped every record, advance the
+            // checkpoint past them — AWS treats filtered records as
+            // consumed. Otherwise, hold the checkpoint until after a
+            // successful invoke so failures retry on the next poll.
             if event_records.is_empty() {
+                if let Some(seq) = last_seq.clone() {
+                    self.checkpoints.write().insert(mapping_id.clone(), seq);
+                }
                 continue;
             }
 
             let event = json!({ "Records": &event_records });
             let payload = serde_json::to_string(&event).unwrap_or_default();
 
-            // Invoke Lambda
-            if let Some(ref delivery) = self.lambda_delivery {
-                match delivery.invoke_lambda(&function_arn, &payload).await {
+            let invoke_succeeded = match &self.lambda_delivery {
+                Some(delivery) => match delivery.invoke_lambda(&function_arn, &payload).await {
                     Ok(_) => {
                         tracing::info!(
                             function_arn = %function_arn,
                             record_count = event_records.len(),
                             "DynamoDB Streams->Lambda invocation succeeded"
                         );
+                        true
                     }
                     Err(e) => {
                         tracing::error!(
@@ -238,12 +239,23 @@ impl DynamoDbStreamsLambdaPoller {
                             error = %e,
                             "DynamoDB Streams->Lambda invocation failed"
                         );
+                        false
                     }
-                }
-            } else {
-                // No delivery mechanism — record the invocation. The
-                // checkpoint was already advanced earlier so the same
-                // batch isn't reprocessed.
+                },
+                None => true,
+            };
+
+            if !invoke_succeeded {
+                continue;
+            }
+
+            // Successful invoke — advance the checkpoint and record
+            // the invocation when no real Lambda runtime is wired.
+            if let Some(seq) = last_seq.clone() {
+                self.checkpoints.write().insert(mapping_id.clone(), seq);
+            }
+
+            if self.lambda_delivery.is_none() {
                 let mut lambda_accounts = self.lambda_state.write();
                 let lambda = lambda_accounts.default_mut();
                 lambda.invocations.push(LambdaInvocation {

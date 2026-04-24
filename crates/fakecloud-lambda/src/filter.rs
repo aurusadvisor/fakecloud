@@ -26,7 +26,10 @@ pub struct FilterSet {
 
 impl FilterSet {
     /// Build from the raw filter pattern strings stored on
-    /// [`crate::state::EventSourceMapping::filter_patterns`].
+    /// [`crate::state::EventSourceMapping::filter_patterns`]. Patterns
+    /// that fail to parse are logged and dropped; pre-validation at
+    /// [`Self::validate`] (called from `CreateEventSourceMapping`)
+    /// keeps the live data clean.
     pub fn from_strings<I, S>(raw: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -34,9 +37,35 @@ impl FilterSet {
     {
         let patterns = raw
             .into_iter()
-            .filter_map(|s| serde_json::from_str::<Value>(s.as_ref()).ok())
+            .filter_map(|s| match serde_json::from_str::<Value>(s.as_ref()) {
+                Ok(v) => Some(v),
+                Err(err) => {
+                    tracing::warn!(
+                        pattern = s.as_ref(),
+                        error = %err,
+                        "lambda ESM filter pattern is invalid JSON; ignoring this pattern (other patterns still apply)"
+                    );
+                    None
+                }
+            })
             .collect();
         Self { patterns }
+    }
+
+    /// Validate raw filter patterns the same way real AWS rejects bad
+    /// `FilterCriteria` at `CreateEventSourceMapping`. Returns the
+    /// first invalid pattern's parse error so the service can surface
+    /// it as `InvalidParameterValueException`.
+    pub fn validate<I, S>(raw: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for s in raw {
+            serde_json::from_str::<Value>(s.as_ref())
+                .map_err(|err| format!("FilterCriteria pattern is invalid JSON: {err}"))?;
+        }
+        Ok(())
     }
 
     /// Returns `true` when the record matches at least one pattern, or
@@ -54,40 +83,42 @@ impl FilterSet {
 }
 
 fn match_value(pattern: &Value, value: &Value) -> bool {
-    // An object pattern is either:
-    //  - an operator (`{"exists": ...}`, `{"prefix": "..."}`, ...)
-    //    applied to the current value, or
-    //  - a nested object pattern, applied field-by-field when the
-    //    value is itself an object.
+    // The top-level entry has the value present, so wrap as Some.
+    eval_field(pattern, Some(value))
+}
+
+/// Evaluate `pattern` against an optional `value`. `None` means the
+/// parent object did not contain the key the pattern targets — this
+/// matters for the `exists` operator, which is defined in terms of
+/// field *presence*, not value-is-null.
+fn eval_field(pattern: &Value, value: Option<&Value>) -> bool {
     if let Value::Object(po) = pattern {
         if is_operator_object(po) {
             return apply_operator(po, value);
         }
     }
-    match (pattern, value) {
-        (Value::Object(po), Value::Object(vo)) => po.iter().all(|(k, sub_pattern)| {
-            // Treat the "body" field of an SQS-shaped record specially:
-            // patterns under "body" are matched against the JSON-parsed
-            // body string, mirroring how Lambda decodes SQS bodies for
-            // FilterCriteria evaluation.
-            if k == "body" {
-                if let Some(Value::String(s)) = vo.get("body") {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-                        return match_value(sub_pattern, &parsed);
+    match pattern {
+        Value::Object(po) => match value {
+            Some(Value::Object(vo)) => po.iter().all(|(k, sub_pattern)| {
+                if k == "body" {
+                    if let Some(Value::String(s)) = vo.get("body") {
+                        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+                            return eval_field(sub_pattern, Some(&parsed));
+                        }
                     }
                 }
-            }
-            match vo.get(k) {
-                Some(v) => match_value(sub_pattern, v),
-                None => match_pattern_against_missing(sub_pattern),
-            }
-        }),
-        (Value::Array(arr), v) => arr.iter().any(|p| match_value(p, v)),
-        (Value::Null, Value::Null) => true,
-        (Value::Bool(a), Value::Bool(b)) => a == b,
-        (Value::Number(a), Value::Number(b)) => a == b,
-        (Value::String(a), Value::String(b)) => a == b,
-        _ => false,
+                eval_field(sub_pattern, vo.get(k))
+            }),
+            _ => false,
+        },
+        Value::Array(arr) => arr.iter().any(|p| eval_field(p, value)),
+        scalar => match (scalar, value) {
+            (Value::Null, Some(Value::Null)) => true,
+            (Value::Bool(a), Some(Value::Bool(b))) => a == b,
+            (Value::Number(a), Some(Value::Number(b))) => a == b,
+            (Value::String(a), Some(Value::String(b))) => a == b,
+            _ => false,
+        },
     }
 }
 
@@ -104,13 +135,24 @@ fn is_operator_object(o: &serde_json::Map<String, Value>) -> bool {
     o.keys().any(|k| OPERATOR_KEYS.contains(&k.as_str()))
 }
 
-fn apply_operator(o: &serde_json::Map<String, Value>, value: &Value) -> bool {
+fn apply_operator(o: &serde_json::Map<String, Value>, value: Option<&Value>) -> bool {
     o.iter().all(|(op, arg)| match op.as_str() {
-        "exists" => match arg {
-            Value::Bool(true) => !value.is_null(),
-            Value::Bool(false) => value.is_null(),
-            _ => false,
+        // `exists` is the only operator defined in terms of *field
+        // presence*. AWS treats `null` as present, so a literal
+        // `{"foo": null}` matches `{"foo": [{"exists": true}]}`.
+        "exists" => matches!(
+            (arg, value),
+            (Value::Bool(true), Some(_)) | (Value::Bool(false), None)
+        ),
+        op_name => match value {
+            Some(v) => apply_value_operator(op_name, arg, v),
+            None => false,
         },
+    })
+}
+
+fn apply_value_operator(op: &str, arg: &Value, value: &Value) -> bool {
+    match op {
         "prefix" => match (arg.as_str(), value.as_str()) {
             (Some(p), Some(s)) => s.starts_with(p),
             _ => false,
@@ -129,7 +171,7 @@ fn apply_operator(o: &serde_json::Map<String, Value>, value: &Value) -> bool {
         },
         "numeric" => apply_numeric(arg, value),
         _ => false,
-    })
+    }
 }
 
 fn apply_numeric(arg: &Value, value: &Value) -> bool {
@@ -139,12 +181,17 @@ fn apply_numeric(arg: &Value, value: &Value) -> bool {
     let Some(arr) = arg.as_array() else {
         return false;
     };
-    let mut iter = arr.iter();
-    while let (Some(op), Some(num)) = (iter.next(), iter.next()) {
-        let Some(target) = num.as_f64() else {
+    // AWS rejects malformed numeric arrays at create time; defensively
+    // treat odd-length arrays here as a no-match instead of letting
+    // a leftover element silently pass.
+    if arr.len() % 2 != 0 || arr.is_empty() {
+        return false;
+    }
+    for chunk in arr.chunks(2) {
+        let Some(target) = chunk[1].as_f64() else {
             return false;
         };
-        let ok = match op.as_str() {
+        let ok = match chunk[0].as_str() {
             Some("=") => n == target,
             Some("<") => n < target,
             Some("<=") => n <= target,
@@ -157,14 +204,6 @@ fn apply_numeric(arg: &Value, value: &Value) -> bool {
         }
     }
     true
-}
-
-fn match_pattern_against_missing(pattern: &Value) -> bool {
-    match pattern {
-        Value::Object(o) => matches!(o.get("exists"), Some(Value::Bool(false))),
-        Value::Array(arr) => arr.iter().any(match_pattern_against_missing),
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -195,6 +234,31 @@ mod tests {
         assert!(f.matches(&json!({"foo": "a"})));
         assert!(f.matches(&json!({"foo": "b"})));
         assert!(!f.matches(&json!({"foo": "c"})));
+    }
+
+    #[test]
+    fn exists_operator_treats_null_as_present() {
+        let exists_true = fs(&[r#"{"foo": [{"exists": true}]}"#]);
+        // AWS treats `{"foo": null}` as foo-is-present.
+        assert!(exists_true.matches(&json!({"foo": null})));
+        let exists_false = fs(&[r#"{"foo": [{"exists": false}]}"#]);
+        // ...and conversely a missing key is exists:false even though
+        // the value lookup returns the same Null sentinel under the
+        // hood.
+        assert!(exists_false.matches(&json!({})));
+        assert!(!exists_false.matches(&json!({"foo": null})));
+    }
+
+    #[test]
+    fn numeric_odd_length_is_no_match() {
+        let f = fs(&[r#"{"n": [{"numeric": [">", 0, "<"]}]}"#]);
+        assert!(!f.matches(&json!({"n": 5})));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_json() {
+        assert!(FilterSet::validate(["{not json"].iter()).is_err());
+        assert!(FilterSet::validate([r#"{"ok": true}"#].iter()).is_ok());
     }
 
     #[test]

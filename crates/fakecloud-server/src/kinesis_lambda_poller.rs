@@ -211,16 +211,14 @@ impl KinesisLambdaPoller {
                     .collect()
             };
 
-            // Advance the checkpoint regardless — AWS treats filtered
-            // records as consumed.
-            {
+            // If the filter dropped every record, advance the
+            // checkpoint past them — AWS treats filtered-out records
+            // as consumed and never retries them.
+            if matched.is_empty() {
                 let account_id = mapping.stream_arn.split(':').nth(4).unwrap_or("");
                 let mut kinesis_accounts = self.kinesis_state.write();
                 let kinesis = kinesis_accounts.get_or_create(account_id);
                 kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, end);
-            }
-
-            if matched.is_empty() {
                 continue;
             }
 
@@ -248,8 +246,18 @@ impl KinesisLambdaPoller {
                 true
             };
 
+            // Only advance the checkpoint after a successful invoke.
+            // A failed invoke leaves the records pending so the next
+            // poll retries them — matches AWS's at-least-once guarantee.
             if !delivered {
                 continue;
+            }
+
+            {
+                let account_id = mapping.stream_arn.split(':').nth(4).unwrap_or("");
+                let mut kinesis_accounts = self.kinesis_state.write();
+                let kinesis = kinesis_accounts.get_or_create(account_id);
+                kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, end);
             }
 
             if !used_real_delivery {

@@ -317,7 +317,7 @@ fn split_batch_failures(body: &[u8], batch_ids: &[String]) -> (Vec<String>, Vec<
         Ok(v) => v,
         Err(_) => return (batch_ids.to_vec(), Vec::new()),
     };
-    let failures: Vec<String> = parsed
+    let raw_failures: Vec<String> = parsed
         .get("batchItemFailures")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -330,6 +330,14 @@ fn split_batch_failures(body: &[u8], batch_ids: &[String]) -> (Vec<String>, Vec<
                 .collect()
         })
         .unwrap_or_default();
+    // Intersect against batch_ids: a stale or made-up itemIdentifier
+    // shouldn't keep an unrelated message visible / hold up an acked
+    // one. AWS behaves the same way — failures referencing ids
+    // outside the batch are ignored.
+    let failures: Vec<String> = raw_failures
+        .into_iter()
+        .filter(|id| batch_ids.contains(id))
+        .collect();
     if failures.is_empty() {
         return (batch_ids.to_vec(), Vec::new());
     }
