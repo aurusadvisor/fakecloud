@@ -606,3 +606,244 @@ async fn introspection_tasks_endpoint_lists_ecs_state() {
     let ev = events.get("events").and_then(|v| v.as_array()).unwrap();
     assert!(!ev.is_empty());
 }
+
+// ── Batch 3: services ──────────────────────────────────────────────
+
+async fn bootstrap_service_fixtures(client: &aws_sdk_ecs::Client, cluster: &str, family: &str) {
+    client
+        .create_cluster()
+        .cluster_name(cluster)
+        .send()
+        .await
+        .unwrap();
+    client
+        .register_task_definition()
+        .family(family)
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn create_service_spawns_desired_tasks_and_describe_roundtrips() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+
+    bootstrap_service_fixtures(&client, "svc-cluster", "svc-td").await;
+
+    let resp = client
+        .create_service()
+        .cluster("svc-cluster")
+        .service_name("web")
+        .task_definition("svc-td")
+        .desired_count(2)
+        .send()
+        .await
+        .expect("create_service");
+    let svc = resp.service().unwrap();
+    assert_eq!(svc.service_name(), Some("web"));
+    assert_eq!(svc.desired_count(), 2);
+    assert_eq!(svc.deployments().len(), 1);
+    assert_eq!(svc.deployments()[0].status(), Some("PRIMARY"));
+
+    let described = client
+        .describe_services()
+        .cluster("svc-cluster")
+        .services("web")
+        .send()
+        .await
+        .expect("describe_services");
+    assert_eq!(described.services().len(), 1);
+    assert!(described.failures().is_empty());
+
+    let listed = client
+        .list_services()
+        .cluster("svc-cluster")
+        .send()
+        .await
+        .expect("list_services");
+    assert_eq!(listed.service_arns().len(), 1);
+    assert!(listed.service_arns()[0].ends_with("service/svc-cluster/web"));
+
+    let tasks = client
+        .list_tasks()
+        .cluster("svc-cluster")
+        .send()
+        .await
+        .expect("list_tasks");
+    assert_eq!(tasks.task_arns().len(), 2, "service should spawn 2 tasks");
+}
+
+#[tokio::test]
+async fn update_service_scales_up_and_down() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "scale-cluster", "scale-td").await;
+    client
+        .create_service()
+        .cluster("scale-cluster")
+        .service_name("web")
+        .task_definition("scale-td")
+        .desired_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let up = client
+        .update_service()
+        .cluster("scale-cluster")
+        .service("web")
+        .desired_count(3)
+        .send()
+        .await
+        .expect("update_service up");
+    assert_eq!(up.service().unwrap().desired_count(), 3);
+    let tasks_after_up = client
+        .list_tasks()
+        .cluster("scale-cluster")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tasks_after_up.task_arns().len(), 3);
+
+    let down = client
+        .update_service()
+        .cluster("scale-cluster")
+        .service("web")
+        .desired_count(1)
+        .send()
+        .await
+        .expect("update_service down");
+    assert_eq!(down.service().unwrap().desired_count(), 1);
+    let all = client
+        .list_tasks()
+        .cluster("scale-cluster")
+        .send()
+        .await
+        .unwrap();
+    let arns: Vec<String> = all.task_arns().iter().map(|a| a.to_string()).collect();
+    let described = client
+        .describe_tasks()
+        .cluster("scale-cluster")
+        .set_tasks(Some(arns))
+        .send()
+        .await
+        .unwrap();
+    let running_desired: usize = described
+        .tasks()
+        .iter()
+        .filter(|t| t.desired_status() == Some("RUNNING"))
+        .count();
+    assert!(
+        running_desired <= 1,
+        "after scale-down <=1 task should still desire RUNNING, got {running_desired}"
+    );
+}
+
+#[tokio::test]
+async fn update_service_new_task_definition_triggers_rolling_deployment() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "roll-cluster", "roll-td").await;
+    client
+        .create_service()
+        .cluster("roll-cluster")
+        .service_name("web")
+        .task_definition("roll-td")
+        .desired_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .register_task_definition()
+        .family("roll-td")
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/library/alpine:3.19")
+                .essential(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let rolled = client
+        .update_service()
+        .cluster("roll-cluster")
+        .service("web")
+        .task_definition("roll-td:2")
+        .send()
+        .await
+        .expect("update_service new td");
+    let svc = rolled.service().unwrap();
+    let primary = svc
+        .deployments()
+        .iter()
+        .find(|d| d.status() == Some("PRIMARY"))
+        .expect("primary deployment");
+    assert!(primary.task_definition().unwrap().ends_with(":2"));
+    assert!(
+        svc.deployments()
+            .iter()
+            .any(|d| d.status() == Some("ACTIVE")),
+        "old deployment should be ACTIVE during rollout"
+    );
+}
+
+#[tokio::test]
+async fn delete_service_requires_zero_desired_unless_force() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "del-cluster", "del-td").await;
+    client
+        .create_service()
+        .cluster("del-cluster")
+        .service_name("web")
+        .task_definition("del-td")
+        .desired_count(2)
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .delete_service()
+        .cluster("del-cluster")
+        .service("web")
+        .send()
+        .await
+        .expect_err("delete should fail while scaled up");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("desiredCount") || msg.contains("scaled"),
+        "msg={msg}"
+    );
+
+    let forced = client
+        .delete_service()
+        .cluster("del-cluster")
+        .service("web")
+        .force(true)
+        .send()
+        .await
+        .expect("force delete");
+    assert_eq!(forced.service().unwrap().service_name(), Some("web"));
+
+    let after = client
+        .describe_services()
+        .cluster("del-cluster")
+        .services("web")
+        .send()
+        .await
+        .unwrap();
+    assert!(after.services().is_empty());
+    assert_eq!(after.failures().len(), 1);
+    assert_eq!(after.failures()[0].reason(), Some("MISSING"));
+}
