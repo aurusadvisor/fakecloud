@@ -1100,16 +1100,37 @@ impl LambdaService {
         let mapping_uuid = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
 
-        let filter_patterns: Vec<String> = body
-            .get("FilterCriteria")
-            .and_then(|v| v.get("Filters"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|f| f.get("Pattern").and_then(|p| p.as_str()).map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Extract Filters[].Pattern strictly: any entry where
+        // `Pattern` is missing or not a string is a hard error,
+        // matching AWS. Doing this before `validate` keeps malformed
+        // values from being silently dropped by the lossy serializer.
+        let filter_patterns: Vec<String> =
+            match body.get("FilterCriteria").and_then(|v| v.get("Filters")) {
+                None => Vec::new(),
+                Some(Value::Array(arr)) => {
+                    let mut out = Vec::with_capacity(arr.len());
+                    for f in arr {
+                        match f.get("Pattern") {
+                            Some(Value::String(s)) => out.push(s.clone()),
+                            _ => {
+                                return Err(AwsServiceError::aws_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "InvalidParameterValueException",
+                                    "FilterCriteria.Filters[].Pattern must be a string",
+                                ));
+                            }
+                        }
+                    }
+                    out
+                }
+                Some(_) => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValueException",
+                        "FilterCriteria.Filters must be an array",
+                    ));
+                }
+            };
         // AWS rejects malformed FilterCriteria at create time.
         if let Err(err) = crate::filter::FilterSet::validate(filter_patterns.iter()) {
             return Err(AwsServiceError::aws_error(
