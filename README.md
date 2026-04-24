@@ -62,9 +62,9 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | IAM                    | 176 | Users, roles, policies, groups, instance profiles, OIDC/SAML           |
 | STS                    |  11 | AssumeRole, session tokens, federation                                 |
 | SSM                    | 146 | Parameters, documents, commands, maintenance, patch baselines          |
-| Secrets Manager        |  23 | Versioning, rotation via Lambda, replication                           |
+| Secrets Manager        |  23 | Versioning, rotation via Lambda, replication, **real KMS encrypt/decrypt** |
 | CloudWatch Logs        | 113 | Groups, streams, subscription filters, query language                  |
-| KMS                    |  53 | Encryption, aliases, grants, real ECDH, key import                     |
+| KMS                    |  53 | Encryption, aliases, grants, real ECDH, key import, **cross-service hook** |
 | CloudFormation         |  90 | Template parsing, resource provisioning, custom resources              |
 | SES (v2 + v1 inbound)  | 110 | Sending, templates, DKIM, **real receipt rule execution**              |
 | Cognito User Pools     | 122 | Pools, clients, MFA, identity providers, full auth flows; verification email -> SES, SMS -> SNS, all 12 Lambda triggers |

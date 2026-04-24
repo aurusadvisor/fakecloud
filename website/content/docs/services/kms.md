@@ -20,6 +20,11 @@ fakecloud implements **53 of 53** KMS operations at 100% Smithy conformance.
 - **Key import** — GetParametersForImport, ImportKeyMaterial with real key material handling
 - **Custom key stores** — CRUD (records only)
 - **Key replica** — ReplicateKey
+- **Cross-service KMS hook** — services that accept a `KmsKeyId` (Secrets Manager today, SSM SecureString / S3 SSE-KMS / SQS / SNS / DynamoDB rolling out in follow-up PRs) call into KMS for real encrypt/decrypt and the calls are recorded at `/_fakecloud/kms/usage` so test code can assert which service principal triggered which operation on which key with which encryption context. AWS-managed aliases (`aws/secretsmanager`, etc.) auto-provision on first use.
+
+## Introspection
+
+- `GET /_fakecloud/kms/usage` — list every cross-service KMS call (operation, service principal, key ARN, encryption context). Useful for asserting that your code path actually triggered KMS encrypt/decrypt under the hood.
 
 ## Protocol
 

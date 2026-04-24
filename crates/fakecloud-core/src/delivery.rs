@@ -157,6 +157,35 @@ pub trait SmsDispatcher: Send + Sync {
     fn send_sms(&self, account_id: &str, phone_number: &str, message: &str);
 }
 
+/// Cross-service KMS hook: services that accept a `KmsKeyId` (Secrets
+/// Manager, SSM `SecureString`, S3 SSE-KMS, SQS / SNS / DynamoDB
+/// encrypted resources) call this so that real KMS calls happen, the
+/// invocation is recorded for introspection, and the returned blob is
+/// decryptable by the public KMS API.
+///
+/// Encryption context is the AWS-defined per-service map (e.g.
+/// `{aws:secretsmanager:secretArn: <arn>}` for Secrets Manager) and is
+/// recorded with the call so test code can assert it.
+pub trait KmsHook: Send + Sync {
+    fn encrypt(
+        &self,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        plaintext: &[u8],
+        service_principal: &str,
+        encryption_context: std::collections::HashMap<String, String>,
+    ) -> Result<String, String>;
+
+    fn decrypt(
+        &self,
+        account_id: &str,
+        ciphertext_b64: &str,
+        service_principal: &str,
+        encryption_context: std::collections::HashMap<String, String>,
+    ) -> Result<Vec<u8>, String>;
+}
+
 impl DeliveryBus {
     pub fn new() -> Self {
         Self {
