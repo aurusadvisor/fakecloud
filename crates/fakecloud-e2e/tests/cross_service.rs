@@ -502,15 +502,26 @@ async fn sqs_lambda_event_source_mapping() {
     let queue_arn = get_queue_arn(&sqs, &queue_url).await;
 
     // Create Lambda function
+    // Use a real Python handler so the container runtime returns Ok and
+    // the poller acks the batch. With the post-Cubic correctness fix we
+    // only delete SQS messages on a successful Lambda invocation; an
+    // un-runnable "fake-code" blob would cause the poller to leave the
+    // message visible for retry, which doesn't reflect what the test is
+    // checking.
     lambda
         .create_function()
         .function_name("sqs-processor")
-        .runtime(aws_sdk_lambda::types::Runtime::Nodejs18x)
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
         .role("arn:aws:iam::123456789012:role/lambda-role")
         .handler("index.handler")
         .code(
             aws_sdk_lambda::types::FunctionCode::builder()
-                .zip_file(aws_sdk_lambda::primitives::Blob::new(b"fake-code"))
+                .zip_file(aws_sdk_lambda::primitives::Blob::new(make_zip(&[(
+                    "index.py",
+                    br#"def handler(event, context):
+    return {"statusCode": 200}
+"#,
+                )])))
                 .build(),
         )
         .send()
