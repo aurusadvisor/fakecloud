@@ -18,7 +18,7 @@ fakecloud implements **176 of 176** IAM operations at 100% Smithy conformance.
 - **Account management** — aliases, password policy, summary
 - **Tags** — on users, roles, policies, and policy versions
 - **Service-linked roles** — CRUD with service name validation
-- **PassRole trust enforcement** — when a role ARN is passed to Lambda (`CreateFunction`, `UpdateFunctionConfiguration`) or ECS (`RegisterTaskDefinition`, `RunTask` overrides), the role's `AssumeRolePolicyDocument` is checked against the calling service's principal (`lambda.amazonaws.com`, `ecs-tasks.amazonaws.com`). Roles whose trust policy doesn't allow the principal are rejected with `InvalidParameterValueException` / `InvalidParameterException`, matching real AWS
+- **PassRole trust enforcement** — when a role ARN is passed to Lambda (`CreateFunction`) or ECS (`RegisterTaskDefinition`, `RunTask` overrides), the role's `AssumeRolePolicyDocument` is checked against the calling service's principal (`lambda.amazonaws.com`, `ecs-tasks.amazonaws.com`). Roles whose trust policy doesn't allow the principal are rejected with `InvalidParameterValueException` / `InvalidParameterException`, matching real AWS
 
 ## PassRole trust policy example
 
