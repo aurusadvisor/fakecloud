@@ -21,6 +21,7 @@ final class FakeCloud
     private LambdaClient $lambda;
     private RdsClient $rds;
     private ElastiCacheClient $elasticache;
+    private EcrClient $ecr;
     private SesClient $ses;
     private SnsClient $sns;
     private SqsClient $sqs;
@@ -40,6 +41,7 @@ final class FakeCloud
         $this->lambda = new LambdaClient($this->http);
         $this->rds = new RdsClient($this->http);
         $this->elasticache = new ElastiCacheClient($this->http);
+        $this->ecr = new EcrClient($this->http);
         $this->ses = new SesClient($this->http);
         $this->sns = new SnsClient($this->http);
         $this->sqs = new SqsClient($this->http);
@@ -95,6 +97,7 @@ final class FakeCloud
     public function lambda(): LambdaClient { return $this->lambda; }
     public function rds(): RdsClient { return $this->rds; }
     public function elasticache(): ElastiCacheClient { return $this->elasticache; }
+    public function ecr(): EcrClient { return $this->ecr; }
     public function ses(): SesClient { return $this->ses; }
     public function sns(): SnsClient { return $this->sns; }
     public function sqs(): SqsClient { return $this->sqs; }
@@ -172,6 +175,34 @@ final class ElastiCacheClient
     {
         return ElastiCacheServerlessCachesResponse::fromArray(
             $this->http->get('/_fakecloud/elasticache/serverless-caches')
+        );
+    }
+}
+
+final class EcrClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    public function getRepositories(): EcrRepositoriesResponse
+    {
+        return EcrRepositoriesResponse::fromArray(
+            $this->http->get('/_fakecloud/ecr/repositories')
+        );
+    }
+
+    public function getImages(?string $repositoryName = null): EcrImagesResponse
+    {
+        $path = '/_fakecloud/ecr/images';
+        if ($repositoryName !== null) {
+            $path .= '?repo=' . rawurlencode($repositoryName);
+        }
+        return EcrImagesResponse::fromArray($this->http->get($path));
+    }
+
+    public function getPullThroughRules(): EcrPullThroughRulesResponse
+    {
+        return EcrPullThroughRulesResponse::fromArray(
+            $this->http->get('/_fakecloud/ecr/pull-through-rules')
         );
     }
 }

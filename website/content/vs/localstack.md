@@ -28,6 +28,7 @@ Since LocalStack replaced its open-source Community Edition with a proprietary i
 | RDS | 163 ops, real PostgreSQL/MySQL/MariaDB | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
 | ElastiCache | 75 ops, real Redis/Valkey | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
 | API Gateway v2 | 28 ops | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
+| ECR | 58 ops + real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/) (and push is [flaky](https://github.com/localstack/localstack/issues/8128) when paid) | Yes |
 | Bedrock | 111 ops (control plane + runtime) | Not available | Not available |
 | SCPs / multi-account | Yes (Organizations control plane + ceiling enforcement) | No | Partial |
 | Lambda real code execution | Yes (13 runtimes) | Paywall required | Yes |
@@ -36,7 +37,7 @@ Since LocalStack replaced its open-source Community Edition with a proprietary i
 
 **LocalStack's approach** is breadth-first — a very large catalog of AWS services at varying depth. Good for "tests need the call to resolve plausibly."
 
-**fakecloud's approach** is depth-first — fewer services today (23), each at 100% behavioral conformance with 100% of cross-service integrations. Good for "tests need the downstream actually to happen."
+**fakecloud's approach** is depth-first — fewer services today (24), each at 100% behavioral conformance with 100% of cross-service integrations. Good for "tests need the downstream actually to happen."
 
 Both are valid. Pick by whether your tests need real cross-service wiring, real Lambda execution, and real stateful backends, or whether you need surface-level plausibility across more services.
 

@@ -490,3 +490,56 @@ export interface FireScheduleResponse {
   scheduleArn: string;
   targetArn: string;
 }
+
+// ── ECR ────────────────────────────────────────────────────────────
+
+export interface EcrTag {
+  key: string;
+  value: string;
+}
+
+export interface EcrRepository {
+  repositoryName: string;
+  repositoryArn: string;
+  registryId: string;
+  repositoryUri: string;
+  imageTagMutability: string;
+  scanOnPush: boolean;
+  createdAt: string;
+  tags: EcrTag[];
+  hasPolicy: boolean;
+  hasLifecyclePolicy: boolean;
+  imageCount: number;
+  layerCount: number;
+}
+
+export interface EcrRepositoriesResponse {
+  repositories: EcrRepository[];
+}
+
+export interface EcrImage {
+  repositoryName: string;
+  imageDigest: string;
+  imageTags: string[];
+  imageSizeInBytes: number;
+  imageManifestMediaType: string;
+  imagePushedAt: string;
+}
+
+export interface EcrImagesResponse {
+  images: EcrImage[];
+}
+
+export interface EcrPullThroughRule {
+  ecrRepositoryPrefix: string;
+  upstreamRegistryUrl: string;
+  upstreamRegistry?: string;
+  credentialArn?: string;
+  customRoleArn?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EcrPullThroughRulesResponse {
+  rules: EcrPullThroughRule[];
+}
