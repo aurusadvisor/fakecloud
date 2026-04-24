@@ -50,6 +50,12 @@ Environment variables from the task definition are forwarded with `localhost` / 
 
 Without a container runtime (docker/podman missing), `RunTask` still returns tasks but they immediately transition to `STOPPED` with `stopCode=TaskFailedToStart`. This keeps the API surface shape-correct so tests on CI agents without Docker can still drive the control-plane surface.
 
+### Pulling from fakecloud ECR
+
+Tasks that reference AWS private-ECR URIs (`<account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>`) are resolved against fakecloud's own OCI v2 endpoint. The runtime pulls from `127.0.0.1:<port>/<repo>:<tag>`, retags to the AWS URI, and runs the container under the user-visible image name. On Linux this is transparent because the docker daemon auto-treats `127.0.0.1` as an insecure registry. On Docker Desktop for macOS or Windows, the daemon runs in a VM and `127.0.0.1` maps to the VM itself, not the host — for full fidelity there, add `127.0.0.0/8` to Docker Desktop's insecure-registries and ensure fakecloud is reachable from the VM (e.g. via `host.docker.internal` forwarding).
+
+Same resolution path applies to Lambda functions deployed with `PackageType=Image`: `Code.ImageUri` pointing at a fakecloud ECR URI is pulled and run on invoke.
+
 ## Protocol
 
 JSON protocol over `POST /`, with `X-Amz-Target: AmazonEC2ContainerServiceV20141113.<Action>`. Request + response bodies are JSON; tags use lowercase `key` / `value` (matches AWS SDK serialization).

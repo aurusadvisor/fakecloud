@@ -23,6 +23,11 @@ pub struct LambdaFunction {
     pub architectures: Vec<String>,
     pub package_type: String,
     pub code_zip: Option<Vec<u8>>,
+    /// Container image URI for `PackageType=Image` functions. Points at a
+    /// private or public ECR image that the runtime pulls at invoke time.
+    /// `None` for `PackageType=Zip`.
+    #[serde(default)]
+    pub image_uri: Option<String>,
     /// Resource-based policy attached to this function via
     /// `AddPermission`, serialized as a full JSON policy document
     /// (`{"Version":"2012-10-17","Statement":[...]}`). `None` means

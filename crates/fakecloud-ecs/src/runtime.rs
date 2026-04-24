@@ -7,11 +7,14 @@
 //! the container, waits for exit, captures logs, and updates shared ECS
 //! state in place.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
 use chrono::Utc;
 use parking_lot::RwLock;
+use tempfile::TempDir;
 use tokio::process::Command;
 
 use crate::state::{LifecycleEvent, SharedEcsState};
@@ -32,6 +35,16 @@ pub enum RuntimeError {
 pub struct EcsRuntime {
     cli: String,
     host_ip: String,
+    /// Port the main fakecloud server bound to. Used to translate AWS
+    /// ECR URIs (`<acct>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>`) to
+    /// the local OCI v2 endpoint (`127.0.0.1:<port>/<repo>:<tag>`) so
+    /// tasks can pull images pushed to fakecloud's own ECR.
+    server_port: u16,
+    /// Isolated DOCKER_CONFIG dir pre-populated with Basic auth for
+    /// `127.0.0.1:<port>`; keeps the host user's `~/.docker/config.json`
+    /// untouched and lets `docker pull` succeed against fakecloud ECR
+    /// without a prior `aws ecr get-login-password | docker login`.
+    docker_config: Option<Arc<TempDir>>,
     /// Tracks container IDs per task ID so `stop_task` can kill in-flight
     /// work without needing to block on the spawned executor future.
     containers: RwLock<std::collections::HashMap<String, String>>,
@@ -40,7 +53,9 @@ pub struct EcsRuntime {
 impl EcsRuntime {
     /// Auto-detect Docker or Podman. Returns `None` if neither is
     /// available. Honours `FAKECLOUD_CONTAINER_CLI` for explicit override.
-    pub fn new() -> Option<Self> {
+    /// `server_port` is the port the main fakecloud server bound to;
+    /// needed to resolve AWS ECR URIs against the local OCI v2 registry.
+    pub fn new(server_port: u16) -> Option<Self> {
         let cli = if let Ok(cli) = std::env::var("FAKECLOUD_CONTAINER_CLI") {
             if cli_works(&cli) {
                 cli
@@ -59,11 +74,31 @@ impl EcsRuntime {
         } else {
             "host-gateway".to_string()
         };
+        let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
         Some(Self {
             cli,
             host_ip,
+            server_port,
+            docker_config,
             containers: RwLock::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// Path suitable for `DOCKER_CONFIG`. `None` if the tempdir setup
+    /// failed; in that case pulls fall back to the user's own config and
+    /// will only work if they've already logged in.
+    fn docker_config_path(&self) -> Option<PathBuf> {
+        self.docker_config.as_ref().map(|d| d.path().to_path_buf())
+    }
+
+    /// Build a `Command` for the container CLI with `DOCKER_CONFIG` set
+    /// to our isolated tempdir so fakecloud ECR auth works out of the box.
+    fn cli_command(&self) -> Command {
+        let mut cmd = Command::new(&self.cli);
+        if let Some(p) = self.docker_config_path() {
+            cmd.env("DOCKER_CONFIG", p);
+        }
+        cmd
     }
 
     pub fn cli_name(&self) -> &str {
@@ -130,9 +165,16 @@ impl EcsRuntime {
         };
 
         // Pull the image first so we can surface pull errors cleanly.
+        // AWS private-ECR URIs (`<acct>.dkr.ecr.<region>.amazonaws.com/...`)
+        // are translated to fakecloud's local OCI v2 endpoint; after
+        // pulling the local URI we retag it to the AWS URI so the
+        // container and task state carry the user-facing image reference.
         mark_pull_started(state, account_id, task_id);
-        let pull_out = Command::new(&self.cli)
-            .args(["pull", &image])
+        let local_pull_uri = fakecloud_core::ecr_uri::translate_to_local(&image, self.server_port);
+        let pull_uri = local_pull_uri.as_deref().unwrap_or(&image);
+        let pull_out = self
+            .cli_command()
+            .args(["pull", pull_uri])
             .output()
             .await
             .map_err(|e| RuntimeError::ImagePull(e.to_string()))?;
@@ -140,6 +182,25 @@ impl EcsRuntime {
             let err = String::from_utf8_lossy(&pull_out.stderr).to_string();
             return Err(RuntimeError::ImagePull(err));
         }
+        // Retag the local pull URI to the AWS URI so `docker run` finds
+        // the image under the user-facing name. Digest-pinned refs can't
+        // be `docker tag` targets, so we fall through and run under the
+        // local URI in that case (cosmetic tradeoff — the task's image
+        // field will show the 127.0.0.1 URI instead of the AWS digest).
+        let run_image = if let Some(ref local_uri) = local_pull_uri {
+            if fakecloud_core::ecr_uri::is_digest_ref(&image) {
+                local_uri.clone()
+            } else {
+                let _ = self
+                    .cli_command()
+                    .args(["tag", local_uri, &image])
+                    .output()
+                    .await;
+                image.clone()
+            }
+        } else {
+            image.clone()
+        };
         mark_pull_stopped(state, account_id, task_id);
 
         // Run the container detached so we can track its ID and wait
@@ -159,7 +220,7 @@ impl EcsRuntime {
                 .replace("https://localhost:", "https://host.docker.internal:");
             cmd.arg("-e").arg(format!("{}={}", k, transformed));
         }
-        cmd.arg(&image);
+        cmd.arg(&run_image);
         for arg in &command {
             cmd.arg(arg);
         }
@@ -271,6 +332,22 @@ fn cli_works(cli: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Build an isolated docker config directory with Basic auth for
+/// fakecloud ECR at `127.0.0.1:<port>`. Lets `docker pull/push/tag`
+/// work against the local OCI v2 registry without requiring the user
+/// to run `aws ecr get-login-password | docker login` first.
+fn build_local_registry_docker_config(server_port: u16) -> Option<TempDir> {
+    let dir = TempDir::new().ok()?;
+    let auth = base64::engine::general_purpose::STANDARD.encode("AWS:fakecloud-ecs-runtime");
+    let config = serde_json::json!({
+        "auths": {
+            format!("127.0.0.1:{server_port}"): { "auth": auth },
+        }
+    });
+    std::fs::write(dir.path().join("config.json"), config.to_string()).ok()?;
+    Some(dir)
 }
 
 fn find_container_definition(
@@ -477,5 +554,17 @@ mod tests {
     #[test]
     fn cli_works_for_known_missing_binary_is_false() {
         assert!(!cli_works("definitely-not-a-real-cli-binary-xyz"));
+    }
+
+    #[test]
+    fn aws_ecr_uris_translate_for_local_pull() {
+        assert_eq!(
+            fakecloud_core::ecr_uri::translate_to_local(
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com/app:latest",
+                4566
+            )
+            .as_deref(),
+            Some("127.0.0.1:4566/app:latest")
+        );
     }
 }

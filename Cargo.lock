@@ -2354,6 +2354,7 @@ name = "fakecloud-ecs"
 version = "0.10.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "fakecloud-core",
  "fakecloud-persistence",
@@ -2361,6 +2362,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

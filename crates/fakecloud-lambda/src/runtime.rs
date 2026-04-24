@@ -1,8 +1,9 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use parking_lot::RwLock;
 use tempfile::TempDir;
 
@@ -25,6 +26,14 @@ pub struct ContainerRuntime {
     instance_id: String,
     /// IP address that containers should use to reach the host
     host_ip: String,
+    /// Port the main fakecloud server bound to. Used to translate AWS
+    /// private-ECR URIs in `PackageType=Image` functions to fakecloud's
+    /// local OCI v2 registry.
+    server_port: u16,
+    /// Isolated DOCKER_CONFIG dir with Basic auth for `127.0.0.1:<port>`.
+    /// Lets `docker pull` talk to fakecloud ECR without mutating the user's
+    /// `~/.docker/config.json`.
+    docker_config: Option<Arc<TempDir>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -44,7 +53,9 @@ pub enum RuntimeError {
 impl ContainerRuntime {
     /// Auto-detect Docker or Podman. Returns `None` if neither is available.
     /// Override with `FAKECLOUD_CONTAINER_CLI` env var.
-    pub fn new() -> Option<Self> {
+    /// `server_port` is the port the main fakecloud server bound to; used
+    /// to resolve `PackageType=Image` ECR URIs against fakecloud ECR.
+    pub fn new(server_port: u16) -> Option<Self> {
         let cli = if let Ok(cli) = std::env::var("FAKECLOUD_CONTAINER_CLI") {
             // Verify the configured CLI works
             if std::process::Command::new(&cli)
@@ -78,13 +89,20 @@ impl ContainerRuntime {
             "host-gateway".to_string()
         };
 
+        let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
         Some(Self {
             cli,
             containers: RwLock::new(HashMap::new()),
             starting: RwLock::new(HashMap::new()),
             instance_id,
             host_ip,
+            server_port,
+            docker_config,
         })
+    }
+
+    fn docker_config_path(&self) -> Option<PathBuf> {
+        self.docker_config.as_ref().map(|d| d.path().to_path_buf())
     }
 
     pub fn cli_name(&self) -> &str {
@@ -97,10 +115,13 @@ impl ContainerRuntime {
         func: &LambdaFunction,
         payload: &[u8],
     ) -> Result<Vec<u8>, RuntimeError> {
-        let zip_bytes = func
-            .code_zip
-            .as_ref()
-            .ok_or_else(|| RuntimeError::NoCodeZip(func.function_name.clone()))?;
+        // Zip-based functions need code bytes; image-based functions have
+        // everything baked into the image. Defer the zip check until we
+        // know we need to start a fresh container.
+        let is_image = func.package_type == "Image";
+        if !is_image && func.code_zip.is_none() {
+            return Err(RuntimeError::NoCodeZip(func.function_name.clone()));
+        }
 
         // Check for warm container with matching code
         let port = {
@@ -145,7 +166,15 @@ impl ContainerRuntime {
                     p
                 } else {
                     self.stop_container(&func.function_name).await;
-                    let container = self.start_container(func, zip_bytes).await?;
+                    let container = if is_image {
+                        self.start_image_container(func).await?
+                    } else {
+                        let zip_bytes = func
+                            .code_zip
+                            .as_ref()
+                            .ok_or_else(|| RuntimeError::NoCodeZip(func.function_name.clone()))?;
+                        self.start_container(func, zip_bytes).await?
+                    };
                     let p = container.host_port;
                     self.containers
                         .write()
@@ -175,6 +204,157 @@ impl ContainerRuntime {
             .map_err(|e| RuntimeError::InvocationFailed(e.to_string()))?;
 
         Ok(body.to_vec())
+    }
+
+    /// Start a container for a `PackageType=Image` function. The image is
+    /// expected to already embed the Runtime Interface Emulator (RIE) or
+    /// an equivalent, exposing port 8080 — that's the AWS convention for
+    /// container-based Lambda. AWS private-ECR URIs get translated to
+    /// fakecloud's local OCI v2 registry and retagged so the container
+    /// reports its user-visible image name.
+    async fn start_image_container(
+        &self,
+        func: &LambdaFunction,
+    ) -> Result<WarmContainer, RuntimeError> {
+        let image = func.image_uri.as_deref().ok_or_else(|| {
+            RuntimeError::ContainerStartFailed("PackageType=Image function has no ImageUri".into())
+        })?;
+
+        // Translate AWS private-ECR URIs to fakecloud ECR's local endpoint.
+        let local_pull_uri = fakecloud_core::ecr_uri::translate_to_local(image, self.server_port);
+        let pull_uri = local_pull_uri.as_deref().unwrap_or(image);
+
+        let mut pull_cmd = tokio::process::Command::new(&self.cli);
+        if let Some(p) = self.docker_config_path() {
+            pull_cmd.env("DOCKER_CONFIG", p);
+        }
+        let pull_out = pull_cmd
+            .args(["pull", pull_uri])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(format!("docker pull: {e}")))?;
+        if !pull_out.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "docker pull failed: {}",
+                String::from_utf8_lossy(&pull_out.stderr)
+            )));
+        }
+        // Retag the local pull URI to the AWS URI so `docker create`
+        // finds the image under the user-visible name. Digest-pinned
+        // refs can't be `docker tag` targets, so fall through and
+        // create under the local URI instead.
+        let run_image = if let Some(ref local_uri) = local_pull_uri {
+            if fakecloud_core::ecr_uri::is_digest_ref(image) {
+                local_uri.clone()
+            } else {
+                let _ = tokio::process::Command::new(&self.cli)
+                    .args(["tag", local_uri, image])
+                    .output()
+                    .await;
+                image.to_string()
+            }
+        } else {
+            image.to_string()
+        };
+
+        let mut cmd = tokio::process::Command::new(&self.cli);
+        cmd.arg("create")
+            .arg("-p")
+            .arg(":8080")
+            .arg("--label")
+            .arg(format!("fakecloud-lambda={}", func.function_name))
+            .arg("--label")
+            .arg(format!("fakecloud-instance={}", self.instance_id))
+            .arg("--add-host")
+            .arg(format!("host.docker.internal:{}", self.host_ip));
+
+        for (key, value) in &func.environment {
+            let transformed_value = value
+                .replace("http://127.0.0.1:", "http://host.docker.internal:")
+                .replace("https://127.0.0.1:", "https://host.docker.internal:")
+                .replace("http://localhost:", "http://host.docker.internal:")
+                .replace("https://localhost:", "https://host.docker.internal:");
+            cmd.arg("-e").arg(format!("{}={}", key, transformed_value));
+        }
+        cmd.arg("-e")
+            .arg(format!("AWS_LAMBDA_FUNCTION_TIMEOUT={}", func.timeout));
+
+        cmd.arg(&run_image);
+
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        if !output.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        let start_result = tokio::process::Command::new(&self.cli)
+            .args(["start", &container_id])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        if !start_result.status.success() {
+            let _ = self.remove_container(&container_id).await;
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "docker start failed: {}",
+                String::from_utf8_lossy(&start_result.stderr)
+            )));
+        }
+
+        let port_output = tokio::process::Command::new(&self.cli)
+            .args(["port", &container_id, "8080"])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        let port_str = String::from_utf8_lossy(&port_output.stdout);
+        let port: u16 = port_str
+            .trim()
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .ok_or_else(|| {
+                RuntimeError::ContainerStartFailed(format!(
+                    "could not determine port from: {}",
+                    port_str.trim()
+                ))
+            })?;
+
+        let mut ready = false;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+                .await
+                .is_ok()
+            {
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            let _ = self.remove_container(&container_id).await;
+            return Err(RuntimeError::ContainerStartFailed(
+                "container did not become ready within 10 seconds".to_string(),
+            ));
+        }
+
+        tracing::info!(
+            function = %func.function_name,
+            container_id = %container_id,
+            port = port,
+            image = %image,
+            "Lambda image container started"
+        );
+
+        Ok(WarmContainer {
+            container_id,
+            host_port: port,
+            last_used: RwLock::new(Instant::now()),
+            code_sha256: func.code_sha256.clone(),
+        })
     }
 
     async fn start_container(
@@ -552,6 +732,18 @@ fn is_cli_available(name: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn build_local_registry_docker_config(server_port: u16) -> Option<TempDir> {
+    let dir = TempDir::new().ok()?;
+    let auth = base64::engine::general_purpose::STANDARD.encode("AWS:fakecloud-lambda-runtime");
+    let config = serde_json::json!({
+        "auths": {
+            format!("127.0.0.1:{server_port}"): { "auth": auth },
+        }
+    });
+    std::fs::write(dir.path().join("config.json"), config.to_string()).ok()?;
+    Some(dir)
 }
 
 #[cfg(test)]
