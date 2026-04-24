@@ -2500,7 +2500,7 @@ async fn main() {
                                             "subject": &body.subject,
                                         }
                                     },
-                                    "content": &body.body,
+                                    "content": &augmented_body,
                                 });
                                 tracing::info!(
                                     topic_arn = %topic_arn,

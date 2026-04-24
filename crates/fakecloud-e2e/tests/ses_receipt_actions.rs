@@ -104,6 +104,11 @@ async fn ses_receipt_rule_executes_addheader_s3_and_bounce() {
                 )
                 .actions(
                     ReceiptAction::builder()
+                        .sns_action(SnsAction::builder().topic_arn(&topic_arn).build().unwrap())
+                        .build(),
+                )
+                .actions(
+                    ReceiptAction::builder()
                         .bounce_action(
                             BounceAction::builder()
                                 .smtp_reply_code("550")
@@ -207,8 +212,11 @@ async fn ses_receipt_rule_executes_addheader_s3_and_bounce() {
         "bounce body should contain SMTP reply code + message, got: {body}"
     );
 
-    // Bounce notification should be delivered through SNS -> SQS.
+    // Both notifications should be delivered through SNS -> SQS:
+    // - Received notification whose `content` includes the AddHeader-injected header
+    // - Bounce notification
     let mut saw_bounce_notif = false;
+    let mut saw_received_with_header = false;
     for _ in 0..20 {
         let recv = sqs
             .receive_message()
@@ -227,21 +235,30 @@ async fn ses_receipt_rule_executes_addheader_s3_and_bounce() {
             let msg_str = env.get("Message").and_then(|v| v.as_str()).unwrap_or("");
             let inner: serde_json::Value =
                 serde_json::from_str(msg_str).unwrap_or(serde_json::Value::Null);
-            if inner["notificationType"].as_str() == Some("Bounce") {
-                saw_bounce_notif = true;
+            match inner["notificationType"].as_str() {
+                Some("Bounce") => saw_bounce_notif = true,
+                Some("Received") => {
+                    let content = inner["content"].as_str().unwrap_or("");
+                    assert!(
+                        content.contains("X-Receipt-Tag: processed"),
+                        "SNS Received content should include AddHeader-injected header, got: {content}"
+                    );
+                    saw_received_with_header = true;
+                }
+                _ => {}
             }
         }
-        if saw_bounce_notif {
+        if saw_bounce_notif && saw_received_with_header {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(saw_bounce_notif, "expected SNS Bounce notification");
+    assert!(
+        saw_received_with_header,
+        "expected SNS Received notification carrying AddHeader-augmented content"
+    );
 
     // Suppress unused warnings for AWS SDK types pulled in for clarity.
-    let _ = (
-        BouncedRecipientInfo::builder,
-        StopAction::builder,
-        SnsAction::builder,
-    );
+    let _ = (BouncedRecipientInfo::builder, StopAction::builder);
 }
