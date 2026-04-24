@@ -2341,6 +2341,7 @@ dependencies = [
  "fakecloud-persistence",
  "http 1.4.0",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",

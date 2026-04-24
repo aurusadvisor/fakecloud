@@ -25,7 +25,7 @@ use crate::state::{Image, Layer, LayerUpload};
 /// Classify an OCI v2 request by method + path. Returns `None` when
 /// the path is not a recognised OCI endpoint (the caller responds
 /// with 404 in that case).
-pub(crate) fn dispatch(
+pub(crate) async fn dispatch(
     service: &EcrService,
     request: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -67,8 +67,8 @@ pub(crate) fn dispatch(
     let parts: Vec<&str> = action_segs.iter().map(|s| s.as_str()).collect();
     match (method, parts.as_slice()) {
         (&Method::GET, ["tags", "list"]) => tags_list(service, request, &repo_name),
-        (&Method::HEAD, ["blobs", digest]) => blob_head(service, request, &repo_name, digest),
-        (&Method::GET, ["blobs", digest]) => blob_get(service, request, &repo_name, digest),
+        (&Method::HEAD, ["blobs", digest]) => blob_head(service, request, &repo_name, digest).await,
+        (&Method::GET, ["blobs", digest]) => blob_get(service, request, &repo_name, digest).await,
         (&Method::DELETE, ["blobs", digest]) => blob_delete(service, request, &repo_name, digest),
         (&Method::POST, ["blobs", "uploads"]) | (&Method::POST, ["blobs", "uploads", ""]) => {
             blob_upload_start(service, request, &repo_name)
@@ -83,10 +83,10 @@ pub(crate) fn dispatch(
             blob_upload_cancel(service, request, &repo_name, upload_id)
         }
         (&Method::HEAD, ["manifests", reference]) => {
-            manifest_head(service, request, &repo_name, reference)
+            manifest_head(service, request, &repo_name, reference).await
         }
         (&Method::GET, ["manifests", reference]) => {
-            manifest_get(service, request, &repo_name, reference)
+            manifest_get(service, request, &repo_name, reference).await
         }
         (&Method::PUT, ["manifests", reference]) => {
             manifest_put(service, request, &repo_name, reference)
@@ -268,59 +268,75 @@ fn tags_list(
     ))
 }
 
-fn blob_head(
+async fn blob_head(
     service: &EcrService,
     request: &AwsRequest,
     name: &str,
     digest: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let accounts = service.state_handle().read();
-    let state = accounts
-        .get(&request.account_id)
-        .ok_or_else(|| repo_not_found(name))?;
-    let repo = state
-        .repositories
-        .get(name)
-        .ok_or_else(|| repo_not_found(name))?;
-    let layer = repo
-        .layers
-        .get(digest)
-        .ok_or_else(|| blob_not_found(name, digest))?;
-    let mut resp = base_response(StatusCode::OK, "application/octet-stream", Vec::new());
-    resp.headers.insert(
-        "Docker-Content-Digest",
-        HeaderValue::from_str(digest).unwrap(),
-    );
-    resp.headers
-        .insert("Content-Length", HeaderValue::from(layer.size));
-    Ok(resp)
+    // Fast path: blob already in local state.
+    let local = {
+        let accounts = service.state_handle().read();
+        accounts
+            .get(&request.account_id)
+            .and_then(|s| s.repositories.get(name))
+            .and_then(|r| r.layers.get(digest).cloned())
+    };
+    if let Some(layer) = local {
+        let mut resp = base_response(StatusCode::OK, "application/octet-stream", Vec::new());
+        resp.headers.insert(
+            "Docker-Content-Digest",
+            HeaderValue::from_str(digest).unwrap(),
+        );
+        resp.headers
+            .insert("Content-Length", HeaderValue::from(layer.size));
+        return Ok(resp);
+    }
+    // Cache miss: try pull-through, which (on success) also caches.
+    if let Some(outcome) =
+        crate::pull_through::proxy_blob(service, &request.account_id, name, digest).await
+    {
+        let proxied = outcome?;
+        let mut resp = crate::pull_through::blob_response(&proxied, digest);
+        resp.body = fakecloud_core::service::ResponseBody::Bytes(bytes::Bytes::new());
+        resp.headers.insert(
+            "Content-Length",
+            HeaderValue::from(proxied.bytes.len() as u64),
+        );
+        return Ok(resp);
+    }
+    Err(blob_not_found(name, digest))
 }
 
-fn blob_get(
+async fn blob_get(
     service: &EcrService,
     request: &AwsRequest,
     name: &str,
     digest: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let accounts = service.state_handle().read();
-    let state = accounts
-        .get(&request.account_id)
-        .ok_or_else(|| repo_not_found(name))?;
-    let repo = state
-        .repositories
-        .get(name)
-        .ok_or_else(|| repo_not_found(name))?;
-    let layer = repo
-        .layers
-        .get(digest)
-        .ok_or_else(|| blob_not_found(name, digest))?;
-    let bytes = B64.decode(layer.blob_b64.as_bytes()).unwrap_or_default();
-    let mut resp = base_response(StatusCode::OK, &layer.media_type, bytes);
-    resp.headers.insert(
-        "Docker-Content-Digest",
-        HeaderValue::from_str(digest).unwrap(),
-    );
-    Ok(resp)
+    let local = {
+        let accounts = service.state_handle().read();
+        accounts
+            .get(&request.account_id)
+            .and_then(|s| s.repositories.get(name))
+            .and_then(|r| r.layers.get(digest).cloned())
+    };
+    if let Some(layer) = local {
+        let bytes = B64.decode(layer.blob_b64.as_bytes()).unwrap_or_default();
+        let mut resp = base_response(StatusCode::OK, &layer.media_type, bytes);
+        resp.headers.insert(
+            "Docker-Content-Digest",
+            HeaderValue::from_str(digest).unwrap(),
+        );
+        return Ok(resp);
+    }
+    if let Some(outcome) =
+        crate::pull_through::proxy_blob(service, &request.account_id, name, digest).await
+    {
+        let proxied = outcome?;
+        return Ok(crate::pull_through::blob_response(&proxied, digest));
+    }
+    Err(blob_not_found(name, digest))
 }
 
 fn blob_delete(
@@ -549,62 +565,92 @@ fn blob_upload_cancel(
     ))
 }
 
-fn manifest_head(
+async fn manifest_head(
     service: &EcrService,
     request: &AwsRequest,
     name: &str,
     reference: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let accounts = service.state_handle().read();
-    let state = accounts
-        .get(&request.account_id)
-        .ok_or_else(|| repo_not_found(name))?;
-    let repo = state
-        .repositories
-        .get(name)
-        .ok_or_else(|| repo_not_found(name))?;
-    let digest =
-        resolve_reference(repo, reference).ok_or_else(|| manifest_not_found(name, reference))?;
-    let image = repo.images.get(&digest).unwrap();
-    let mut resp = base_response(StatusCode::OK, &image.image_manifest_media_type, Vec::new());
-    resp.headers.insert(
-        "Docker-Content-Digest",
-        HeaderValue::from_str(&digest).unwrap(),
-    );
-    resp.headers.insert(
-        "Content-Length",
-        HeaderValue::from(image.image_manifest.len() as u64),
-    );
-    Ok(resp)
+    let local = {
+        let accounts = service.state_handle().read();
+        accounts
+            .get(&request.account_id)
+            .and_then(|s| s.repositories.get(name))
+            .and_then(|repo| {
+                resolve_reference(repo, reference).and_then(|digest| {
+                    repo.images.get(&digest).map(|img| {
+                        (
+                            digest,
+                            img.image_manifest_media_type.clone(),
+                            img.image_manifest.len() as u64,
+                        )
+                    })
+                })
+            })
+    };
+    if let Some((digest, media_type, size)) = local {
+        let mut resp = base_response(StatusCode::OK, &media_type, Vec::new());
+        resp.headers.insert(
+            "Docker-Content-Digest",
+            HeaderValue::from_str(&digest).unwrap(),
+        );
+        resp.headers
+            .insert("Content-Length", HeaderValue::from(size));
+        return Ok(resp);
+    }
+    if let Some(outcome) =
+        crate::pull_through::proxy_manifest(service, &request.account_id, name, reference).await
+    {
+        let proxied = outcome?;
+        let mut resp = crate::pull_through::manifest_response(&proxied);
+        resp.headers.insert(
+            "Content-Length",
+            HeaderValue::from(proxied.bytes.len() as u64),
+        );
+        resp.body = fakecloud_core::service::ResponseBody::Bytes(bytes::Bytes::new());
+        return Ok(resp);
+    }
+    Err(manifest_not_found(name, reference))
 }
 
-fn manifest_get(
+async fn manifest_get(
     service: &EcrService,
     request: &AwsRequest,
     name: &str,
     reference: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let accounts = service.state_handle().read();
-    let state = accounts
-        .get(&request.account_id)
-        .ok_or_else(|| repo_not_found(name))?;
-    let repo = state
-        .repositories
-        .get(name)
-        .ok_or_else(|| repo_not_found(name))?;
-    let digest =
-        resolve_reference(repo, reference).ok_or_else(|| manifest_not_found(name, reference))?;
-    let image = repo.images.get(&digest).unwrap();
-    let mut resp = base_response(
-        StatusCode::OK,
-        &image.image_manifest_media_type,
-        image.image_manifest.as_bytes().to_vec(),
-    );
-    resp.headers.insert(
-        "Docker-Content-Digest",
-        HeaderValue::from_str(&digest).unwrap(),
-    );
-    Ok(resp)
+    let local = {
+        let accounts = service.state_handle().read();
+        accounts
+            .get(&request.account_id)
+            .and_then(|s| s.repositories.get(name))
+            .and_then(|repo| {
+                resolve_reference(repo, reference).and_then(|digest| {
+                    repo.images.get(&digest).map(|img| {
+                        (
+                            digest,
+                            img.image_manifest_media_type.clone(),
+                            img.image_manifest.as_bytes().to_vec(),
+                        )
+                    })
+                })
+            })
+    };
+    if let Some((digest, media_type, body)) = local {
+        let mut resp = base_response(StatusCode::OK, &media_type, body);
+        resp.headers.insert(
+            "Docker-Content-Digest",
+            HeaderValue::from_str(&digest).unwrap(),
+        );
+        return Ok(resp);
+    }
+    if let Some(outcome) =
+        crate::pull_through::proxy_manifest(service, &request.account_id, name, reference).await
+    {
+        let proxied = outcome?;
+        return Ok(crate::pull_through::manifest_response(&proxied));
+    }
+    Err(manifest_not_found(name, reference))
 }
 
 fn manifest_put(
