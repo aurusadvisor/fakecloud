@@ -406,19 +406,51 @@ impl LogsService {
         let accounts = self.state.read();
         let empty = crate::state::LogsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        if !state.log_groups.contains_key(&group_name) {
-            return Err(AwsServiceError::aws_error(
+        let group = state.log_groups.get(&group_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ResourceNotFoundException",
                 format!("The specified log group does not exist: {group_name}"),
-            ));
-        }
+            )
+        })?;
 
-        // Stub response with common fields
-        let fields = json!([
-            { "fieldName": "@timestamp", "percent": 100 },
-            { "fieldName": "@message", "percent": 100 },
-        ]);
+        // Walk every event in every stream and tally how often each
+        // discovered field appears. JSON-shaped events contribute their
+        // top-level keys; every event always contributes @timestamp +
+        // @message + @logStream.
+        let mut total: u64 = 0;
+        let mut counts: std::collections::BTreeMap<String, u64> = Default::default();
+        for stream in group.log_streams.values() {
+            for ev in &stream.events {
+                total += 1;
+                *counts.entry("@timestamp".to_string()).or_insert(0) += 1;
+                *counts.entry("@message".to_string()).or_insert(0) += 1;
+                *counts.entry("@logStream".to_string()).or_insert(0) += 1;
+                if let Ok(serde_json::Value::Object(map)) =
+                    serde_json::from_str::<serde_json::Value>(&ev.message)
+                {
+                    for k in map.keys() {
+                        *counts.entry(k.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let denom = total.max(1) as f64;
+        let mut fields: Vec<Value> = counts
+            .into_iter()
+            .map(|(name, n)| {
+                let percent = ((n as f64 / denom) * 100.0).round() as i64;
+                json!({ "name": name, "percent": percent })
+            })
+            .collect();
+        // No events yet: still surface the always-present synthetic fields.
+        if total == 0 {
+            fields = vec![
+                json!({ "name": "@timestamp", "percent": 100 }),
+                json!({ "name": "@message", "percent": 100 }),
+                json!({ "name": "@logStream", "percent": 100 }),
+            ];
+        }
 
         Ok(AwsResponse::json(
             StatusCode::OK,

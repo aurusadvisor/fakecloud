@@ -15,40 +15,82 @@ impl LogsService {
 
     pub(crate) fn start_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let log_group_name = body["logGroupName"].as_str().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterException",
-                "logGroupName is required",
-            )
-        })?;
+        let log_group_name = body["logGroupName"].as_str();
+        let log_group_names: Vec<String> = body["logGroupNames"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let log_group_identifiers: Vec<String> = body["logGroupIdentifiers"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
         let start_time = body["startTime"].as_i64().unwrap_or(0);
         let end_time = body["endTime"].as_i64().unwrap_or(0);
         let query_string = body["queryString"].as_str().unwrap_or("").to_string();
 
-        validate_string_length("logGroupName", log_group_name, 1, 512)?;
+        // AWS requires exactly one of logGroupName / logGroupNames / logGroupIdentifiers.
+        if log_group_name.is_none()
+            && log_group_names.is_empty()
+            && log_group_identifiers.is_empty()
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "logGroupName, logGroupNames or logGroupIdentifiers is required",
+            ));
+        }
+        if let Some(name) = log_group_name {
+            validate_string_length("logGroupName", name, 1, 512)?;
+        }
         validate_optional_string_length("queryString", Some(&query_string), 0, 10000)?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        // Verify log group exists
-        if !state.log_groups.contains_key(log_group_name) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                "The specified log group does not exist.",
-            ));
+        // Verify single-name shape exists, when provided. The array shapes are
+        // accepted as-is; AWS returns results keyed off whichever groups exist.
+        if let Some(name) = log_group_name {
+            if !state.log_groups.contains_key(name) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "The specified log group does not exist.",
+                ));
+            }
         }
 
         let query_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
 
+        // Capture every group/identifier the query referenced for later
+        // `ListLogGroupsForQuery` lookups.
+        let mut all_identifiers: Vec<String> = Vec::new();
+        if let Some(name) = log_group_name {
+            all_identifiers.push(name.to_string());
+        }
+        all_identifiers.extend(log_group_names.iter().cloned());
+        all_identifiers.extend(log_group_identifiers.iter().cloned());
+
+        let primary_name = log_group_name
+            .map(String::from)
+            .or_else(|| log_group_names.first().cloned())
+            .or_else(|| log_group_identifiers.first().cloned())
+            .unwrap_or_default();
+
         state.queries.insert(
             query_id.clone(),
             QueryInfo {
                 query_id: query_id.clone(),
-                log_group_name: log_group_name.to_string(),
+                log_group_name: primary_name,
+                log_group_identifiers: all_identifiers,
                 query_string,
                 start_time,
                 end_time,
@@ -92,11 +134,33 @@ impl LogsService {
         // Parse the query string
         let parsed = query::parse_query(&query_info.query_string);
 
-        // Collect events by stream
+        // Collect events by stream from every group/identifier the query
+        // referenced, not just the legacy single `log_group_name`. ARNs are
+        // resolved to bare group names so multi-group StartQuery requests
+        // actually scan every requested group.
         let mut stream_events: Vec<(String, Vec<LogEvent>)> = Vec::new();
-        if let Some(group) = state.log_groups.get(&query_info.log_group_name) {
-            for stream in group.log_streams.values() {
-                stream_events.push((stream.name.clone(), stream.events.clone()));
+        let mut seen_groups: std::collections::HashSet<String> = Default::default();
+        let identifiers: Vec<String> = if query_info.log_group_identifiers.is_empty() {
+            vec![query_info.log_group_name.clone()]
+        } else {
+            query_info.log_group_identifiers.clone()
+        };
+        for identifier in identifiers {
+            let group_name = if identifier.starts_with("arn:") {
+                match super::extract_log_group_from_arn(&identifier) {
+                    Some(n) => n,
+                    None => continue,
+                }
+            } else {
+                identifier
+            };
+            if !seen_groups.insert(group_name.clone()) {
+                continue;
+            }
+            if let Some(group) = state.log_groups.get(&group_name) {
+                for stream in group.log_streams.values() {
+                    stream_events.push((stream.name.clone(), stream.events.clone()));
+                }
             }
         }
 
@@ -380,10 +444,25 @@ impl LogsService {
         validate_string_length("queryId", query_id, 1, 256)?;
         validate_optional_range_i64("maxResults", body["maxResults"].as_i64(), 50, 500)?;
         validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 4096)?;
-        // Stub: return empty log group names
+
+        let accounts = self.state.read();
+        let empty = crate::state::LogsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let identifiers = state
+            .queries
+            .get(query_id)
+            .map(|q| q.log_group_identifiers.clone())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "The specified query does not exist.",
+                )
+            })?;
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "logGroupIdentifiers": [] })).unwrap(),
+            serde_json::to_string(&json!({ "logGroupIdentifiers": identifiers })).unwrap(),
         ))
     }
 }
@@ -673,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn list_log_groups_for_query_returns_stub_list() {
+    fn list_log_groups_for_query_returns_started_groups() {
         let svc = make_service();
         create_group(&svc, "app");
         let start = make_request(
@@ -691,7 +770,33 @@ mod tests {
         let req = make_request("ListLogGroupsForQuery", json!({"queryId": qid}));
         let resp = svc.list_log_groups_for_query(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert!(body["logGroupIdentifiers"].is_array());
+        let ids = body["logGroupIdentifiers"].as_array().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].as_str().unwrap(), "app");
+    }
+
+    #[test]
+    fn list_log_groups_for_query_returns_array_form_groups() {
+        let svc = make_service();
+        let start = make_request(
+            "StartQuery",
+            json!({
+                "logGroupIdentifiers": [
+                    "arn:aws:logs:us-east-1:123456789012:log-group:a:*",
+                    "arn:aws:logs:us-east-1:123456789012:log-group:b:*"
+                ],
+                "startTime": 0,
+                "endTime": 0,
+                "queryString": "fields @timestamp"
+            }),
+        );
+        let resp = svc.start_query(&start).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let qid = body["queryId"].as_str().unwrap().to_string();
+        let req = make_request("ListLogGroupsForQuery", json!({"queryId": qid}));
+        let resp = svc.list_log_groups_for_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["logGroupIdentifiers"].as_array().unwrap().len(), 2);
     }
 
     #[test]

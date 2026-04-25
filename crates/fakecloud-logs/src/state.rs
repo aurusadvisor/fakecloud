@@ -217,6 +217,12 @@ pub struct Destination {
 pub struct QueryInfo {
     pub query_id: String,
     pub log_group_name: String,
+    /// Every log group / identifier referenced by this query, used by
+    /// `ListLogGroupsForQuery`. Always includes `log_group_name` plus any
+    /// names from `logGroupNames` / identifiers from `logGroupIdentifiers`
+    /// passed at start time.
+    #[serde(default)]
+    pub log_group_identifiers: Vec<String>,
     pub query_string: String,
     pub start_time: i64,
     pub end_time: i64,

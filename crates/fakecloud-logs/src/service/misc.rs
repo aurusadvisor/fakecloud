@@ -572,6 +572,24 @@ impl LogsService {
             0,
             1024,
         )?;
+        let arr = body["logGroupIdentifiers"].as_array().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "logGroupIdentifiers must be an array of strings",
+            )
+        })?;
+        let mut identifiers: Vec<String> = Vec::with_capacity(arr.len());
+        for v in arr {
+            let s = v.as_str().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupIdentifiers entries must be strings",
+                )
+            })?;
+            identifiers.push(s.to_string());
+        }
         let session_id = uuid::Uuid::new_v4().to_string();
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -579,7 +597,7 @@ impl LogsService {
                 "responseStream": {
                     "sessionStart": {
                         "sessionId": session_id,
-                        "logGroupIdentifiers": [],
+                        "logGroupIdentifiers": identifiers,
                     }
                 }
             }))
@@ -712,7 +730,7 @@ mod tests {
     // ---- Misc operations ----
 
     #[test]
-    fn get_log_group_fields_returns_stub() {
+    fn get_log_group_fields_returns_synthetic_fields_when_no_events() {
         let svc = make_service();
         create_group(&svc, "fields-group");
 
@@ -722,7 +740,44 @@ mod tests {
         );
         let resp = svc.get_log_group_fields(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert_eq!(body["logGroupFields"].as_array().unwrap().len(), 2);
+        let fields = body["logGroupFields"].as_array().unwrap();
+        assert_eq!(fields.len(), 3);
+        let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"@timestamp"));
+        assert!(names.contains(&"@message"));
+        assert!(names.contains(&"@logStream"));
+    }
+
+    #[test]
+    fn get_log_group_fields_extracts_top_level_keys_from_json_events() {
+        let svc = make_service();
+        create_group(&svc, "json-group");
+        create_stream(&svc, "json-group", "s1");
+        put_events(
+            &svc,
+            "json-group",
+            "s1",
+            &[
+                r#"{"level":"INFO","msg":"hello","userId":"u1"}"#,
+                r#"{"level":"ERROR","msg":"bad","trace":"…"}"#,
+            ],
+        );
+
+        let req = make_request("GetLogGroupFields", json!({ "logGroupName": "json-group" }));
+        let resp = svc.get_log_group_fields(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let fields = body["logGroupFields"].as_array().unwrap();
+        let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"level"));
+        assert!(names.contains(&"msg"));
+        assert!(names.contains(&"userId"));
+        assert!(names.contains(&"trace"));
+        // userId only in first event, trace only in second -> 50% each.
+        let user_id = fields
+            .iter()
+            .find(|f| f["name"].as_str().unwrap() == "userId")
+            .unwrap();
+        assert_eq!(user_id["percent"].as_i64().unwrap(), 50);
     }
 
     #[test]
@@ -1036,15 +1091,16 @@ mod tests {
     }
 
     #[test]
-    fn list_log_groups_for_query_returns_empty() {
+    fn list_log_groups_for_query_unknown_query_errors() {
         let svc = make_service();
         let req = make_request(
             "ListLogGroupsForQuery",
             json!({ "queryId": "some-query-id" }),
         );
-        let resp = svc.list_log_groups_for_query(&req).unwrap();
-        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert!(body["logGroupIdentifiers"].as_array().unwrap().is_empty());
+        match svc.list_log_groups_for_query(&req) {
+            Err(e) => assert_eq!(e.code(), "ResourceNotFoundException"),
+            Ok(_) => panic!("expected ResourceNotFoundException"),
+        }
     }
 
     #[test]

@@ -459,7 +459,7 @@ fn resolve_log_group_name(
 }
 
 /// Extract log group name from ARN like "arn:aws:logs:region:account:log-group:name:*"
-fn extract_log_group_from_arn(arn: &str) -> Option<String> {
+pub(crate) fn extract_log_group_from_arn(arn: &str) -> Option<String> {
     // arn:aws:logs:region:account:log-group:name:*
     let parts: Vec<&str> = arn.splitn(7, ':').collect();
     if parts.len() >= 7 && parts[5] == "log-group" {
