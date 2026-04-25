@@ -468,6 +468,40 @@ fn task_definition_to_json(td: &TaskDefinition) -> Value {
     Value::Object(map)
 }
 
+/// Resolve a service ARN tail to its storage key in `state.services`.
+/// Long-form ARNs carry `cluster/service` directly; short-form
+/// (pre-Nov-2018, still emitted when `serviceLongArnFormat=disabled`)
+/// only carry the service name, so we scan for any cluster whose stored
+/// key ends with `/<name>`.
+fn resolve_service_key(state: &EcsState, tail: &str) -> Option<String> {
+    if tail.contains('/') {
+        return state.services.contains_key(tail).then(|| tail.to_string());
+    }
+    let suffix = format!("/{tail}");
+    state
+        .services
+        .keys()
+        .find(|k| k.ends_with(&suffix))
+        .cloned()
+}
+
+/// Same idea for container instances. Storage keys are
+/// `cluster/instance-id`; short ARN tails are just `instance-id`.
+fn resolve_container_instance_key(state: &EcsState, tail: &str) -> Option<String> {
+    if tail.contains('/') {
+        return state
+            .container_instances
+            .contains_key(tail)
+            .then(|| tail.to_string());
+    }
+    let suffix = format!("/{tail}");
+    state
+        .container_instances
+        .keys()
+        .find(|k| k.ends_with(&suffix))
+        .cloned()
+}
+
 /// Decode an `arn:aws:ecs:<region>:<account>:<type>/<name>[:<rev>]` ARN
 /// into `(account, resource_type, tail)`. For task definitions `tail` is
 /// `family:revision`; for clusters it's `cluster_name`.
@@ -1217,9 +1251,46 @@ impl EcsService {
                     .ok_or_else(|| resource_not_found(&arn))?;
                 merge_tags(&mut td.tags, tags);
             }
+            "service" => {
+                let key =
+                    resolve_service_key(state, &tail).ok_or_else(|| resource_not_found(&arn))?;
+                let svc = state.services.get_mut(&key).expect("resolved key exists");
+                merge_tags(&mut svc.tags, tags);
+            }
+            "task" => {
+                let task_id = tail.rsplit('/').next().unwrap_or(&tail).to_string();
+                let task = state
+                    .tasks
+                    .get_mut(&task_id)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                merge_tags(&mut task.tags, tags);
+            }
+            "task-set" => {
+                let ts = state
+                    .task_sets
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                merge_tags(&mut ts.tags, tags);
+            }
+            "container-instance" => {
+                let key = resolve_container_instance_key(state, &tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                let ci = state
+                    .container_instances
+                    .get_mut(&key)
+                    .expect("resolved key exists");
+                merge_tags(&mut ci.tags, tags);
+            }
+            "capacity-provider" => {
+                let cp = state
+                    .capacity_providers
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                merge_tags(&mut cp.tags, tags);
+            }
             other => {
                 return Err(invalid_parameter(format!(
-                    "Tagging not yet supported for resource type: {other}"
+                    "Unknown ECS resource type: {other}"
                 )));
             }
         }
@@ -1261,9 +1332,46 @@ impl EcsService {
                     .ok_or_else(|| resource_not_found(&arn))?;
                 td.tags.retain(|t| !keys.contains(&t.key));
             }
+            "service" => {
+                let key =
+                    resolve_service_key(state, &tail).ok_or_else(|| resource_not_found(&arn))?;
+                let svc = state.services.get_mut(&key).expect("resolved key exists");
+                svc.tags.retain(|t| !keys.contains(&t.key));
+            }
+            "task" => {
+                let task_id = tail.rsplit('/').next().unwrap_or(&tail).to_string();
+                let task = state
+                    .tasks
+                    .get_mut(&task_id)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                task.tags.retain(|t| !keys.contains(&t.key));
+            }
+            "task-set" => {
+                let ts = state
+                    .task_sets
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                ts.tags.retain(|t| !keys.contains(&t.key));
+            }
+            "container-instance" => {
+                let key = resolve_container_instance_key(state, &tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                let ci = state
+                    .container_instances
+                    .get_mut(&key)
+                    .expect("resolved key exists");
+                ci.tags.retain(|t| !keys.contains(&t.key));
+            }
+            "capacity-provider" => {
+                let cp = state
+                    .capacity_providers
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                cp.tags.retain(|t| !keys.contains(&t.key));
+            }
             other => {
                 return Err(invalid_parameter(format!(
-                    "Tagging not yet supported for resource type: {other}"
+                    "Unknown ECS resource type: {other}"
                 )));
             }
         }
@@ -1296,9 +1404,45 @@ impl EcsService {
                     .map(|td| td.tags.clone())
                     .ok_or_else(|| resource_not_found(&arn))?
             }
+            "service" => {
+                let key =
+                    resolve_service_key(state, &tail).ok_or_else(|| resource_not_found(&arn))?;
+                state
+                    .services
+                    .get(&key)
+                    .map(|s| s.tags.clone())
+                    .expect("resolved key exists")
+            }
+            "task" => {
+                let task_id = tail.rsplit('/').next().unwrap_or(&tail).to_string();
+                state
+                    .tasks
+                    .get(&task_id)
+                    .map(|t| t.tags.clone())
+                    .ok_or_else(|| resource_not_found(&arn))?
+            }
+            "task-set" => state
+                .task_sets
+                .get(&tail)
+                .map(|t| t.tags.clone())
+                .ok_or_else(|| resource_not_found(&arn))?,
+            "container-instance" => {
+                let key = resolve_container_instance_key(state, &tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                state
+                    .container_instances
+                    .get(&key)
+                    .map(|c| c.tags.clone())
+                    .expect("resolved key exists")
+            }
+            "capacity-provider" => state
+                .capacity_providers
+                .get(&tail)
+                .map(|c| c.tags.clone())
+                .ok_or_else(|| resource_not_found(&arn))?,
             other => {
                 return Err(invalid_parameter(format!(
-                    "ListTagsForResource not yet supported for resource type: {other}"
+                    "Unknown ECS resource type: {other}"
                 )));
             }
         };
@@ -4080,6 +4224,92 @@ mod tests {
     #[test]
     fn decode_ecs_arn_rejects_non_ecs() {
         assert!(decode_ecs_arn("arn:aws:s3:::bucket").is_err());
+    }
+
+    #[test]
+    fn resolve_service_key_handles_short_and_long() {
+        let mut state = EcsState::new("123456789012", "us-east-1");
+        state.services.insert(
+            "default/api".to_string(),
+            Service {
+                service_name: "api".into(),
+                service_arn: "arn".into(),
+                cluster_name: "default".into(),
+                cluster_arn: "arn".into(),
+                task_definition_arn: "td-arn".into(),
+                family: "td".into(),
+                revision: 1,
+                desired_count: 0,
+                running_count: 0,
+                pending_count: 0,
+                launch_type: "FARGATE".into(),
+                status: "ACTIVE".into(),
+                scheduling_strategy: "REPLICA".into(),
+                deployment_controller: "ECS".into(),
+                minimum_healthy_percent: None,
+                maximum_percent: None,
+                circuit_breaker: None,
+                deployments: vec![],
+                load_balancers: vec![],
+                service_registries: vec![],
+                placement_constraints: vec![],
+                placement_strategy: vec![],
+                network_configuration: None,
+                tags: vec![],
+                created_at: chrono::Utc::now(),
+                created_by: None,
+                role_arn: None,
+            },
+        );
+        // Long-form: cluster/service.
+        assert_eq!(
+            resolve_service_key(&state, "default/api"),
+            Some("default/api".to_string())
+        );
+        // Short-form: bare service name resolves via ends_with scan.
+        assert_eq!(
+            resolve_service_key(&state, "api"),
+            Some("default/api".to_string())
+        );
+        // Unknown name returns None.
+        assert_eq!(resolve_service_key(&state, "nope"), None);
+    }
+
+    #[test]
+    fn resolve_container_instance_key_handles_short_and_long() {
+        let mut state = EcsState::new("123456789012", "us-east-1");
+        state.container_instances.insert(
+            "default/abc-123".to_string(),
+            ContainerInstance {
+                container_instance_arn: "arn".into(),
+                ec2_instance_id: Some("i-x".into()),
+                cluster_name: "default".into(),
+                cluster_arn: "arn".into(),
+                status: "ACTIVE".into(),
+                version: 0,
+                version_info: None,
+                agent_connected: true,
+                agent_update_status: None,
+                remaining_resources: vec![],
+                registered_resources: vec![],
+                running_tasks_count: 0,
+                pending_tasks_count: 0,
+                registered_at: chrono::Utc::now(),
+                attributes: vec![],
+                tags: vec![],
+                capacity_provider_name: None,
+                health_status: None,
+            },
+        );
+        assert_eq!(
+            resolve_container_instance_key(&state, "default/abc-123"),
+            Some("default/abc-123".to_string())
+        );
+        assert_eq!(
+            resolve_container_instance_key(&state, "abc-123"),
+            Some("default/abc-123".to_string())
+        );
+        assert_eq!(resolve_container_instance_key(&state, "nope"), None);
     }
 
     #[test]

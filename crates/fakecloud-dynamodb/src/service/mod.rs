@@ -304,7 +304,7 @@ impl AwsService for DynamoDbService {
             "PutResourcePolicy" => self.put_resource_policy(&req),
             "GetResourcePolicy" => self.get_resource_policy(&req),
             "DeleteResourcePolicy" => self.delete_resource_policy(&req),
-            // Stubs
+            // Synthetic defaults (no DAX endpoint discovery / no real per-account quotas tracked)
             "DescribeEndpoints" => self.describe_endpoints(&req),
             "DescribeLimits" => self.describe_limits(&req),
             // Backups

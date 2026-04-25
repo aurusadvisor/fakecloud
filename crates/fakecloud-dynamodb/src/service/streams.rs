@@ -8,7 +8,7 @@ use crate::state::KinesisDestination;
 use super::{get_table, get_table_mut, require_str, DynamoDbService};
 
 impl DynamoDbService {
-    // ── Stubs ──────────────────────────────────────────────────────────
+    // ── Synthetic defaults ─────────────────────────────────────────────
 
     pub(super) fn describe_endpoints(
         &self,
