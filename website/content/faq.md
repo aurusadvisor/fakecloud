@@ -20,11 +20,11 @@ Yes. LocalStack replaced its open-source Community Edition with a proprietary im
 
 ### How many AWS services does fakecloud support?
 
-23 services and 1,680 API operations at 100% conformance per implemented service today, with more on the roadmap. The explicit goal is 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Services land depth-first — a service is added when it passes the full Smithy-model test variants and cross-service wire-ups.
+26 services and 1,849 API operations at 100% conformance per implemented service today, with more on the roadmap. The explicit goal is 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Services land depth-first — a service is added when it passes the full Smithy-model test variants and cross-service wire-ups.
 
 ### Which AWS services are supported?
 
-S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager, SSM, CloudWatch Logs, CloudFormation, EventBridge, EventBridge Scheduler, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime.
+S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager, SSM, CloudWatch Logs, CloudFormation, EventBridge, EventBridge Scheduler, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, ECR, ECS, Elastic Load Balancing v2, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime.
 
 ### Does fakecloud execute Lambda code for real?
 
@@ -109,7 +109,7 @@ GitHub issues: [github.com/faiscadev/fakecloud/issues](https://github.com/faisca
     {"@type": "Question", "name": "What is fakecloud?", "acceptedAnswer": {"@type": "Answer", "text": "fakecloud is a free, open-source local AWS cloud emulator for integration testing and local development. It runs on a single port (4566), requires no account or auth token, and aims for 100% behavioral conformance with real AWS on every service it implements. AGPL-3.0 licensed."}},
     {"@type": "Question", "name": "Is fakecloud free?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. AGPL-3.0, free for commercial use. Using fakecloud as a dev/test dependency has zero AGPL implications for your application."}},
     {"@type": "Question", "name": "Is fakecloud a LocalStack alternative?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. LocalStack replaced its open-source Community Edition with a proprietary image in March 2026 that requires an account and auth token. fakecloud is a free, open-source replacement."}},
-    {"@type": "Question", "name": "How many AWS services does fakecloud support?", "acceptedAnswer": {"@type": "Answer", "text": "23 services and 1,680 API operations at 100% conformance per implemented service today, with more on the roadmap. The goal is 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations."}},
+    {"@type": "Question", "name": "How many AWS services does fakecloud support?", "acceptedAnswer": {"@type": "Answer", "text": "26 services and 1,849 API operations at 100% conformance per implemented service today, with more on the roadmap. The goal is 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations."}},
     {"@type": "Question", "name": "Which AWS services are supported?", "acceptedAnswer": {"@type": "Answer", "text": "S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager, SSM, CloudWatch Logs, CloudFormation, EventBridge, EventBridge Scheduler, SES, Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime."}},
     {"@type": "Question", "name": "Does fakecloud execute Lambda code for real?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. fakecloud pulls real AWS Lambda runtime containers and executes your handler against them. All 13 official runtimes are supported."}},
     {"@type": "Question", "name": "Does fakecloud run real databases for RDS?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. RDS emulation pulls real PostgreSQL, MySQL, and MariaDB Docker images and runs them as the DB instance."}},
