@@ -146,16 +146,21 @@ impl SnsDelivery for SnsDeliveryImpl {
         drop(accounts);
 
         // Wrap the message in SNS notification envelope (matches real AWS format)
+        let timestamp = Utc::now().to_rfc3339();
+        let canonical = crate::signing::canonical_notification(
+            message, &msg_id, subject, &timestamp, topic_arn,
+        );
+        let signature = crate::signing::sign(&canonical);
         let sns_envelope = serde_json::json!({
             "Type": "Notification",
             "MessageId": msg_id,
             "TopicArn": topic_arn,
             "Subject": subject.unwrap_or(""),
             "Message": message,
-            "Timestamp": Utc::now().to_rfc3339(),
+            "Timestamp": timestamp,
             "SignatureVersion": "1",
-            "Signature": "FAKE_SIGNATURE",
-            "SigningCertURL": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem",
+            "Signature": signature,
+            "SigningCertURL": crate::signing::cert_url(&endpoint),
             "UnsubscribeURL": format!("{}/?Action=Unsubscribe&SubscriptionArn={}", endpoint, topic_arn),
         });
         let envelope_str = sns_envelope.to_string();

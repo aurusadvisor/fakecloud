@@ -3307,6 +3307,15 @@ pub(crate) struct SnsLambdaEventInput<'a> {
 /// Build an SNS Lambda event payload (matches real AWS format).
 /// Used by both direct Publish and cross-service delivery.
 pub(crate) fn build_sns_lambda_event(input: &SnsLambdaEventInput<'_>) -> String {
+    let timestamp = input.timestamp.to_rfc3339();
+    let canonical = crate::signing::canonical_notification(
+        input.message,
+        input.message_id,
+        input.subject,
+        &timestamp,
+        input.topic_arn,
+    );
+    let signature = crate::signing::sign(&canonical);
     let sns_event = serde_json::json!({
         "Records": [{
             "EventVersion": "1.0",
@@ -3314,9 +3323,9 @@ pub(crate) fn build_sns_lambda_event(input: &SnsLambdaEventInput<'_>) -> String 
             "EventSource": "aws:sns",
             "Sns": {
                 "SignatureVersion": "1",
-                "Timestamp": input.timestamp.to_rfc3339(),
-                "Signature": "FAKE_SIGNATURE",
-                "SigningCertUrl": "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem",
+                "Timestamp": timestamp,
+                "Signature": signature,
+                "SigningCertUrl": crate::signing::cert_url(input.endpoint),
                 "MessageId": input.message_id,
                 "Message": input.message,
                 "MessageAttributes": input.message_attributes,
@@ -3354,21 +3363,24 @@ fn build_sns_envelope(
         map.insert("Subject".to_string(), Value::String(subj.clone()));
     }
     map.insert("Message".to_string(), Value::String(message.to_string()));
-    map.insert(
-        "Timestamp".to_string(),
-        Value::String(Utc::now().to_rfc3339()),
+    let timestamp = Utc::now().to_rfc3339();
+    let canonical = crate::signing::canonical_notification(
+        message,
+        message_id,
+        subject.as_deref(),
+        &timestamp,
+        topic_arn,
     );
+    let signature = crate::signing::sign(&canonical);
+    map.insert("Timestamp".to_string(), Value::String(timestamp));
     map.insert(
         "SignatureVersion".to_string(),
         Value::String("1".to_string()),
     );
-    map.insert(
-        "Signature".to_string(),
-        Value::String("FAKE_SIGNATURE".to_string()),
-    );
+    map.insert("Signature".to_string(), Value::String(signature));
     map.insert(
         "SigningCertURL".to_string(),
-        Value::String("https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem".to_string()),
+        Value::String(crate::signing::cert_url(endpoint)),
     );
     map.insert(
         "UnsubscribeURL".to_string(),
