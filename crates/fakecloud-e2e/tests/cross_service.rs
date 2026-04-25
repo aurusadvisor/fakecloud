@@ -549,21 +549,26 @@ async fn sqs_lambda_event_source_mapping() {
 
     // Poll for the post-invoke `aws:sqs` record rather than a fixed
     // sleep — Docker container startup can take >2s in CI and would
-    // race the assertion below.
-    let invocations = loop {
-        let invs = get_lambda_invocations(server.endpoint()).await;
-        let saw_sqs = invs["invocations"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .any(|inv| inv["source"].as_str() == Some("aws:sqs"))
-            })
-            .unwrap_or(false);
-        if saw_sqs {
-            break invs;
+    // race the assertion below. Bound the wait so a stuck poller fails
+    // the test instead of hanging the whole CI job.
+    let invocations = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let invs = get_lambda_invocations(server.endpoint()).await;
+            let saw_sqs = invs["invocations"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .any(|inv| inv["source"].as_str() == Some("aws:sqs"))
+                })
+                .unwrap_or(false);
+            if saw_sqs {
+                break invs;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    };
+    })
+    .await
+    .expect("timed out waiting for Lambda invocation");
     let inv_list = invocations["invocations"].as_array().unwrap();
     assert!(
         !inv_list.is_empty(),
