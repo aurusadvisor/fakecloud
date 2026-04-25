@@ -52,7 +52,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
-| S3                     | 107 | Versioning, lifecycle, notifications, multipart, replication, website  |
+| S3                     | 107 | Versioning, lifecycle, notifications, multipart, replication, website, **real SSE-KMS encrypt/decrypt** |
 | SQS                    |  23 | FIFO, DLQs, long polling, batch, **real KMS encrypt/decrypt on `KmsMasterKeyId` queues** |
 | SNS                    |  42 | Fan-out to SQS/Lambda/HTTP, filter policies, **KMS audit-trail on `KmsMasterKeyId` topics** |
 | EventBridge            |  57 | Pattern matching, schedules, archives, replay, API destinations        |
@@ -61,7 +61,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | DynamoDB               |  57 | Transactions, PartiQL, backups, global tables, streams, **KMS audit-trail on SSE-KMS tables** |
 | IAM                    | 176 | Users, roles, policies, groups, OIDC/SAML, **PassRole trust enforcement** |
 | STS                    |  11 | AssumeRole, session tokens, federation                                 |
-| SSM                    | 146 | Parameters, documents, commands, maintenance, patch baselines          |
+| SSM                    | 146 | Parameters, documents, commands, maintenance, patch baselines, **SecureString -> real KMS encrypt/decrypt** |
 | Secrets Manager        |  23 | Versioning, rotation via Lambda, replication, **real KMS encrypt/decrypt** |
 | CloudWatch Logs        | 113 | Groups, streams, subscription filters, query language                  |
 | KMS                    |  53 | Encryption, aliases, grants, real ECDH, key import, **cross-service hook** |
