@@ -24,11 +24,10 @@ pub fn spawn_prober(state: SharedElbv2State) {
         return;
     }
     tokio::spawn(async move {
-        let client = match Client::builder()
-            .danger_accept_invalid_certs(true)
-            .timeout(Duration::from_secs(30))
-            .build()
-        {
+        // No client-level timeout: each probe wraps the request in a
+        // `tokio::time::timeout` keyed off the target group's
+        // `HealthCheckTimeoutSeconds` so that knob is authoritative.
+        let client = match Client::builder().danger_accept_invalid_certs(true).build() {
             Ok(c) => c,
             Err(e) => {
                 debug!("ELBv2 prober: failed to build HTTP client: {e}");
@@ -144,10 +143,13 @@ fn build_job(
         .or(tg.protocol.as_deref())
         .unwrap_or("HTTP")
         .to_uppercase();
-    let port = match tg.health_check_port.as_deref() {
+    let port: i32 = match tg.health_check_port.as_deref() {
         Some("traffic-port") | None => target.port?,
         Some(s) => s.parse().ok()?,
     };
+    if !(1..=65535).contains(&port) {
+        return None;
+    }
     let path = tg
         .health_check_path
         .clone()
@@ -215,14 +217,15 @@ async fn probe(client: &Client, job: &ProbeJob) -> bool {
                 _ => false,
             }
         }
-        "TCP" | "TLS" => matches!(
-            timeout(
-                probe_timeout,
-                TcpStream::connect((host.as_str(), job.port as u16))
+        "TCP" | "TLS" => {
+            let Ok(port) = u16::try_from(job.port) else {
+                return false;
+            };
+            matches!(
+                timeout(probe_timeout, TcpStream::connect((host.as_str(), port))).await,
+                Ok(Ok(_))
             )
-            .await,
-            Ok(Ok(_))
-        ),
+        }
         // UDP / GENEVE / unknown — AWS marks UDP healthy without active probing
         _ => true,
     }
