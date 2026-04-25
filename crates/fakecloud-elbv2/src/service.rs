@@ -2630,8 +2630,10 @@ mod tests {
     #[tokio::test]
     async fn unimplemented_action_errors() {
         let svc = svc();
+        // Use a name that is not in the AWS Smithy model so this test
+        // remains stable as new ops are implemented.
         let err = svc
-            .handle(req("CreateListener", &[]))
+            .handle(req("ThisActionDoesNotExist", &[]))
             .await
             .err()
             .expect("expected error");
