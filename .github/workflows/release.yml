@@ -178,6 +178,7 @@ jobs:
           publish fakecloud-scheduler      # depends on aws + core + persistence
           publish fakecloud-apigatewayv2   # depends on core only
           publish fakecloud-bedrock        # depends on aws + core
+          publish fakecloud-elbv2          # depends on aws + core + persistence
 
           # Layer 4: depend on layer 3 crates
           publish fakecloud-s3             # depends on kms
