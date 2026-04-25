@@ -1104,33 +1104,47 @@ impl LambdaService {
         // `Pattern` is missing or not a string is a hard error,
         // matching AWS. Doing this before `validate` keeps malformed
         // values from being silently dropped by the lossy serializer.
-        let filter_patterns: Vec<String> =
-            match body.get("FilterCriteria").and_then(|v| v.get("Filters")) {
-                None => Vec::new(),
-                Some(Value::Array(arr)) => {
-                    let mut out = Vec::with_capacity(arr.len());
-                    for f in arr {
-                        match f.get("Pattern") {
-                            Some(Value::String(s)) => out.push(s.clone()),
-                            _ => {
-                                return Err(AwsServiceError::aws_error(
-                                    StatusCode::BAD_REQUEST,
-                                    "InvalidParameterValueException",
-                                    "FilterCriteria.Filters[].Pattern must be a string",
-                                ));
+        // FilterCriteria itself must be an object (or absent) — non-
+        // object values would otherwise be silently dropped by
+        // `Value::get`, masking client bugs.
+        let filter_patterns: Vec<String> = match body.get("FilterCriteria") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Object(_)) => {
+                match body.get("FilterCriteria").and_then(|v| v.get("Filters")) {
+                    None => Vec::new(),
+                    Some(Value::Array(arr)) => {
+                        let mut out = Vec::with_capacity(arr.len());
+                        for f in arr {
+                            match f.get("Pattern") {
+                                Some(Value::String(s)) => out.push(s.clone()),
+                                _ => {
+                                    return Err(AwsServiceError::aws_error(
+                                        StatusCode::BAD_REQUEST,
+                                        "InvalidParameterValueException",
+                                        "FilterCriteria.Filters[].Pattern must be a string",
+                                    ));
+                                }
                             }
                         }
+                        out
                     }
-                    out
+                    Some(_) => {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterValueException",
+                            "FilterCriteria.Filters must be an array",
+                        ));
+                    }
                 }
-                Some(_) => {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidParameterValueException",
-                        "FilterCriteria.Filters must be an array",
-                    ));
-                }
-            };
+            }
+            Some(_) => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    "FilterCriteria must be an object",
+                ));
+            }
+        };
         // AWS rejects malformed FilterCriteria at create time.
         if let Err(err) = crate::filter::FilterSet::validate(filter_patterns.iter()) {
             return Err(AwsServiceError::aws_error(
