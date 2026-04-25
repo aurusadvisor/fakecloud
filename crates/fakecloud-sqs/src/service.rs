@@ -191,10 +191,16 @@ fn batch_failure(id: &str, code: &str, message: impl Into<String>) -> Value {
 /// enqueue the message, and return either a successful or failed response
 /// fragment. Returns `Err` only for errors that AWS signals at the
 /// *batch* level (missing MessageGroupId / dedup on FIFO queues).
+///
+/// `stored_body_override` lets the caller pre-encrypt the message body
+/// for SSE-KMS queues without losing the plaintext MD5 the response
+/// must return (AWS surfaces the plaintext MD5 even for encrypted
+/// queues).
 fn process_batch_send_entry(
     queue: &mut SqsQueue,
     entry: &Value,
     cfg: &BatchSendConfig,
+    stored_body_override: Option<String>,
 ) -> Result<BatchEntryOutcome, AwsServiceError> {
     let id = match entry["Id"].as_str() {
         Some(id) => id.to_string(),
@@ -291,7 +297,7 @@ fn process_batch_send_entry(
         message_id: uuid::Uuid::new_v4().to_string(),
         receipt_handle: None,
         md5_of_body: md5_hex(&message_body),
-        body: message_body,
+        body: stored_body_override.unwrap_or(message_body),
         sent_timestamp: cfg.now.timestamp_millis(),
         attributes: HashMap::new(),
         message_attributes,
@@ -399,18 +405,25 @@ impl SqsService {
     /// Encrypt an SQS message body via the configured KMS hook when the
     /// queue has `KmsMasterKeyId` set. Returns the plaintext unchanged
     /// when no hook is wired or the queue isn't encrypted.
+    ///
+    /// Fail-closed: if the hook errors (key denied, key not found), this
+    /// returns `Err` so SendMessage / SendMessageBatch abort with a 500
+    /// rather than silently storing plaintext on an "encrypted" queue.
+    /// Real AWS surfaces KMS errors back to the caller; fakecloud
+    /// matching that behavior is what makes tests catch broken key
+    /// policies before they hit prod.
     fn encrypt_message_body(
         &self,
         account_id: &str,
         queue_arn: &str,
         kms_key_id: Option<&str>,
         plaintext: &str,
-    ) -> String {
+    ) -> Result<String, AwsServiceError> {
         let Some(hook) = &self.kms_hook else {
-            return plaintext.to_string();
+            return Ok(plaintext.to_string());
         };
         let Some(key) = kms_key_id.filter(|k| !k.is_empty()) else {
-            return plaintext.to_string();
+            return Ok(plaintext.to_string());
         };
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("aws:sqs:arn".to_string(), queue_arn.to_string());
@@ -422,23 +435,46 @@ impl SqsService {
             "sqs.amazonaws.com",
             ctx,
         ) {
-            Ok(envelope) => envelope,
-            Err(_) => plaintext.to_string(),
+            Ok(envelope) => Ok(envelope),
+            Err(err) => {
+                tracing::warn!(queue = %queue_arn, error = %err, "SQS SSE-KMS encrypt failed");
+                Err(AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMS.InternalFailureException",
+                    format!("Failed to encrypt SQS message via KMS: {err}"),
+                ))
+            }
         }
     }
 
     /// Decrypt a stored SQS body via the KMS hook. Caller must gate this
     /// on the queue having `KmsMasterKeyId` set; opaque base64 ciphertext
     /// can't be detected by prefix.
-    fn decrypt_message_body(&self, account_id: &str, queue_arn: &str, ciphertext: &str) -> String {
+    ///
+    /// Fail-closed: a hook error here surfaces as 500
+    /// `KMS.InternalFailureException` so callers don't silently see the
+    /// raw ciphertext envelope when KMS access is broken.
+    fn decrypt_message_body(
+        &self,
+        account_id: &str,
+        queue_arn: &str,
+        ciphertext: &str,
+    ) -> Result<String, AwsServiceError> {
         let Some(hook) = &self.kms_hook else {
-            return ciphertext.to_string();
+            return Ok(ciphertext.to_string());
         };
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("aws:sqs:arn".to_string(), queue_arn.to_string());
         match hook.decrypt(account_id, ciphertext, "sqs.amazonaws.com", ctx) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-            Err(_) => ciphertext.to_string(),
+            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
+            Err(err) => {
+                tracing::warn!(queue = %queue_arn, error = %err, "SQS SSE-KMS decrypt failed");
+                Err(AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMS.InternalFailureException",
+                    format!("Failed to decrypt SQS message via KMS: {err}"),
+                ))
+            }
         }
     }
 
@@ -1679,7 +1715,7 @@ impl SqsService {
                 &queue.arn,
                 kms_key_id.as_deref(),
                 &message_body,
-            );
+            )?;
             let msg = SqsMessage {
                 message_id: uuid::Uuid::new_v4().to_string(),
                 receipt_handle: None,
@@ -2039,7 +2075,7 @@ impl SqsService {
         // copy we hand back.
         if kms_key_id.is_some() && self.kms_hook.is_some() {
             for msg in received.iter_mut() {
-                msg.body = self.decrypt_message_body(account_id, &queue_arn, &msg.body);
+                msg.body = self.decrypt_message_body(account_id, &queue_arn, &msg.body)?;
             }
         }
 
@@ -2487,8 +2523,37 @@ impl SqsService {
 
         let cfg = BatchSendConfig::from_queue(queue, now);
 
-        for entry in &entries {
-            match process_batch_send_entry(queue, entry, &cfg)? {
+        // SSE-KMS: pre-encrypt every entry's body before handing it to
+        // the per-entry helper. Encryption is queue-wide, so a KMS
+        // failure here aborts the whole batch (matches AWS behavior:
+        // when the queue's CMK is unavailable, no entry can succeed).
+        let kms_key_id = queue
+            .attributes
+            .get("KmsMasterKeyId")
+            .cloned()
+            .filter(|s| !s.is_empty());
+        let queue_arn = queue.arn.clone();
+        let mut stored_overrides: Vec<Option<String>> = Vec::with_capacity(entries.len());
+        if kms_key_id.is_some() && self.kms_hook.is_some() {
+            for entry in &entries {
+                if let Some(plaintext) = entry["MessageBody"].as_str() {
+                    let stored = self.encrypt_message_body(
+                        &req.account_id,
+                        &queue_arn,
+                        kms_key_id.as_deref(),
+                        plaintext,
+                    )?;
+                    stored_overrides.push(Some(stored));
+                } else {
+                    stored_overrides.push(None);
+                }
+            }
+        } else {
+            stored_overrides.resize(entries.len(), None);
+        }
+
+        for (entry, override_body) in entries.iter().zip(stored_overrides) {
+            match process_batch_send_entry(queue, entry, &cfg, override_body)? {
                 BatchEntryOutcome::Success(v) => successful.push(v),
                 BatchEntryOutcome::Failure(v) => failed.push(v),
             }

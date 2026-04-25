@@ -124,8 +124,15 @@ impl DynamoDbService {
         let key = kms_key_arn
             .filter(|k| !k.is_empty())
             .unwrap_or("aws/dynamodb");
+        // DynamoDB SSE-KMS uses the AWS-documented encryption context:
+        // {aws:dynamodb:tableArn: <arn>, aws:dynamodb:subscriberId: <account>}
+        // — see the AWS DynamoDB encryption-at-rest docs.
         let mut ctx = std::collections::HashMap::new();
-        ctx.insert("aws-crypto-public-key".to_string(), table_arn.to_string());
+        ctx.insert("aws:dynamodb:tableArn".to_string(), table_arn.to_string());
+        ctx.insert(
+            "aws:dynamodb:subscriberId".to_string(),
+            account_id.to_string(),
+        );
         let envelope = match hook.encrypt(
             account_id,
             &self.region,

@@ -66,10 +66,12 @@ impl SnsService {
         topic_arn: &str,
         kms_key_id: Option<&str>,
         message: &str,
-    ) {
-        let Some(hook) = &self.kms_hook else { return };
+    ) -> Result<(), AwsServiceError> {
+        let Some(hook) = &self.kms_hook else {
+            return Ok(());
+        };
         let Some(key) = kms_key_id.filter(|k| !k.is_empty()) else {
-            return;
+            return Ok(());
         };
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("aws:sns:arn".to_string(), topic_arn.to_string());
@@ -82,11 +84,28 @@ impl SnsService {
             ctx.clone(),
         ) {
             Ok(env) => env,
-            Err(_) => return,
+            Err(err) => {
+                tracing::warn!(topic = %topic_arn, error = %err, "SNS SSE-KMS encrypt failed");
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMS.InternalFailureException",
+                    format!("Failed to encrypt SNS message via KMS: {err}"),
+                ));
+            }
         };
         // Mirror the GenerateDataKey with the matching Decrypt the
-        // service would emit at fan-out time.
-        let _ = hook.decrypt(account_id, &envelope, "sns.amazonaws.com", ctx);
+        // service would emit at fan-out time. A decrypt failure here
+        // means the topic's CMK is unusable for delivery — also
+        // fail-closed so callers don't silently lose audit records.
+        if let Err(err) = hook.decrypt(account_id, &envelope, "sns.amazonaws.com", ctx) {
+            tracing::warn!(topic = %topic_arn, error = %err, "SNS SSE-KMS decrypt failed");
+            return Err(AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "KMS.InternalFailureException",
+                format!("Failed to decrypt SNS message via KMS: {err}"),
+            ));
+        }
+        Ok(())
     }
 
     /// Persist current state as a snapshot. Held across the
@@ -1186,7 +1205,7 @@ impl SnsService {
             .get("KmsMasterKeyId")
             .cloned()
             .filter(|s| !s.is_empty());
-        self.record_topic_kms_usage(&req.account_id, &topic_arn, kms_key_id.as_deref(), &message);
+        self.record_topic_kms_usage(&req.account_id, &topic_arn, kms_key_id.as_deref(), &message)?;
 
         let msg_id = uuid::Uuid::new_v4().to_string();
         state.published.push(PublishedMessage {
