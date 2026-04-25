@@ -1615,7 +1615,7 @@ fn number_from_dynamo(v: &Value) -> Option<f64> {
 }
 
 fn format_number(n: f64) -> String {
-    if n.fract() == 0.0 && n.is_finite() {
+    if n.fract() == 0.0 && n.is_finite() && (i64::MIN as f64..=i64::MAX as f64).contains(&n) {
         format!("{}", n as i64)
     } else {
         format!("{n}")
