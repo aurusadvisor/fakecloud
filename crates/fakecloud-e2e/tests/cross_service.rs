@@ -547,24 +547,43 @@ async fn sqs_lambda_event_source_mapping() {
         .await
         .unwrap();
 
-    // Wait for the poller to pick it up
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    // Check that Lambda was invoked
-    let invocations = get_lambda_invocations(server.endpoint()).await;
+    // Poll for the post-invoke `aws:sqs` record rather than a fixed
+    // sleep — Docker container startup can take >2s in CI and would
+    // race the assertion below.
+    let invocations = loop {
+        let invs = get_lambda_invocations(server.endpoint()).await;
+        let saw_sqs = invs["invocations"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .any(|inv| inv["source"].as_str() == Some("aws:sqs"))
+            })
+            .unwrap_or(false);
+        if saw_sqs {
+            break invs;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    };
     let inv_list = invocations["invocations"].as_array().unwrap();
     assert!(
         !inv_list.is_empty(),
         "expected at least one Lambda invocation"
     );
 
-    // Verify the invocation payload contains the SQS message
-    let inv = &inv_list[inv_list.len() - 1];
+    // Verify the invocation payload contains the SQS message. Find the
+    // `aws:sqs`-shaped invocation explicitly: the LambdaDelivery adapter
+    // also records an `aws:lambda:delivery` entry at the start of every
+    // invoke, so under slow Docker startup the last entry can be the
+    // delivery record rather than the post-invoke poller record.
+    let inv = inv_list
+        .iter()
+        .rev()
+        .find(|inv| inv["source"].as_str() == Some("aws:sqs"))
+        .expect("expected an aws:sqs-shaped Lambda invocation payload");
     assert!(inv["functionArn"]
         .as_str()
         .unwrap()
         .contains("sqs-processor"));
-    assert_eq!(inv["source"], "aws:sqs");
     let payload: serde_json::Value =
         serde_json::from_str(inv["payload"].as_str().unwrap()).unwrap();
     assert_eq!(payload["Records"][0]["body"], r#"{"order_id": "12345"}"#);
