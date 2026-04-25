@@ -1379,8 +1379,10 @@ fn invoke_dynamodb_delete_item(
     Ok(json!({}))
 }
 
-/// Update an item in DynamoDB via direct state access.
-/// Simplified: merges Key+ExpressionAttributeValues into the existing item.
+/// Update an item in DynamoDB via direct state access. Honors UpdateExpression
+/// SET (with `=`, `+`, `-`, `if_not_exists`), REMOVE, ADD (numeric), and
+/// DELETE (set elements). Creates the item from `Key` plus the expression
+/// when no matching item exists, mirroring DynamoDB upsert semantics.
 fn invoke_dynamodb_update_item(
     input: &Value,
     dynamodb_state: &Option<SharedDynamoDbState>,
@@ -1458,40 +1460,292 @@ fn apply_update_expression(
     attr_values: &serde_json::Map<String, Value>,
     attr_names: &serde_json::Map<String, Value>,
 ) {
-    // Parse "SET #name1 = :val1, #name2 = :val2" or "SET field = :val"
-    // DynamoDB keywords are case-insensitive
-    let trimmed = expr.trim();
-    let set_part = if trimmed.len() >= 4 && trimmed[..4].eq_ignore_ascii_case("SET ") {
-        &trimmed[4..]
+    // DynamoDB UpdateExpression has up to four clauses: SET, REMOVE, ADD, DELETE.
+    // The clauses are separated by whitespace; we tokenize by walking the string
+    // and switching mode whenever we hit a keyword, then split the body of each
+    // clause on commas.
+    let clauses = split_update_clauses(expr);
+    for (clause, body) in clauses {
+        match clause {
+            UpdateClause::Set => apply_set(item, &body, attr_values, attr_names),
+            UpdateClause::Remove => apply_remove(item, &body, attr_names),
+            UpdateClause::Add => apply_add(item, &body, attr_values, attr_names),
+            UpdateClause::Delete => apply_delete(item, &body, attr_values, attr_names),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UpdateClause {
+    Set,
+    Remove,
+    Add,
+    Delete,
+}
+
+fn split_update_clauses(expr: &str) -> Vec<(UpdateClause, String)> {
+    let mut out = Vec::new();
+    let mut current: Option<UpdateClause> = None;
+    let mut buf = String::new();
+    for token in expr.split_whitespace() {
+        let upper = token.to_ascii_uppercase();
+        let next_clause = match upper.as_str() {
+            "SET" => Some(UpdateClause::Set),
+            "REMOVE" => Some(UpdateClause::Remove),
+            "ADD" => Some(UpdateClause::Add),
+            "DELETE" => Some(UpdateClause::Delete),
+            _ => None,
+        };
+        if let Some(nc) = next_clause {
+            if let Some(prev) = current.take() {
+                out.push((prev, buf.trim().to_string()));
+                buf.clear();
+            }
+            current = Some(nc);
+        } else if current.is_some() {
+            if !buf.is_empty() {
+                buf.push(' ');
+            }
+            buf.push_str(token);
+        }
+    }
+    if let Some(c) = current {
+        out.push((c, buf.trim().to_string()));
+    }
+    out
+}
+
+fn resolve_attr_name(token: &str, attr_names: &serde_json::Map<String, Value>) -> String {
+    if token.starts_with('#') {
+        attr_names
+            .get(token)
+            .and_then(|v| v.as_str())
+            .unwrap_or(token)
+            .to_string()
     } else {
-        trimmed
-    };
+        token.to_string()
+    }
+}
 
-    for assignment in set_part.split(',') {
-        let parts: Vec<&str> = assignment.splitn(2, '=').collect();
+fn apply_set(
+    item: &mut HashMap<String, Value>,
+    body: &str,
+    attr_values: &serde_json::Map<String, Value>,
+    attr_names: &serde_json::Map<String, Value>,
+) {
+    for assignment in split_top_commas(body) {
+        let Some((lhs, rhs)) = assignment.split_once('=') else {
+            continue;
+        };
+        let attr_name = resolve_attr_name(lhs.trim(), attr_names);
+        let value = evaluate_set_rhs(rhs.trim(), &attr_name, item, attr_values, attr_names);
+        if let Some(v) = value {
+            item.insert(attr_name, v);
+        }
+    }
+}
+
+fn evaluate_set_rhs(
+    rhs: &str,
+    attr_name: &str,
+    item: &HashMap<String, Value>,
+    attr_values: &serde_json::Map<String, Value>,
+    attr_names: &serde_json::Map<String, Value>,
+) -> Option<Value> {
+    // if_not_exists(path, :val)
+    if let Some(args) = rhs
+        .strip_prefix("if_not_exists(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let parts: Vec<&str> = args.splitn(2, ',').collect();
         if parts.len() == 2 {
-            let attr_ref = parts[0].trim();
-            let val_ref = parts[1].trim();
-
-            // Resolve attribute name (could be #alias or direct name)
-            let attr_name = if attr_ref.starts_with('#') {
-                attr_names
-                    .get(attr_ref)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(attr_ref)
-                    .to_string()
+            let path = resolve_attr_name(parts[0].trim(), attr_names);
+            if item.contains_key(&path) {
+                return item.get(&path).cloned();
+            }
+            return resolve_value(parts[1].trim(), attr_values);
+        }
+        return None;
+    }
+    // path + :inc / path - :dec — DynamoDB stores numbers as {"N":"<str>"}.
+    for op in ['+', '-'] {
+        if let Some((left, right)) = split_top_op(rhs, op) {
+            let left = left.trim();
+            let right = right.trim();
+            let left_val = if left.starts_with(':') {
+                resolve_value(left, attr_values)
             } else {
-                attr_ref.to_string()
+                let name = resolve_attr_name(left, attr_names);
+                item.get(&name).cloned()
             };
+            let right_val = if right.starts_with(':') {
+                resolve_value(right, attr_values)
+            } else {
+                let name = resolve_attr_name(right, attr_names);
+                item.get(&name).cloned()
+            };
+            return arithmetic(left_val.as_ref(), op, right_val.as_ref());
+        }
+    }
+    // bare value or attribute reference
+    if rhs.starts_with(':') {
+        return resolve_value(rhs, attr_values);
+    }
+    if rhs.starts_with('#') {
+        let _ = attr_name;
+        let name = resolve_attr_name(rhs, attr_names);
+        return item.get(&name).cloned();
+    }
+    None
+}
 
-            // Resolve value
-            if val_ref.starts_with(':') {
-                if let Some(val) = attr_values.get(val_ref) {
-                    item.insert(attr_name, val.clone());
+fn arithmetic(left: Option<&Value>, op: char, right: Option<&Value>) -> Option<Value> {
+    let lf = number_from_dynamo(left?)?;
+    let rf = number_from_dynamo(right?)?;
+    let out = match op {
+        '+' => lf + rf,
+        '-' => lf - rf,
+        _ => return None,
+    };
+    Some(json!({ "N": format_number(out) }))
+}
+
+fn number_from_dynamo(v: &Value) -> Option<f64> {
+    v.get("N")?.as_str()?.parse().ok()
+}
+
+fn format_number(n: f64) -> String {
+    if n.fract() == 0.0 && n.is_finite() {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
+fn resolve_value(token: &str, attr_values: &serde_json::Map<String, Value>) -> Option<Value> {
+    attr_values.get(token).cloned()
+}
+
+fn apply_remove(
+    item: &mut HashMap<String, Value>,
+    body: &str,
+    attr_names: &serde_json::Map<String, Value>,
+) {
+    for path in split_top_commas(body) {
+        let name = resolve_attr_name(path.trim(), attr_names);
+        item.remove(&name);
+    }
+}
+
+fn apply_add(
+    item: &mut HashMap<String, Value>,
+    body: &str,
+    attr_values: &serde_json::Map<String, Value>,
+    attr_names: &serde_json::Map<String, Value>,
+) {
+    // ADD #path :inc — numeric increment, with the value initialized to :inc when
+    // the attribute is absent. Set union (NS/SS/BS) is not implemented; ADD on a
+    // non-numeric attribute is a no-op.
+    for clause in split_top_commas(body) {
+        let mut parts = clause.split_whitespace();
+        let Some(path) = parts.next() else { continue };
+        let Some(value_ref) = parts.next() else {
+            continue;
+        };
+        let attr_name = resolve_attr_name(path, attr_names);
+        let Some(delta) = resolve_value(value_ref, attr_values) else {
+            continue;
+        };
+        let current = item.get(&attr_name).cloned();
+        let next = match (current.as_ref(), &delta) {
+            (None, _) => delta.clone(),
+            (Some(cur), _) => arithmetic(Some(cur), '+', Some(&delta)).unwrap_or(delta.clone()),
+        };
+        item.insert(attr_name, next);
+    }
+}
+
+fn apply_delete(
+    item: &mut HashMap<String, Value>,
+    body: &str,
+    attr_values: &serde_json::Map<String, Value>,
+    attr_names: &serde_json::Map<String, Value>,
+) {
+    // DELETE #path :elements — remove each element of the set value from the
+    // attribute's set. Drops the attribute when the resulting set is empty.
+    for clause in split_top_commas(body) {
+        let mut parts = clause.split_whitespace();
+        let Some(path) = parts.next() else { continue };
+        let Some(value_ref) = parts.next() else {
+            continue;
+        };
+        let attr_name = resolve_attr_name(path, attr_names);
+        let Some(elements) = resolve_value(value_ref, attr_values) else {
+            continue;
+        };
+        let Some(current) = item.get_mut(&attr_name) else {
+            continue;
+        };
+        for set_kind in ["SS", "NS", "BS"] {
+            if let (Some(cur_arr), Some(rem_arr)) = (
+                current.get_mut(set_kind).and_then(|v| v.as_array_mut()),
+                elements.get(set_kind).and_then(|v| v.as_array()),
+            ) {
+                let to_remove: std::collections::HashSet<String> = rem_arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                cur_arr.retain(|v| !v.as_str().is_some_and(|s| to_remove.contains(s)));
+                if cur_arr.is_empty() {
+                    item.remove(&attr_name);
                 }
+                break;
             }
         }
     }
+}
+
+fn split_top_commas(s: &str) -> Vec<String> {
+    // Splits on `,` while respecting paren depth (so commas inside
+    // `if_not_exists(a, :b)` don't split the assignment).
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut buf = String::new();
+    for c in s.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                buf.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                buf.push(c);
+            }
+            ',' if depth == 0 => {
+                out.push(std::mem::take(&mut buf).trim().to_string());
+            }
+            _ => buf.push(c),
+        }
+    }
+    if !buf.trim().is_empty() {
+        out.push(buf.trim().to_string());
+    }
+    out
+}
+
+fn split_top_op(s: &str, op: char) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            c if c == op && depth == 0 && i > 0 => {
+                return Some((&s[..i], &s[i + c.len_utf8()..]));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Convert an SQS queue URL to an ARN.
@@ -2523,6 +2777,140 @@ mod tests {
             &serde_json::Map::new(),
         );
         assert_eq!(item.get("field").unwrap(), &json!({"S": "x"}));
+    }
+
+    #[test]
+    fn apply_update_expression_set_arithmetic_increments_counter() {
+        let mut item: HashMap<String, Value> = HashMap::new();
+        item.insert("count".to_string(), json!({"N": "10"}));
+        let mut attr_values = serde_json::Map::new();
+        attr_values.insert(":inc".to_string(), json!({"N": "3"}));
+        apply_update_expression(
+            &mut item,
+            "SET count = count + :inc",
+            &attr_values,
+            &serde_json::Map::new(),
+        );
+        assert_eq!(item.get("count").unwrap(), &json!({"N": "13"}));
+    }
+
+    #[test]
+    fn apply_update_expression_set_decrement() {
+        let mut item: HashMap<String, Value> = HashMap::new();
+        item.insert("count".to_string(), json!({"N": "10"}));
+        let mut attr_values = serde_json::Map::new();
+        attr_values.insert(":d".to_string(), json!({"N": "4"}));
+        apply_update_expression(
+            &mut item,
+            "SET count = count - :d",
+            &attr_values,
+            &serde_json::Map::new(),
+        );
+        assert_eq!(item.get("count").unwrap(), &json!({"N": "6"}));
+    }
+
+    #[test]
+    fn apply_update_expression_remove_drops_attributes() {
+        let mut item: HashMap<String, Value> = HashMap::new();
+        item.insert("a".to_string(), json!({"S": "x"}));
+        item.insert("b".to_string(), json!({"S": "y"}));
+        item.insert("c".to_string(), json!({"S": "z"}));
+        apply_update_expression(
+            &mut item,
+            "REMOVE a, c",
+            &serde_json::Map::new(),
+            &serde_json::Map::new(),
+        );
+        assert!(!item.contains_key("a"));
+        assert!(item.contains_key("b"));
+        assert!(!item.contains_key("c"));
+    }
+
+    #[test]
+    fn apply_update_expression_add_increments_existing_or_initializes() {
+        // Existing attribute -> sum
+        let mut item: HashMap<String, Value> = HashMap::new();
+        item.insert("count".to_string(), json!({"N": "5"}));
+        let mut attr_values = serde_json::Map::new();
+        attr_values.insert(":inc".to_string(), json!({"N": "2"}));
+        apply_update_expression(
+            &mut item,
+            "ADD count :inc",
+            &attr_values,
+            &serde_json::Map::new(),
+        );
+        assert_eq!(item.get("count").unwrap(), &json!({"N": "7"}));
+
+        // Absent attribute -> initialized to value
+        let mut item2: HashMap<String, Value> = HashMap::new();
+        apply_update_expression(
+            &mut item2,
+            "ADD count :inc",
+            &attr_values,
+            &serde_json::Map::new(),
+        );
+        assert_eq!(item2.get("count").unwrap(), &json!({"N": "2"}));
+    }
+
+    #[test]
+    fn apply_update_expression_delete_removes_set_elements() {
+        let mut item: HashMap<String, Value> = HashMap::new();
+        item.insert("tags".to_string(), json!({"SS": ["a", "b", "c"]}));
+        let mut attr_values = serde_json::Map::new();
+        attr_values.insert(":rm".to_string(), json!({"SS": ["b"]}));
+        apply_update_expression(
+            &mut item,
+            "DELETE tags :rm",
+            &attr_values,
+            &serde_json::Map::new(),
+        );
+        assert_eq!(item.get("tags").unwrap(), &json!({"SS": ["a", "c"]}));
+    }
+
+    #[test]
+    fn apply_update_expression_if_not_exists_initializes_only_when_absent() {
+        // Absent -> initialize.
+        let mut item: HashMap<String, Value> = HashMap::new();
+        let mut attr_values = serde_json::Map::new();
+        attr_values.insert(":zero".to_string(), json!({"N": "0"}));
+        apply_update_expression(
+            &mut item,
+            "SET count = if_not_exists(count, :zero)",
+            &attr_values,
+            &serde_json::Map::new(),
+        );
+        assert_eq!(item.get("count").unwrap(), &json!({"N": "0"}));
+
+        // Present -> preserve existing.
+        let mut item2: HashMap<String, Value> = HashMap::new();
+        item2.insert("count".to_string(), json!({"N": "42"}));
+        apply_update_expression(
+            &mut item2,
+            "SET count = if_not_exists(count, :zero)",
+            &attr_values,
+            &serde_json::Map::new(),
+        );
+        assert_eq!(item2.get("count").unwrap(), &json!({"N": "42"}));
+    }
+
+    #[test]
+    fn apply_update_expression_combines_clauses() {
+        let mut item: HashMap<String, Value> = HashMap::new();
+        item.insert("a".to_string(), json!({"S": "old"}));
+        item.insert("b".to_string(), json!({"N": "1"}));
+        item.insert("c".to_string(), json!({"S": "drop"}));
+        let mut attr_values = serde_json::Map::new();
+        attr_values.insert(":new".to_string(), json!({"S": "new"}));
+        attr_values.insert(":one".to_string(), json!({"N": "1"}));
+        apply_update_expression(
+            &mut item,
+            "SET a = :new ADD b :one REMOVE c",
+            &attr_values,
+            &serde_json::Map::new(),
+        );
+        assert_eq!(item.get("a").unwrap(), &json!({"S": "new"}));
+        assert_eq!(item.get("b").unwrap(), &json!({"N": "2"}));
+        assert!(!item.contains_key("c"));
     }
 
     // ── DynamoDB invoke: error paths without delivery bus ────────────
