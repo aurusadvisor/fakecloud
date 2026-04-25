@@ -48,7 +48,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 
 ## Supported services
 
-26 services, 1,819 operations, 100% conformance per implemented service.
+26 services, 1,833 operations, 100% conformance per implemented service.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -77,7 +77,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | Bedrock Runtime        |  10 | InvokeModel, Converse, streaming, configurable responses, fault inject |
 | ECR                    |  58 | Full API — OCI v2 push/pull, lifecycle, scanning, registry, pull-through |
 | ECS                    |  60 | **Full API** — clusters, task definitions, real task execution, services + rolling deployments, container instances, capacity providers, task sets, ECS Exec |
-| Elastic Load Balancing v2 |  21 | ALB/NLB/GWLB CRUD: load balancers, **target groups + targets + health**, subnets, security groups, IP types, IPAM, account limits, SSL policies, attributes, tags |
+| Elastic Load Balancing v2 |  35 | ALB/NLB/GWLB CRUD: load balancers, target groups + targets + health, **listeners + rules + certificates**, attributes, SSL policies, tags |
 
 Per-service docs and feature matrices: [fakecloud.dev/docs/services](https://fakecloud.dev/docs/services).
 

@@ -7,7 +7,8 @@
 mod helpers;
 
 use aws_sdk_elasticloadbalancingv2::types::{
-    IpAddressType, LoadBalancerSchemeEnum, LoadBalancerTypeEnum, ProtocolEnum, Tag,
+    Action, ActionTypeEnum, Certificate, FixedResponseActionConfig, IpAddressType,
+    LoadBalancerSchemeEnum, LoadBalancerTypeEnum, ProtocolEnum, RuleCondition, Tag,
     TargetDescription, TargetGroupAttribute, TargetTypeEnum,
 };
 use fakecloud_conformance_macros::test_action;
@@ -548,4 +549,614 @@ async fn elbv2_describe_target_group_attributes() {
         .await
         .unwrap();
     assert!(!resp.attributes().is_empty());
+}
+
+// ── Batch 3: Listeners + Rules ──────────────────────────────────────
+
+async fn make_lb_and_tg(
+    server: &TestServer,
+) -> (aws_sdk_elasticloadbalancingv2::Client, String, String) {
+    let client = server.elbv2_client().await;
+    let lb = client
+        .create_load_balancer()
+        .name("confo-stack")
+        .send()
+        .await
+        .unwrap();
+    let lb_arn = lb
+        .load_balancers()
+        .first()
+        .unwrap()
+        .load_balancer_arn()
+        .unwrap()
+        .to_string();
+    let tg = client
+        .create_target_group()
+        .name("confo-stack-tg")
+        .protocol(ProtocolEnum::Http)
+        .port(80)
+        .send()
+        .await
+        .unwrap();
+    let tg_arn = tg
+        .target_groups()
+        .first()
+        .unwrap()
+        .target_group_arn()
+        .unwrap()
+        .to_string();
+    (client, lb_arn, tg_arn)
+}
+
+#[test_action("elasticloadbalancingv2", "CreateListener", checksum = "ad4f2eb9")]
+#[tokio::test]
+async fn elbv2_create_listener() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let resp = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .protocol(ProtocolEnum::Http)
+        .port(80)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.listeners().first().unwrap().port(), Some(80));
+}
+
+#[test_action("elasticloadbalancingv2", "DescribeListeners", checksum = "05130066")]
+#[tokio::test]
+async fn elbv2_describe_listeners() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .protocol(ProtocolEnum::Http)
+        .port(8080)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .describe_listeners()
+        .load_balancer_arn(&lb_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.listeners().len(), 1);
+}
+
+#[test_action("elasticloadbalancingv2", "ModifyListener", checksum = "7e814e05")]
+#[tokio::test]
+async fn elbv2_modify_listener() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let create = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(80)
+        .protocol(ProtocolEnum::Http)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = create.listeners().first().unwrap().listener_arn().unwrap();
+    let resp = client
+        .modify_listener()
+        .listener_arn(arn)
+        .port(8081)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.listeners().first().unwrap().port(), Some(8081));
+}
+
+#[test_action("elasticloadbalancingv2", "DeleteListener", checksum = "de5fd7c9")]
+#[tokio::test]
+async fn elbv2_delete_listener() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let create = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(80)
+        .protocol(ProtocolEnum::Http)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = create.listeners().first().unwrap().listener_arn().unwrap();
+    client
+        .delete_listener()
+        .listener_arn(arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "ModifyListenerAttributes",
+    checksum = "f838206c"
+)]
+#[tokio::test]
+async fn elbv2_modify_listener_attributes() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let create = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(80)
+        .protocol(ProtocolEnum::Http)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = create.listeners().first().unwrap().listener_arn().unwrap();
+    client
+        .modify_listener_attributes()
+        .listener_arn(arn)
+        .attributes(
+            aws_sdk_elasticloadbalancingv2::types::ListenerAttribute::builder()
+                .key("tcp.idle_timeout.seconds")
+                .value("350")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "DescribeListenerAttributes",
+    checksum = "3ab0c50b"
+)]
+#[tokio::test]
+async fn elbv2_describe_listener_attributes() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let create = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(80)
+        .protocol(ProtocolEnum::Http)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = create.listeners().first().unwrap().listener_arn().unwrap();
+    let _resp = client
+        .describe_listener_attributes()
+        .listener_arn(arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "AddListenerCertificates",
+    checksum = "83647a8c"
+)]
+#[tokio::test]
+async fn elbv2_add_listener_certificates() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let create = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(443)
+        .protocol(ProtocolEnum::Https)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = create.listeners().first().unwrap().listener_arn().unwrap();
+    client
+        .add_listener_certificates()
+        .listener_arn(arn)
+        .certificates(
+            Certificate::builder()
+                .certificate_arn("arn:aws:acm:us-east-1:123:certificate/abc")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "RemoveListenerCertificates",
+    checksum = "5f8d4fb1"
+)]
+#[tokio::test]
+async fn elbv2_remove_listener_certificates() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let create = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(443)
+        .protocol(ProtocolEnum::Https)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = create.listeners().first().unwrap().listener_arn().unwrap();
+    client
+        .add_listener_certificates()
+        .listener_arn(arn)
+        .certificates(
+            Certificate::builder()
+                .certificate_arn("arn:aws:acm:us-east-1:123:certificate/extra")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    client
+        .remove_listener_certificates()
+        .listener_arn(arn)
+        .certificates(
+            Certificate::builder()
+                .certificate_arn("arn:aws:acm:us-east-1:123:certificate/extra")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "DescribeListenerCertificates",
+    checksum = "c640a1d4"
+)]
+#[tokio::test]
+async fn elbv2_describe_listener_certificates() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let create = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(443)
+        .protocol(ProtocolEnum::Https)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = create.listeners().first().unwrap().listener_arn().unwrap();
+    let _ = client
+        .describe_listener_certificates()
+        .listener_arn(arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticloadbalancingv2", "CreateRule", checksum = "9ef2043e")]
+#[tokio::test]
+async fn elbv2_create_rule() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let listener = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(80)
+        .protocol(ProtocolEnum::Http)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let listener_arn = listener
+        .listeners()
+        .first()
+        .unwrap()
+        .listener_arn()
+        .unwrap();
+    let resp = client
+        .create_rule()
+        .listener_arn(listener_arn)
+        .priority(10)
+        .conditions(
+            RuleCondition::builder()
+                .field("path-pattern")
+                .values("/api/*")
+                .build(),
+        )
+        .actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::FixedResponse)
+                .fixed_response_config(
+                    FixedResponseActionConfig::builder()
+                        .status_code("200")
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.rules().first().unwrap().priority(), Some("10"));
+}
+
+#[test_action("elasticloadbalancingv2", "DescribeRules", checksum = "8a119620")]
+#[tokio::test]
+async fn elbv2_describe_rules() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let listener = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(80)
+        .protocol(ProtocolEnum::Http)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let listener_arn = listener
+        .listeners()
+        .first()
+        .unwrap()
+        .listener_arn()
+        .unwrap();
+    client
+        .create_rule()
+        .listener_arn(listener_arn)
+        .priority(20)
+        .conditions(
+            RuleCondition::builder()
+                .field("host-header")
+                .values("api.example.com")
+                .build(),
+        )
+        .actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::FixedResponse)
+                .fixed_response_config(
+                    FixedResponseActionConfig::builder()
+                        .status_code("404")
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .describe_rules()
+        .listener_arn(listener_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.rules().len(), 1);
+}
+
+#[test_action("elasticloadbalancingv2", "ModifyRule", checksum = "dc4ec5b1")]
+#[tokio::test]
+async fn elbv2_modify_rule() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let listener = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(80)
+        .protocol(ProtocolEnum::Http)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let listener_arn = listener
+        .listeners()
+        .first()
+        .unwrap()
+        .listener_arn()
+        .unwrap();
+    let rule = client
+        .create_rule()
+        .listener_arn(listener_arn)
+        .priority(30)
+        .conditions(
+            RuleCondition::builder()
+                .field("path-pattern")
+                .values("/v1/*")
+                .build(),
+        )
+        .actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let rule_arn = rule.rules().first().unwrap().rule_arn().unwrap();
+    client
+        .modify_rule()
+        .rule_arn(rule_arn)
+        .conditions(
+            RuleCondition::builder()
+                .field("path-pattern")
+                .values("/v2/*")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticloadbalancingv2", "DeleteRule", checksum = "dd15d3f9")]
+#[tokio::test]
+async fn elbv2_delete_rule() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let listener = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(80)
+        .protocol(ProtocolEnum::Http)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let listener_arn = listener
+        .listeners()
+        .first()
+        .unwrap()
+        .listener_arn()
+        .unwrap();
+    let rule = client
+        .create_rule()
+        .listener_arn(listener_arn)
+        .priority(40)
+        .conditions(
+            RuleCondition::builder()
+                .field("path-pattern")
+                .values("/del/*")
+                .build(),
+        )
+        .actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let rule_arn = rule.rules().first().unwrap().rule_arn().unwrap();
+    client
+        .delete_rule()
+        .rule_arn(rule_arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticloadbalancingv2", "SetRulePriorities", checksum = "f7ddaac0")]
+#[tokio::test]
+async fn elbv2_set_rule_priorities() {
+    let server = TestServer::start().await;
+    let (client, lb_arn, tg_arn) = make_lb_and_tg(&server).await;
+    let listener = client
+        .create_listener()
+        .load_balancer_arn(&lb_arn)
+        .port(80)
+        .protocol(ProtocolEnum::Http)
+        .default_actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let listener_arn = listener
+        .listeners()
+        .first()
+        .unwrap()
+        .listener_arn()
+        .unwrap();
+    let rule = client
+        .create_rule()
+        .listener_arn(listener_arn)
+        .priority(50)
+        .conditions(
+            RuleCondition::builder()
+                .field("path-pattern")
+                .values("/p/*")
+                .build(),
+        )
+        .actions(
+            Action::builder()
+                .r#type(ActionTypeEnum::Forward)
+                .target_group_arn(&tg_arn)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let rule_arn = rule.rules().first().unwrap().rule_arn().unwrap();
+    client
+        .set_rule_priorities()
+        .rule_priorities(
+            aws_sdk_elasticloadbalancingv2::types::RulePriorityPair::builder()
+                .rule_arn(rule_arn)
+                .priority(60)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
 }
