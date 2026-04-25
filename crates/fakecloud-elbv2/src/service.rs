@@ -200,6 +200,18 @@ fn parse_tags(req: &AwsRequest) -> Vec<Tag> {
     out
 }
 
+fn validate_ip_address_type(ipt: &str) -> Result<(), AwsServiceError> {
+    if !matches!(
+        ipt,
+        "ipv4" | "dualstack" | "dualstack-without-public-ipv4"
+    ) {
+        return Err(invalid_param(format!(
+            "IpAddressType must be one of ipv4|dualstack|dualstack-without-public-ipv4, got '{ipt}'"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_lb_name(name: &str) -> Result<(), AwsServiceError> {
     if name.is_empty() || name.len() > 32 {
         return Err(invalid_param(
@@ -438,6 +450,7 @@ impl Elbv2Service {
         }
         let ip_address_type =
             optional_query_param(req, "IpAddressType").unwrap_or_else(|| "ipv4".to_string());
+        validate_ip_address_type(&ip_address_type)?;
 
         let subnets_explicit = parse_member_list(req, "Subnets");
         let subnet_mappings = parse_subnet_mappings(req);
@@ -618,6 +631,9 @@ impl Elbv2Service {
         let subnets_explicit = parse_member_list(req, "Subnets");
         let mappings = parse_subnet_mappings(req);
         let new_ip_address_type = optional_query_param(req, "IpAddressType");
+        if let Some(ref ipt) = new_ip_address_type {
+            validate_ip_address_type(ipt)?;
+        }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let lb = st
@@ -711,14 +727,7 @@ impl Elbv2Service {
     fn set_ip_address_type(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let arn = required_query_param(req, "LoadBalancerArn")?;
         let ipt = required_query_param(req, "IpAddressType")?;
-        if !matches!(
-            ipt.as_str(),
-            "ipv4" | "dualstack" | "dualstack-without-public-ipv4"
-        ) {
-            return Err(invalid_param(format!(
-                "IpAddressType must be one of ipv4|dualstack|dualstack-without-public-ipv4, got '{ipt}'"
-            )));
-        }
+        validate_ip_address_type(&ipt)?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let lb = st
