@@ -48,7 +48,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 
 ## Supported services
 
-26 services, 1,849 operations, 100% conformance per implemented service.
+26 services, 1,924 operations, 100% conformance per implemented service.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -72,7 +72,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | RDS                    | 163 | Real Postgres, MySQL, MariaDB via Docker; lifecycle ops emit `aws.rds` EventBridge events |
 | ElastiCache            |  75 | Real Redis, Valkey via Docker                                          |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
-| API Gateway v2         |  28 | HTTP APIs, Lambda proxy, JWT/Lambda authorizers, CORS                  |
+| API Gateway v2         | 103 | HTTP APIs, routes, integrations, stages, deployments, authorizers, domains, models, VPC links, routing rules, developer portals, CORS, tags |
 | Bedrock                | 101 | Foundation models, guardrails, custom models, invocation/eval jobs    |
 | Bedrock Runtime        |  10 | InvokeModel, Converse, streaming, configurable responses, fault inject |
 | ECR                    |  58 | Full API — OCI v2 push/pull, lifecycle, scanning, registry, pull-through |
@@ -114,7 +114,7 @@ Full guides: [fakecloud.dev/docs/guides](https://fakecloud.dev/docs/guides).
 | SES inbound email   | Real receipt rule action execution                 | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) |
 | RDS                 | 163 operations, PostgreSQL/MySQL/MariaDB via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | ElastiCache         | 75 operations, Redis and Valkey via Docker         | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
-| API Gateway v2      | 28 operations, full HTTP API support               | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| API Gateway v2      | 103 operations — HTTP APIs + developer portals     | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | Bedrock             | 111 operations (control plane + runtime)           | Not available                                                                  |
 | ECR                 | 58 operations, real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/)              |
 | ECS                 | **60 operations — full API** incl. real task execution, services, task sets, capacity providers | [Paid only](https://docs.localstack.cloud/references/licensing/)               |

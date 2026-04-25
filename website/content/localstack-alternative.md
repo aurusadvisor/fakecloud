@@ -1,6 +1,6 @@
 +++
 title = "Free, open-source LocalStack alternative"
-description = "fakecloud is a free, open-source local AWS emulator: 26 services, 1,849 operations, 100% conformance, 6 test-assertion SDKs. No account, no token, no paid tier. Drop-in replacement for LocalStack Community."
+description = "fakecloud is a free, open-source local AWS emulator: 26 services, 1,924 operations, 100% conformance, 6 test-assertion SDKs. No account, no token, no paid tier. Drop-in replacement for LocalStack Community."
 template = "page.html"
 +++
 
@@ -24,7 +24,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 ## What fakecloud gives you
 
 - **26 AWS services.** S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager, SSM, CloudWatch Logs, CloudFormation, EventBridge, EventBridge Scheduler, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, ECR, ECS, Elastic Load Balancing v2, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime.
-- **1,849 API operations. 100% conformance** per implemented service, validated against AWS's own Smithy models on every commit (59,000+ generated test variants).
+- **1,924 API operations. 100% conformance** per implemented service, validated against AWS's own Smithy models on every commit (59,000+ generated test variants).
 - **Tested against upstream Terraform acceptance tests.** CI runs `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud, catching waiter and field-presence drift that pure SDK tests miss.
 - **Real Lambda execution.** 13 runtimes in Docker containers. Not a mock, not a stub. Node, Python, Java, Go, .NET, Ruby, custom runtimes.
 - **Real stateful services.** RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey. Your Lambda talking to RDS is talking to a real Postgres.
@@ -52,7 +52,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 | SES inbound email | Real receipt rule action execution | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) |
 | RDS | 163 ops, real PostgreSQL/MySQL/MariaDB via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | ElastiCache | 75 ops, real Redis/Valkey via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/) |
-| API Gateway v2 | 28 ops, HTTP APIs + JWT/Lambda authorizers | [Paid only](https://docs.localstack.cloud/references/licensing/) |
+| API Gateway v2 | 103 ops, HTTP APIs + developer portals + JWT/Lambda authorizers | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | Bedrock | 111 ops (control plane + runtime) | Not available |
 
 Performance numbers measured on Apple M1 via `time fakecloud`, `ps -o rss`, `ls -lh`. LocalStack numbers from a fresh `localstack start` on the same hardware.
