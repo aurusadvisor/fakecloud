@@ -54,3 +54,5 @@ fakecloud-testkit = { path = "../fakecloud-testkit", features = ["sdk-clients"] 
 tempfile = { workspace = true }
 sha2 = { workspace = true }
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+rsa = { workspace = true }
+x509-cert = { version = "0.2", features = ["pem"] }

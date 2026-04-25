@@ -2783,6 +2783,15 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/sns/cert.pem",
+            axum::routing::get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/x-pem-file")],
+                    fakecloud_sns::signing::cert_pem(),
+                )
+            }),
+        )
+        .route(
             "/_fakecloud/sns/messages",
             axum::routing::get({
                 let ss = sns_introspection_state;
