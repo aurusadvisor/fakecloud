@@ -78,31 +78,74 @@ fn push_part(out: &mut String, boundary: &str, content_type: &str, body: &str) {
 /// Quoted-printable for any non-ASCII body or HTML; 7bit for plain ASCII text.
 fn encode_body(body: &str) -> (String, &'static str) {
     if body.is_ascii() {
-        (body.replace('\n', "\r\n"), "7bit")
+        (normalize_crlf(body), "7bit")
     } else {
         (quoted_printable_encode(body), "quoted-printable")
     }
 }
 
+/// Normalize any mix of `\r\n`, `\r`, `\n` line endings to canonical `\r\n`
+/// without doubling existing CRLFs.
+fn normalize_crlf(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => {
+                out.push_str("\r\n");
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            b'\n' => {
+                out.push_str("\r\n");
+                i += 1;
+            }
+            b => {
+                out.push(b as char);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 fn quoted_printable_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut line_len = 0;
-    for byte in input.as_bytes() {
-        let needs_encoding = matches!(byte, 0..=31 | 61 | 127..=255) && *byte != b'\t';
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        // Hard line breaks: emit literal CRLF, not =0A / =0D. Collapse any
+        // mix of \r, \n, \r\n into a single CRLF.
+        if byte == b'\r' || byte == b'\n' {
+            out.push_str("\r\n");
+            line_len = 0;
+            if byte == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        let needs_encoding = matches!(byte, 0..=31 | 61 | 127..=255) && byte != b'\t';
         let chunk: String = if needs_encoding {
             format!("={:02X}", byte)
         } else {
-            (*byte as char).to_string()
+            (byte as char).to_string()
         };
+        // Soft line break before 76th char per RFC 2045 §6.7.
         if line_len + chunk.len() > 75 {
             out.push_str("=\r\n");
             line_len = 0;
         }
         out.push_str(&chunk);
         line_len += chunk.len();
-        if *byte == b'\n' {
-            line_len = 0;
-        }
+        i += 1;
     }
     out
 }
@@ -185,5 +228,27 @@ mod tests {
         assert!(mime.contains("Content-Transfer-Encoding: quoted-printable\r\n"));
         // 'é' is two bytes in UTF-8 (0xC3 0xA9), each must be percent-escaped.
         assert!(mime.contains("=C3=A9"));
+    }
+
+    #[test]
+    fn quoted_printable_emits_crlf_for_newlines_not_0a() {
+        let qp = quoted_printable_encode("café\nlatte");
+        assert!(qp.contains("=C3=A9\r\nlatte"));
+        assert!(!qp.contains("=0A"));
+    }
+
+    #[test]
+    fn quoted_printable_collapses_crlf_lf_cr_to_canonical_crlf() {
+        let qp = quoted_printable_encode("a\r\nb\nc\rdé");
+        assert_eq!(qp, "a\r\nb\r\nc\r\nd=C3=A9");
+    }
+
+    #[test]
+    fn normalize_crlf_does_not_double_existing_crlf() {
+        assert_eq!(normalize_crlf("a\r\nb"), "a\r\nb");
+        assert_eq!(normalize_crlf("a\nb"), "a\r\nb");
+        assert_eq!(normalize_crlf("a\rb"), "a\r\nb");
+        assert_eq!(normalize_crlf("a\r\n\r\nb"), "a\r\n\r\nb");
+        assert_eq!(normalize_crlf("a\n\nb"), "a\r\n\r\nb");
     }
 }
