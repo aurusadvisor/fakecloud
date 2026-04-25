@@ -1150,14 +1150,23 @@ async fn logs_misc_stubs() {
     let resp = client.list_log_groups().send().await.unwrap();
     assert!(!resp.log_groups().is_empty());
 
-    // ListLogGroupsForQuery
-    let resp = client
-        .list_log_groups_for_query()
-        .query_id("dummy-query")
+    // ListLogGroupsForQuery — needs a real queryId from StartQuery; AWS
+    // returns ResourceNotFoundException for unknown ids.
+    let started = client
+        .start_query()
+        .log_group_name("/misc/listgroups")
+        .start_time(0)
+        .end_time(1)
+        .query_string("fields @timestamp")
         .send()
         .await
         .unwrap();
-    assert!(resp.log_group_identifiers().is_empty());
+    client
+        .list_log_groups_for_query()
+        .query_id(started.query_id().unwrap())
+        .send()
+        .await
+        .unwrap();
 
     // DescribeConfigurationTemplates
     let resp = client
