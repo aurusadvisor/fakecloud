@@ -23,6 +23,7 @@ members = [
     "crates/fakecloud-ecr",
     "crates/fakecloud-ecs",
     "crates/fakecloud-elasticache",
+    "crates/fakecloud-elbv2",
     "crates/fakecloud-stepfunctions",
     "crates/fakecloud-scheduler",
     "crates/fakecloud-apigatewayv2",
@@ -104,6 +105,7 @@ fakecloud-rds = { path = "crates/fakecloud-rds", version = "0.11.0" }
 fakecloud-elasticache = { path = "crates/fakecloud-elasticache", version = "0.11.0" }
 fakecloud-ecr = { path = "crates/fakecloud-ecr", version = "0.11.0" }
 fakecloud-ecs = { path = "crates/fakecloud-ecs", version = "0.11.0" }
+fakecloud-elbv2 = { path = "crates/fakecloud-elbv2", version = "0.11.0" }
 fakecloud-stepfunctions = { path = "crates/fakecloud-stepfunctions", version = "0.11.0" }
 fakecloud-scheduler = { path = "crates/fakecloud-scheduler", version = "0.11.0" }
 fakecloud-apigatewayv2 = { path = "crates/fakecloud-apigatewayv2", version = "0.11.0" }

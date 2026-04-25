@@ -99,6 +99,16 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["service.rs"],
             &["apigateway", "apigatewayv2"],
         ),
+        ("ecr", "ecr", &["service.rs"], &["ecr"]),
+        ("ecs", "ecs", &["service.rs"], &["ecs"]),
+        // ELBv2's Smithy service_name is "elasticloadbalancing"; AWS SDK crate
+        // is `elasticloadbalancingv2`. Tests tag `elbv2` for ergonomics.
+        (
+            "elasticloadbalancing",
+            "elbv2",
+            &["service.rs"],
+            &["elbv2", "elasticloadbalancing", "elasticloadbalancingv2"],
+        ),
     ];
 
     mappings

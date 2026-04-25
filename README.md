@@ -48,7 +48,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 
 ## Supported services
 
-25 services, 1,798 operations, 100% conformance per implemented service.
+26 services, 1,810 operations, 100% conformance per implemented service.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -77,6 +77,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | Bedrock Runtime        |  10 | InvokeModel, Converse, streaming, configurable responses, fault inject |
 | ECR                    |  58 | Full API — OCI v2 push/pull, lifecycle, scanning, registry, pull-through |
 | ECS                    |  60 | **Full API** — clusters, task definitions, real task execution, services + rolling deployments, container instances, capacity providers, task sets, ECS Exec |
+| Elastic Load Balancing v2 |  12 | ALB/NLB/GWLB CRUD: load balancers, subnets, security groups, IP address types, IPAM, account limits, SSL policies, tags |
 
 Per-service docs and feature matrices: [fakecloud.dev/docs/services](https://fakecloud.dev/docs/services).
 
@@ -117,6 +118,7 @@ Full guides: [fakecloud.dev/docs/guides](https://fakecloud.dev/docs/guides).
 | Bedrock             | 111 operations (control plane + runtime)           | Not available                                                                  |
 | ECR                 | 58 operations, real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/)              |
 | ECS                 | **60 operations — full API** incl. real task execution, services, task sets, capacity providers | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| Elastic Load Balancing v2 | ALB/NLB/GWLB load balancer CRUD + tags + SSL policies | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 
 > Performance numbers measured on Apple M1 via `time fakecloud`, `ps -o rss`, `ls -lh`.
 
