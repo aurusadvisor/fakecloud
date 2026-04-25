@@ -9,3 +9,4 @@ sdks/python/.venv/
 sdks/python/.pytest_cache/
 __pycache__/
 *.egg-info/
+.claude/scheduled_tasks.lock

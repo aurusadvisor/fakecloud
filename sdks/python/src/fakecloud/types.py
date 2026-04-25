@@ -1513,7 +1513,7 @@ class Elbv2ListenersResponse:
     def from_dict(cls, data: Dict[str, Any]) -> Elbv2ListenersResponse:
         return cls(
             listeners=[
-                Elbv2Listener.from_dict(l) for l in data.get("listeners", [])
+                Elbv2Listener.from_dict(item) for item in data.get("listeners", [])
             ],
         )
 
