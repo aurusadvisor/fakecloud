@@ -7,7 +7,8 @@
 mod helpers;
 
 use aws_sdk_elasticloadbalancingv2::types::{
-    IpAddressType, LoadBalancerSchemeEnum, LoadBalancerTypeEnum, Tag,
+    IpAddressType, LoadBalancerSchemeEnum, LoadBalancerTypeEnum, ProtocolEnum, Tag,
+    TargetDescription, TargetGroupAttribute, TargetTypeEnum,
 };
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
@@ -287,4 +288,264 @@ async fn elbv2_modify_ip_pools() {
         .load_balancer_arn()
         .unwrap();
     let _ = client.modify_ip_pools().load_balancer_arn(arn).send().await;
+}
+
+// ── Batch 2: TargetGroups + Targets ─────────────────────────────────
+
+#[test_action("elasticloadbalancingv2", "CreateTargetGroup", checksum = "1f017667")]
+#[tokio::test]
+async fn elbv2_create_target_group() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let resp = client
+        .create_target_group()
+        .name("confo-tg-create")
+        .protocol(ProtocolEnum::Http)
+        .port(80)
+        .target_type(TargetTypeEnum::Ip)
+        .vpc_id("vpc-1234")
+        .send()
+        .await
+        .unwrap();
+    let tg = resp.target_groups().first().unwrap();
+    assert_eq!(tg.target_group_name(), Some("confo-tg-create"));
+    assert_eq!(tg.port(), Some(80));
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "DescribeTargetGroups",
+    checksum = "46b00b84"
+)]
+#[tokio::test]
+async fn elbv2_describe_target_groups() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    client
+        .create_target_group()
+        .name("confo-tg-desc")
+        .send()
+        .await
+        .unwrap();
+    let resp = client.describe_target_groups().send().await.unwrap();
+    assert!(resp
+        .target_groups()
+        .iter()
+        .any(|tg| tg.target_group_name() == Some("confo-tg-desc")));
+}
+
+#[test_action("elasticloadbalancingv2", "ModifyTargetGroup", checksum = "24ab6b92")]
+#[tokio::test]
+async fn elbv2_modify_target_group() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_target_group()
+        .name("confo-tg-mod")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .target_groups()
+        .first()
+        .unwrap()
+        .target_group_arn()
+        .unwrap();
+    let resp = client
+        .modify_target_group()
+        .target_group_arn(arn)
+        .health_check_path("/healthz")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.target_groups().first().unwrap().health_check_path(),
+        Some("/healthz")
+    );
+}
+
+#[test_action("elasticloadbalancingv2", "DeleteTargetGroup", checksum = "4d18f3de")]
+#[tokio::test]
+async fn elbv2_delete_target_group() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_target_group()
+        .name("confo-tg-del")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .target_groups()
+        .first()
+        .unwrap()
+        .target_group_arn()
+        .unwrap();
+    client
+        .delete_target_group()
+        .target_group_arn(arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticloadbalancingv2", "RegisterTargets", checksum = "9c96083e")]
+#[tokio::test]
+async fn elbv2_register_targets() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_target_group()
+        .name("confo-tg-reg")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .target_groups()
+        .first()
+        .unwrap()
+        .target_group_arn()
+        .unwrap();
+    client
+        .register_targets()
+        .target_group_arn(arn)
+        .targets(TargetDescription::builder().id("i-aaaa").port(80).build())
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticloadbalancingv2", "DeregisterTargets", checksum = "a2e93f46")]
+#[tokio::test]
+async fn elbv2_deregister_targets() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_target_group()
+        .name("confo-tg-dereg")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .target_groups()
+        .first()
+        .unwrap()
+        .target_group_arn()
+        .unwrap();
+    client
+        .register_targets()
+        .target_group_arn(arn)
+        .targets(TargetDescription::builder().id("i-bbbb").build())
+        .send()
+        .await
+        .unwrap();
+    client
+        .deregister_targets()
+        .target_group_arn(arn)
+        .targets(TargetDescription::builder().id("i-bbbb").build())
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "DescribeTargetHealth",
+    checksum = "e09fc1ce"
+)]
+#[tokio::test]
+async fn elbv2_describe_target_health() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_target_group()
+        .name("confo-tg-health")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .target_groups()
+        .first()
+        .unwrap()
+        .target_group_arn()
+        .unwrap();
+    client
+        .register_targets()
+        .target_group_arn(arn)
+        .targets(TargetDescription::builder().id("i-cccc").build())
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .describe_target_health()
+        .target_group_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.target_health_descriptions().len(), 1);
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "ModifyTargetGroupAttributes",
+    checksum = "70f22772"
+)]
+#[tokio::test]
+async fn elbv2_modify_target_group_attributes() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_target_group()
+        .name("confo-tg-attrs")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .target_groups()
+        .first()
+        .unwrap()
+        .target_group_arn()
+        .unwrap();
+    client
+        .modify_target_group_attributes()
+        .target_group_arn(arn)
+        .attributes(
+            TargetGroupAttribute::builder()
+                .key("deregistration_delay.timeout_seconds")
+                .value("30")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "DescribeTargetGroupAttributes",
+    checksum = "f426a1b9"
+)]
+#[tokio::test]
+async fn elbv2_describe_target_group_attributes() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_target_group()
+        .name("confo-tg-getattrs")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .target_groups()
+        .first()
+        .unwrap()
+        .target_group_arn()
+        .unwrap();
+    let resp = client
+        .describe_target_group_attributes()
+        .target_group_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.attributes().is_empty());
 }

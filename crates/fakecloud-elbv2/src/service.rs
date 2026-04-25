@@ -33,6 +33,15 @@ const ELBV2_SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeTags",
     "DescribeAccountLimits",
     "DescribeSSLPolicies",
+    "CreateTargetGroup",
+    "DescribeTargetGroups",
+    "ModifyTargetGroup",
+    "DeleteTargetGroup",
+    "RegisterTargets",
+    "DeregisterTargets",
+    "DescribeTargetHealth",
+    "ModifyTargetGroupAttributes",
+    "DescribeTargetGroupAttributes",
 ];
 
 pub struct Elbv2Service {
@@ -73,6 +82,15 @@ impl AwsService for Elbv2Service {
             "DescribeTags" => self.describe_tags(&req),
             "DescribeAccountLimits" => self.describe_account_limits(&req),
             "DescribeSSLPolicies" => self.describe_ssl_policies(&req),
+            "CreateTargetGroup" => self.create_target_group(&req),
+            "DescribeTargetGroups" => self.describe_target_groups(&req),
+            "ModifyTargetGroup" => self.modify_target_group(&req),
+            "DeleteTargetGroup" => self.delete_target_group(&req),
+            "RegisterTargets" => self.register_targets(&req),
+            "DeregisterTargets" => self.deregister_targets(&req),
+            "DescribeTargetHealth" => self.describe_target_health(&req),
+            "ModifyTargetGroupAttributes" => self.modify_target_group_attributes(&req),
+            "DescribeTargetGroupAttributes" => self.describe_target_group_attributes(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "elasticloadbalancing",
                 &req.action,
@@ -923,6 +941,565 @@ impl Elbv2Service {
             &req.request_id,
         ))
     }
+
+    // ───────────── Target Group ops ─────────────
+
+    fn create_target_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let name = required_query_param(req, "Name")?;
+        validate_tg_name(&name)?;
+        let target_type =
+            optional_query_param(req, "TargetType").unwrap_or_else(|| "instance".into());
+        if !matches!(target_type.as_str(), "instance" | "ip" | "lambda" | "alb") {
+            return Err(invalid_param(format!(
+                "TargetType must be one of instance|ip|lambda|alb, got '{target_type}'"
+            )));
+        }
+        let protocol = optional_query_param(req, "Protocol");
+        let port = optional_query_param(req, "Port").and_then(|s| s.parse().ok());
+        let vpc_id = optional_query_param(req, "VpcId");
+        let ip_address_type =
+            optional_query_param(req, "IpAddressType").unwrap_or_else(|| "ipv4".into());
+        let protocol_version = optional_query_param(req, "ProtocolVersion");
+        let health_check_protocol =
+            optional_query_param(req, "HealthCheckProtocol").or_else(|| protocol.clone());
+        let health_check_port =
+            optional_query_param(req, "HealthCheckPort").or_else(|| Some("traffic-port".into()));
+        let health_check_path = optional_query_param(req, "HealthCheckPath");
+        let health_check_enabled = optional_query_param(req, "HealthCheckEnabled")
+            .map(|s| s != "false")
+            .unwrap_or(true);
+        let health_check_interval_seconds = optional_query_param(req, "HealthCheckIntervalSeconds")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30);
+        let health_check_timeout_seconds = optional_query_param(req, "HealthCheckTimeoutSeconds")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        let healthy_threshold_count = optional_query_param(req, "HealthyThresholdCount")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        let unhealthy_threshold_count = optional_query_param(req, "UnhealthyThresholdCount")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2);
+        let matcher_http_code = optional_query_param(req, "Matcher.HttpCode");
+        let matcher_grpc_code = optional_query_param(req, "Matcher.GrpcCode");
+        let mut tags = parse_tags(req);
+        tags.dedup_by(|a, b| a.key == b.key);
+
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+
+        if let Some(existing) = st.target_groups.values().find(|tg| tg.name == name) {
+            let inner = format!(
+                "<TargetGroups><member>{}</member></TargetGroups>",
+                render_target_group_xml(existing)
+            );
+            return Ok(xml_resp("CreateTargetGroup", inner, &req.request_id));
+        }
+
+        let suffix = alphanumeric_id(16);
+        let arn = format!(
+            "arn:aws:elasticloadbalancing:{}:{}:targetgroup/{}/{}",
+            req.region, req.account_id, name, suffix
+        );
+        let tg = crate::state::TargetGroup {
+            arn: arn.clone(),
+            name,
+            protocol,
+            port,
+            vpc_id,
+            target_type,
+            ip_address_type,
+            protocol_version,
+            health_check_protocol,
+            health_check_port,
+            health_check_enabled,
+            health_check_path,
+            health_check_interval_seconds,
+            health_check_timeout_seconds,
+            healthy_threshold_count,
+            unhealthy_threshold_count,
+            matcher_http_code,
+            matcher_grpc_code,
+            load_balancer_arns: Vec::new(),
+            targets: Vec::new(),
+            tags,
+            attributes: default_target_group_attributes(),
+            created_time: Utc::now(),
+        };
+        let tg_xml = render_target_group_xml(&tg);
+        st.target_groups.insert(arn, tg);
+        Ok(xml_resp(
+            "CreateTargetGroup",
+            format!("<TargetGroups><member>{tg_xml}</member></TargetGroups>"),
+            &req.request_id,
+        ))
+    }
+
+    fn describe_target_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arns: HashSet<String> = parse_member_list(req, "TargetGroupArns")
+            .into_iter()
+            .collect();
+        let names: HashSet<String> = parse_member_list(req, "Names").into_iter().collect();
+        let lb_arn = optional_query_param(req, "LoadBalancerArn");
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut tgs: Vec<&crate::state::TargetGroup> = st.target_groups.values().collect();
+        if !arns.is_empty() {
+            let kept: Vec<&crate::state::TargetGroup> = tgs
+                .iter()
+                .filter(|t| arns.contains(&t.arn))
+                .copied()
+                .collect();
+            if kept.len() != arns.len() {
+                let missing = arns
+                    .iter()
+                    .find(|a| !kept.iter().any(|t| t.arn == **a))
+                    .cloned()
+                    .unwrap_or_default();
+                return Err(target_group_not_found(&missing));
+            }
+            tgs = kept;
+        }
+        if !names.is_empty() {
+            let kept: Vec<&crate::state::TargetGroup> = tgs
+                .iter()
+                .filter(|t| names.contains(&t.name))
+                .copied()
+                .collect();
+            if kept.len() != names.len() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "TargetGroupNotFound",
+                    "One or more named target groups not found",
+                ));
+            }
+            tgs = kept;
+        }
+        if let Some(lb) = lb_arn.as_deref() {
+            tgs.retain(|t| t.load_balancer_arns.iter().any(|a| a == lb));
+        }
+        tgs.sort_by_key(|a| a.created_time);
+        let inner = format!(
+            "<TargetGroups>{}</TargetGroups>",
+            tgs.iter()
+                .map(|tg| format!("<member>{}</member>", render_target_group_xml(tg)))
+                .collect::<String>()
+        );
+        Ok(xml_resp("DescribeTargetGroups", inner, &req.request_id))
+    }
+
+    fn modify_target_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TargetGroupArn")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let tg = st
+            .target_groups
+            .get_mut(&arn)
+            .ok_or_else(|| target_group_not_found(&arn))?;
+        if let Some(p) = optional_query_param(req, "HealthCheckProtocol") {
+            tg.health_check_protocol = Some(p);
+        }
+        if let Some(p) = optional_query_param(req, "HealthCheckPort") {
+            tg.health_check_port = Some(p);
+        }
+        if let Some(p) = optional_query_param(req, "HealthCheckPath") {
+            tg.health_check_path = Some(p);
+        }
+        if let Some(e) = optional_query_param(req, "HealthCheckEnabled") {
+            tg.health_check_enabled = e != "false";
+        }
+        if let Some(s) =
+            optional_query_param(req, "HealthCheckIntervalSeconds").and_then(|s| s.parse().ok())
+        {
+            tg.health_check_interval_seconds = s;
+        }
+        if let Some(s) =
+            optional_query_param(req, "HealthCheckTimeoutSeconds").and_then(|s| s.parse().ok())
+        {
+            tg.health_check_timeout_seconds = s;
+        }
+        if let Some(s) =
+            optional_query_param(req, "HealthyThresholdCount").and_then(|s| s.parse().ok())
+        {
+            tg.healthy_threshold_count = s;
+        }
+        if let Some(s) =
+            optional_query_param(req, "UnhealthyThresholdCount").and_then(|s| s.parse().ok())
+        {
+            tg.unhealthy_threshold_count = s;
+        }
+        if let Some(c) = optional_query_param(req, "Matcher.HttpCode") {
+            tg.matcher_http_code = Some(c);
+        }
+        if let Some(c) = optional_query_param(req, "Matcher.GrpcCode") {
+            tg.matcher_grpc_code = Some(c);
+        }
+        let xml = render_target_group_xml(tg);
+        Ok(xml_resp(
+            "ModifyTargetGroup",
+            format!("<TargetGroups><member>{xml}</member></TargetGroups>"),
+            &req.request_id,
+        ))
+    }
+
+    fn delete_target_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TargetGroupArn")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        // Reject if the TG is still referenced by listeners/rules.
+        let referenced = st.listeners.values().any(|l| {
+            l.default_actions
+                .iter()
+                .any(|a| a.target_group_arn.as_deref() == Some(arn.as_str()))
+                || l.default_actions.iter().any(|a| {
+                    a.forward
+                        .as_ref()
+                        .map(|f| f.target_groups.iter().any(|t| t.target_group_arn == arn))
+                        .unwrap_or(false)
+                })
+        }) || st.rules.values().any(|r| {
+            r.actions
+                .iter()
+                .any(|a| a.target_group_arn.as_deref() == Some(arn.as_str()))
+        });
+        if referenced {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceInUse",
+                "Target group is currently in use by a listener or a rule",
+            ));
+        }
+        st.target_groups.remove(&arn);
+        Ok(xml_metadata_only("DeleteTargetGroup", &req.request_id))
+    }
+
+    fn register_targets(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TargetGroupArn")?;
+        let targets = parse_target_descriptions(req);
+        if targets.is_empty() {
+            return Err(invalid_param("Targets is required"));
+        }
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let tg = st
+            .target_groups
+            .get_mut(&arn)
+            .ok_or_else(|| target_group_not_found(&arn))?;
+        for t in targets {
+            // Replace existing entry with same id+port, otherwise append.
+            tg.targets.retain(|x| !(x.id == t.id && x.port == t.port));
+            tg.targets.push(t);
+        }
+        Ok(xml_metadata_only("RegisterTargets", &req.request_id))
+    }
+
+    fn deregister_targets(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TargetGroupArn")?;
+        let targets = parse_target_descriptions(req);
+        if targets.is_empty() {
+            return Err(invalid_param("Targets is required"));
+        }
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let tg = st
+            .target_groups
+            .get_mut(&arn)
+            .ok_or_else(|| target_group_not_found(&arn))?;
+        for t in targets {
+            tg.targets
+                .retain(|x| !(x.id == t.id && (t.port.is_none() || x.port == t.port)));
+        }
+        Ok(xml_metadata_only("DeregisterTargets", &req.request_id))
+    }
+
+    fn describe_target_health(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TargetGroupArn")?;
+        let filter = parse_target_descriptions(req);
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let tg = st
+            .target_groups
+            .get(&arn)
+            .ok_or_else(|| target_group_not_found(&arn))?;
+        let entries: Vec<&crate::state::TargetDescription> = if filter.is_empty() {
+            tg.targets.iter().collect()
+        } else {
+            tg.targets
+                .iter()
+                .filter(|t| {
+                    filter
+                        .iter()
+                        .any(|f| f.id == t.id && (f.port.is_none() || f.port == t.port))
+                })
+                .collect()
+        };
+        let xml = entries
+            .iter()
+            .map(|t| {
+                let port_xml = t
+                    .port
+                    .map(|p| format!("<Port>{p}</Port>"))
+                    .unwrap_or_default();
+                let az_xml = t
+                    .availability_zone
+                    .as_deref()
+                    .map(|a| format!("<AvailabilityZone>{}</AvailabilityZone>", xml_escape(a)))
+                    .unwrap_or_default();
+                let reason = t
+                    .health
+                    .reason
+                    .as_deref()
+                    .map(|r| format!("<Reason>{}</Reason>", xml_escape(r)))
+                    .unwrap_or_default();
+                let desc = t
+                    .health
+                    .description
+                    .as_deref()
+                    .map(|d| format!("<Description>{}</Description>", xml_escape(d)))
+                    .unwrap_or_default();
+                format!(
+                    "<member><Target><Id>{}</Id>{port_xml}{az_xml}</Target><TargetHealth><State>{}</State>{reason}{desc}</TargetHealth></member>",
+                    xml_escape(&t.id),
+                    xml_escape(&t.health.state),
+                )
+            })
+            .collect::<String>();
+        Ok(xml_resp(
+            "DescribeTargetHealth",
+            format!("<TargetHealthDescriptions>{xml}</TargetHealthDescriptions>"),
+            &req.request_id,
+        ))
+    }
+
+    fn modify_target_group_attributes(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TargetGroupArn")?;
+        let new_attrs = parse_attributes(req);
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let tg = st
+            .target_groups
+            .get_mut(&arn)
+            .ok_or_else(|| target_group_not_found(&arn))?;
+        for (k, v) in &new_attrs {
+            tg.attributes.insert(k.clone(), v.clone());
+        }
+        Ok(xml_resp(
+            "ModifyTargetGroupAttributes",
+            render_attributes_xml(&tg.attributes),
+            &req.request_id,
+        ))
+    }
+
+    fn describe_target_group_attributes(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TargetGroupArn")?;
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let tg = st
+            .target_groups
+            .get(&arn)
+            .ok_or_else(|| target_group_not_found(&arn))?;
+        Ok(xml_resp(
+            "DescribeTargetGroupAttributes",
+            render_attributes_xml(&tg.attributes),
+            &req.request_id,
+        ))
+    }
+}
+
+fn validate_tg_name(name: &str) -> Result<(), AwsServiceError> {
+    if name.is_empty() || name.len() > 32 {
+        return Err(invalid_param(
+            "TargetGroup name must be between 1 and 32 characters",
+        ));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(invalid_param(
+            "TargetGroup name must contain only ASCII letters, digits, and hyphens",
+        ));
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        return Err(invalid_param(
+            "TargetGroup name cannot start or end with a hyphen",
+        ));
+    }
+    Ok(())
+}
+
+fn target_group_not_found(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "TargetGroupNotFound",
+        format!("Target group '{arn}' not found"),
+    )
+}
+
+fn render_target_group_xml(tg: &crate::state::TargetGroup) -> String {
+    let lb_xml = tg
+        .load_balancer_arns
+        .iter()
+        .map(|a| format!("<member>{}</member>", xml_escape(a)))
+        .collect::<String>();
+    let port = tg
+        .port
+        .map(|p| format!("<Port>{p}</Port>"))
+        .unwrap_or_default();
+    let proto = tg
+        .protocol
+        .as_deref()
+        .map(|p| format!("<Protocol>{}</Protocol>", xml_escape(p)))
+        .unwrap_or_default();
+    let vpc = tg
+        .vpc_id
+        .as_deref()
+        .map(|v| format!("<VpcId>{}</VpcId>", xml_escape(v)))
+        .unwrap_or_default();
+    let proto_ver = tg
+        .protocol_version
+        .as_deref()
+        .map(|p| format!("<ProtocolVersion>{}</ProtocolVersion>", xml_escape(p)))
+        .unwrap_or_default();
+    let hc_proto = tg
+        .health_check_protocol
+        .as_deref()
+        .map(|p| {
+            format!(
+                "<HealthCheckProtocol>{}</HealthCheckProtocol>",
+                xml_escape(p)
+            )
+        })
+        .unwrap_or_default();
+    let hc_port = tg
+        .health_check_port
+        .as_deref()
+        .map(|p| format!("<HealthCheckPort>{}</HealthCheckPort>", xml_escape(p)))
+        .unwrap_or_default();
+    let hc_path = tg
+        .health_check_path
+        .as_deref()
+        .map(|p| format!("<HealthCheckPath>{}</HealthCheckPath>", xml_escape(p)))
+        .unwrap_or_default();
+    let matcher = tg
+        .matcher_http_code
+        .as_deref()
+        .map(|m| format!("<Matcher><HttpCode>{}</HttpCode></Matcher>", xml_escape(m)))
+        .unwrap_or_default();
+    format!(
+        "<TargetGroupArn>{arn}</TargetGroupArn>\
+         <TargetGroupName>{name}</TargetGroupName>\
+         {proto}{port}{vpc}{proto_ver}\
+         <TargetType>{tt}</TargetType>\
+         <IpAddressType>{ipt}</IpAddressType>\
+         <HealthCheckEnabled>{hce}</HealthCheckEnabled>\
+         {hc_proto}{hc_port}{hc_path}\
+         <HealthCheckIntervalSeconds>{hci}</HealthCheckIntervalSeconds>\
+         <HealthCheckTimeoutSeconds>{hct}</HealthCheckTimeoutSeconds>\
+         <HealthyThresholdCount>{ht}</HealthyThresholdCount>\
+         <UnhealthyThresholdCount>{uht}</UnhealthyThresholdCount>\
+         {matcher}\
+         <LoadBalancerArns>{lb_xml}</LoadBalancerArns>",
+        arn = xml_escape(&tg.arn),
+        name = xml_escape(&tg.name),
+        tt = xml_escape(&tg.target_type),
+        ipt = xml_escape(&tg.ip_address_type),
+        hce = tg.health_check_enabled,
+        hci = tg.health_check_interval_seconds,
+        hct = tg.health_check_timeout_seconds,
+        ht = tg.healthy_threshold_count,
+        uht = tg.unhealthy_threshold_count,
+    )
+}
+
+fn parse_target_descriptions(req: &AwsRequest) -> Vec<crate::state::TargetDescription> {
+    let mut out = Vec::new();
+    for n in 1..=100 {
+        let id = req
+            .query_params
+            .get(&format!("Targets.member.{n}.Id"))
+            .cloned();
+        if let Some(id) = id {
+            let port = req
+                .query_params
+                .get(&format!("Targets.member.{n}.Port"))
+                .and_then(|s| s.parse().ok());
+            let az = req
+                .query_params
+                .get(&format!("Targets.member.{n}.AvailabilityZone"))
+                .cloned();
+            out.push(crate::state::TargetDescription {
+                id,
+                port,
+                availability_zone: az,
+                health: crate::state::TargetHealth::default(),
+            });
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn parse_attributes(req: &AwsRequest) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for n in 1..=50 {
+        let key = req
+            .query_params
+            .get(&format!("Attributes.member.{n}.Key"))
+            .cloned();
+        if let Some(k) = key {
+            let v = req
+                .query_params
+                .get(&format!("Attributes.member.{n}.Value"))
+                .cloned()
+                .unwrap_or_default();
+            out.push((k, v));
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn render_attributes_xml(attrs: &HashMap<String, String>) -> String {
+    let entries = attrs
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "<member><Key>{}</Key><Value>{}</Value></member>",
+                xml_escape(k),
+                xml_escape(v)
+            )
+        })
+        .collect::<String>();
+    format!("<Attributes>{entries}</Attributes>")
+}
+
+fn default_target_group_attributes() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert(
+        "deregistration_delay.timeout_seconds".to_string(),
+        "300".to_string(),
+    );
+    m.insert("stickiness.enabled".to_string(), "false".to_string());
+    m.insert("stickiness.type".to_string(), "lb_cookie".to_string());
+    m.insert(
+        "stickiness.lb_cookie.duration_seconds".to_string(),
+        "86400".to_string(),
+    );
+    m.insert(
+        "load_balancing.algorithm.type".to_string(),
+        "round_robin".to_string(),
+    );
+    m.insert("slow_start.duration_seconds".to_string(), "0".to_string());
+    m
 }
 
 fn apply_tags(
