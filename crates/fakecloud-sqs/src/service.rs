@@ -5,6 +5,7 @@ use md5::Md5;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -758,6 +759,171 @@ fn sqs_resource_for(action: &str, account: &str, region: &str, body: &Value) -> 
             .and_then(|url| url.rsplit('/').next())
             .map(queue_arn)
             .unwrap_or_else(|| "*".to_string()),
+    }
+}
+
+/// Background message-move worker. Drains the source queue one message at a
+/// time, sleeping `interval` between moves to enforce the requested rate.
+/// Updates the matching task's `messages_moved` counter on each move and
+/// flips status to `Completed` when the source drains, or `Cancelled` when
+/// the cancel flag is set. Exits silently if the source/destination queue
+/// or the task itself disappears (e.g. queue deleted while moving).
+#[allow(clippy::too_many_arguments)]
+async fn run_message_move_task(
+    state_handle: SharedSqsState,
+    account_id: String,
+    region: String,
+    task_handle: String,
+    source_url: String,
+    destination_arn: Option<String>,
+    dlq_targets: Vec<String>,
+    interval: std::time::Duration,
+    cancel_flag: Arc<AtomicBool>,
+) {
+    enum Step {
+        Moved,
+        SourceDrained,
+        Failed,
+    }
+
+    let mut idx: usize = 0;
+    loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            finalize_move_task(
+                &state_handle,
+                &account_id,
+                &region,
+                &task_handle,
+                MessageMoveTaskStatus::Cancelled,
+            );
+            return;
+        }
+
+        // Each iteration acquires the write lock for exactly one move and
+        // drops it before sleeping or finalizing — `finalize_move_task` also
+        // acquires the lock, so we can't hold one when we call it.
+        let step: Step = {
+            let mut accounts = state_handle.write();
+            let state = accounts.get_or_create(&account_id);
+
+            // Source queue must exist (immutable check before any mutation).
+            if !state.queues.contains_key(&source_url) {
+                drop(accounts);
+                finalize_move_task(
+                    &state_handle,
+                    &account_id,
+                    &region,
+                    &task_handle,
+                    MessageMoveTaskStatus::Failed,
+                );
+                return;
+            }
+
+            // Resolve and verify the target before popping anything off the
+            // source — AWS treats the source as the durable copy until the
+            // destination commit, so we must never pop a message we can't
+            // deliver. If the destination is gone, leave the source untouched
+            // and finalize Failed.
+            let target_url_opt = if let Some(ref dest_arn) = destination_arn {
+                state
+                    .queues
+                    .values()
+                    .find(|q| &q.arn == dest_arn)
+                    .map(|q| q.queue_url.clone())
+            } else if dlq_targets.is_empty() {
+                None
+            } else {
+                let url = dlq_targets[idx % dlq_targets.len()].clone();
+                Some(url)
+            };
+            match target_url_opt.filter(|u| state.queues.contains_key(u)) {
+                None => Step::Failed,
+                Some(target_url) => {
+                    // Source is guaranteed to exist (checked above); pop one message.
+                    let popped = state
+                        .queues
+                        .get_mut(&source_url)
+                        .and_then(|q| q.messages.pop_front());
+                    match popped {
+                        None => Step::SourceDrained,
+                        Some(mut msg) => {
+                            msg.visible_at = None;
+                            msg.receive_count = 0;
+                            match state.queues.get_mut(&target_url) {
+                                Some(target_queue) => {
+                                    target_queue.messages.push_back(msg);
+                                    if destination_arn.is_none() {
+                                        idx += 1;
+                                    }
+                                    if let Some(task) = state
+                                        .message_move_tasks
+                                        .iter_mut()
+                                        .find(|t| t.task_handle == task_handle)
+                                    {
+                                        task.messages_moved += 1;
+                                    }
+                                    Step::Moved
+                                }
+                                None => {
+                                    // Target vanished between resolution and
+                                    // the get_mut here. Push the message back
+                                    // to the source so it isn't lost.
+                                    if let Some(source_queue) = state.queues.get_mut(&source_url) {
+                                        source_queue.messages.push_front(msg);
+                                    }
+                                    Step::Failed
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        match step {
+            Step::Moved => {
+                tokio::time::sleep(interval).await;
+            }
+            Step::SourceDrained => {
+                finalize_move_task(
+                    &state_handle,
+                    &account_id,
+                    &region,
+                    &task_handle,
+                    MessageMoveTaskStatus::Completed,
+                );
+                return;
+            }
+            Step::Failed => {
+                finalize_move_task(
+                    &state_handle,
+                    &account_id,
+                    &region,
+                    &task_handle,
+                    MessageMoveTaskStatus::Failed,
+                );
+                return;
+            }
+        }
+    }
+}
+
+fn finalize_move_task(
+    state_handle: &SharedSqsState,
+    account_id: &str,
+    region: &str,
+    task_handle: &str,
+    final_status: MessageMoveTaskStatus,
+) {
+    let _ = region; // currently only used for symmetry with constructor
+    let mut accounts = state_handle.write();
+    let state = accounts.get_or_create(account_id);
+    if let Some(task) = state
+        .message_move_tasks
+        .iter_mut()
+        .find(|t| t.task_handle == task_handle)
+    {
+        task.status = final_status;
     }
 }
 
@@ -3164,68 +3330,123 @@ impl SqsService {
             ));
         }
 
-        // Move messages synchronously: drain source queue, redirect to destination
-        // (or to each redrive-source's queue if destination unspecified).
-        let source_messages: Vec<SqsMessage> = state
+        let total = state
             .queues
-            .get_mut(&source_url)
-            .map(|q| {
-                let drained: Vec<_> = q.messages.drain(..).collect();
-                q.inflight.clear();
-                drained
-            })
-            .unwrap_or_default();
-        let total = source_messages.len() as u64;
+            .get(&source_url)
+            .map(|q| q.messages.len() as u64)
+            .unwrap_or(0);
+        let task_handle = format!("FakeCloudMessageMoveTask-{}", uuid::Uuid::new_v4().simple());
 
-        let mut moved: u64 = 0;
-        if let Some(ref dest) = destination_arn {
-            let dest_url = state
+        // Fast path: if no rate was supplied AND there is no work to throttle,
+        // drain synchronously and mark the task COMPLETED before returning.
+        // The async path below is only useful when the caller wants real
+        // backpressure (rate limit) or the ability to observe / cancel mid-flight.
+        if max_per_sec.is_none() {
+            let source_messages: Vec<SqsMessage> = state
                 .queues
-                .values()
-                .find(|q| &q.arn == dest)
-                .map(|q| q.queue_url.clone());
-            if let Some(dest_url) = dest_url {
-                if let Some(dq) = state.queues.get_mut(&dest_url) {
-                    for msg in source_messages {
+                .get_mut(&source_url)
+                .map(|q| {
+                    let drained: Vec<_> = q.messages.drain(..).collect();
+                    q.inflight.clear();
+                    drained
+                })
+                .unwrap_or_default();
+            let mut moved: u64 = 0;
+            if let Some(ref dest) = destination_arn {
+                let dest_url = state
+                    .queues
+                    .values()
+                    .find(|q| &q.arn == dest)
+                    .map(|q| q.queue_url.clone());
+                if let Some(dest_url) = dest_url {
+                    if let Some(dq) = state.queues.get_mut(&dest_url) {
+                        for msg in source_messages {
+                            let mut new_msg = msg;
+                            new_msg.visible_at = None;
+                            new_msg.receive_count = 0;
+                            dq.messages.push_back(new_msg);
+                            moved += 1;
+                        }
+                    }
+                }
+            } else {
+                let targets = dlq_sources.clone();
+                for (idx, msg) in source_messages.into_iter().enumerate() {
+                    if targets.is_empty() {
+                        break;
+                    }
+                    let target_url = &targets[idx % targets.len()];
+                    if let Some(tq) = state.queues.get_mut(target_url) {
                         let mut new_msg = msg;
                         new_msg.visible_at = None;
                         new_msg.receive_count = 0;
-                        dq.messages.push_back(new_msg);
+                        tq.messages.push_back(new_msg);
                         moved += 1;
                     }
                 }
             }
-        } else {
-            // Round-robin back to each source queue.
-            let targets = dlq_sources.clone();
-            for (idx, msg) in source_messages.into_iter().enumerate() {
-                if targets.is_empty() {
-                    break;
-                }
-                let target_url = &targets[idx % targets.len()];
-                if let Some(tq) = state.queues.get_mut(target_url) {
-                    let mut new_msg = msg;
-                    new_msg.visible_at = None;
-                    new_msg.receive_count = 0;
-                    tq.messages.push_back(new_msg);
-                    moved += 1;
-                }
-            }
+
+            state.message_move_tasks.push(MessageMoveTask {
+                task_handle: task_handle.clone(),
+                source_arn,
+                destination_arn,
+                max_messages_per_second: max_per_sec,
+                status: MessageMoveTaskStatus::Completed,
+                messages_moved: moved,
+                messages_to_move: total,
+                started_timestamp: Utc::now().timestamp_millis(),
+                failure_reason: None,
+                cancel_flag: Arc::new(AtomicBool::new(false)),
+            });
+            return Ok(sqs_response(
+                "StartMessageMoveTask",
+                json!({ "TaskHandle": task_handle }),
+                &req.request_id,
+                req.is_query_protocol,
+            ));
         }
 
-        let task_handle = format!("FakeCloudMessageMoveTask-{}", uuid::Uuid::new_v4().simple());
+        // Async path: insert a Running task, spawn a background mover that
+        // drains one message at a time at the requested rate. Cancellation is
+        // signalled through the task's `cancel_flag`.
+        let cancel_flag = Arc::new(AtomicBool::new(false));
         state.message_move_tasks.push(MessageMoveTask {
             task_handle: task_handle.clone(),
-            source_arn,
-            destination_arn,
+            source_arn: source_arn.clone(),
+            destination_arn: destination_arn.clone(),
             max_messages_per_second: max_per_sec,
-            status: MessageMoveTaskStatus::Completed,
-            messages_moved: moved,
+            status: MessageMoveTaskStatus::Running,
+            messages_moved: 0,
             messages_to_move: total,
             started_timestamp: Utc::now().timestamp_millis(),
             failure_reason: None,
+            cancel_flag: cancel_flag.clone(),
         });
-        // Cap retained tasks at 10 per source per AWS docs.
+        drop(accounts);
+
+        let state_handle = self.state.clone();
+        let account_id = req.account_id.clone();
+        let region = req.region.clone();
+        let handle_for_task = task_handle.clone();
+        let dlq_targets = dlq_sources.clone();
+        let rate = max_per_sec.unwrap_or(1).max(1) as u64;
+        let interval = std::time::Duration::from_nanos(1_000_000_000 / rate);
+
+        tokio::spawn(async move {
+            run_message_move_task(
+                state_handle,
+                account_id,
+                region,
+                handle_for_task,
+                source_url,
+                destination_arn,
+                dlq_targets,
+                interval,
+                cancel_flag,
+            )
+            .await;
+        });
+
         Ok(sqs_response(
             "StartMessageMoveTask",
             json!({ "TaskHandle": task_handle }),
@@ -3257,7 +3478,12 @@ impl SqsService {
         let moved = task.messages_moved;
         match task.status {
             MessageMoveTaskStatus::Running => {
-                task.status = MessageMoveTaskStatus::Cancelled;
+                // Signal the background mover to stop on its next tick.
+                // The mover flips status to Cancelled when it observes the
+                // flag and exits its loop; we mark Cancelling here so the
+                // request doesn't have to wait for that observation.
+                task.cancel_flag.store(true, Ordering::SeqCst);
+                task.status = MessageMoveTaskStatus::Cancelling;
             }
             MessageMoveTaskStatus::Completed
             | MessageMoveTaskStatus::Cancelled
@@ -5766,11 +5992,13 @@ mod tests {
         dlq_arn
     }
 
-    #[test]
-    fn start_message_move_task_query_protocol_parses_string_rate() {
+    #[tokio::test]
+    async fn start_message_move_task_query_protocol_parses_string_rate() {
         let svc = make_service();
         let dlq_arn = create_dlq_with_source(&svc, "qp-dlq", "qp-src");
         // Query protocol passes integers as strings; this should parse fine.
+        // The rate-bound path spawns a background mover, so this test runs
+        // on the tokio runtime.
         let req = make_query_request(
             "StartMessageMoveTask",
             &[
@@ -5980,7 +6208,7 @@ mod tests {
             let mut accounts = svc.state.write();
             let state = accounts.get_or_create("123456789012");
             state.message_move_tasks.push(MessageMoveTask {
-                task_handle: "FakeCloudMessageMoveTask-stub".to_string(),
+                task_handle: "FakeCloudMessageMoveTask-running".to_string(),
                 source_arn: dlq_arn.clone(),
                 destination_arn: None,
                 max_messages_per_second: None,
@@ -5989,6 +6217,7 @@ mod tests {
                 messages_to_move: 0,
                 started_timestamp: 0,
                 failure_reason: None,
+                cancel_flag: Arc::new(AtomicBool::new(false)),
             });
         }
         let req = make_request("StartMessageMoveTask", json!({ "SourceArn": dlq_arn }));
@@ -6014,6 +6243,7 @@ mod tests {
                 messages_to_move: 10,
                 started_timestamp: 0,
                 failure_reason: None,
+                cancel_flag: Arc::new(AtomicBool::new(false)),
             });
         }
         let resp = svc
@@ -6048,6 +6278,7 @@ mod tests {
                     messages_to_move: 0,
                     started_timestamp: i,
                     failure_reason: None,
+                    cancel_flag: Arc::new(AtomicBool::new(false)),
                 });
             }
         }

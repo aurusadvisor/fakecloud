@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +96,16 @@ pub struct MessageMoveTask {
     pub messages_to_move: u64,
     pub started_timestamp: i64,
     pub failure_reason: Option<String>,
+    /// Set to `true` by `CancelMessageMoveTask` to request that the
+    /// background mover stop after its current iteration. Not persisted
+    /// — restored snapshots resume with a fresh flag in its default
+    /// state (no in-flight cancellation).
+    #[serde(skip, default = "default_cancel_flag")]
+    pub cancel_flag: Arc<AtomicBool>,
+}
+
+fn default_cancel_flag() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
