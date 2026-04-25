@@ -936,11 +936,29 @@ impl S3Service {
             }
         }
 
-        let store_body_bytes = data.clone();
+        // SSE-KMS: encrypt the body via the KMS hook so it lands as a
+        // fakecloud-kms envelope on disk and through replication. Plaintext
+        // size is preserved for headers via `data_size` further down.
+        // Fail-closed: a KMS error here aborts PutObject before any
+        // mutation, matching real S3 (which surfaces KMS errors back to
+        // the caller rather than silently storing plaintext).
+        let stored_bytes = if sse_algorithm.as_deref() == Some("aws:kms") {
+            self.encrypt_object_body(
+                account_id,
+                &region,
+                bucket,
+                &data,
+                sse_kms_key_id.as_deref(),
+            )?
+        } else {
+            data.clone()
+        };
+        let plaintext_size = data.len() as u64;
+        let store_body_bytes = stored_bytes.clone();
         let obj = S3Object {
             key: key.to_string(),
-            size: data.len() as u64,
-            body: crate::state::memory_body(data),
+            size: plaintext_size,
+            body: crate::state::memory_body(stored_bytes),
             // The runtime body is replaced below with the BodyRef returned
             // from self.store.put_object — for memory mode this is still a
             // Memory variant; for persistent mode it points at the freshly
@@ -1153,6 +1171,18 @@ impl S3Service {
         // Conditional checks
         check_get_conditionals(req, obj)?;
         let total_size = obj.size as usize;
+        // SSE-KMS: pre-load and decrypt the full body so we can slice
+        // ranged/multi-part reads against plaintext (matching real S3,
+        // which transparently decrypts on the read path). Fail-closed —
+        // a KMS error surfaces as 500 KMS.InternalFailureException
+        // instead of returning the raw envelope to the caller.
+        let decrypted_body: Option<Bytes> =
+            if obj.sse_algorithm.as_deref() == Some("aws:kms") && self.kms_hook.is_some() {
+                let raw = state.read_body(&obj.body).map_err(super::io_to_aws)?;
+                Some(self.decrypt_object_body(account_id, bucket, &raw)?)
+            } else {
+                None
+            };
         let mut headers = HeaderMap::new();
         headers.insert("etag", format!("\"{}\"", obj.etag).parse().unwrap());
         headers.insert(
@@ -1243,10 +1273,16 @@ impl S3Service {
                         );
                         let len = (end - start + 1) as u64;
                         headers.insert("content-length", len.to_string().parse().unwrap());
-                        response_body = state
-                            .read_body_range(&obj.body, start as u64, len)
-                            .map_err(super::io_to_aws)?
-                            .into();
+                        response_body = if let Some(plain) = &decrypted_body {
+                            let s = start.min(plain.len());
+                            let e = (start + len as usize).min(plain.len());
+                            plain.slice(s..e).into()
+                        } else {
+                            state
+                                .read_body_range(&obj.body, start as u64, len)
+                                .map_err(super::io_to_aws)?
+                                .into()
+                        };
                         response_status = StatusCode::PARTIAL_CONTENT;
                         is_range_request = true;
                     }
@@ -1263,12 +1299,20 @@ impl S3Service {
                     }
                     RangeResult::Ignored => {
                         headers.insert("content-length", total_size.to_string().parse().unwrap());
-                        response_body = full_body_response(state, &obj.body)?;
+                        response_body = if let Some(plain) = decrypted_body.clone() {
+                            plain.into()
+                        } else {
+                            full_body_response(state, &obj.body)?
+                        };
                     }
                 }
             } else {
                 headers.insert("content-length", total_size.to_string().parse().unwrap());
-                response_body = full_body_response(state, &obj.body)?;
+                response_body = if let Some(plain) = decrypted_body.clone() {
+                    plain.into()
+                } else {
+                    full_body_response(state, &obj.body)?
+                };
             }
         } else if let Some(part_num_str) = req.query_params.get("partNumber") {
             if let Ok(part_num) = part_num_str.parse::<u32>() {
@@ -1305,18 +1349,32 @@ impl S3Service {
                         .unwrap(),
                 );
                 headers.insert("content-length", part_size.to_string().parse().unwrap());
-                response_body = state
-                    .read_body_range(&obj.body, part_start as u64, part_size as u64)
-                    .map_err(super::io_to_aws)?
-                    .into();
+                response_body = if let Some(plain) = &decrypted_body {
+                    let s = part_start.min(plain.len());
+                    let e = (part_start + part_size).min(plain.len());
+                    plain.slice(s..e).into()
+                } else {
+                    state
+                        .read_body_range(&obj.body, part_start as u64, part_size as u64)
+                        .map_err(super::io_to_aws)?
+                        .into()
+                };
                 response_status = StatusCode::PARTIAL_CONTENT;
             } else {
                 headers.insert("content-length", total_size.to_string().parse().unwrap());
-                response_body = full_body_response(state, &obj.body)?;
+                response_body = if let Some(plain) = decrypted_body.clone() {
+                    plain.into()
+                } else {
+                    full_body_response(state, &obj.body)?
+                };
             }
         } else {
             headers.insert("content-length", total_size.to_string().parse().unwrap());
-            response_body = full_body_response(state, &obj.body)?;
+            response_body = if let Some(plain) = decrypted_body.clone() {
+                plain.into()
+            } else {
+                full_body_response(state, &obj.body)?
+            };
         }
         // Only include checksum headers for full (non-range) responses
         if !is_range_request {
@@ -2130,8 +2188,20 @@ impl S3Service {
             }
         });
 
-        // Checksum: compute new if algorithm specified, or copy from source
-        let src_bytes = state.read_body(&src_obj.body).map_err(super::io_to_aws)?;
+        // Checksum: compute new if algorithm specified, or copy from source.
+        // For SSE-KMS sources we work on plaintext so the checksum + the
+        // destination's stored body line up with what the caller will get
+        // back from a future GetObject. Fail-closed if the source can't
+        // be decrypted (revoked key, malformed envelope) — copying the
+        // ciphertext over to the destination would silently corrupt the
+        // copy.
+        let raw_src_bytes = state.read_body(&src_obj.body).map_err(super::io_to_aws)?;
+        let src_bytes =
+            if src_obj.sse_algorithm.as_deref() == Some("aws:kms") && self.kms_hook.is_some() {
+                self.decrypt_object_body(account_id, src_bucket, &raw_src_bytes)?
+            } else {
+                raw_src_bytes
+            };
         let (new_checksum_algo, new_checksum_val) = if let Some(ref algo) = checksum_algorithm {
             let val = compute_checksum(algo, &src_bytes);
             (Some(algo.clone()), Some(val))
@@ -2142,6 +2212,22 @@ impl S3Service {
             )
         } else {
             (None, None)
+        };
+        // Re-encrypt for the destination if it lands as SSE-KMS, so the
+        // stored body is a fresh envelope with the dest's encryption
+        // context (bucket arn).
+        let dest_region = state.region.clone();
+        let dest_stored_bytes = if new_sse.as_deref() == Some("aws:kms") && self.kms_hook.is_some()
+        {
+            self.encrypt_object_body(
+                account_id,
+                &dest_region,
+                dest_bucket,
+                &src_bytes,
+                new_kms.as_deref(),
+            )?
+        } else {
+            src_bytes.clone()
         };
 
         let db = state
@@ -2170,8 +2256,10 @@ impl S3Service {
             // disk-backed BodyRef (which would point at the source's file).
             // The source bytes are read above; the destination's own on-disk
             // file is written below via `self.store.put_object`.
-            body: crate::state::memory_body(src_bytes.clone()),
-            size: src_obj.size,
+            body: crate::state::memory_body(dest_stored_bytes.clone()),
+            // size tracks plaintext bytes (matches what a future GetObject
+            // returns to the caller); see the put_object SSE-KMS path.
+            size: src_bytes.len() as u64,
             etag: etag.clone(),
             last_modified,
             content_type: new_content_type,
@@ -2219,7 +2307,7 @@ impl S3Service {
                 dest_bucket,
                 dest_key,
                 dest_meta.version_id.as_deref(),
-                BodySource::Bytes(src_bytes.clone()),
+                BodySource::Bytes(dest_stored_bytes.clone()),
                 &dest_meta,
             )
             .map_err(super::persistence_error)?;

@@ -122,6 +122,7 @@ pub struct SsmService {
     secretsmanager_state: Option<SharedSecretsManagerState>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    pub(crate) kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
 }
 
 impl SsmService {
@@ -131,6 +132,7 @@ impl SsmService {
             secretsmanager_state: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            kms_hook: None,
         }
     }
 
@@ -141,6 +143,11 @@ impl SsmService {
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self
+    }
+
+    pub fn with_kms_hook(mut self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
+        self.kms_hook = Some(hook);
         self
     }
 

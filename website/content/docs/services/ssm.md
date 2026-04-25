@@ -24,9 +24,15 @@ fakecloud implements **146 of 146** SSM operations at 100% Smithy conformance.
 
 JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 
-## Gotchas
+## SecureString encryption
 
-- **SecureString parameters are stored unencrypted.** The AWS API accepts a `KeyId` and returns a decrypted value to authorized callers; fakecloud stores the value as-is since there's no KMS-level enforcement.
+SecureString parameters are encrypted through the KMS hook on `PutParameter`
+and decrypted on `GetParameter` / `GetParameters` / `GetParametersByPath` when
+the caller passes `WithDecryption=true`. The default `alias/aws/ssm`
+AWS-managed key is auto-provisioned on first use; passing an explicit `KeyId`
+routes encryption through that key instead. KMS calls land in
+`/_fakecloud/kms/usage` with the `PARAMETER_ARN` encryption context, so tests
+can assert that a parameter's plaintext is never persisted.
 
 ## Source
 
