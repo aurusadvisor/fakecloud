@@ -47,6 +47,26 @@ fn decode_ciphertext_envelope(
     let ciphertext_bytes = base64::engine::general_purpose::STANDARD
         .decode(ciphertext_b64)
         .map_err(|_| invalid_ciphertext())?;
+
+    // Modern AWS-shaped blob (AES-256-GCM under the per-account master
+    // key) — try this first. Older textual envelopes fall through.
+    if let Some(decoded) = crate::blob::decode(&state.master_key_bytes, &ciphertext_bytes) {
+        let key = state.keys.get(&decoded.key_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotFoundException",
+                format!("Key '{}' does not exist", decoded.key_id),
+            )
+        })?;
+        return Ok(DecodedCiphertext {
+            source_arn: key.arn.clone(),
+            plaintext_b64: base64::engine::general_purpose::STANDARD.encode(&decoded.plaintext),
+        });
+    }
+
+    // Legacy textual envelopes: `fakecloud-kms:<key>:<b64>` and
+    // `fakecloud-imported:<key>:<xored-b64>`. Kept for back-compat with
+    // ciphertexts persisted before the binary blob format shipped.
     let envelope = String::from_utf8(ciphertext_bytes).map_err(|_| invalid_ciphertext())?;
 
     if let Some(rest) = envelope.strip_prefix(IMPORTED_ENVELOPE_PREFIX) {
@@ -681,19 +701,33 @@ fn decode_plaintext(plaintext_b64: &str) -> Result<Vec<u8>, AwsServiceError> {
 /// against the material so the ciphertext is deterministic in the
 /// imported key; otherwise the fakecloud envelope just wraps the
 /// original base64 plaintext under a fixed prefix.
-fn build_encrypt_ciphertext(key: &KmsKey, plaintext_b64: &str, plaintext_bytes: &[u8]) -> String {
-    let envelope = if let Some(ref material) = key.imported_material_bytes {
+fn build_encrypt_ciphertext(
+    state: &KmsState,
+    key: &KmsKey,
+    plaintext_b64: &str,
+    plaintext_bytes: &[u8],
+) -> String {
+    let _ = plaintext_b64;
+    if let Some(ref material) = key.imported_material_bytes {
+        // Imported key material path: legacy XOR envelope wrapped in the
+        // textual `fakecloud-imported:<key>:<b64>` form, base64-encoded for
+        // wire transport. This format is preserved for back-compat with
+        // snapshots and external callers that may already have stored
+        // ciphertexts produced before the AES-GCM blob format landed.
         let xored: Vec<u8> = plaintext_bytes
             .iter()
             .enumerate()
             .map(|(i, b)| b ^ material[i % material.len()])
             .collect();
         let xored_b64 = base64::engine::general_purpose::STANDARD.encode(&xored);
-        format!("fakecloud-imported:{}:{xored_b64}", key.key_id)
-    } else {
-        format!("{FAKE_ENVELOPE_PREFIX}{}:{plaintext_b64}", key.key_id)
-    };
-    base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes())
+        let envelope = format!("fakecloud-imported:{}:{xored_b64}", key.key_id);
+        return base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+    }
+    // Default path: AWS-shaped binary blob with AES-256-GCM under the
+    // per-account master key persisted in `KmsState`. Round-trips through
+    // real SDKs and does not leak plaintext to anyone inspecting the bytes.
+    let blob = crate::blob::encode(&state.master_key_bytes, &key.key_id, plaintext_bytes);
+    base64::engine::general_purpose::STANDARD.encode(&blob)
 }
 
 /// Reject empty/undecodable base64 for `Verify`'s Message and Signature.
@@ -1165,7 +1199,7 @@ impl KmsService {
             ));
         }
 
-        let ciphertext_b64 = build_encrypt_ciphertext(key, plaintext_b64, &plaintext_bytes);
+        let ciphertext_b64 = build_encrypt_ciphertext(state, key, plaintext_b64, &plaintext_bytes);
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -1243,25 +1277,27 @@ impl KmsService {
             )
         })?;
 
-        let new_envelope = if let Some(ref material) = dest_key.imported_material_bytes {
-            let plaintext_bytes = base64::engine::general_purpose::STANDARD
-                .decode(&decoded.plaintext_b64)
-                .unwrap_or_default();
+        let plaintext_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&decoded.plaintext_b64)
+            .unwrap_or_default();
+        let new_ciphertext_b64 = if let Some(ref material) = dest_key.imported_material_bytes {
+            // Imported-key path: keep the legacy XOR envelope so consumers
+            // that already round-trip via key material can still decrypt.
             let xored: Vec<u8> = plaintext_bytes
                 .iter()
                 .enumerate()
                 .map(|(i, b)| b ^ material[i % material.len()])
                 .collect();
             let xored_b64 = base64::engine::general_purpose::STANDARD.encode(&xored);
-            format!("fakecloud-imported:{}:{xored_b64}", dest_key.key_id)
+            let envelope = format!("fakecloud-imported:{}:{xored_b64}", dest_key.key_id);
+            base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes())
         } else {
-            format!(
-                "{FAKE_ENVELOPE_PREFIX}{}:{}",
-                dest_key.key_id, decoded.plaintext_b64
-            )
+            // Default path: wrap the recovered plaintext under the
+            // destination key with the AWS-shaped binary blob.
+            let blob =
+                crate::blob::encode(&state.master_key_bytes, &dest_key.key_id, &plaintext_bytes);
+            base64::engine::general_purpose::STANDARD.encode(&blob)
         };
-        let new_ciphertext_b64 =
-            base64::engine::general_purpose::STANDARD.encode(new_envelope.as_bytes());
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -1313,9 +1349,9 @@ impl KmsService {
         let data_key_bytes: Vec<u8> = rand_bytes(num_bytes);
         let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(&data_key_bytes);
 
-        // Encrypt the data key
-        let envelope = format!("{FAKE_ENVELOPE_PREFIX}{}:{plaintext_b64}", key.key_id);
-        let ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+        // Wrap the data key in the AWS-shaped binary blob.
+        let blob = crate::blob::encode(&state.master_key_bytes, &key.key_id, &data_key_bytes);
+        let ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -1365,9 +1401,9 @@ impl KmsService {
 
         let num_bytes = data_key_size_from_body(&body)?;
         let data_key_bytes: Vec<u8> = rand_bytes(num_bytes);
-        let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(&data_key_bytes);
-        let envelope = format!("{FAKE_ENVELOPE_PREFIX}{}:{plaintext_b64}", key.key_id);
-        let ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+        let _ = base64::engine::general_purpose::STANDARD.encode(&data_key_bytes);
+        let blob = crate::blob::encode(&state.master_key_bytes, &key.key_id, &data_key_bytes);
+        let ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -2702,13 +2738,9 @@ impl KmsService {
         let private_plaintext_b64 =
             base64::engine::general_purpose::STANDARD.encode(&private_key_bytes);
 
-        // Encrypt private key
-        let envelope = format!(
-            "{FAKE_ENVELOPE_PREFIX}{}:{private_plaintext_b64}",
-            key.key_id
-        );
-        let private_ciphertext_b64 =
-            base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+        // Wrap the private key in the AWS-shaped binary blob.
+        let blob = crate::blob::encode(&state.master_key_bytes, &key.key_id, &private_key_bytes);
+        let private_ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -2765,15 +2797,9 @@ impl KmsService {
         let public_key_bytes = generate_fake_public_key(&key_pair_spec);
         let private_key_bytes = rand_bytes(256);
         let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key_bytes);
-        let private_plaintext_b64 =
-            base64::engine::general_purpose::STANDARD.encode(&private_key_bytes);
 
-        let envelope = format!(
-            "{FAKE_ENVELOPE_PREFIX}{}:{private_plaintext_b64}",
-            key.key_id
-        );
-        let private_ciphertext_b64 =
-            base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+        let blob = crate::blob::encode(&state.master_key_bytes, &key.key_id, &private_key_bytes);
+        let private_ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
 
         Ok(AwsResponse::json(
             StatusCode::OK,

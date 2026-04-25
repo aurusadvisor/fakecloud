@@ -1,0 +1,217 @@
+//! AWS-shaped KMS ciphertext blobs.
+//!
+//! Real AWS KMS ciphertext is opaque binary that round-trips through
+//! `Encrypt` and `Decrypt`. Anyone inspecting the bytes sees a binary
+//! header followed by AES-GCM ciphertext, *not* their plaintext. The
+//! original fakecloud envelope (`fakecloud-kms:<key>:<base64-plaintext>`)
+//! round-tripped correctly through real SDKs but leaked plaintext to
+//! anyone who base64-decoded the blob.
+//!
+//! This module produces and consumes a binary envelope shaped like
+//! AWS's, using a per-process master key:
+//!
+//! ```text
+//! ┌──────────┬────────────┬──────────────┬────┬─────────────┬───────────────┐
+//! │ version  │ key-id len │ key-id bytes │ IV │ ciphertext  │ AES-GCM tag   │
+//! │ 4 bytes  │ 8 bytes BE │ N bytes UTF8 │ 12 │ M bytes     │ 16 bytes      │
+//! └──────────┴────────────┴──────────────┴────┴─────────────┴───────────────┘
+//! ```
+//!
+//! The version header (`0x01 0x02 0x02 0x00`) lets us distinguish
+//! fakecloud blobs from random base64 noise. The key-id is included so
+//! `Decrypt` can echo back the source `KeyId` without the caller having
+//! to specify it, matching AWS behavior.
+
+use aes_gcm::aead::generic_array::GenericArray;
+use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
+use aes_gcm::{AeadCore, Aes256Gcm, Key};
+
+const VERSION_HEADER: [u8; 4] = [0x01, 0x02, 0x02, 0x00];
+
+fn cipher_for(master_key_bytes: &[u8]) -> Option<Aes256Gcm> {
+    if master_key_bytes.len() != 32 {
+        return None;
+    }
+    let key = Key::<Aes256Gcm>::from_slice(master_key_bytes);
+    Some(Aes256Gcm::new(key))
+}
+
+/// Encode a plaintext byte slice into the AWS-shaped blob format. Uses
+/// AES-256-GCM with the supplied 32-byte master key and a fresh random
+/// IV. Output bytes are opaque — callers should base64 them before
+/// placing in JSON responses. Panics on a master key that isn't 32
+/// bytes; callers control the key, so this is a programming error.
+pub fn encode(master_key_bytes: &[u8], key_id: &str, plaintext: &[u8]) -> Vec<u8> {
+    let cipher =
+        cipher_for(master_key_bytes).expect("KMS master key must be 32 bytes for AES-256-GCM");
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+
+    // AES-GCM in this crate produces ciphertext || tag concatenated; we'll
+    // split tag off the back to keep the wire format aligned with the AWS
+    // shape (ciphertext segment followed by separate tag segment).
+    // Bind the key-id into the AAD so any tampering with the header
+    // bytes (e.g. flipping a single character of the embedded key-id)
+    // makes AEAD verification fail on decrypt. Without this, the
+    // header is a plain prefix and an attacker could rewrite the
+    // returned KeyId without breaking decryption.
+    let combined = cipher
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad: key_id.as_bytes(),
+            },
+        )
+        .expect("AES-GCM encrypt with 96-bit nonce never fails on valid key");
+    debug_assert!(combined.len() >= 16, "AES-GCM output includes 16-byte tag");
+    let tag_split = combined.len() - 16;
+    let ciphertext = &combined[..tag_split];
+    let tag = &combined[tag_split..];
+
+    let key_bytes = key_id.as_bytes();
+    let mut out = Vec::with_capacity(
+        VERSION_HEADER.len() + 8 + key_bytes.len() + 12 + 4 + ciphertext.len() + 16,
+    );
+    out.extend_from_slice(&VERSION_HEADER);
+    out.extend_from_slice(&(key_bytes.len() as u64).to_be_bytes());
+    out.extend_from_slice(key_bytes);
+    out.extend_from_slice(nonce.as_slice());
+    out.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
+    out.extend_from_slice(ciphertext);
+    out.extend_from_slice(tag);
+    out
+}
+
+/// A decoded blob from [`decode`]. Carries the embedded key-id and the
+/// recovered plaintext.
+pub struct Decoded {
+    pub key_id: String,
+    pub plaintext: Vec<u8>,
+}
+
+/// Decode an AWS-shaped fakecloud KMS blob back to its plaintext.
+/// Returns `None` if the bytes don't carry the version header or fail
+/// any structural check (including AEAD verification under the supplied
+/// master key); callers fall back to legacy envelope formats in that
+/// case.
+pub fn decode(master_key_bytes: &[u8], blob: &[u8]) -> Option<Decoded> {
+    if blob.len() < VERSION_HEADER.len() + 8 + 12 + 4 + 16 {
+        return None;
+    }
+    if blob[..VERSION_HEADER.len()] != VERSION_HEADER {
+        return None;
+    }
+    let mut cursor = VERSION_HEADER.len();
+
+    let key_len = u64::from_be_bytes(blob[cursor..cursor + 8].try_into().ok()?) as usize;
+    cursor += 8;
+    if cursor + key_len + 12 + 4 + 16 > blob.len() {
+        return None;
+    }
+    let key_id = std::str::from_utf8(&blob[cursor..cursor + key_len])
+        .ok()?
+        .to_string();
+    cursor += key_len;
+
+    let nonce = GenericArray::from_slice(&blob[cursor..cursor + 12]);
+    cursor += 12;
+
+    let ct_len = u32::from_be_bytes(blob[cursor..cursor + 4].try_into().ok()?) as usize;
+    cursor += 4;
+    if cursor + ct_len + 16 != blob.len() {
+        return None;
+    }
+    let ct_with_tag = &blob[cursor..cursor + ct_len + 16];
+
+    let cipher = cipher_for(master_key_bytes)?;
+    let plaintext = cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ct_with_tag,
+                aad: key_id.as_bytes(),
+            },
+        )
+        .ok()?;
+
+    Some(Decoded { key_id, plaintext })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixed_master() -> Vec<u8> {
+        // Deterministic 32-byte key so unit tests are reproducible.
+        (0u8..32).collect()
+    }
+
+    #[test]
+    fn round_trip_recovers_plaintext_and_key_id() {
+        let plaintext = b"super-secret-value";
+        let mk = fixed_master();
+        let blob = encode(&mk, "alias/my-key", plaintext);
+        let decoded = decode(&mk, &blob).unwrap();
+        assert_eq!(decoded.plaintext, plaintext);
+        assert_eq!(decoded.key_id, "alias/my-key");
+    }
+
+    #[test]
+    fn blob_does_not_leak_plaintext() {
+        let plaintext = b"NOT_TO_BE_FOUND_IN_BYTES";
+        let blob = encode(&fixed_master(), "key-1", plaintext);
+        assert!(blob.windows(plaintext.len()).all(|w| w != plaintext));
+    }
+
+    #[test]
+    fn decode_rejects_random_bytes() {
+        let mk = fixed_master();
+        assert!(decode(&mk, b"this-is-not-a-blob").is_none());
+        assert!(decode(&mk, &[0u8; 8]).is_none());
+    }
+
+    #[test]
+    fn decode_rejects_wrong_header() {
+        let mk = fixed_master();
+        let mut blob = encode(&mk, "k", b"data");
+        blob[0] = 0xFF;
+        assert!(decode(&mk, &blob).is_none());
+    }
+
+    #[test]
+    fn decode_rejects_tampered_ciphertext() {
+        let mk = fixed_master();
+        let mut blob = encode(&mk, "k", b"data");
+        let last = blob.len() - 1;
+        blob[last] ^= 0x01;
+        assert!(decode(&mk, &blob).is_none());
+    }
+
+    #[test]
+    fn decode_rejects_wrong_master_key() {
+        let blob = encode(&fixed_master(), "k", b"data");
+        let other_key: Vec<u8> = (32u8..64).collect();
+        assert!(decode(&other_key, &blob).is_none());
+    }
+
+    #[test]
+    fn decode_rejects_tampered_key_id_header() {
+        let mk = fixed_master();
+        let mut blob = encode(&mk, "alias/original-key", b"data");
+        // The version header is 4 bytes, key-id length is the next 8.
+        // The first byte of the key-id sits at offset 12. Flip one
+        // character so the AAD no longer matches the bytes used at
+        // encrypt time and AES-GCM rejects the ciphertext.
+        let key_id_offset = 4 + 8;
+        blob[key_id_offset] ^= 0x01;
+        assert!(decode(&mk, &blob).is_none());
+    }
+
+    #[test]
+    fn distinct_calls_produce_distinct_blobs() {
+        let mk = fixed_master();
+        let a = encode(&mk, "k", b"same");
+        let b = encode(&mk, "k", b"same");
+        assert_ne!(a, b, "fresh IV should make ciphertext non-deterministic");
+    }
+}
