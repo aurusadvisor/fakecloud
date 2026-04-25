@@ -1147,22 +1147,22 @@ impl Elbv2Service {
         let arn = required_query_param(req, "TargetGroupArn")?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        // Reject if the TG is still referenced by listeners/rules.
-        let referenced = st.listeners.values().any(|l| {
-            l.default_actions
-                .iter()
-                .any(|a| a.target_group_arn.as_deref() == Some(arn.as_str()))
-                || l.default_actions.iter().any(|a| {
-                    a.forward
-                        .as_ref()
-                        .map(|f| f.target_groups.iter().any(|t| t.target_group_arn == arn))
-                        .unwrap_or(false)
-                })
-        }) || st.rules.values().any(|r| {
-            r.actions
-                .iter()
-                .any(|a| a.target_group_arn.as_deref() == Some(arn.as_str()))
-        });
+        // Reject if the TG is still referenced by listeners/rules — including
+        // ForwardConfig.TargetGroups blocks on either default actions or rule actions.
+        let action_refs_tg = |a: &crate::state::Action| {
+            a.target_group_arn.as_deref() == Some(arn.as_str())
+                || a.forward
+                    .as_ref()
+                    .is_some_and(|f| f.target_groups.iter().any(|t| t.target_group_arn == arn))
+        };
+        let referenced = st
+            .listeners
+            .values()
+            .any(|l| l.default_actions.iter().any(action_refs_tg))
+            || st
+                .rules
+                .values()
+                .any(|r| r.actions.iter().any(action_refs_tg));
         if referenced {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1387,11 +1387,29 @@ fn render_target_group_xml(tg: &crate::state::TargetGroup) -> String {
         .as_deref()
         .map(|p| format!("<HealthCheckPath>{}</HealthCheckPath>", xml_escape(p)))
         .unwrap_or_default();
-    let matcher = tg
-        .matcher_http_code
-        .as_deref()
-        .map(|m| format!("<Matcher><HttpCode>{}</HttpCode></Matcher>", xml_escape(m)))
-        .unwrap_or_default();
+    let matcher = match (
+        tg.matcher_http_code.as_deref(),
+        tg.matcher_grpc_code.as_deref(),
+    ) {
+        (Some(http), Some(grpc)) => format!(
+            "<Matcher><HttpCode>{}</HttpCode><GrpcCode>{}</GrpcCode></Matcher>",
+            xml_escape(http),
+            xml_escape(grpc)
+        ),
+        (Some(http), None) => {
+            format!(
+                "<Matcher><HttpCode>{}</HttpCode></Matcher>",
+                xml_escape(http)
+            )
+        }
+        (None, Some(grpc)) => {
+            format!(
+                "<Matcher><GrpcCode>{}</GrpcCode></Matcher>",
+                xml_escape(grpc)
+            )
+        }
+        (None, None) => String::new(),
+    };
     format!(
         "<TargetGroupArn>{arn}</TargetGroupArn>\
          <TargetGroupName>{name}</TargetGroupName>\
