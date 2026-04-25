@@ -10,7 +10,7 @@ Gradle (Kotlin DSL):
 
 ```kotlin
 dependencies {
-    testImplementation("dev.fakecloud:fakecloud:0.11.0")
+    testImplementation("dev.fakecloud:fakecloud:0.12.0")
 }
 ```
 
@@ -20,7 +20,7 @@ Maven:
 <dependency>
     <groupId>dev.fakecloud</groupId>
     <artifactId>fakecloud</artifactId>
-    <version>0.11.0</version>
+    <version>0.12.0</version>
     <scope>test</scope>
 </dependency>
 ```

@@ -81,7 +81,7 @@ $emails = $fc->ses()->getEmails()->emails;
 
 ```kotlin
 // build.gradle.kts
-testImplementation("dev.fakecloud:fakecloud:0.11.0")
+testImplementation("dev.fakecloud:fakecloud:0.12.0")
 ```
 
 ```java
