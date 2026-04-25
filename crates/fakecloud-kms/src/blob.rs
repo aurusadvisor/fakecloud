@@ -23,7 +23,7 @@
 //! to specify it, matching AWS behavior.
 
 use aes_gcm::aead::generic_array::GenericArray;
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{AeadCore, Aes256Gcm, Key};
 
 const VERSION_HEADER: [u8; 4] = [0x01, 0x02, 0x02, 0x00];
@@ -49,8 +49,19 @@ pub fn encode(master_key_bytes: &[u8], key_id: &str, plaintext: &[u8]) -> Vec<u8
     // AES-GCM in this crate produces ciphertext || tag concatenated; we'll
     // split tag off the back to keep the wire format aligned with the AWS
     // shape (ciphertext segment followed by separate tag segment).
+    // Bind the key-id into the AAD so any tampering with the header
+    // bytes (e.g. flipping a single character of the embedded key-id)
+    // makes AEAD verification fail on decrypt. Without this, the
+    // header is a plain prefix and an attacker could rewrite the
+    // returned KeyId without breaking decryption.
     let combined = cipher
-        .encrypt(&nonce, plaintext)
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad: key_id.as_bytes(),
+            },
+        )
         .expect("AES-GCM encrypt with 96-bit nonce never fails on valid key");
     debug_assert!(combined.len() >= 16, "AES-GCM output includes 16-byte tag");
     let tag_split = combined.len() - 16;
@@ -113,7 +124,15 @@ pub fn decode(master_key_bytes: &[u8], blob: &[u8]) -> Option<Decoded> {
     let ct_with_tag = &blob[cursor..cursor + ct_len + 16];
 
     let cipher = cipher_for(master_key_bytes)?;
-    let plaintext = cipher.decrypt(nonce, ct_with_tag).ok()?;
+    let plaintext = cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ct_with_tag,
+                aad: key_id.as_bytes(),
+            },
+        )
+        .ok()?;
 
     Some(Decoded { key_id, plaintext })
 }
@@ -173,6 +192,19 @@ mod tests {
         let blob = encode(&fixed_master(), "k", b"data");
         let other_key: Vec<u8> = (32u8..64).collect();
         assert!(decode(&other_key, &blob).is_none());
+    }
+
+    #[test]
+    fn decode_rejects_tampered_key_id_header() {
+        let mk = fixed_master();
+        let mut blob = encode(&mk, "alias/original-key", b"data");
+        // The version header is 4 bytes, key-id length is the next 8.
+        // The first byte of the key-id sits at offset 12. Flip one
+        // character so the AAD no longer matches the bytes used at
+        // encrypt time and AES-GCM rejects the ciphertext.
+        let key_id_offset = 4 + 8;
+        blob[key_id_offset] ^= 0x01;
+        assert!(decode(&mk, &blob).is_none());
     }
 
     #[test]
