@@ -1072,9 +1072,7 @@ fn build_instance_patch_state(state: &SsmState, instance_id: &str) -> Option<Val
             .unwrap_or(0)
     };
     let str_field = |key: &str, default: &str| -> String {
-        row.get(key)
-            .cloned()
-            .unwrap_or_else(|| default.to_string())
+        row.get(key).cloned().unwrap_or_else(|| default.to_string())
     };
     let ts_field = |key: &str| -> f64 {
         let raw = str_field(key, "1970-01-01T00:00:00Z");
