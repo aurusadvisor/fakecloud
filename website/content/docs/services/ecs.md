@@ -1,12 +1,12 @@
 +++
 title = "ECS"
-description = "Elastic Container Service — clusters, task definitions, (later) real Fargate-style task execution via Docker, services, and rolling deployments."
+description = "Elastic Container Service — full API: clusters, task definitions, real Fargate-style task execution via Docker, services with rolling deployments, task sets, container instances, ECS Exec."
 weight = 22
 +++
 
-fakecloud implements Amazon Elastic Container Service (ECS) with full API coverage. 60 operations, shipped across four batches.
+fakecloud implements Amazon Elastic Container Service (ECS) with full API coverage. 60 operations.
 
-**Status: all four batches shipped — full API.** Covers clusters, task definitions, real Fargate-style task execution, services with rolling deployments, task sets, container instances, capacity providers, attributes, task protection, ECS Exec, and the agent-side `Submit*` / `DiscoverPollEndpoint` surface.
+**Status: full API.** Covers clusters, task definitions, real Fargate-style task execution, services with rolling deployments, task sets, container instances, capacity providers, attributes, task protection, ECS Exec, and the agent-side `Submit*` / `DiscoverPollEndpoint` surface.
 
 ## Supported today (full API)
 
@@ -25,7 +25,7 @@ fakecloud implements Amazon Elastic Container Service (ECS) with full API covera
 - **Tagging** — `TagResource`, `UntagResource`, `ListTagsForResource` (clusters and task definitions)
 - **Account settings** — `PutAccountSetting`, `PutAccountSettingDefault`, `DeleteAccountSetting`, `ListAccountSettings`
 
-### Services + rolling deployments (Batch 3)
+### Services + rolling deployments
 
 `CreateService` spawns tasks to match `desiredCount` under the service, tagging each with `startedBy=ecs-svc/<name>` so the tasks reconcile back to the service. `UpdateService` supports two independent mutations:
 
@@ -36,7 +36,7 @@ fakecloud implements Amazon Elastic Container Service (ECS) with full API covera
 
 Task-definition families track revisions monotonically; `DeleteTaskDefinitions` requires `DeregisterTaskDefinition` first (real AWS behaviour), and the result flips status to `DELETE_IN_PROGRESS`.
 
-## Task execution (Batch 2)
+## Task execution
 
 `RunTask` records the task synchronously and kicks off a background docker execution per spawned task:
 
@@ -174,10 +174,6 @@ const { clusters } = await fc.ecs.getClusters();
 let fc = FakeCloud::new("http://localhost:4566");
 let clusters = fc.ecs().get_clusters().await?;
 ```
-
-## Roadmap
-
-- **Batch 4** — Container instances, attributes, capacity providers, task protection, ECS Exec (`ExecuteCommand` via `docker exec`), task sets (EXTERNAL deployment controller), snapshot/restore of in-flight tasks, IAM task-role credential injection via `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, EventBridge `ECS Task State Change` events, awslogs-driver CloudWatch Logs streaming.
 
 ## Source
 
