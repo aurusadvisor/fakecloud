@@ -332,6 +332,90 @@ async fn tag_untag_cluster_and_task_definition() {
 }
 
 #[tokio::test]
+async fn tag_untag_service_and_capacity_provider() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "tag-cluster", "tag-td").await;
+
+    let svc = client
+        .create_service()
+        .cluster("tag-cluster")
+        .service_name("api")
+        .task_definition("tag-td")
+        .desired_count(1)
+        .send()
+        .await
+        .unwrap()
+        .service()
+        .unwrap()
+        .clone();
+
+    client
+        .tag_resource()
+        .resource_arn(svc.service_arn().unwrap())
+        .tags(Tag::builder().key("tier").value("frontend").build())
+        .send()
+        .await
+        .unwrap();
+    let svc_tags = client
+        .list_tags_for_resource()
+        .resource_arn(svc.service_arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(svc_tags.tags().len(), 1);
+    assert_eq!(svc_tags.tags()[0].key(), Some("tier"));
+
+    let cp = client
+        .create_capacity_provider()
+        .name("cp-tag")
+        .auto_scaling_group_provider(
+            aws_sdk_ecs::types::AutoScalingGroupProvider::builder()
+                .auto_scaling_group_arn(
+                    "arn:aws:autoscaling:us-east-1:123456789012:autoScalingGroup:abc:autoScalingGroupName/asg-1",
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .capacity_provider()
+        .unwrap()
+        .clone();
+
+    client
+        .tag_resource()
+        .resource_arn(cp.capacity_provider_arn().unwrap())
+        .tags(Tag::builder().key("owner").value("platform").build())
+        .send()
+        .await
+        .unwrap();
+    let cp_tags = client
+        .list_tags_for_resource()
+        .resource_arn(cp.capacity_provider_arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cp_tags.tags().len(), 1);
+
+    client
+        .untag_resource()
+        .resource_arn(cp.capacity_provider_arn().unwrap())
+        .tag_keys("owner")
+        .send()
+        .await
+        .unwrap();
+    let cp_tags_after = client
+        .list_tags_for_resource()
+        .resource_arn(cp.capacity_provider_arn().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert!(cp_tags_after.tags().is_empty());
+}
+
+#[tokio::test]
 async fn put_and_list_account_settings() {
     let server = TestServer::start().await;
     let client = server.ecs_client().await;

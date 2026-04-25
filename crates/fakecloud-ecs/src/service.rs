@@ -1217,9 +1217,45 @@ impl EcsService {
                     .ok_or_else(|| resource_not_found(&arn))?;
                 merge_tags(&mut td.tags, tags);
             }
+            "service" => {
+                let svc = state
+                    .services
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                merge_tags(&mut svc.tags, tags);
+            }
+            "task" => {
+                let task_id = tail.rsplit('/').next().unwrap_or(&tail).to_string();
+                let task = state
+                    .tasks
+                    .get_mut(&task_id)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                merge_tags(&mut task.tags, tags);
+            }
+            "task-set" => {
+                let ts = state
+                    .task_sets
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                merge_tags(&mut ts.tags, tags);
+            }
+            "container-instance" => {
+                let ci = state
+                    .container_instances
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                merge_tags(&mut ci.tags, tags);
+            }
+            "capacity-provider" => {
+                let cp = state
+                    .capacity_providers
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                merge_tags(&mut cp.tags, tags);
+            }
             other => {
                 return Err(invalid_parameter(format!(
-                    "Tagging not yet supported for resource type: {other}"
+                    "Unknown ECS resource type: {other}"
                 )));
             }
         }
@@ -1261,9 +1297,45 @@ impl EcsService {
                     .ok_or_else(|| resource_not_found(&arn))?;
                 td.tags.retain(|t| !keys.contains(&t.key));
             }
+            "service" => {
+                let svc = state
+                    .services
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                svc.tags.retain(|t| !keys.contains(&t.key));
+            }
+            "task" => {
+                let task_id = tail.rsplit('/').next().unwrap_or(&tail).to_string();
+                let task = state
+                    .tasks
+                    .get_mut(&task_id)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                task.tags.retain(|t| !keys.contains(&t.key));
+            }
+            "task-set" => {
+                let ts = state
+                    .task_sets
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                ts.tags.retain(|t| !keys.contains(&t.key));
+            }
+            "container-instance" => {
+                let ci = state
+                    .container_instances
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                ci.tags.retain(|t| !keys.contains(&t.key));
+            }
+            "capacity-provider" => {
+                let cp = state
+                    .capacity_providers
+                    .get_mut(&tail)
+                    .ok_or_else(|| resource_not_found(&arn))?;
+                cp.tags.retain(|t| !keys.contains(&t.key));
+            }
             other => {
                 return Err(invalid_parameter(format!(
-                    "Tagging not yet supported for resource type: {other}"
+                    "Unknown ECS resource type: {other}"
                 )));
             }
         }
@@ -1296,9 +1368,37 @@ impl EcsService {
                     .map(|td| td.tags.clone())
                     .ok_or_else(|| resource_not_found(&arn))?
             }
+            "service" => state
+                .services
+                .get(&tail)
+                .map(|s| s.tags.clone())
+                .ok_or_else(|| resource_not_found(&arn))?,
+            "task" => {
+                let task_id = tail.rsplit('/').next().unwrap_or(&tail).to_string();
+                state
+                    .tasks
+                    .get(&task_id)
+                    .map(|t| t.tags.clone())
+                    .ok_or_else(|| resource_not_found(&arn))?
+            }
+            "task-set" => state
+                .task_sets
+                .get(&tail)
+                .map(|t| t.tags.clone())
+                .ok_or_else(|| resource_not_found(&arn))?,
+            "container-instance" => state
+                .container_instances
+                .get(&tail)
+                .map(|c| c.tags.clone())
+                .ok_or_else(|| resource_not_found(&arn))?,
+            "capacity-provider" => state
+                .capacity_providers
+                .get(&tail)
+                .map(|c| c.tags.clone())
+                .ok_or_else(|| resource_not_found(&arn))?,
             other => {
                 return Err(invalid_parameter(format!(
-                    "ListTagsForResource not yet supported for resource type: {other}"
+                    "Unknown ECS resource type: {other}"
                 )));
             }
         };

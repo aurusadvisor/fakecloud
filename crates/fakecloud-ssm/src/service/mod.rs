@@ -371,7 +371,8 @@ impl AwsService for SsmService {
             "DescribeInstanceAssociationsStatus" => {
                 self.describe_instance_associations_status(&req)
             }
-            // Stubs
+            // Synthetic defaults (no managed-instance fleet to track) and
+            // service settings backed by real per-account state.
             "GetConnectionStatus" => self.get_connection_status(&req),
             "GetCalendarState" => self.get_calendar_state(&req),
             "DescribePatchGroupState" => self.describe_patch_group_state(&req),
@@ -544,7 +545,7 @@ impl AwsService for SsmService {
             "ListNodesSummary",
             "DescribeEffectiveInstanceAssociations",
             "DescribeInstanceAssociationsStatus",
-            // Stubs
+            // Synthetic defaults + service settings
             "GetConnectionStatus",
             "GetCalendarState",
             "DescribePatchGroupState",
@@ -1008,7 +1009,7 @@ mod tests {
         assert!(body["Policies"].as_array().unwrap().is_empty());
     }
 
-    // -- Stubs --
+    // -- Synthetic defaults + service settings --
 
     #[test]
     fn get_connection_status_returns_connected() {
@@ -4450,7 +4451,7 @@ mod tests {
     }
 
     #[test]
-    fn list_document_metadata_history_returns_stub() {
+    fn list_document_metadata_history_returns_empty_without_reviews() {
         let svc = make_service();
         create_doc_basic(&svc, "DocA");
         let req = make_request(
