@@ -1,3 +1,4 @@
+pub mod prober;
 pub mod service;
 pub mod state;
 
