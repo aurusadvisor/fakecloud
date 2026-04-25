@@ -812,6 +812,7 @@ impl SsmService {
             .as_str()
             .ok_or_else(|| missing("Metadata"))?;
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
@@ -821,7 +822,7 @@ impl SsmService {
             .get(name)
             .ok_or_else(|| doc_not_found(name))?;
 
-        let reviewer_response: Vec<Value> = doc
+        let all_responses: Vec<Value> = doc
             .reviews
             .iter()
             .map(|r| {
@@ -838,14 +839,21 @@ impl SsmService {
             })
             .collect();
 
-        Ok(AwsResponse::ok_json(json!({
+        let (page, next_token) = paginate(&all_responses, body["NextToken"].as_str(), max_results);
+
+        let mut resp = json!({
             "Name": name,
             "DocumentVersion": doc.default_version,
             "Author": doc.owner,
             "Metadata": {
-                "ReviewerResponse": reviewer_response,
+                "ReviewerResponse": page,
             },
-        })))
+        });
+        if let Some(token) = next_token {
+            resp["NextToken"] = json!(token);
+        }
+
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn update_document_metadata(

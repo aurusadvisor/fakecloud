@@ -410,22 +410,33 @@ impl SsmService {
             .as_array()
             .ok_or_else(|| missing("AssociationIds"))?;
 
+        let ids: Vec<String> = association_ids
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let now = Utc::now();
 
-        for id in association_ids.iter().filter_map(|v| v.as_str()) {
-            if let Some(assoc) = state.associations.get_mut(id) {
-                assoc.status = "Pending".to_string();
-                assoc.status_date = now;
-                assoc.last_update_association_date = now;
-                assoc.last_execution_date = Some(now);
-            } else {
+        // Validate every association exists before mutating any of them so we
+        // never leave half the batch flipped to Pending on a failed call.
+        for id in &ids {
+            if !state.associations.contains_key(id) {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "AssociationDoesNotExist",
                     format!("The specified association {id} does not exist."),
                 ));
+            }
+        }
+
+        let now = Utc::now();
+        for id in &ids {
+            if let Some(assoc) = state.associations.get_mut(id) {
+                assoc.status = "Pending".to_string();
+                assoc.status_date = now;
+                assoc.last_update_association_date = now;
+                assoc.last_execution_date = Some(now);
             }
         }
         Ok(AwsResponse::ok_json(json!({})))

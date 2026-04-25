@@ -1037,22 +1037,26 @@ impl CreatePatchBaselineInput {
 }
 
 /// Build a single `InstancePatchState` entry from inventory data captured for
-/// the instance via `PutInventory` (typically `AWS:PatchSummary` rows). Returns
-/// `None` if the instance is unknown or has no patch summary recorded.
+/// the instance via `PutInventory`. Requires an `AWS:PatchSummary` item with
+/// at least one row to exist for the instance — otherwise returns `None`, so
+/// instances that never reported back are omitted rather than reported with
+/// fabricated zero defaults.
 fn build_instance_patch_state(state: &SsmState, instance_id: &str) -> Option<Value> {
     let entry = state.inventory_entries.get(instance_id)?;
     let summary = entry
         .items
         .iter()
-        .find(|i| i.type_name == "AWS:PatchSummary");
-    let row = summary.and_then(|s| s.content.first());
+        .find(|i| i.type_name == "AWS:PatchSummary")?;
+    let row = summary.content.first()?;
 
     let baseline_id = row
-        .and_then(|r| r.get("BaselineId").cloned())
+        .get("BaselineId")
+        .cloned()
         .or_else(|| state.default_patch_baseline_id.clone())
         .unwrap_or_default();
     let patch_group = row
-        .and_then(|r| r.get("PatchGroup").cloned())
+        .get("PatchGroup")
+        .cloned()
         .or_else(|| {
             state
                 .patch_groups
@@ -1063,12 +1067,13 @@ fn build_instance_patch_state(state: &SsmState, instance_id: &str) -> Option<Val
         .unwrap_or_default();
 
     let i64_field = |key: &str| -> i64 {
-        row.and_then(|r| r.get(key))
+        row.get(key)
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0)
     };
     let str_field = |key: &str, default: &str| -> String {
-        row.and_then(|r| r.get(key).cloned())
+        row.get(key)
+            .cloned()
             .unwrap_or_else(|| default.to_string())
     };
     let ts_field = |key: &str| -> f64 {
