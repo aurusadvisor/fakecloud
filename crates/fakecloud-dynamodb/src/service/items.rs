@@ -25,7 +25,7 @@ impl DynamoDbService {
 
         // --- Acquire write lock ONLY for validation + mutation ---
         // Capture kinesis delivery info alongside the return value
-        let (old_item, kinesis_info) = {
+        let (old_item, kinesis_info, kms_audit) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
             let region = state.region.clone();
@@ -98,9 +98,26 @@ impl DynamoDbService {
                 )
             });
 
-            (old_item_for_return, kinesis_info)
+            // Snapshot KMS-audit inputs while we still hold the table
+            // borrow, then emit the records below the lock.
+            let kms_audit = if table.sse_type.as_deref() == Some("KMS") {
+                Some((table.arn.clone(), table.sse_kms_key_arn.clone()))
+            } else {
+                None
+            };
+
+            (old_item_for_return, kinesis_info, kms_audit)
         };
         // --- Write lock released, build response ---
+
+        if let Some((arn, key_arn)) = kms_audit {
+            self.record_table_kms_usage(
+                &req.account_id,
+                &arn,
+                key_arn.as_deref(),
+                super::TableKmsOp::Write,
+            );
+        }
 
         // Deliver to Kinesis destinations outside the lock
         if let Some((target, event_name, keys, old_image, new_image)) = kinesis_info {
@@ -128,7 +145,7 @@ impl DynamoDbService {
         let key = require_object(&body, "Key")?;
 
         // --- Use a read lock for the lookup (allows concurrent GetItem calls) ---
-        let (result, needs_insights) = {
+        let (result, needs_insights, kms_audit) = {
             let accounts = self.state.read();
             let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
@@ -143,9 +160,23 @@ impl DynamoDbService {
                 }
                 None => json!({}),
             };
-            (result, needs_insights)
+            let kms_audit = if table.sse_type.as_deref() == Some("KMS") {
+                Some((table.arn.clone(), table.sse_kms_key_arn.clone()))
+            } else {
+                None
+            };
+            (result, needs_insights, kms_audit)
         };
         // --- Read lock released ---
+
+        if let Some((arn, key_arn)) = kms_audit {
+            self.record_table_kms_usage(
+                &req.account_id,
+                &arn,
+                key_arn.as_deref(),
+                super::TableKmsOp::Read,
+            );
+        }
 
         // Only acquire write lock if contributor insights tracking is enabled
         if needs_insights {

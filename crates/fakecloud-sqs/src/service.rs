@@ -366,6 +366,8 @@ pub struct SqsService {
     /// between read-clone and save, leaving older bytes as the final
     /// on-disk state (P1 in Cubic review).
     snapshot_lock: Arc<AsyncMutex<()>>,
+    pub(crate) kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
+    pub(crate) region: String,
 }
 
 impl SqsService {
@@ -374,12 +376,70 @@ impl SqsService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            kms_hook: None,
+            region: "us-east-1".to_string(),
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
+    }
+
+    pub fn with_kms_hook(mut self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
+        self.kms_hook = Some(hook);
+        self
+    }
+
+    pub fn with_region(mut self, region: impl Into<String>) -> Self {
+        self.region = region.into();
+        self
+    }
+
+    /// Encrypt an SQS message body via the configured KMS hook when the
+    /// queue has `KmsMasterKeyId` set. Returns the plaintext unchanged
+    /// when no hook is wired or the queue isn't encrypted.
+    fn encrypt_message_body(
+        &self,
+        account_id: &str,
+        queue_arn: &str,
+        kms_key_id: Option<&str>,
+        plaintext: &str,
+    ) -> String {
+        let Some(hook) = &self.kms_hook else {
+            return plaintext.to_string();
+        };
+        let Some(key) = kms_key_id.filter(|k| !k.is_empty()) else {
+            return plaintext.to_string();
+        };
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("aws:sqs:arn".to_string(), queue_arn.to_string());
+        match hook.encrypt(
+            account_id,
+            &self.region,
+            key,
+            plaintext.as_bytes(),
+            "sqs.amazonaws.com",
+            ctx,
+        ) {
+            Ok(envelope) => envelope,
+            Err(_) => plaintext.to_string(),
+        }
+    }
+
+    /// Decrypt a stored SQS body via the KMS hook. Caller must gate this
+    /// on the queue having `KmsMasterKeyId` set; opaque base64 ciphertext
+    /// can't be detected by prefix.
+    fn decrypt_message_body(&self, account_id: &str, queue_arn: &str, ciphertext: &str) -> String {
+        let Some(hook) = &self.kms_hook else {
+            return ciphertext.to_string();
+        };
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("aws:sqs:arn".to_string(), queue_arn.to_string());
+        match hook.decrypt(account_id, ciphertext, "sqs.amazonaws.com", ctx) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            Err(_) => ciphertext.to_string(),
+        }
     }
 
     /// Persist the current in-memory state as a snapshot. Called after
@@ -1605,11 +1665,26 @@ impl SqsService {
                 None
             };
 
+            // SSE-KMS: encrypt the body via the KMS hook so the in-memory
+            // queue holds a fakecloud-kms envelope. md5_of_body keeps the
+            // plaintext digest — that's what callers verify against, and
+            // matches AWS's behavior of returning the plaintext MD5.
+            let kms_key_id = queue
+                .attributes
+                .get("KmsMasterKeyId")
+                .cloned()
+                .filter(|s| !s.is_empty());
+            let stored_body = self.encrypt_message_body(
+                &req.account_id,
+                &queue.arn,
+                kms_key_id.as_deref(),
+                &message_body,
+            );
             let msg = SqsMessage {
                 message_id: uuid::Uuid::new_v4().to_string(),
                 receipt_handle: None,
                 md5_of_body: md5_of_body.clone(),
-                body: message_body,
+                body: stored_body,
                 sent_timestamp: now.timestamp_millis(),
                 attributes: system_attributes,
                 message_attributes,
@@ -1939,12 +2014,32 @@ impl SqsService {
             queue.inflight.push(msg.clone());
         }
 
+        // Capture the values we need for the post-DLQ decrypt step before
+        // releasing the `queue` borrow — DLQ writes mutate sibling queues
+        // and would otherwise overlap with the active mutable borrow.
+        let queue_arn = queue.arn.clone();
+        let kms_key_id = queue
+            .attributes
+            .get("KmsMasterKeyId")
+            .cloned()
+            .filter(|s| !s.is_empty());
+
         // Move messages to DLQ
         for (dlq_arn, mut msg) in dlq_messages {
             if let Some(dlq) = state.queues.values_mut().find(|q| q.arn == dlq_arn) {
                 msg.receipt_handle = None;
                 msg.visible_at = None;
                 dlq.messages.push_back(msg);
+            }
+        }
+
+        // SSE-KMS: decrypt the body before returning so the caller sees
+        // plaintext, mirroring AWS's transparent server-side decryption.
+        // The on-queue body stays encrypted; we only decrypt the cloned
+        // copy we hand back.
+        if kms_key_id.is_some() && self.kms_hook.is_some() {
+            for msg in received.iter_mut() {
+                msg.body = self.decrypt_message_body(account_id, &queue_arn, &msg.body);
             }
         }
 

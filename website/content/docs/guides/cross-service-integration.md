@@ -45,6 +45,9 @@ fakecloud actually executes the cross-service wiring. When an EventBridge rule m
 - **CloudFormation -> Lambda / SNS** — Custom resources invoke via `ServiceToken`, stack events notify via `NotificationARNs`.
 - **Secrets Manager -> Lambda** — Rotation invokes Lambda for all 4 steps.
 - **Secrets Manager -> KMS** — When a secret has `KmsKeyId`, `CreateSecret` / `PutSecretValue` call `kms:GenerateDataKey` and `GetSecretValue` calls `kms:Decrypt` with the AWS-shaped encryption context `{aws:secretsmanager:secretArn: <arn>}`. Auto-provisions the `aws/secretsmanager` AWS-managed key on first use. All KMS calls are recorded at `/_fakecloud/kms/usage`.
+- **SQS encrypted queue -> KMS** — `SendMessage` on a queue with `KmsMasterKeyId` calls `kms:GenerateDataKey`; `ReceiveMessage` calls `kms:Decrypt` and returns the plaintext body. Encryption context: `{aws:sqs:arn: <queue-arn>}`. The on-queue body is the ciphertext envelope; only the returned copy is decrypted.
+- **SNS encrypted topic -> KMS** — `Publish` to a topic with `KmsMasterKeyId` records the matching `kms:GenerateDataKey` and `kms:Decrypt` audit-trail records (SNS encrypts at rest then decrypts to fan-out). Encryption context: `{aws:sns:arn: <topic-arn>}`.
+- **DynamoDB encrypted table -> KMS** — `PutItem` / `UpdateItem` on a table with `SSESpecification.SSEType=KMS` records `kms:GenerateDataKey`; `GetItem` / `Query` / `Scan` records `kms:Decrypt`. Item bodies are not actually encrypted — fakecloud emits the audit-trail records the AWS API would produce so callers can assert KMS usage on encrypted tables.
 - **S3 Lifecycle** — Background expiration and storage class transitions.
 - **EventBridge Scheduler** — Cron and rate-based rules fire on schedule.
 - **RDS -> EventBridge** — DB instance and snapshot lifecycle ops (create, modify, delete, reboot, start, stop, snapshot create/delete, restore) emit `aws.rds` events that match the AWS event schema.

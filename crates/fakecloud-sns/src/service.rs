@@ -22,6 +22,8 @@ pub struct SnsService {
     delivery: Arc<DeliveryBus>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    pub(crate) kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
+    pub(crate) region: String,
 }
 
 impl SnsService {
@@ -31,12 +33,60 @@ impl SnsService {
             delivery,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            kms_hook: None,
+            region: "us-east-1".to_string(),
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
+    }
+
+    pub fn with_kms_hook(mut self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
+        self.kms_hook = Some(hook);
+        self
+    }
+
+    pub fn with_region(mut self, region: impl Into<String>) -> Self {
+        self.region = region.into();
+        self
+    }
+
+    /// Record `GenerateDataKey` + `Decrypt` for an encrypted SNS topic.
+    /// SNS encrypts each message at rest with the topic's KMS key, then
+    /// decrypts to fan-out to subscribers. fakecloud's fan-out happens
+    /// in-process so we don't actually round-trip ciphertext through the
+    /// envelope; we just emit the audit-trail records the AWS API would
+    /// produce, so callers can assert KMS usage via
+    /// `/_fakecloud/kms/usage`.
+    fn record_topic_kms_usage(
+        &self,
+        account_id: &str,
+        topic_arn: &str,
+        kms_key_id: Option<&str>,
+        message: &str,
+    ) {
+        let Some(hook) = &self.kms_hook else { return };
+        let Some(key) = kms_key_id.filter(|k| !k.is_empty()) else {
+            return;
+        };
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("aws:sns:arn".to_string(), topic_arn.to_string());
+        let envelope = match hook.encrypt(
+            account_id,
+            &self.region,
+            key,
+            message.as_bytes(),
+            "sns.amazonaws.com",
+            ctx.clone(),
+        ) {
+            Ok(env) => env,
+            Err(_) => return,
+        };
+        // Mirror the GenerateDataKey with the matching Decrypt the
+        // service would emit at fan-out time.
+        let _ = hook.decrypt(account_id, &envelope, "sns.amazonaws.com", ctx);
     }
 
     /// Persist current state as a snapshot. Held across the
@@ -1130,6 +1180,13 @@ impl SnsService {
                 ));
             }
         }
+
+        let kms_key_id = topic
+            .attributes
+            .get("KmsMasterKeyId")
+            .cloned()
+            .filter(|s| !s.is_empty());
+        self.record_topic_kms_usage(&req.account_id, &topic_arn, kms_key_id.as_deref(), &message);
 
         let msg_id = uuid::Uuid::new_v4().to_string();
         state.published.push(PublishedMessage {
