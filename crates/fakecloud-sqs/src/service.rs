@@ -2061,20 +2061,22 @@ impl SqsService {
             .cloned()
             .filter(|s| !s.is_empty());
         if kms_key_id.is_some() && self.kms_hook.is_some() {
-            for msg in received.iter_mut() {
+            // Decrypt into a side buffer first; only commit the
+            // plaintext bodies back onto `received` once the entire
+            // batch decrypts cleanly. Otherwise a partial decrypt would
+            // leak plaintext back onto the queue during rollback.
+            let mut plaintexts: Vec<String> = Vec::with_capacity(received.len());
+            for msg in received.iter() {
                 match self.decrypt_message_body(account_id, &queue_arn, &msg.body) {
-                    Ok(plain) => msg.body = plain,
+                    Ok(plain) => plaintexts.push(plain),
                     Err(err) => {
-                        // Rollback: put both the would-be-DLQ messages
-                        // and the would-be-received messages back onto
-                        // the front of the queue so the next receive
+                        // Rollback the popped batch (both would-be-received
+                        // and would-be-DLQ messages) onto the front of the
+                        // queue with their original ciphertext bodies and
+                        // their receive_count restored, so the next receive
                         // can retry once KMS recovers.
                         let mut rollback: VecDeque<SqsMessage> = VecDeque::new();
                         for (_, mut m) in dlq_messages.into_iter() {
-                            // Reset receive_count we bumped in the loop
-                            // so the next attempt doesn't immediately
-                            // DLQ the message again on a transient KMS
-                            // outage.
                             m.receive_count = m.receive_count.saturating_sub(1);
                             m.visible_at = None;
                             m.receipt_handle = None;
@@ -2092,6 +2094,9 @@ impl SqsService {
                         return Err(err);
                     }
                 }
+            }
+            for (msg, plain) in received.iter_mut().zip(plaintexts) {
+                msg.body = plain;
             }
         }
 
