@@ -4,7 +4,7 @@
 
 - **Goal:** 100% of AWS services, each at 100% conformance, with 100% of cross-service integrations. Approach is depth-first — a service is added when it passes the full Smithy-model test variants and cross-service wire-ups, not when the API surface looks filled in.
 - Single static binary (~19 MB), ~500ms startup, ~10 MiB idle memory, no Docker required to run fakecloud itself
-- **26 AWS services shipped today, 1,833 operations, 100% conformance per implemented service** — validated against AWS's own Smithy models on every commit (59,000+ generated test variants). More services land as they hit the conformance bar; roadmap is driven by real-project demand.
+- **26 AWS services shipped today, 1,849 operations, 100% conformance per implemented service** — validated against AWS's own Smithy models on every commit (59,000+ generated test variants). More services land as they hit the conformance bar; roadmap is driven by real-project demand.
 - Services: S3, SQS, SNS, EventBridge, EventBridge Scheduler, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, ECR, ECS, Elastic Load Balancing v2, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime
 - 30+ cross-service integrations: S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more
 - Real Lambda execution via Docker across 13 runtimes (Node.js 18/20/22, Python 3.9-3.12, Java 11/17/21, .NET 6/8, Ruby 3.2, Go, custom `provided.al2` / `provided.al2023`)
@@ -57,7 +57,7 @@
 - **Bedrock Runtime** (10 ops): InvokeModel (Anthropic, Titan, Meta, Cohere, Mistral), Converse, streaming, ApplyGuardrail, CountTokens, async invoke, configurable responses, fault injection
 - **ECR** (58 ops): full registry — repos, images (real OCI v2 push/pull via `docker push`/`pull`), lifecycle policies, scanning, pull-through cache, registry settings, signing
 - **ECS** (60 ops): clusters, task definitions, real Fargate-style task execution via Docker, services with rolling deployments, container instances, capacity providers, task sets, ECS Exec
-- **Elastic Load Balancing v2** (35 ops, Application/Network/Gateway): load balancer CRUD, target groups + targets + health, listeners + rules + certificates, attributes, subnets, security groups, IP address types, IPAM pools, SSL policies, tags
+- **Elastic Load Balancing v2** (51 ops, Application/Network/Gateway): load balancer CRUD, target groups + targets + health, listeners + rules + certificates, LB/listener/target-group attributes, capacity reservations, mTLS trust stores + revocations, subnets, security groups, IP address types, IPAM pools, SSL policies, resource policies, tags
 
 ## Introspection endpoints (for tests)
 

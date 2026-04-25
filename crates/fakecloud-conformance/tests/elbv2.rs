@@ -288,7 +288,12 @@ async fn elbv2_modify_ip_pools() {
         .unwrap()
         .load_balancer_arn()
         .unwrap();
-    let _ = client.modify_ip_pools().load_balancer_arn(arn).send().await;
+    client
+        .modify_ip_pools()
+        .load_balancer_arn(arn)
+        .send()
+        .await
+        .unwrap();
 }
 
 // ── Batch 2: TargetGroups + Targets ─────────────────────────────────
@@ -875,7 +880,7 @@ async fn elbv2_describe_listener_certificates() {
         .await
         .unwrap();
     let arn = create.listeners().first().unwrap().listener_arn().unwrap();
-    let _ = client
+    client
         .describe_listener_certificates()
         .listener_arn(arn)
         .send()
@@ -1156,6 +1161,511 @@ async fn elbv2_set_rule_priorities() {
                 .priority(60)
                 .build(),
         )
+        .send()
+        .await
+        .unwrap();
+}
+
+// ── Batch 4: LB attributes + Trust Stores + Capacity ────────────────
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "ModifyLoadBalancerAttributes",
+    checksum = "9b8482c9"
+)]
+#[tokio::test]
+async fn elbv2_modify_load_balancer_attributes() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let lb = client
+        .create_load_balancer()
+        .name("confo-lbattr")
+        .send()
+        .await
+        .unwrap();
+    let arn = lb
+        .load_balancers()
+        .first()
+        .unwrap()
+        .load_balancer_arn()
+        .unwrap();
+    client
+        .modify_load_balancer_attributes()
+        .load_balancer_arn(arn)
+        .attributes(
+            aws_sdk_elasticloadbalancingv2::types::LoadBalancerAttribute::builder()
+                .key("idle_timeout.timeout_seconds")
+                .value("120")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "DescribeLoadBalancerAttributes",
+    checksum = "41dcd4c2"
+)]
+#[tokio::test]
+async fn elbv2_describe_load_balancer_attributes() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let lb = client
+        .create_load_balancer()
+        .name("confo-lbattr2")
+        .send()
+        .await
+        .unwrap();
+    let arn = lb
+        .load_balancers()
+        .first()
+        .unwrap()
+        .load_balancer_arn()
+        .unwrap();
+    let resp = client
+        .describe_load_balancer_attributes()
+        .load_balancer_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.attributes().is_empty());
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "ModifyCapacityReservation",
+    checksum = "a337dfef"
+)]
+#[tokio::test]
+async fn elbv2_modify_capacity_reservation() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let lb = client
+        .create_load_balancer()
+        .name("confo-cap")
+        .send()
+        .await
+        .unwrap();
+    let arn = lb
+        .load_balancers()
+        .first()
+        .unwrap()
+        .load_balancer_arn()
+        .unwrap();
+    client
+        .modify_capacity_reservation()
+        .load_balancer_arn(arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "DescribeCapacityReservation",
+    checksum = "07bdb2cb"
+)]
+#[tokio::test]
+async fn elbv2_describe_capacity_reservation() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let lb = client
+        .create_load_balancer()
+        .name("confo-cap2")
+        .send()
+        .await
+        .unwrap();
+    let arn = lb
+        .load_balancers()
+        .first()
+        .unwrap()
+        .load_balancer_arn()
+        .unwrap();
+    client
+        .describe_capacity_reservation()
+        .load_balancer_arn(arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticloadbalancingv2", "CreateTrustStore", checksum = "55af6076")]
+#[tokio::test]
+async fn elbv2_create_trust_store() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let resp = client
+        .create_trust_store()
+        .name("confo-ts")
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("ca.pem")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.trust_stores().first().unwrap().name(),
+        Some("confo-ts")
+    );
+}
+
+#[test_action("elasticloadbalancingv2", "DescribeTrustStores", checksum = "7aba5e25")]
+#[tokio::test]
+async fn elbv2_describe_trust_stores() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    client
+        .create_trust_store()
+        .name("confo-ts-d")
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("ca.pem")
+        .send()
+        .await
+        .unwrap();
+    let resp = client.describe_trust_stores().send().await.unwrap();
+    assert!(!resp.trust_stores().is_empty());
+}
+
+#[test_action("elasticloadbalancingv2", "ModifyTrustStore", checksum = "9b488371")]
+#[tokio::test]
+async fn elbv2_modify_trust_store() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_trust_store()
+        .name("confo-ts-m")
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("v1.pem")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .trust_stores()
+        .first()
+        .unwrap()
+        .trust_store_arn()
+        .unwrap();
+    client
+        .modify_trust_store()
+        .trust_store_arn(arn)
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("v2.pem")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticloadbalancingv2", "DeleteTrustStore", checksum = "95a135c9")]
+#[tokio::test]
+async fn elbv2_delete_trust_store() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_trust_store()
+        .name("confo-ts-del")
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("ca.pem")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .trust_stores()
+        .first()
+        .unwrap()
+        .trust_store_arn()
+        .unwrap();
+    client
+        .delete_trust_store()
+        .trust_store_arn(arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "AddTrustStoreRevocations",
+    checksum = "252695df"
+)]
+#[tokio::test]
+async fn elbv2_add_trust_store_revocations() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_trust_store()
+        .name("confo-ts-rev")
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("ca.pem")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .trust_stores()
+        .first()
+        .unwrap()
+        .trust_store_arn()
+        .unwrap();
+    client
+        .add_trust_store_revocations()
+        .trust_store_arn(arn)
+        .revocation_contents(
+            aws_sdk_elasticloadbalancingv2::types::RevocationContent::builder()
+                .s3_bucket("revocations")
+                .s3_key("crl.pem")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "RemoveTrustStoreRevocations",
+    checksum = "9c386fe2"
+)]
+#[tokio::test]
+async fn elbv2_remove_trust_store_revocations() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_trust_store()
+        .name("confo-ts-rmrev")
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("ca.pem")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .trust_stores()
+        .first()
+        .unwrap()
+        .trust_store_arn()
+        .unwrap();
+    let added = client
+        .add_trust_store_revocations()
+        .trust_store_arn(arn)
+        .revocation_contents(
+            aws_sdk_elasticloadbalancingv2::types::RevocationContent::builder()
+                .s3_bucket("revocations")
+                .s3_key("crl.pem")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let id = added
+        .trust_store_revocations()
+        .first()
+        .unwrap()
+        .revocation_id()
+        .unwrap();
+    client
+        .remove_trust_store_revocations()
+        .trust_store_arn(arn)
+        .revocation_ids(id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "DescribeTrustStoreRevocations",
+    checksum = "cf2c6fa5"
+)]
+#[tokio::test]
+async fn elbv2_describe_trust_store_revocations() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_trust_store()
+        .name("confo-ts-descrev")
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("ca.pem")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .trust_stores()
+        .first()
+        .unwrap()
+        .trust_store_arn()
+        .unwrap();
+    client
+        .describe_trust_store_revocations()
+        .trust_store_arn(arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "DescribeTrustStoreAssociations",
+    checksum = "72bc3c3c"
+)]
+#[tokio::test]
+async fn elbv2_describe_trust_store_associations() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_trust_store()
+        .name("confo-ts-assoc")
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("ca.pem")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .trust_stores()
+        .first()
+        .unwrap()
+        .trust_store_arn()
+        .unwrap();
+    client
+        .describe_trust_store_associations()
+        .trust_store_arn(arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "DeleteSharedTrustStoreAssociation",
+    checksum = "1a5d0ab7"
+)]
+#[tokio::test]
+async fn elbv2_delete_shared_trust_store_association() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_trust_store()
+        .name("confo-ts-shared")
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("ca.pem")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .trust_stores()
+        .first()
+        .unwrap()
+        .trust_store_arn()
+        .unwrap();
+    client
+        .delete_shared_trust_store_association()
+        .trust_store_arn(arn)
+        .resource_arn("arn:aws:elasticloadbalancing:us-east-1:123:listener/app/x/y/z")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "GetTrustStoreCaCertificatesBundle",
+    checksum = "a651bfd8"
+)]
+#[tokio::test]
+async fn elbv2_get_trust_store_ca_certificates_bundle() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_trust_store()
+        .name("confo-ts-bundle")
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("ca.pem")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .trust_stores()
+        .first()
+        .unwrap()
+        .trust_store_arn()
+        .unwrap();
+    let resp = client
+        .get_trust_store_ca_certificates_bundle()
+        .trust_store_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.location().unwrap_or("").is_empty());
+}
+
+#[test_action(
+    "elasticloadbalancingv2",
+    "GetTrustStoreRevocationContent",
+    checksum = "8d2d6574"
+)]
+#[tokio::test]
+async fn elbv2_get_trust_store_revocation_content() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let create = client
+        .create_trust_store()
+        .name("confo-ts-revcontent")
+        .ca_certificates_bundle_s3_bucket("ca-bundles")
+        .ca_certificates_bundle_s3_key("ca.pem")
+        .send()
+        .await
+        .unwrap();
+    let arn = create
+        .trust_stores()
+        .first()
+        .unwrap()
+        .trust_store_arn()
+        .unwrap();
+    let added = client
+        .add_trust_store_revocations()
+        .trust_store_arn(arn)
+        .revocation_contents(
+            aws_sdk_elasticloadbalancingv2::types::RevocationContent::builder()
+                .s3_bucket("revs")
+                .s3_key("crl.pem")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let id = added
+        .trust_store_revocations()
+        .first()
+        .unwrap()
+        .revocation_id()
+        .unwrap();
+    client
+        .get_trust_store_revocation_content()
+        .trust_store_arn(arn)
+        .revocation_id(id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("elasticloadbalancingv2", "GetResourcePolicy", checksum = "1424da94")]
+#[tokio::test]
+async fn elbv2_get_resource_policy() {
+    let server = TestServer::start().await;
+    let client = server.elbv2_client().await;
+    let lb = client
+        .create_load_balancer()
+        .name("confo-rp")
+        .send()
+        .await
+        .unwrap();
+    let arn = lb
+        .load_balancers()
+        .first()
+        .unwrap()
+        .load_balancer_arn()
+        .unwrap();
+    client
+        .get_resource_policy()
+        .resource_arn(arn)
         .send()
         .await
         .unwrap();

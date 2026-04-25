@@ -56,6 +56,22 @@ const ELBV2_SUPPORTED_ACTIONS: &[&str] = &[
     "ModifyRule",
     "DeleteRule",
     "SetRulePriorities",
+    "ModifyLoadBalancerAttributes",
+    "DescribeLoadBalancerAttributes",
+    "ModifyCapacityReservation",
+    "DescribeCapacityReservation",
+    "CreateTrustStore",
+    "DescribeTrustStores",
+    "ModifyTrustStore",
+    "DeleteTrustStore",
+    "AddTrustStoreRevocations",
+    "RemoveTrustStoreRevocations",
+    "DescribeTrustStoreRevocations",
+    "DescribeTrustStoreAssociations",
+    "DeleteSharedTrustStoreAssociation",
+    "GetTrustStoreCaCertificatesBundle",
+    "GetTrustStoreRevocationContent",
+    "GetResourcePolicy",
 ];
 
 pub struct Elbv2Service {
@@ -119,6 +135,24 @@ impl AwsService for Elbv2Service {
             "ModifyRule" => self.modify_rule(&req),
             "DeleteRule" => self.delete_rule(&req),
             "SetRulePriorities" => self.set_rule_priorities(&req),
+            "ModifyLoadBalancerAttributes" => self.modify_load_balancer_attributes(&req),
+            "DescribeLoadBalancerAttributes" => self.describe_load_balancer_attributes(&req),
+            "ModifyCapacityReservation" => self.modify_capacity_reservation(&req),
+            "DescribeCapacityReservation" => self.describe_capacity_reservation(&req),
+            "CreateTrustStore" => self.create_trust_store(&req),
+            "DescribeTrustStores" => self.describe_trust_stores(&req),
+            "ModifyTrustStore" => self.modify_trust_store(&req),
+            "DeleteTrustStore" => self.delete_trust_store(&req),
+            "AddTrustStoreRevocations" => self.add_trust_store_revocations(&req),
+            "RemoveTrustStoreRevocations" => self.remove_trust_store_revocations(&req),
+            "DescribeTrustStoreRevocations" => self.describe_trust_store_revocations(&req),
+            "DescribeTrustStoreAssociations" => self.describe_trust_store_associations(&req),
+            "DeleteSharedTrustStoreAssociation" => self.delete_shared_trust_store_association(&req),
+            "GetTrustStoreCaCertificatesBundle" => {
+                self.get_trust_store_ca_certificates_bundle(&req)
+            }
+            "GetTrustStoreRevocationContent" => self.get_trust_store_revocation_content(&req),
+            "GetResourcePolicy" => self.get_resource_policy(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "elasticloadbalancing",
                 &req.action,
@@ -1785,6 +1819,501 @@ impl Elbv2Service {
             &req.request_id,
         ))
     }
+
+    // ───────────── LB attributes + Capacity ─────────────
+
+    fn modify_load_balancer_attributes(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "LoadBalancerArn")?;
+        let new_attrs = parse_attributes(req);
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let lb = st
+            .load_balancers
+            .get_mut(&arn)
+            .ok_or_else(|| lb_not_found(&arn))?;
+        for (k, v) in &new_attrs {
+            lb.attributes.insert(k.clone(), v.clone());
+        }
+        let merged = merge_lb_attributes(&lb.lb_type, &lb.attributes);
+        Ok(xml_resp(
+            "ModifyLoadBalancerAttributes",
+            render_attributes_xml(&merged),
+            &req.request_id,
+        ))
+    }
+
+    fn describe_load_balancer_attributes(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "LoadBalancerArn")?;
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let lb = st
+            .load_balancers
+            .get(&arn)
+            .ok_or_else(|| lb_not_found(&arn))?;
+        let merged = merge_lb_attributes(&lb.lb_type, &lb.attributes);
+        Ok(xml_resp(
+            "DescribeLoadBalancerAttributes",
+            render_attributes_xml(&merged),
+            &req.request_id,
+        ))
+    }
+
+    fn modify_capacity_reservation(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "LoadBalancerArn")?;
+        let units = optional_query_param(req, "MinimumLoadBalancerCapacity.CapacityUnits")
+            .and_then(|s| s.parse().ok());
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let lb = st
+            .load_balancers
+            .get_mut(&arn)
+            .ok_or_else(|| lb_not_found(&arn))?;
+        lb.minimum_capacity_units = units;
+        Ok(xml_resp(
+            "ModifyCapacityReservation",
+            capacity_reservation_xml(lb),
+            &req.request_id,
+        ))
+    }
+
+    fn describe_capacity_reservation(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "LoadBalancerArn")?;
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let lb = st
+            .load_balancers
+            .get(&arn)
+            .ok_or_else(|| lb_not_found(&arn))?;
+        Ok(xml_resp(
+            "DescribeCapacityReservation",
+            capacity_reservation_xml(lb),
+            &req.request_id,
+        ))
+    }
+
+    // ───────────── Trust stores ─────────────
+
+    fn create_trust_store(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let name = required_query_param(req, "Name")?;
+        let bucket = required_query_param(req, "CaCertificatesBundleS3Bucket")?;
+        let key = required_query_param(req, "CaCertificatesBundleS3Key")?;
+        let _version = optional_query_param(req, "CaCertificatesBundleS3ObjectVersion");
+        let tags = parse_tags(req);
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        if st.trust_stores.values().any(|t| t.name == name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DuplicateTrustStoreName",
+                format!("Trust store '{name}' already exists"),
+            ));
+        }
+        let suffix = alphanumeric_id(16);
+        let arn = format!(
+            "arn:aws:elasticloadbalancing:{}:{}:truststore/{}/{}",
+            req.region, req.account_id, name, suffix
+        );
+        let ts = crate::state::TrustStore {
+            arn: arn.clone(),
+            name,
+            status: "ACTIVE".to_string(),
+            number_of_ca_certificates: 1,
+            total_revoked_entries: 0,
+            created_time: Utc::now(),
+            ca_certificates_bundle: Some(format!("s3://{bucket}/{key}").into_bytes()),
+            revocations: HashMap::new(),
+            next_revocation_id: 1,
+            tags,
+        };
+        let xml = render_trust_store_xml(&ts);
+        st.trust_stores.insert(arn, ts);
+        Ok(xml_resp(
+            "CreateTrustStore",
+            format!("<TrustStores><member>{xml}</member></TrustStores>"),
+            &req.request_id,
+        ))
+    }
+
+    fn describe_trust_stores(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arns: HashSet<String> = parse_member_list(req, "TrustStoreArns")
+            .into_iter()
+            .collect();
+        let names: HashSet<String> = parse_member_list(req, "Names").into_iter().collect();
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut stores: Vec<&crate::state::TrustStore> = st
+            .trust_stores
+            .values()
+            .filter(|t| {
+                (arns.is_empty() || arns.contains(&t.arn))
+                    && (names.is_empty() || names.contains(&t.name))
+            })
+            .collect();
+        stores.sort_by_key(|s| s.created_time);
+        let inner = format!(
+            "<TrustStores>{}</TrustStores>",
+            stores
+                .iter()
+                .map(|t| format!("<member>{}</member>", render_trust_store_xml(t)))
+                .collect::<String>()
+        );
+        Ok(xml_resp("DescribeTrustStores", inner, &req.request_id))
+    }
+
+    fn modify_trust_store(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TrustStoreArn")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let ts = st
+            .trust_stores
+            .get_mut(&arn)
+            .ok_or_else(|| trust_store_not_found(&arn))?;
+        if let Some(b) = optional_query_param(req, "CaCertificatesBundleS3Bucket") {
+            let key = required_query_param(req, "CaCertificatesBundleS3Key")?;
+            ts.ca_certificates_bundle = Some(format!("s3://{b}/{key}").into_bytes());
+        }
+        let xml = render_trust_store_xml(ts);
+        Ok(xml_resp(
+            "ModifyTrustStore",
+            format!("<TrustStores><member>{xml}</member></TrustStores>"),
+            &req.request_id,
+        ))
+    }
+
+    fn delete_trust_store(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TrustStoreArn")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let in_use = st.listeners.values().any(|l| {
+            l.mutual_authentication
+                .as_ref()
+                .and_then(|m| m.trust_store_arn.as_deref())
+                == Some(arn.as_str())
+        });
+        if in_use {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "TrustStoreInUse",
+                "Trust store is in use by one or more listeners",
+            ));
+        }
+        st.trust_stores.remove(&arn);
+        Ok(xml_metadata_only("DeleteTrustStore", &req.request_id))
+    }
+
+    fn add_trust_store_revocations(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TrustStoreArn")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let ts = st
+            .trust_stores
+            .get_mut(&arn)
+            .ok_or_else(|| trust_store_not_found(&arn))?;
+        let mut added = Vec::new();
+        for n in 1..=10 {
+            let bucket = req
+                .query_params
+                .get(&format!("RevocationContents.member.{n}.S3Bucket"))
+                .cloned();
+            if let Some(bucket) = bucket {
+                let key = req
+                    .query_params
+                    .get(&format!("RevocationContents.member.{n}.S3Key"))
+                    .cloned()
+                    .unwrap_or_default();
+                let id = ts.next_revocation_id;
+                ts.next_revocation_id += 1;
+                let rev = crate::state::TrustStoreRevocation {
+                    revocation_id: id,
+                    revocation_type: "CRL".to_string(),
+                    number_of_revoked_entries: 0,
+                    content: format!("s3://{bucket}/{key}").into_bytes(),
+                };
+                ts.revocations.insert(id, rev);
+                added.push(id);
+            } else {
+                break;
+            }
+        }
+        ts.total_revoked_entries += added.len() as i64;
+        let revs_xml = added
+            .iter()
+            .map(|id| {
+                format!(
+                    "<member><TrustStoreArn>{}</TrustStoreArn><RevocationId>{id}</RevocationId><RevocationType>CRL</RevocationType><NumberOfRevokedEntries>0</NumberOfRevokedEntries></member>",
+                    xml_escape(&arn)
+                )
+            })
+            .collect::<String>();
+        Ok(xml_resp(
+            "AddTrustStoreRevocations",
+            format!("<TrustStoreRevocations>{revs_xml}</TrustStoreRevocations>"),
+            &req.request_id,
+        ))
+    }
+
+    fn remove_trust_store_revocations(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TrustStoreArn")?;
+        let ids: Vec<i64> = parse_member_list(req, "RevocationIds")
+            .into_iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let ts = st
+            .trust_stores
+            .get_mut(&arn)
+            .ok_or_else(|| trust_store_not_found(&arn))?;
+        for id in &ids {
+            ts.revocations.remove(id);
+        }
+        Ok(xml_metadata_only(
+            "RemoveTrustStoreRevocations",
+            &req.request_id,
+        ))
+    }
+
+    fn describe_trust_store_revocations(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TrustStoreArn")?;
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let ts = st
+            .trust_stores
+            .get(&arn)
+            .ok_or_else(|| trust_store_not_found(&arn))?;
+        let revs_xml = ts
+            .revocations
+            .values()
+            .map(|r| {
+                format!(
+                    "<member><TrustStoreArn>{}</TrustStoreArn><RevocationId>{}</RevocationId><RevocationType>{}</RevocationType><NumberOfRevokedEntries>{}</NumberOfRevokedEntries></member>",
+                    xml_escape(&arn),
+                    r.revocation_id,
+                    xml_escape(&r.revocation_type),
+                    r.number_of_revoked_entries
+                )
+            })
+            .collect::<String>();
+        Ok(xml_resp(
+            "DescribeTrustStoreRevocations",
+            format!("<TrustStoreRevocations>{revs_xml}</TrustStoreRevocations>"),
+            &req.request_id,
+        ))
+    }
+
+    fn describe_trust_store_associations(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TrustStoreArn")?;
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let assocs: Vec<&str> = st
+            .listeners
+            .values()
+            .filter(|l| {
+                l.mutual_authentication
+                    .as_ref()
+                    .and_then(|m| m.trust_store_arn.as_deref())
+                    == Some(arn.as_str())
+            })
+            .map(|l| l.arn.as_str())
+            .collect();
+        let xml = assocs
+            .iter()
+            .map(|a| {
+                format!(
+                    "<member><ResourceArn>{}</ResourceArn></member>",
+                    xml_escape(a)
+                )
+            })
+            .collect::<String>();
+        Ok(xml_resp(
+            "DescribeTrustStoreAssociations",
+            format!("<TrustStoreAssociations>{xml}</TrustStoreAssociations>"),
+            &req.request_id,
+        ))
+    }
+
+    fn delete_shared_trust_store_association(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let _arn = required_query_param(req, "TrustStoreArn")?;
+        let _resource = required_query_param(req, "ResourceArn")?;
+        Ok(xml_metadata_only(
+            "DeleteSharedTrustStoreAssociation",
+            &req.request_id,
+        ))
+    }
+
+    fn get_trust_store_ca_certificates_bundle(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TrustStoreArn")?;
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let ts = st
+            .trust_stores
+            .get(&arn)
+            .ok_or_else(|| trust_store_not_found(&arn))?;
+        let location = ts
+            .ca_certificates_bundle
+            .as_deref()
+            .map(|b| String::from_utf8_lossy(b).to_string())
+            .unwrap_or_default();
+        Ok(xml_resp(
+            "GetTrustStoreCaCertificatesBundle",
+            format!("<Location>{}</Location>", xml_escape(&location)),
+            &req.request_id,
+        ))
+    }
+
+    fn get_trust_store_revocation_content(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "TrustStoreArn")?;
+        let id: i64 = required_query_param(req, "RevocationId")?
+            .parse()
+            .map_err(|_| invalid_param("RevocationId must be an integer"))?;
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let ts = st
+            .trust_stores
+            .get(&arn)
+            .ok_or_else(|| trust_store_not_found(&arn))?;
+        let rev = ts.revocations.get(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "RevocationIdNotFound",
+                format!("Revocation '{id}' not found"),
+            )
+        })?;
+        let location = String::from_utf8_lossy(&rev.content).to_string();
+        Ok(xml_resp(
+            "GetTrustStoreRevocationContent",
+            format!("<Location>{}</Location>", xml_escape(&location)),
+            &req.request_id,
+        ))
+    }
+
+    fn get_resource_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "ResourceArn")?;
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let policy = st
+            .resource_policies
+            .get(&arn)
+            .cloned()
+            .unwrap_or_else(|| "{}".to_string());
+        Ok(xml_resp(
+            "GetResourcePolicy",
+            format!("<Policy>{}</Policy>", xml_escape(&policy)),
+            &req.request_id,
+        ))
+    }
+}
+
+fn trust_store_not_found(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "TrustStoreNotFound",
+        format!("Trust store '{arn}' not found"),
+    )
+}
+
+fn default_lb_attributes(lb_type: &str) -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    m.insert("idle_timeout.timeout_seconds".to_string(), "60".to_string());
+    m.insert(
+        "deletion_protection.enabled".to_string(),
+        "false".to_string(),
+    );
+    m.insert(
+        "load_balancing.cross_zone.enabled".to_string(),
+        "true".to_string(),
+    );
+    m.insert("access_logs.s3.enabled".to_string(), "false".to_string());
+    m.insert("access_logs.s3.bucket".to_string(), String::new());
+    m.insert("access_logs.s3.prefix".to_string(), String::new());
+    if lb_type == "application" {
+        m.insert("routing.http2.enabled".to_string(), "true".to_string());
+        m.insert(
+            "routing.http.drop_invalid_header_fields.enabled".to_string(),
+            "false".to_string(),
+        );
+        m.insert(
+            "routing.http.preserve_host_header.enabled".to_string(),
+            "false".to_string(),
+        );
+    }
+    m
+}
+
+fn merge_lb_attributes(lb_type: &str, stored: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut m = default_lb_attributes(lb_type);
+    for (k, v) in stored {
+        m.insert(k.clone(), v.clone());
+    }
+    m
+}
+
+fn capacity_reservation_xml(lb: &crate::state::LoadBalancer) -> String {
+    let units = lb
+        .minimum_capacity_units
+        .map(|v| {
+            format!(
+                "<MinimumLoadBalancerCapacity><CapacityUnits>{v}</CapacityUnits></MinimumLoadBalancerCapacity>"
+            )
+        })
+        .unwrap_or_default();
+    format!("<LastModifiedTime>{}</LastModifiedTime>{units}<DecreaseRequestsRemaining>0</DecreaseRequestsRemaining>", lb.created_time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+fn render_trust_store_xml(ts: &crate::state::TrustStore) -> String {
+    format!(
+        "<TrustStoreArn>{arn}</TrustStoreArn>\
+         <Name>{name}</Name>\
+         <Status>{status}</Status>\
+         <NumberOfCaCertificates>{num}</NumberOfCaCertificates>\
+         <TotalRevokedEntries>{rev}</TotalRevokedEntries>",
+        arn = xml_escape(&ts.arn),
+        name = xml_escape(&ts.name),
+        status = xml_escape(&ts.status),
+        num = ts.number_of_ca_certificates,
+        rev = ts.total_revoked_entries,
+    )
 }
 
 fn listener_not_found(arn: &str) -> AwsServiceError {
