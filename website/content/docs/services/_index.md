@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 26 AWS services with 1,849 total operations, all at 100% Smithy conformance. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 26 AWS services with 1,924 total operations, all at 100% Smithy conformance. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -31,7 +31,7 @@ fakecloud implements 26 AWS services with 1,849 total operations, all at 100% Sm
 | RDS                    | 163 | Real Postgres, MySQL, MariaDB via Docker; lifecycle ops emit `aws.rds` EventBridge events |
 | ElastiCache            |  75 | Real Redis, Valkey via Docker                                          |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
-| API Gateway v2         |  28 | HTTP APIs, Lambda proxy, JWT/Lambda authorizers, CORS                  |
+| API Gateway v2         | 103 | HTTP APIs, routes, integrations, stages, deployments, authorizers, domains, models, VPC links, routing rules, developer portals, CORS, tags |
 | Bedrock                | 101 | Foundation models, guardrails, custom models, invocation/eval jobs    |
 | Bedrock Runtime        |  10 | InvokeModel, Converse, streaming, configurable responses, fault inject |
 | ECR                    |  58 | Full API — OCI v2 push/pull, lifecycle eval, scanning, pull-through cache, registry templates, real cosign signature verification |

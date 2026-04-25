@@ -6,7 +6,7 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~500ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 26 services (1,849 operations) are shipped today; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 26 services (1,924 operations) are shipped today; more land progressively as they hit the bar.
 
 Key design principles:
 - **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models (54,000+ generated test variants). CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
@@ -367,16 +367,29 @@ Features: Complete Amazon States Language (ASL) interpreter with all state types
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
-### API Gateway v2 (28 actions)
+### API Gateway v2 (103 actions)
 
-**APIs:** CreateApi, DeleteApi, GetApi, GetApis, UpdateApi
-**Routes:** CreateRoute, DeleteRoute, GetRoute, GetRoutes, UpdateRoute
+**APIs:** CreateApi, DeleteApi, GetApi, GetApis, UpdateApi, ImportApi, ReimportApi, ExportApi
+**Routes:** CreateRoute, DeleteRoute, GetRoute, GetRoutes, UpdateRoute, DeleteRouteRequestParameter, DeleteRouteSettings
+**Route Responses:** CreateRouteResponse, DeleteRouteResponse, GetRouteResponse, GetRouteResponses, UpdateRouteResponse
 **Integrations:** CreateIntegration, DeleteIntegration, GetIntegration, GetIntegrations, UpdateIntegration
-**Stages:** CreateStage, DeleteStage, GetStage, GetStages, UpdateStage
-**Deployments:** CreateDeployment, GetDeployment, GetDeployments
-**Authorizers:** CreateAuthorizer, DeleteAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer
+**Integration Responses:** CreateIntegrationResponse, DeleteIntegrationResponse, GetIntegrationResponse, GetIntegrationResponses, UpdateIntegrationResponse
+**Routing Rules:** CreateRoutingRule, DeleteRoutingRule, GetRoutingRule, ListRoutingRules, PutRoutingRule
+**Stages:** CreateStage, DeleteStage, GetStage, GetStages, UpdateStage, DeleteAccessLogSettings
+**Deployments:** CreateDeployment, DeleteDeployment, GetDeployment, GetDeployments, UpdateDeployment
+**Authorizers:** CreateAuthorizer, DeleteAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, ResetAuthorizersCache
+**Domain Names:** CreateDomainName, DeleteDomainName, GetDomainName, GetDomainNames, UpdateDomainName
+**API Mappings:** CreateApiMapping, DeleteApiMapping, GetApiMapping, GetApiMappings, UpdateApiMapping
+**Models:** CreateModel, DeleteModel, GetModel, GetModels, UpdateModel, GetModelTemplate
+**VPC Links:** CreateVpcLink, DeleteVpcLink, GetVpcLink, GetVpcLinks, UpdateVpcLink
+**CORS:** DeleteCorsConfiguration
+**Tags:** TagResource, UntagResource, GetTags
+**Developer Portals:** CreatePortal, DeletePortal, DisablePortal, GetPortal, ListPortals, PreviewPortal, PublishPortal, UpdatePortal
+**Portal Products:** CreatePortalProduct, DeletePortalProduct, DeletePortalProductSharingPolicy, GetPortalProduct, GetPortalProductSharingPolicy, ListPortalProducts, PutPortalProductSharingPolicy, UpdatePortalProduct
+**Product Pages:** CreateProductPage, DeleteProductPage, GetProductPage, ListProductPages, UpdateProductPage
+**Product REST Endpoint Pages:** CreateProductRestEndpointPage, DeleteProductRestEndpointPage, GetProductRestEndpointPage, ListProductRestEndpointPages, UpdateProductRestEndpointPage
 
-Features: HTTP APIs with route-based request handling, path parameters and wildcards (`/users/{userId}`, `/api/*`), Lambda proxy integration v2.0 format, HTTP proxy integration for external endpoints, Mock integration for static responses, CORS configuration, JWT and Lambda authorizers, request history introspection endpoint.
+Features: HTTP APIs with route-based request handling, path parameters and wildcards (`/users/{userId}`, `/api/*`), Lambda proxy integration v2.0 format, HTTP proxy integration for external endpoints, Mock integration for static responses, CORS configuration, JWT and Lambda authorizers, custom domains + API mappings, request models, routing rules, VPC links, OpenAPI import/reimport/export, full developer portal surface (portals, products, product pages, REST endpoint pages, sharing policies), request history introspection endpoint.
 
 Protocol: REST (HTTP method + path-based routing, JSON responses)
 

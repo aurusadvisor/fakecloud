@@ -13,7 +13,7 @@ fakecloud runs Lambda the same way — real runtime containers, 13 runtimes supp
 | | fakecloud | SAM Local |
 |---|---|---|
 | Lambda real code execution | Yes (13 runtimes in Docker) | Yes (13 runtimes in Docker) |
-| API Gateway v2 | 28 ops, HTTP APIs, JWT/Lambda authorizers | Limited (REST API emulation) |
+| API Gateway v2 | 103 ops, HTTP APIs, JWT/Lambda authorizers | Limited (REST API emulation) |
 | API Gateway v1 | Not yet | Yes (SAM focuses here) |
 | S3 | 107 ops, real storage + notifications | **No** |
 | SQS | 23 ops, real queues + event source mappings | **No** |
