@@ -110,9 +110,19 @@ impl KmsServiceHook {
         let key_arn = self.resolve_or_provision(account_id, region, key_id, service_principal)?;
         let key_short = key_id_from_arn(&key_arn).to_string();
 
-        let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(plaintext);
-        let envelope = format!("fakecloud-kms:{key_short}:{plaintext_b64}");
-        let ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+        // Default to the AWS-shaped binary blob (AES-256-GCM under the
+        // per-account master key persisted in `KmsState`). The legacy
+        // `fakecloud-kms:<key>:<b64>` textual envelope is still accepted on
+        // the decrypt side for back-compat with older snapshots and
+        // external callers.
+        let master_key_bytes = {
+            let mas = self.state.read();
+            mas.get(account_id)
+                .map(|s| s.master_key_bytes.clone())
+                .ok_or_else(|| KmsHookError::KeyNotFound(key_short.clone()))?
+        };
+        let blob = crate::blob::encode(&master_key_bytes, &key_short, plaintext);
+        let ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
 
         self.usage.write().push(KmsUsageRecord {
             timestamp: Utc::now(),
@@ -138,30 +148,44 @@ impl KmsServiceHook {
         let envelope_bytes = base64::engine::general_purpose::STANDARD
             .decode(ciphertext_b64)
             .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
-        let envelope = String::from_utf8(envelope_bytes)
-            .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
 
-        let rest = envelope
-            .strip_prefix("fakecloud-kms:")
-            .ok_or_else(|| KmsHookError::InvalidCiphertext("unrecognized envelope".into()))?;
-        let (key_short, plaintext_b64) = rest
-            .split_once(':')
-            .ok_or_else(|| KmsHookError::InvalidCiphertext("missing key separator".into()))?;
+        // Try AWS-shaped binary blob first using the account's master key;
+        // older textual envelopes fall through to the legacy parser below.
+        let master_key_bytes = {
+            let mas = self.state.read();
+            mas.get(account_id)
+                .map(|s| s.master_key_bytes.clone())
+                .unwrap_or_default()
+        };
+        let (key_short, plaintext) =
+            if let Some(decoded) = crate::blob::decode(&master_key_bytes, &envelope_bytes) {
+                (decoded.key_id, decoded.plaintext)
+            } else {
+                let envelope = String::from_utf8(envelope_bytes)
+                    .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
+                let rest = envelope.strip_prefix("fakecloud-kms:").ok_or_else(|| {
+                    KmsHookError::InvalidCiphertext("unrecognized envelope".into())
+                })?;
+                let (key_short, plaintext_b64) = rest.split_once(':').ok_or_else(|| {
+                    KmsHookError::InvalidCiphertext("missing key separator".into())
+                })?;
 
-        let plaintext = base64::engine::general_purpose::STANDARD
-            .decode(plaintext_b64)
-            .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
+                let plaintext = base64::engine::general_purpose::STANDARD
+                    .decode(plaintext_b64)
+                    .map_err(|e| KmsHookError::InvalidCiphertext(e.to_string()))?;
+                (key_short.to_string(), plaintext)
+            };
 
         let key_arn = {
             let mas = self.state.read();
             let state = mas
                 .get(account_id)
-                .ok_or_else(|| KmsHookError::KeyNotFound(key_short.into()))?;
+                .ok_or_else(|| KmsHookError::KeyNotFound(key_short.clone()))?;
             state
                 .keys
-                .get(key_short)
+                .get(&key_short)
                 .map(|k| k.arn.clone())
-                .ok_or_else(|| KmsHookError::KeyNotFound(key_short.into()))?
+                .ok_or_else(|| KmsHookError::KeyNotFound(key_short.clone()))?
         };
 
         self.usage.write().push(KmsUsageRecord {

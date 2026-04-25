@@ -19,6 +19,21 @@ pub struct KmsState {
     pub aliases: HashMap<String, KmsAlias>,
     pub grants: Vec<KmsGrant>,
     pub custom_key_stores: HashMap<String, CustomKeyStore>,
+    /// Per-account master key bytes (32 bytes for AES-256-GCM) used to
+    /// wrap plaintext in the AWS-shaped ciphertext blob format. Generated
+    /// lazily on first encrypt and persisted alongside the rest of the
+    /// state so that ciphertexts produced before a server restart still
+    /// decrypt afterwards.
+    #[serde(default = "default_master_key_bytes")]
+    pub master_key_bytes: Vec<u8>,
+}
+
+fn default_master_key_bytes() -> Vec<u8> {
+    use aes_gcm::aead::rand_core::RngCore;
+    use aes_gcm::aead::OsRng;
+    let mut bytes = vec![0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    bytes
 }
 
 impl KmsState {
@@ -30,6 +45,7 @@ impl KmsState {
             aliases: HashMap::new(),
             grants: Vec::new(),
             custom_key_stores: HashMap::new(),
+            master_key_bytes: default_master_key_bytes(),
         }
     }
 
@@ -38,6 +54,7 @@ impl KmsState {
         self.aliases.clear();
         self.grants.clear();
         self.custom_key_stores.clear();
+        // Keep the master key across resets so ciphertexts still decrypt.
     }
 }
 
