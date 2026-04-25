@@ -49,6 +49,23 @@ pub struct SsmDocument {
     pub owner: String,
     pub status: String,
     pub permissions: HashMap<String, Vec<String>>, // permission_type -> account_ids
+    #[serde(default)]
+    pub reviews: Vec<DocumentReview>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DocumentReview {
+    pub reviewer: String,
+    pub action: String, // SendForReview / Approve / Reject
+    pub comment: Vec<DocumentReviewComment>,
+    pub created_time: DateTime<Utc>,
+    pub updated_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DocumentReviewComment {
+    pub comment_type: String, // Comment
+    pub content: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

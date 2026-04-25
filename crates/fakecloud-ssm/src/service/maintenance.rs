@@ -172,6 +172,7 @@ impl SsmService {
                                     return false;
                                 }
                             }
+                            // Unknown filter keys: AWS silently ignores them.
                             _ => {}
                         }
                     }
