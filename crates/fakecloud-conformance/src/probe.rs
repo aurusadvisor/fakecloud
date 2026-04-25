@@ -9,7 +9,7 @@ use crate::shape_validator;
 use crate::smithy::ServiceModel;
 
 /// Protocol used by a service for request/response encoding.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     /// Query protocol: form-encoded body with `Action` param, XML responses.
     /// Used by: SQS, SNS, IAM, STS, CloudFormation.
@@ -93,6 +93,13 @@ pub fn service_protocol(service_name: &str) -> Protocol {
         "ecr" => Protocol::Json {
             target_prefix: "AmazonEC2ContainerRegistry_V20150921",
         },
+        "ecs" => Protocol::Json {
+            target_prefix: "AmazonEC2ContainerServiceV20141113",
+        },
+        // Smithy service_name for Step Functions is `states`; SDK calls it SFN.
+        "states" => Protocol::Json {
+            target_prefix: "AWSStepFunctions",
+        },
         "s3" => Protocol::Rest,
         "lambda" => Protocol::Rest,
         // `service_name` in `service-map.json` for API Gateway v2 is
@@ -100,6 +107,16 @@ pub fn service_protocol(service_name: &str) -> Protocol {
         // fakecloud's `ApiGatewayV2Service`. restJson1 wire format; no
         // hardcoded op table, relies on the generic `@http`-driven builder.
         "apigateway" => Protocol::Rest,
+        // restJson1 services — REST routing with @http traits + JSON bodies.
+        "ses" => Protocol::Rest,
+        "bedrock" => Protocol::Rest,
+        "bedrock-runtime" => Protocol::Rest,
+        "scheduler" => Protocol::Rest,
+        // awsQuery services — RDS, ElastiCache, ELBv2 — explicitly listed
+        // for clarity instead of relying on the default fall-through.
+        "rds" => Protocol::Query,
+        "elasticache" => Protocol::Query,
+        "elasticloadbalancing" => Protocol::Query,
         _ => Protocol::Query,
     }
 }
@@ -1203,6 +1220,103 @@ fn truncate(s: &str, max: usize) -> &str {
 mod tests {
     use super::*;
     use crate::smithy::{Member, Operation, Shape, ShapeTraits, ShapeType};
+
+    #[test]
+    fn service_protocol_covers_every_shipped_service() {
+        // Every Smithy service_name fakecloud ships must have an explicit
+        // protocol mapping. Falling through to the `_ => Query` default
+        // misroutes JSON/REST services as form-encoded `Action=` requests
+        // that get caught by APIGW's catch-all and silently classified as
+        // Pass — masking real conformance gaps. See issue surfaced when
+        // ECS reported 76/76 pass while only 60 ops were actually routed.
+        let cases = [
+            ("sqs", Protocol::Query),
+            ("sns", Protocol::Query),
+            ("iam", Protocol::Query),
+            ("sts", Protocol::Query),
+            ("cloudformation", Protocol::Query),
+            ("rds", Protocol::Query),
+            ("elasticache", Protocol::Query),
+            ("elasticloadbalancing", Protocol::Query),
+            (
+                "ssm",
+                Protocol::Json {
+                    target_prefix: "AmazonSSM",
+                },
+            ),
+            (
+                "events",
+                Protocol::Json {
+                    target_prefix: "AWSEvents",
+                },
+            ),
+            (
+                "dynamodb",
+                Protocol::Json {
+                    target_prefix: "DynamoDB_20120810",
+                },
+            ),
+            (
+                "secretsmanager",
+                Protocol::Json {
+                    target_prefix: "secretsmanager",
+                },
+            ),
+            (
+                "logs",
+                Protocol::Json {
+                    target_prefix: "Logs_20140328",
+                },
+            ),
+            (
+                "kms",
+                Protocol::Json {
+                    target_prefix: "TrentService",
+                },
+            ),
+            (
+                "cognito-idp",
+                Protocol::Json {
+                    target_prefix: "AWSCognitoIdentityProviderService",
+                },
+            ),
+            (
+                "kinesis",
+                Protocol::Json {
+                    target_prefix: "Kinesis_20131202",
+                },
+            ),
+            (
+                "ecr",
+                Protocol::Json {
+                    target_prefix: "AmazonEC2ContainerRegistry_V20150921",
+                },
+            ),
+            (
+                "ecs",
+                Protocol::Json {
+                    target_prefix: "AmazonEC2ContainerServiceV20141113",
+                },
+            ),
+            (
+                "states",
+                Protocol::Json {
+                    target_prefix: "AWSStepFunctions",
+                },
+            ),
+            ("s3", Protocol::Rest),
+            ("lambda", Protocol::Rest),
+            ("apigateway", Protocol::Rest),
+            ("ses", Protocol::Rest),
+            ("bedrock", Protocol::Rest),
+            ("bedrock-runtime", Protocol::Rest),
+            ("scheduler", Protocol::Rest),
+        ];
+        for (svc, expected) in cases {
+            let got = service_protocol(svc);
+            assert_eq!(got, expected, "wrong protocol for {svc}");
+        }
+    }
 
     fn op_with_http(name: &str, method: &str, uri: &str, input_shape_id: &str) -> Operation {
         Operation {
