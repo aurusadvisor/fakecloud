@@ -1406,8 +1406,7 @@ class Elbv2LoadBalancersResponse:
     def from_dict(cls, data: Dict[str, Any]) -> Elbv2LoadBalancersResponse:
         return cls(
             load_balancers=[
-                Elbv2LoadBalancer.from_dict(lb)
-                for lb in data.get("loadBalancers", [])
+                Elbv2LoadBalancer.from_dict(lb) for lb in data.get("loadBalancers", [])
             ],
         )
 
@@ -1474,8 +1473,7 @@ class Elbv2TargetGroupsResponse:
     def from_dict(cls, data: Dict[str, Any]) -> Elbv2TargetGroupsResponse:
         return cls(
             target_groups=[
-                Elbv2TargetGroup.from_dict(tg)
-                for tg in data.get("targetGroups", [])
+                Elbv2TargetGroup.from_dict(tg) for tg in data.get("targetGroups", [])
             ],
         )
 

@@ -292,16 +292,12 @@ class Elbv2Client:
         self._base = base_url
 
     async def get_load_balancers(self) -> Elbv2LoadBalancersResponse:
-        resp = await self._client.get(
-            f"{self._base}/_fakecloud/elbv2/load-balancers"
-        )
+        resp = await self._client.get(f"{self._base}/_fakecloud/elbv2/load-balancers")
         _check(resp)
         return Elbv2LoadBalancersResponse.from_dict(resp.json())
 
     async def get_target_groups(self) -> Elbv2TargetGroupsResponse:
-        resp = await self._client.get(
-            f"{self._base}/_fakecloud/elbv2/target-groups"
-        )
+        resp = await self._client.get(f"{self._base}/_fakecloud/elbv2/target-groups")
         _check(resp)
         return Elbv2TargetGroupsResponse.from_dict(resp.json())
 
