@@ -134,11 +134,33 @@ impl LogsService {
         // Parse the query string
         let parsed = query::parse_query(&query_info.query_string);
 
-        // Collect events by stream
+        // Collect events by stream from every group/identifier the query
+        // referenced, not just the legacy single `log_group_name`. ARNs are
+        // resolved to bare group names so multi-group StartQuery requests
+        // actually scan every requested group.
         let mut stream_events: Vec<(String, Vec<LogEvent>)> = Vec::new();
-        if let Some(group) = state.log_groups.get(&query_info.log_group_name) {
-            for stream in group.log_streams.values() {
-                stream_events.push((stream.name.clone(), stream.events.clone()));
+        let mut seen_groups: std::collections::HashSet<String> = Default::default();
+        let identifiers: Vec<String> = if query_info.log_group_identifiers.is_empty() {
+            vec![query_info.log_group_name.clone()]
+        } else {
+            query_info.log_group_identifiers.clone()
+        };
+        for identifier in identifiers {
+            let group_name = if identifier.starts_with("arn:") {
+                match super::extract_log_group_from_arn(&identifier) {
+                    Some(n) => n,
+                    None => continue,
+                }
+            } else {
+                identifier
+            };
+            if !seen_groups.insert(group_name.clone()) {
+                continue;
+            }
+            if let Some(group) = state.log_groups.get(&group_name) {
+                for stream in group.log_streams.values() {
+                    stream_events.push((stream.name.clone(), stream.events.clone()));
+                }
             }
         }
 
@@ -426,11 +448,17 @@ impl LogsService {
         let accounts = self.state.read();
         let empty = crate::state::LogsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let identifiers: Vec<String> = state
+        let identifiers = state
             .queries
             .get(query_id)
             .map(|q| q.log_group_identifiers.clone())
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "The specified query does not exist.",
+                )
+            })?;
 
         Ok(AwsResponse::json(
             StatusCode::OK,

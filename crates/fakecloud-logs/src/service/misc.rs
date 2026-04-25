@@ -572,14 +572,24 @@ impl LogsService {
             0,
             1024,
         )?;
-        let identifiers: Vec<String> = body["logGroupIdentifiers"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let arr = body["logGroupIdentifiers"].as_array().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "logGroupIdentifiers must be an array of strings",
+            )
+        })?;
+        let mut identifiers: Vec<String> = Vec::with_capacity(arr.len());
+        for v in arr {
+            let s = v.as_str().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "logGroupIdentifiers entries must be strings",
+                )
+            })?;
+            identifiers.push(s.to_string());
+        }
         let session_id = uuid::Uuid::new_v4().to_string();
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -1081,15 +1091,16 @@ mod tests {
     }
 
     #[test]
-    fn list_log_groups_for_query_returns_empty() {
+    fn list_log_groups_for_query_unknown_query_errors() {
         let svc = make_service();
         let req = make_request(
             "ListLogGroupsForQuery",
             json!({ "queryId": "some-query-id" }),
         );
-        let resp = svc.list_log_groups_for_query(&req).unwrap();
-        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert!(body["logGroupIdentifiers"].as_array().unwrap().is_empty());
+        match svc.list_log_groups_for_query(&req) {
+            Err(e) => assert_eq!(e.code(), "ResourceNotFoundException"),
+            Ok(_) => panic!("expected ResourceNotFoundException"),
+        }
     }
 
     #[test]
