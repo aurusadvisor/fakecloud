@@ -48,6 +48,31 @@ pub struct EventSourceMapping {
     pub enabled: bool,
     pub state: String,
     pub last_modified: DateTime<Utc>,
+    /// Raw `Filters: [{Pattern: "..."}]` array as supplied via
+    /// `FilterCriteria`. Each pattern is an EventBridge-style JSON
+    /// pattern matched against the record body — non-matching records
+    /// are dropped.
+    #[serde(default)]
+    pub filter_patterns: Vec<String>,
+    /// Wait up to N seconds to accumulate `batch_size` records before
+    /// invoking. Implemented as a deadline check inside the poller.
+    #[serde(default)]
+    pub maximum_batching_window_in_seconds: Option<i64>,
+    /// `LATEST`, `TRIM_HORIZON`, or `AT_TIMESTAMP`. Honored on the
+    /// first poll for stream sources (Kinesis, DDB Streams).
+    #[serde(default)]
+    pub starting_position: Option<String>,
+    /// Optional epoch-second timestamp paired with
+    /// `StartingPosition=AT_TIMESTAMP`.
+    #[serde(default)]
+    pub starting_position_timestamp: Option<f64>,
+    /// Kinesis-only: number of concurrent batch invocations per shard.
+    #[serde(default)]
+    pub parallelization_factor: Option<i64>,
+    /// `["ReportBatchItemFailures"]` to opt into partial-batch failure
+    /// semantics. Empty / unset = entire batch is retried on error.
+    #[serde(default)]
+    pub function_response_types: Vec<String>,
 }
 
 /// A recorded Lambda invocation from cross-service delivery.

@@ -11,7 +11,7 @@ fakecloud implements **85 of 85** Lambda operations at 100% Smithy conformance. 
 - **Function CRUD** — create, update, delete, list, get
 - **Real code execution** — functions run in Docker containers with the official AWS Lambda runtime images
 - **13 runtimes** — Node.js (16/18/20), Python (3.8/3.9/3.10/3.11/3.12), Java (11/17/21), Go, Ruby, .NET
-- **Event source mappings** — SQS, Kinesis, DynamoDB Streams polling loops
+- **Event source mappings** — SQS, Kinesis, DynamoDB Streams polling loops with **`FilterCriteria`** (EventBridge-style JSON pattern, exists/prefix/suffix/equals-ignore-case/anything-but/numeric operators, SQS body decode), **`StartingPosition`** (`TRIM_HORIZON` / `LATEST` / `AT_TIMESTAMP` for Kinesis, `TRIM_HORIZON` / `LATEST` for DDB Streams), **`MaximumBatchingWindowInSeconds`** (SQS), and **`FunctionResponseTypes=[ReportBatchItemFailures]`** for SQS partial-batch failure semantics
 - **Layers** — create, publish, attach to functions
 - **Environment variables** — passed to the container
 - **Aliases and versions** — publish, point aliases at versions
@@ -29,6 +29,29 @@ REST. Path-based routing for invoke operations, JSON for control plane.
 - `GET /_fakecloud/lambda/invocations` — list all Lambda invocations with input/output/errors
 - `GET /_fakecloud/lambda/warm-containers` — list currently warm containers
 - `POST /_fakecloud/lambda/{function-name}/evict-container` — force a cold start on the next invoke
+
+## Event source mapping example: FilterCriteria + partial batch failure
+
+```typescript
+import { LambdaClient, CreateEventSourceMappingCommand } from "@aws-sdk/client-lambda";
+
+await new LambdaClient({ endpoint: "http://localhost:4566" }).send(
+  new CreateEventSourceMappingCommand({
+    FunctionName: "process-orders",
+    EventSourceArn: "arn:aws:sqs:us-east-1:000000000000:orders",
+    BatchSize: 10,
+    MaximumBatchingWindowInSeconds: 5,
+    // Only deliver paid orders.
+    FilterCriteria: {
+      Filters: [{ Pattern: '{"body": {"status": ["paid"]}}' }],
+    },
+    // Opt into partial-batch failure: Lambda returns
+    // {"batchItemFailures":[{"itemIdentifier":"<msgId>"}]}
+    // and only those messages stay on the queue for retry.
+    FunctionResponseTypes: ["ReportBatchItemFailures"],
+  })
+);
+```
 
 ## Cross-service triggers
 

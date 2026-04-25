@@ -1676,7 +1676,32 @@ impl LambdaService {
                 state.region, state.account_id, name
             );
         }
-        let body_json = json!({
+        if let Some(filters) = body
+            .get("FilterCriteria")
+            .and_then(|v| v.get("Filters"))
+            .and_then(|v| v.as_array())
+        {
+            esm.filter_patterns = filters
+                .iter()
+                .filter_map(|f| f.get("Pattern").and_then(|p| p.as_str()).map(String::from))
+                .collect();
+        }
+        if let Some(types) = body.get("FunctionResponseTypes").and_then(|v| v.as_array()) {
+            esm.function_response_types = types
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+        if let Some(w) = body
+            .get("MaximumBatchingWindowInSeconds")
+            .and_then(|v| v.as_i64())
+        {
+            esm.maximum_batching_window_in_seconds = Some(w);
+        }
+        if let Some(p) = body.get("ParallelizationFactor").and_then(|v| v.as_i64()) {
+            esm.parallelization_factor = Some(p);
+        }
+        let mut body_json = json!({
             "UUID": esm.uuid,
             "FunctionArn": esm.function_arn,
             "EventSourceArn": esm.event_source_arn,
@@ -1685,6 +1710,31 @@ impl LambdaService {
             "StateTransitionReason": "USER_INITIATED",
             "LastModified": chrono::Utc::now().timestamp() as f64,
         });
+        let obj = body_json.as_object_mut().expect("json! built object");
+        if !esm.filter_patterns.is_empty() {
+            obj.insert(
+                "FilterCriteria".into(),
+                json!({
+                    "Filters": esm
+                        .filter_patterns
+                        .iter()
+                        .map(|p| json!({"Pattern": p}))
+                        .collect::<Vec<_>>(),
+                }),
+            );
+        }
+        if !esm.function_response_types.is_empty() {
+            obj.insert(
+                "FunctionResponseTypes".into(),
+                json!(esm.function_response_types),
+            );
+        }
+        if let Some(w) = esm.maximum_batching_window_in_seconds {
+            obj.insert("MaximumBatchingWindowInSeconds".into(), json!(w));
+        }
+        if let Some(p) = esm.parallelization_factor {
+            obj.insert("ParallelizationFactor".into(), json!(p));
+        }
         ok(body_json)
     }
 

@@ -17,9 +17,9 @@ fakecloud actually executes the cross-service wiring. When an EventBridge rule m
 - **SNS -> SQS / Lambda / HTTP** — Fan-out delivery to all subscription types.
 - **S3 -> SNS / SQS / Lambda / EventBridge** — Bucket notifications on object create/delete.
 - **EventBridge -> SNS / SQS / Lambda / Logs / Kinesis / Step Functions / HTTP** — Rules deliver to targets on schedule or event match, including API Destinations.
-- **SQS -> Lambda** — Event source mapping polls queues and invokes functions.
-- **Kinesis -> Lambda** — Event source mapping polls shards and invokes functions.
-- **DynamoDB Streams -> Lambda** — Event source mapping polls stream records and invokes.
+- **SQS -> Lambda** — Event source mapping polls queues. Honors `FilterCriteria` (drop non-matching), `MaximumBatchingWindowInSeconds` (hold partial batches), and `FunctionResponseTypes=[ReportBatchItemFailures]` (Lambda response `{"batchItemFailures":[{"itemIdentifier":...}]}` retries only the failed messages).
+- **Kinesis -> Lambda** — Event source mapping polls shards. Honors `FilterCriteria` (advances past dropped records) and `StartingPosition` (`TRIM_HORIZON` / `LATEST` / `AT_TIMESTAMP`) on first poll.
+- **DynamoDB Streams -> Lambda** — Event source mapping polls stream records. Honors `FilterCriteria` (advances past dropped records) and `StartingPosition` (`TRIM_HORIZON` / `LATEST`).
 - **DynamoDB -> Kinesis** — Table changes stream to Kinesis Data Streams.
 - **CloudWatch Logs -> Lambda / Kinesis / SQS** — Subscription filters deliver log events.
 - **Lambda async destinations -> SQS / SNS / EventBridge / Lambda** — `InvocationType=Event` invocations route their result through `OnSuccess` / `OnFailure` using AWS's standard destinations record schema.
