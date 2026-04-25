@@ -1616,10 +1616,13 @@ impl Elbv2Service {
     fn create_rule(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let listener_arn = required_query_param(req, "ListenerArn")?;
         let priority = required_query_param(req, "Priority")?;
-        if priority.parse::<i32>().is_err() {
-            return Err(invalid_param(format!(
-                "Priority must be a positive integer, got '{priority}'"
-            )));
+        match priority.parse::<i32>() {
+            Ok(n) if n > 0 => {}
+            _ => {
+                return Err(invalid_param(format!(
+                    "Priority must be a positive integer, got '{priority}'"
+                )));
+            }
         }
         let conditions = parse_conditions(req);
         if conditions.is_empty() {
@@ -1636,6 +1639,21 @@ impl Elbv2Service {
         let st = accounts.get_or_create(&req.account_id);
         if !st.listeners.contains_key(&listener_arn) {
             return Err(listener_not_found(&listener_arn));
+        }
+        // Reject any forward action that references a target group not in this account.
+        for action in &actions {
+            if let Some(arn) = action.target_group_arn.as_deref() {
+                if !st.target_groups.contains_key(arn) {
+                    return Err(target_group_not_found(arn));
+                }
+            }
+            if let Some(forward) = action.forward.as_ref() {
+                for t in &forward.target_groups {
+                    if !st.target_groups.contains_key(&t.target_group_arn) {
+                        return Err(target_group_not_found(&t.target_group_arn));
+                    }
+                }
+            }
         }
         if st
             .rules
