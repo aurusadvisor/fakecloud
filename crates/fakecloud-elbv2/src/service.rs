@@ -81,6 +81,7 @@ pub struct Elbv2Service {
 
 impl Elbv2Service {
     pub fn new(state: SharedElbv2State) -> Self {
+        crate::prober::spawn_prober(Arc::clone(&state));
         Self {
             state,
             region: "us-east-1".to_string(),
@@ -2862,7 +2863,14 @@ fn parse_target_descriptions(req: &AwsRequest) -> Vec<crate::state::TargetDescri
                 id,
                 port,
                 availability_zone: az,
-                health: crate::state::TargetHealth::default(),
+                health: if crate::prober::probes_enabled() {
+                    crate::state::TargetHealth::initial()
+                } else {
+                    crate::state::TargetHealth::default()
+                },
+                consecutive_success: 0,
+                consecutive_failure: 0,
+                last_probe_at: None,
             });
         } else {
             break;

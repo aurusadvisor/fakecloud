@@ -143,6 +143,12 @@ pub struct TargetDescription {
     pub port: Option<i32>,
     pub availability_zone: Option<String>,
     pub health: TargetHealth,
+    #[serde(default)]
+    pub consecutive_success: u32,
+    #[serde(default)]
+    pub consecutive_failure: u32,
+    #[serde(default)]
+    pub last_probe_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +164,16 @@ impl Default for TargetHealth {
             state: "healthy".to_string(),
             reason: None,
             description: None,
+        }
+    }
+}
+
+impl TargetHealth {
+    pub fn initial() -> Self {
+        Self {
+            state: "initial".to_string(),
+            reason: Some("Elb.RegistrationInProgress".to_string()),
+            description: Some("Target registration is in progress".to_string()),
         }
     }
 }

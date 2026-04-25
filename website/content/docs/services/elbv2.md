@@ -79,7 +79,12 @@ The `/_fakecloud/elbv2/*` endpoints let your tests assert directly on the persis
 
 Wrapped by the first-party SDKs: `fc.elbv2().getLoadBalancers()` (TS/Java), `fc.elbv2.getLoadBalancers()` (Python), `fc.ELBv2().GetLoadBalancers(ctx)` (Go), `$fc->elbv2()->getLoadBalancers()` (PHP).
 
+## Health probes
+
+A background prober walks every target group with `HealthCheckEnabled=true` and probes each registered target on its `HealthCheckProtocol`/`HealthCheckPort`/`HealthCheckPath` at the configured `HealthCheckIntervalSeconds`. HTTP/HTTPS probes match the configured `Matcher.HttpCode` (e.g. `200`, `200-299`, `200,301,404`); TCP/TLS probes succeed on connect. After `HealthyThresholdCount` consecutive successes a target flips to `healthy`; after `UnhealthyThresholdCount` consecutive failures it flips to `unhealthy`. Newly registered targets start at `initial` until the first probe completes. `DescribeTargetHealth` returns the live state.
+
+Set `FAKECLOUD_ELBV2_DISABLE_HEALTH_PROBES=true` to turn the prober off and revert to the historical default of synthetic `healthy` for every registered target — useful when targets are placeholder IPs that don't actually answer.
+
 ## Not yet implemented
 
 - **In-process HTTP routing.** fakecloud stores the listener/rule wiring exactly, but does not bind a port per ALB and forward HTTP requests to registered targets. The control plane is complete; the data plane is the next axis. Open an issue if you have a use case that needs it.
-- **Health probes.** Targets default to `healthy` since fakecloud does not actually call the target's health check endpoint. `DescribeTargetHealth` returns the synthetic state.
