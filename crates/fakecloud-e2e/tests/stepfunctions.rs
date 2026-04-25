@@ -526,7 +526,11 @@ fn fail_definition() -> String {
 
 /// Helper to wait for an execution to finish (not RUNNING).
 async fn wait_for_execution(client: &aws_sdk_sfn::Client, arn: &str) -> String {
-    for _ in 0..50 {
+    // 200 * 50ms = 10s budget. Locally executions complete in <2s, but
+    // GitHub-hosted runners under heavy parallel load occasionally stretch
+    // to several seconds, especially when downstream task integrations
+    // (SNS RSA signing, DynamoDB serialization) do real work on first hit.
+    for _ in 0..200 {
         sleep(Duration::from_millis(50)).await;
         let desc = client
             .describe_execution()

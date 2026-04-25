@@ -1375,13 +1375,36 @@ async fn logs_list_log_groups_for_query() {
     let server = TestServer::start().await;
     let client = server.logs_client().await;
 
-    let resp = client
-        .list_log_groups_for_query()
-        .query_id("dummy-query-id")
+    // ListLogGroupsForQuery looks up a queryId previously returned by
+    // StartQuery; AWS (and fakecloud) return ResourceNotFoundException for
+    // unknown ids, so create a real query first.
+    client
+        .create_log_group()
+        .log_group_name("/conf/list-for-query")
         .send()
         .await
         .unwrap();
-    assert!(resp.log_group_identifiers().is_empty());
+
+    let started = client
+        .start_query()
+        .log_group_name("/conf/list-for-query")
+        .start_time(0)
+        .end_time(1)
+        .query_string("fields @timestamp")
+        .send()
+        .await
+        .unwrap();
+    let query_id = started.query_id().unwrap().to_string();
+
+    // Just assert the call returns without error — the contents of
+    // logGroupIdentifiers are exercised by the unit tests in
+    // fakecloud-logs::service::queries.
+    client
+        .list_log_groups_for_query()
+        .query_id(query_id)
+        .send()
+        .await
+        .unwrap();
 }
 
 #[test_action("logs", "ListAggregateLogGroupSummaries", checksum = "06cc853e")]
