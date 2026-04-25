@@ -59,10 +59,21 @@ jobs:
       # via mysql_async / twox-hash / rust_decimal / mysql_common. The advisory
       # requires a user-installed custom logger that calls `rand::rng()` during
       # logging — fakecloud does not install such a logger.
+      #
+      # RUSTSEC-2023-0071 (rsa 0.9 Marvin Attack timing sidechannel) reaches us
+      # only through fakecloud-sns's RSA-SHA256 signing key — generated once
+      # per process for SNS message signatures consumers verify in tests. The
+      # attack requires a remote oracle that times decryption operations on a
+      # private key handling attacker-chosen ciphertexts. fakecloud's signing
+      # key is never used for decrypt and never handles attacker-chosen input;
+      # there is no fixed upgrade path because rsa upstream has not released a
+      # constant-time fix yet. The same advisory is the standard escape hatch
+      # for any project that needs RSA in pure Rust today.
       - run: |
           cargo audit \
             --ignore RUSTSEC-2026-0098 \
             --ignore RUSTSEC-2026-0099 \
             --ignore RUSTSEC-2026-0104 \
             --ignore RUSTSEC-2026-0002 \
-            --ignore RUSTSEC-2026-0097
+            --ignore RUSTSEC-2026-0097 \
+            --ignore RUSTSEC-2023-0071
