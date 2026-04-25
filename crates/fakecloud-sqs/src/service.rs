@@ -2046,19 +2046,58 @@ impl SqsService {
             queue.messages = remaining;
         }
 
-        for msg in &received {
-            queue.inflight.push(msg.clone());
-        }
-
-        // Capture the values we need for the post-DLQ decrypt step before
-        // releasing the `queue` borrow — DLQ writes mutate sibling queues
-        // and would otherwise overlap with the active mutable borrow.
+        // SSE-KMS: decrypt the body BEFORE we commit any state changes
+        // (inflight push / DLQ move / queue.messages rewrite). A KMS
+        // failure here would otherwise leave the queue in a broken state
+        // — the message hidden in inflight or moved to DLQ — while the
+        // client receives 500 and never sees the body. Real AWS treats
+        // KMS failures as a Receive failure that doesn't consume the
+        // message; rollback the popped batch by pushing it back onto
+        // `queue.messages`.
         let queue_arn = queue.arn.clone();
         let kms_key_id = queue
             .attributes
             .get("KmsMasterKeyId")
             .cloned()
             .filter(|s| !s.is_empty());
+        if kms_key_id.is_some() && self.kms_hook.is_some() {
+            for msg in received.iter_mut() {
+                match self.decrypt_message_body(account_id, &queue_arn, &msg.body) {
+                    Ok(plain) => msg.body = plain,
+                    Err(err) => {
+                        // Rollback: put both the would-be-DLQ messages
+                        // and the would-be-received messages back onto
+                        // the front of the queue so the next receive
+                        // can retry once KMS recovers.
+                        let mut rollback: VecDeque<SqsMessage> = VecDeque::new();
+                        for (_, mut m) in dlq_messages.into_iter() {
+                            // Reset receive_count we bumped in the loop
+                            // so the next attempt doesn't immediately
+                            // DLQ the message again on a transient KMS
+                            // outage.
+                            m.receive_count = m.receive_count.saturating_sub(1);
+                            m.visible_at = None;
+                            m.receipt_handle = None;
+                            rollback.push_back(m);
+                        }
+                        for mut m in received.into_iter() {
+                            m.receive_count = m.receive_count.saturating_sub(1);
+                            m.visible_at = None;
+                            m.receipt_handle = None;
+                            rollback.push_back(m);
+                        }
+                        for m in rollback.into_iter().rev() {
+                            queue.messages.push_front(m);
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+        }
+
+        for msg in &received {
+            queue.inflight.push(msg.clone());
+        }
 
         // Move messages to DLQ
         for (dlq_arn, mut msg) in dlq_messages {
@@ -2066,16 +2105,6 @@ impl SqsService {
                 msg.receipt_handle = None;
                 msg.visible_at = None;
                 dlq.messages.push_back(msg);
-            }
-        }
-
-        // SSE-KMS: decrypt the body before returning so the caller sees
-        // plaintext, mirroring AWS's transparent server-side decryption.
-        // The on-queue body stays encrypted; we only decrypt the cloned
-        // copy we hand back.
-        if kms_key_id.is_some() && self.kms_hook.is_some() {
-            for msg in received.iter_mut() {
-                msg.body = self.decrypt_message_body(account_id, &queue_arn, &msg.body)?;
             }
         }
 
@@ -2527,6 +2556,9 @@ impl SqsService {
         // the per-entry helper. Encryption is queue-wide, so a KMS
         // failure here aborts the whole batch (matches AWS behavior:
         // when the queue's CMK is unavailable, no entry can succeed).
+        // Skip encryption for entries that won't pass per-entry
+        // validation — otherwise an invalid entry would still record a
+        // KMS GenerateDataKey call and inflate the audit trail.
         let kms_key_id = queue
             .attributes
             .get("KmsMasterKeyId")
@@ -2536,12 +2568,19 @@ impl SqsService {
         let mut stored_overrides: Vec<Option<String>> = Vec::with_capacity(entries.len());
         if kms_key_id.is_some() && self.kms_hook.is_some() {
             for entry in &entries {
-                if let Some(plaintext) = entry["MessageBody"].as_str() {
+                let body = entry["MessageBody"].as_str();
+                let body_size_ok = body.is_some_and(|b| b.len() <= cfg.max_message_size);
+                let id_ok = entry["Id"].as_str().is_some_and(is_valid_batch_id);
+                let delay_ok = match val_as_i64(&entry["DelaySeconds"]) {
+                    Some(d) => (0..=900).contains(&d),
+                    None => true,
+                };
+                if body_size_ok && id_ok && delay_ok {
                     let stored = self.encrypt_message_body(
                         &req.account_id,
                         &queue_arn,
                         kms_key_id.as_deref(),
-                        plaintext,
+                        body.unwrap(),
                     )?;
                     stored_overrides.push(Some(stored));
                 } else {

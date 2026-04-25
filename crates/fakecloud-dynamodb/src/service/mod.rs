@@ -125,10 +125,12 @@ impl DynamoDbService {
             .filter(|k| !k.is_empty())
             .unwrap_or("aws/dynamodb");
         // DynamoDB SSE-KMS uses the AWS-documented encryption context:
-        // {aws:dynamodb:tableArn: <arn>, aws:dynamodb:subscriberId: <account>}
-        // — see the AWS DynamoDB encryption-at-rest docs.
+        // {aws:dynamodb:tableName: <name>, aws:dynamodb:subscriberId: <account>}
+        // — see the AWS DynamoDB encryption-at-rest docs. The table arn
+        // ends with `:table/<name>`, so derive the name from it.
+        let table_name = table_arn.rsplit('/').next().unwrap_or(table_arn);
         let mut ctx = std::collections::HashMap::new();
-        ctx.insert("aws:dynamodb:tableArn".to_string(), table_arn.to_string());
+        ctx.insert("aws:dynamodb:tableName".to_string(), table_name.to_string());
         ctx.insert(
             "aws:dynamodb:subscriberId".to_string(),
             account_id.to_string(),
