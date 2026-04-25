@@ -841,13 +841,59 @@ mod tests {
     }
 
     #[test]
-    fn start_associations_once_noop() {
+    fn start_associations_once_unknown_id_errors() {
         let svc = make_service();
         let req = make_request(
             "StartAssociationsOnce",
             json!({ "AssociationIds": ["fake-id"] }),
         );
+        assert!(svc.start_associations_once(&req).is_err());
+    }
+
+    #[test]
+    fn start_associations_once_marks_pending_and_records_execution() {
+        let svc = make_service();
+
+        // Create a document to associate against
+        let req = make_request(
+            "CreateDocument",
+            json!({
+                "Name": "doc-for-assoc",
+                "Content": "{\"schemaVersion\": \"2.2\"}",
+                "DocumentType": "Command",
+            }),
+        );
+        svc.create_document(&req).unwrap();
+
+        // Create association
+        let req = make_request(
+            "CreateAssociation",
+            json!({
+                "Name": "doc-for-assoc",
+                "Targets": [{"Key": "InstanceIds", "Values": ["i-1234"]}],
+            }),
+        );
+        let resp = svc.create_association(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let assoc_id = body["AssociationDescription"]["AssociationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Trigger StartAssociationsOnce
+        let req = make_request(
+            "StartAssociationsOnce",
+            json!({ "AssociationIds": [assoc_id] }),
+        );
         svc.start_associations_once(&req).unwrap();
+
+        // Verify status flipped to Pending and last_execution_date is set
+        let req = make_request("DescribeAssociation", json!({ "AssociationId": assoc_id }));
+        let resp = svc.describe_association(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let desc = &body["AssociationDescription"];
+        assert_eq!(desc["Status"]["Name"], "Pending");
+        assert!(desc["LastExecutionDate"].is_number());
     }
 
     // -- OpsItems --
@@ -1106,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn describe_patch_properties_returns_empty() {
+    fn describe_patch_properties_windows_products() {
         let svc = make_service();
         let req = make_request(
             "DescribePatchProperties",
@@ -1114,7 +1160,9 @@ mod tests {
         );
         let resp = svc.describe_patch_properties(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert!(body["Properties"].as_array().unwrap().is_empty());
+        let props = body["Properties"].as_array().unwrap();
+        assert!(!props.is_empty());
+        assert!(props.iter().any(|p| p["PRODUCT"] == "Windows10"));
     }
 
     // ── Inventory ─────────────────────────────────────────────────
@@ -1602,10 +1650,10 @@ mod tests {
         assert!(body["ResourceDataSyncItems"].as_array().unwrap().is_empty());
     }
 
-    // ── Patch stubs ───────────────────────────────────────────────
+    // ── Patch describes ───────────────────────────────────────────
 
     #[test]
-    fn describe_instance_patch_states_returns_empty() {
+    fn describe_instance_patch_states_returns_empty_for_unknown_instance() {
         let svc = make_service();
         let req = make_request(
             "DescribeInstancePatchStates",
@@ -1617,7 +1665,7 @@ mod tests {
     }
 
     #[test]
-    fn describe_instance_patches_returns_empty() {
+    fn describe_instance_patches_returns_empty_for_unknown_instance() {
         let svc = make_service();
         let req = make_request("DescribeInstancePatches", json!({ "InstanceId": "i-001" }));
         let resp = svc.describe_instance_patches(&req).unwrap();
@@ -1626,17 +1674,95 @@ mod tests {
     }
 
     #[test]
-    fn describe_effective_patches_returns_empty() {
+    fn describe_effective_patches_for_unknown_baseline_errors() {
         let svc = make_service();
         let req = make_request(
             "DescribeEffectivePatchesForPatchBaseline",
             json!({ "BaselineId": "pb-12345678901234567" }),
         );
+        assert!(svc
+            .describe_effective_patches_for_patch_baseline(&req)
+            .is_err());
+    }
+
+    #[test]
+    fn describe_effective_patches_returns_approved_for_real_baseline() {
+        let svc = make_service();
+        let req = make_request(
+            "CreatePatchBaseline",
+            json!({
+                "Name": "real-baseline",
+                "OperatingSystem": "WINDOWS",
+                "ApprovedPatches": ["KB12345", "KB67890"],
+                "ApprovedPatchesComplianceLevel": "CRITICAL",
+            }),
+        );
+        let resp = svc.create_patch_baseline(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let baseline_id = body["BaselineId"].as_str().unwrap().to_string();
+
+        let req = make_request(
+            "DescribeEffectivePatchesForPatchBaseline",
+            json!({ "BaselineId": baseline_id }),
+        );
         let resp = svc
             .describe_effective_patches_for_patch_baseline(&req)
             .unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-        assert!(body["EffectivePatches"].as_array().unwrap().is_empty());
+        let patches = body["EffectivePatches"].as_array().unwrap();
+        assert_eq!(patches.len(), 2);
+        assert_eq!(patches[0]["PatchStatus"]["ComplianceLevel"], "CRITICAL");
+    }
+
+    #[test]
+    fn describe_patch_properties_returns_known_classifications() {
+        let svc = make_service();
+        let req = make_request(
+            "DescribePatchProperties",
+            json!({ "OperatingSystem": "WINDOWS", "Property": "CLASSIFICATION" }),
+        );
+        let resp = svc.describe_patch_properties(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let props = body["Properties"].as_array().unwrap();
+        assert!(!props.is_empty());
+        assert!(props
+            .iter()
+            .any(|p| p["CLASSIFICATION"] == "SecurityUpdates"));
+    }
+
+    #[test]
+    fn describe_instance_patches_surfaces_inventory_compliance() {
+        let svc = make_service();
+        let req = make_request(
+            "PutInventory",
+            json!({
+                "InstanceId": "i-002",
+                "Items": [{
+                    "TypeName": "AWS:PatchCompliance",
+                    "SchemaVersion": "1.0",
+                    "CaptureTime": "2026-04-25T20:00:00Z",
+                    "Content": [
+                        {
+                            "Title": "KB987654",
+                            "KBId": "KB987654",
+                            "Classification": "SecurityUpdates",
+                            "Severity": "Critical",
+                            "State": "Installed",
+                            "InstalledTime": "2026-04-25T19:00:00Z"
+                        }
+                    ]
+                }]
+            }),
+        );
+        svc.put_inventory(&req).unwrap();
+
+        let req = make_request("DescribeInstancePatches", json!({ "InstanceId": "i-002" }));
+        let resp = svc.describe_instance_patches(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let patches = body["Patches"].as_array().unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0]["KBId"], "KB987654");
+        assert_eq!(patches[0]["Classification"], "SecurityUpdates");
     }
 
     #[test]
@@ -4353,16 +4479,43 @@ mod tests {
     #[test]
     fn update_document_metadata_not_found() {
         let svc = make_service();
-        let req = make_request("UpdateDocumentMetadata", json!({"Name": "missing"}));
+        let req = make_request(
+            "UpdateDocumentMetadata",
+            json!({
+                "Name": "missing",
+                "DocumentReviews": {"Action": "SendForReview"},
+            }),
+        );
         assert!(svc.update_document_metadata(&req).is_err());
     }
 
     #[test]
-    fn update_document_metadata_existing() {
+    fn update_document_metadata_persists_review_history() {
         let svc = make_service();
         create_doc_basic(&svc, "DocB");
-        let req = make_request("UpdateDocumentMetadata", json!({"Name": "DocB"}));
+
+        let req = make_request(
+            "UpdateDocumentMetadata",
+            json!({
+                "Name": "DocB",
+                "DocumentReviews": {
+                    "Action": "Approve",
+                    "Comment": [{"Type": "Comment", "Content": "lgtm"}]
+                }
+            }),
+        );
         svc.update_document_metadata(&req).unwrap();
+
+        let req = make_request(
+            "ListDocumentMetadataHistory",
+            json!({"Name": "DocB", "Metadata": "DocumentReviews"}),
+        );
+        let resp = svc.list_document_metadata_history(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let responses = body["Metadata"]["ReviewerResponse"].as_array().unwrap();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["ReviewStatus"], "APPROVED");
+        assert_eq!(responses[0]["Comment"][0]["Content"], "lgtm");
     }
 
     #[test]

@@ -406,10 +406,28 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let _association_ids = body["AssociationIds"]
+        let association_ids = body["AssociationIds"]
             .as_array()
             .ok_or_else(|| missing("AssociationIds"))?;
-        // No-op: return success
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let now = Utc::now();
+
+        for id in association_ids.iter().filter_map(|v| v.as_str()) {
+            if let Some(assoc) = state.associations.get_mut(id) {
+                assoc.status = "Pending".to_string();
+                assoc.status_date = now;
+                assoc.last_update_association_date = now;
+                assoc.last_execution_date = Some(now);
+            } else {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "AssociationDoesNotExist",
+                    format!("The specified association {id} does not exist."),
+                ));
+            }
+        }
         Ok(AwsResponse::ok_json(json!({})))
     }
 

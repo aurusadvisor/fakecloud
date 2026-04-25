@@ -119,6 +119,7 @@ impl SsmService {
                                 if !values.contains(&pb.operating_system.as_str()) => {
                                     return false;
                                 }
+                            // Unknown filter keys: AWS silently ignores them.
                             _ => {}
                         }
                     }
@@ -404,6 +405,7 @@ impl SsmService {
                                     }
                                 }
                             }
+                            // Unknown filter keys: AWS silently ignores them.
                             _ => {}
                         }
                     }
@@ -525,11 +527,27 @@ impl SsmService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
-        let _instance_ids = body["InstanceIds"]
+        let instance_ids = body["InstanceIds"]
             .as_array()
             .ok_or_else(|| missing("InstanceIds"))?;
-        // Return empty - no real instances in emulator
-        Ok(AwsResponse::ok_json(json!({ "InstancePatchStates": [] })))
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
+
+        let accounts = self.state.read();
+        let empty = SsmState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        let all: Vec<Value> = instance_ids
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter_map(|iid| build_instance_patch_state(state, iid))
+            .collect();
+
+        let (page, next_token) = paginate(&all, body["NextToken"].as_str(), max_results);
+        let mut resp = json!({ "InstancePatchStates": page });
+        if let Some(token) = next_token {
+            resp["NextToken"] = json!(token);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn describe_instance_patch_states_for_patch_group(
@@ -539,10 +557,28 @@ impl SsmService {
         let body = req.json_body();
         validate_optional_string_length("PatchGroup", body["PatchGroup"].as_str(), 1, 256)?;
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
-        let _patch_group = body["PatchGroup"]
+        let patch_group = body["PatchGroup"]
             .as_str()
             .ok_or_else(|| missing("PatchGroup"))?;
-        Ok(AwsResponse::ok_json(json!({ "InstancePatchStates": [] })))
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
+
+        let accounts = self.state.read();
+        let empty = SsmState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        let all: Vec<Value> = state
+            .inventory_entries
+            .keys()
+            .filter(|iid| instance_in_patch_group(state, iid, patch_group))
+            .filter_map(|iid| build_instance_patch_state(state, iid))
+            .collect();
+
+        let (page, next_token) = paginate(&all, body["NextToken"].as_str(), max_results);
+        let mut resp = json!({ "InstancePatchStates": page });
+        if let Some(token) = next_token {
+            resp["NextToken"] = json!(token);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn describe_instance_patches(
@@ -551,10 +587,50 @@ impl SsmService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 10, 100)?;
-        let _instance_id = body["InstanceId"]
+        let instance_id = body["InstanceId"]
             .as_str()
             .ok_or_else(|| missing("InstanceId"))?;
-        Ok(AwsResponse::ok_json(json!({ "Patches": [] })))
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
+
+        let accounts = self.state.read();
+        let empty = SsmState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        let patches: Vec<Value> = state
+            .inventory_entries
+            .get(instance_id)
+            .map(|entry| {
+                entry
+                    .items
+                    .iter()
+                    .filter(|i| {
+                        i.type_name == "AWS:PatchCompliance" || i.type_name == "AWS:Patch"
+                    })
+                    .flat_map(|i| i.content.iter())
+                    .map(|row| {
+                        let installed_time = row
+                            .get("InstalledTime")
+                            .map(|s| parse_iso8601_epoch_seconds(s))
+                            .unwrap_or(0.0);
+                        json!({
+                            "Title": row.get("Title").cloned().unwrap_or_default(),
+                            "KBId": row.get("KBId").cloned().unwrap_or_default(),
+                            "Classification": row.get("Classification").cloned().unwrap_or_default(),
+                            "Severity": row.get("Severity").cloned().unwrap_or_default(),
+                            "State": row.get("State").cloned().unwrap_or_else(|| "Installed".to_string()),
+                            "InstalledTime": installed_time,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let (page, next_token) = paginate(&patches, body["NextToken"].as_str(), max_results);
+        let mut resp = json!({ "Patches": page });
+        if let Some(token) = next_token {
+            resp["NextToken"] = json!(token);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn describe_effective_patches_for_patch_baseline(
@@ -564,10 +640,62 @@ impl SsmService {
         let body = req.json_body();
         validate_optional_string_length("BaselineId", body["BaselineId"].as_str(), 20, 128)?;
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 100)?;
-        let _baseline_id = body["BaselineId"]
+        let baseline_id = body["BaselineId"]
             .as_str()
             .ok_or_else(|| missing("BaselineId"))?;
-        Ok(AwsResponse::ok_json(json!({ "EffectivePatches": [] })))
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
+
+        let accounts = self.state.read();
+        let empty = SsmState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let pb = state.patch_baselines.get(baseline_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DoesNotExistException",
+                format!("Patch baseline {baseline_id} does not exist"),
+            )
+        })?;
+
+        // Synthesize an effective patch entry from each approved patch ID.
+        // AWS effective patches come from a curated catalog; here we project
+        // baseline-approved IDs into the response shape so callers see the
+        // approval level/state mapping they configured.
+        let now = chrono::Utc::now();
+        let effective: Vec<Value> = pb
+            .approved_patches
+            .iter()
+            .map(|patch_id| {
+                json!({
+                    "Patch": {
+                        "Id": patch_id,
+                        "ReleaseDate": now.timestamp_millis() as f64 / 1000.0,
+                        "Title": patch_id,
+                        "Description": format!("Approved patch {patch_id} (synthetic)"),
+                        "ContentUrl": Value::Null,
+                        "Vendor": "AWS",
+                        "ProductFamily": "Linux",
+                        "Product": pb.operating_system,
+                        "Classification": "SecurityUpdates",
+                        "MsrcSeverity": pb.approved_patches_compliance_level,
+                        "KbNumber": patch_id,
+                        "MsrcNumber": Value::Null,
+                        "Language": Value::Null,
+                    },
+                    "PatchStatus": {
+                        "DeploymentStatus": "APPROVED",
+                        "ComplianceLevel": pb.approved_patches_compliance_level,
+                        "ApprovalDate": now.timestamp_millis() as f64 / 1000.0,
+                    },
+                })
+            })
+            .collect();
+
+        let (page, next_token) = paginate(&effective, body["NextToken"].as_str(), max_results);
+        let mut resp = json!({ "EffectivePatches": page });
+        if let Some(token) = next_token {
+            resp["NextToken"] = json!(token);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn get_deployable_patch_snapshot_for_instance(
@@ -664,7 +792,26 @@ impl SsmService {
             &["OS", "APPLICATION"],
         )?;
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
-        Ok(AwsResponse::ok_json(json!({ "Properties": [] })))
+        let os = body["OperatingSystem"].as_str().unwrap_or("WINDOWS");
+        let property = body["Property"].as_str().unwrap_or("");
+        let max_results = body["MaxResults"].as_i64().unwrap_or(50) as usize;
+
+        let values = patch_property_values(os, property);
+        let all: Vec<Value> = values
+            .iter()
+            .map(|v| {
+                let mut entry = serde_json::Map::new();
+                entry.insert(property.to_string(), Value::String((*v).to_string()));
+                Value::Object(entry)
+            })
+            .collect();
+
+        let (page, next_token) = paginate(&all, body["NextToken"].as_str(), max_results);
+        let mut resp = json!({ "Properties": page });
+        if let Some(token) = next_token {
+            resp["NextToken"] = json!(token);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn get_default_patch_baseline(
@@ -886,6 +1033,151 @@ impl CreatePatchBaselineInput {
             client_token: body["ClientToken"].as_str().map(|s| s.to_string()),
             tags,
         })
+    }
+}
+
+/// Build a single `InstancePatchState` entry from inventory data captured for
+/// the instance via `PutInventory` (typically `AWS:PatchSummary` rows). Returns
+/// `None` if the instance is unknown or has no patch summary recorded.
+fn build_instance_patch_state(state: &SsmState, instance_id: &str) -> Option<Value> {
+    let entry = state.inventory_entries.get(instance_id)?;
+    let summary = entry
+        .items
+        .iter()
+        .find(|i| i.type_name == "AWS:PatchSummary");
+    let row = summary.and_then(|s| s.content.first());
+
+    let baseline_id = row
+        .and_then(|r| r.get("BaselineId").cloned())
+        .or_else(|| state.default_patch_baseline_id.clone())
+        .unwrap_or_default();
+    let patch_group = row
+        .and_then(|r| r.get("PatchGroup").cloned())
+        .or_else(|| {
+            state
+                .patch_groups
+                .iter()
+                .find(|pg| pg.baseline_id == baseline_id)
+                .map(|pg| pg.patch_group.clone())
+        })
+        .unwrap_or_default();
+
+    let i64_field = |key: &str| -> i64 {
+        row.and_then(|r| r.get(key))
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0)
+    };
+    let str_field = |key: &str, default: &str| -> String {
+        row.and_then(|r| r.get(key).cloned())
+            .unwrap_or_else(|| default.to_string())
+    };
+    let ts_field = |key: &str| -> f64 {
+        let raw = str_field(key, "1970-01-01T00:00:00Z");
+        parse_iso8601_epoch_seconds(&raw)
+    };
+
+    Some(json!({
+        "InstanceId": instance_id,
+        "PatchGroup": patch_group,
+        "BaselineId": baseline_id,
+        "OperationStartTime": ts_field("OperationStartTime"),
+        "OperationEndTime": ts_field("OperationEndTime"),
+        "Operation": str_field("Operation", "Scan"),
+        "InstalledCount": i64_field("InstalledCount"),
+        "InstalledOtherCount": i64_field("InstalledOtherCount"),
+        "InstalledPendingRebootCount": i64_field("InstalledPendingRebootCount"),
+        "InstalledRejectedCount": i64_field("InstalledRejectedCount"),
+        "MissingCount": i64_field("MissingCount"),
+        "FailedCount": i64_field("FailedCount"),
+        "UnreportedNotApplicableCount": i64_field("UnreportedNotApplicableCount"),
+        "NotApplicableCount": i64_field("NotApplicableCount"),
+        "CriticalNonCompliantCount": i64_field("CriticalNonCompliantCount"),
+        "SecurityNonCompliantCount": i64_field("SecurityNonCompliantCount"),
+        "OtherNonCompliantCount": i64_field("OtherNonCompliantCount"),
+    }))
+}
+
+/// Parse an RFC 3339 / ISO 8601 timestamp string into Unix epoch seconds as
+/// the floating-point form AWS Smithy clients expect for timestamp shapes.
+/// Falls back to 0.0 if the string isn't parseable.
+fn parse_iso8601_epoch_seconds(s: &str) -> f64 {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.timestamp_millis() as f64 / 1000.0)
+        .unwrap_or(0.0)
+}
+
+/// Decide whether an instance belongs to a patch group based on either the
+/// `AWS:PatchSummary` inventory tag or its `AWS:InstanceInformation` patch
+/// group association recorded by the agent.
+fn instance_in_patch_group(state: &SsmState, instance_id: &str, patch_group: &str) -> bool {
+    let Some(entry) = state.inventory_entries.get(instance_id) else {
+        return false;
+    };
+    entry.items.iter().any(|i| {
+        (i.type_name == "AWS:PatchSummary" || i.type_name == "AWS:InstanceInformation")
+            && i.content
+                .iter()
+                .any(|row| row.get("PatchGroup").map(|s| s.as_str()) == Some(patch_group))
+    })
+}
+
+/// Catalogue of values returned by `DescribePatchProperties`. Mirrors the
+/// AWS-published patch metadata catalog without pulling a live feed; covers
+/// the values realistic SSM clients filter on.
+fn patch_property_values(os: &str, property: &str) -> &'static [&'static str] {
+    match (os, property) {
+        ("WINDOWS", "PRODUCT") => &[
+            "Windows10",
+            "Windows11",
+            "WindowsServer2016",
+            "WindowsServer2019",
+            "WindowsServer2022",
+        ],
+        ("WINDOWS", "PRODUCT_FAMILY") => &["Windows"],
+        ("WINDOWS", "CLASSIFICATION") => &[
+            "CriticalUpdates",
+            "DefinitionUpdates",
+            "FeaturePacks",
+            "SecurityUpdates",
+            "ServicePacks",
+            "Tools",
+            "UpdateRollups",
+            "Updates",
+            "Upgrades",
+        ],
+        ("WINDOWS", "MSRC_SEVERITY") => {
+            &["Critical", "Important", "Low", "Moderate", "Unspecified"]
+        }
+        ("AMAZON_LINUX", "PRODUCT")
+        | ("AMAZON_LINUX_2", "PRODUCT")
+        | ("AMAZON_LINUX_2022", "PRODUCT")
+        | ("AMAZON_LINUX_2023", "PRODUCT") => &["AmazonLinux"],
+        ("UBUNTU", "PRODUCT") => &[
+            "Ubuntu14.04",
+            "Ubuntu16.04",
+            "Ubuntu18.04",
+            "Ubuntu20.04",
+            "Ubuntu22.04",
+        ],
+        ("REDHAT_ENTERPRISE_LINUX", "PRODUCT") => &[
+            "RedhatEnterpriseLinux7",
+            "RedhatEnterpriseLinux8",
+            "RedhatEnterpriseLinux9",
+        ],
+        ("DEBIAN", "PRODUCT") => &["Debian10", "Debian11", "Debian12"],
+        ("MACOS", "PRODUCT") => &["MacOS"],
+        ("MACOS", "PRODUCT_FAMILY") => &["macOS"],
+        (_, "PRODUCT_FAMILY") => &["Linux"],
+        (_, "CLASSIFICATION") => &[
+            "Security",
+            "Bugfix",
+            "Enhancement",
+            "Recommended",
+            "Newpackage",
+        ],
+        (_, "PRIORITY") => &["Critical", "Important", "Medium", "Low", "Unspecified"],
+        (_, "SEVERITY") => &["Critical", "Important", "Medium", "Low", "Unspecified"],
+        _ => &[],
     }
 }
 

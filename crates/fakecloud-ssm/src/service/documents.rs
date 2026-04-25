@@ -13,6 +13,15 @@ use sha2::{Digest, Sha256};
 
 use super::{missing, SsmService};
 
+fn review_status_for_action(action: &str) -> &'static str {
+    match action {
+        "Approve" => "APPROVED",
+        "Reject" => "REJECTED",
+        "SendForReview" => "PENDING",
+        _ => "NOT_REVIEWED",
+    }
+}
+
 /// Resolve which `SsmDocumentVersion` a `GetDocument`-style request is
 /// asking for. AWS lets the caller pin a version with `DocumentVersion`,
 /// `VersionName`, both, or neither (in which case we return the document's
@@ -142,6 +151,7 @@ fn document_matches_list_filters(
             "Name" if !values.contains(&doc.name.as_str()) => {
                 return false;
             }
+            // Unknown filter keys: AWS silently ignores them.
             _ => {}
         }
     }
@@ -248,6 +258,7 @@ impl SsmService {
             owner: state.account_id.clone(),
             status: "Active".to_string(),
             permissions: HashMap::new(),
+            reviews: Vec::new(),
         };
 
         state.documents.insert(name.clone(), doc);
@@ -794,7 +805,7 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let _name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+        let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
         validate_required("Metadata", &body["Metadata"])?;
         validate_optional_enum("Metadata", body["Metadata"].as_str(), &["DocumentReviews"])?;
         let _metadata = body["Metadata"]
@@ -802,13 +813,38 @@ impl SsmService {
             .ok_or_else(|| missing("Metadata"))?;
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
 
-        // Stub: return empty metadata
+        let accounts = self.state.read();
+        let empty = SsmState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let doc = state
+            .documents
+            .get(name)
+            .ok_or_else(|| doc_not_found(name))?;
+
+        let reviewer_response: Vec<Value> = doc
+            .reviews
+            .iter()
+            .map(|r| {
+                json!({
+                    "Reviewer": r.reviewer,
+                    "ReviewStatus": review_status_for_action(&r.action),
+                    "Comment": r.comment.iter().map(|c| json!({
+                        "Type": c.comment_type,
+                        "Content": c.content,
+                    })).collect::<Vec<_>>(),
+                    "CreateTime": r.created_time.timestamp_millis() as f64 / 1000.0,
+                    "UpdatedTime": r.updated_time.timestamp_millis() as f64 / 1000.0,
+                })
+            })
+            .collect();
+
         Ok(AwsResponse::ok_json(json!({
-            "Name": _name,
-            "Author": "",
+            "Name": name,
+            "DocumentVersion": doc.default_version,
+            "Author": doc.owner,
             "Metadata": {
-                "ReviewerResponse": []
-            }
+                "ReviewerResponse": reviewer_response,
+            },
         })))
     }
 
@@ -817,16 +853,51 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
+        let name = body["Name"]
+            .as_str()
+            .ok_or_else(|| missing("Name"))?
+            .to_string();
+        validate_required("DocumentReviews", &body["DocumentReviews"])?;
+        let action = body["DocumentReviews"]["Action"]
+            .as_str()
+            .ok_or_else(|| missing("DocumentReviews.Action"))?;
+        validate_optional_enum(
+            "DocumentReviews.Action",
+            Some(action),
+            &["SendForReview", "UpdateReview", "Approve", "Reject"],
+        )?;
 
-        let accounts = self.state.read();
-        let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        if !state.documents.contains_key(name) {
-            return Err(doc_not_found(name));
-        }
+        let comments: Vec<crate::state::DocumentReviewComment> = body["DocumentReviews"]["Comment"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| {
+                        let content = c["Content"].as_str()?;
+                        Some(crate::state::DocumentReviewComment {
+                            comment_type: c["Type"].as_str().unwrap_or("Comment").to_string(),
+                            content: content.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        // Stub: accept but do nothing
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let doc = state
+            .documents
+            .get_mut(&name)
+            .ok_or_else(|| doc_not_found(&name))?;
+
+        let now = chrono::Utc::now();
+        doc.reviews.push(crate::state::DocumentReview {
+            reviewer: state.account_id.clone(),
+            action: action.to_string(),
+            comment: comments,
+            created_time: now,
+            updated_time: now,
+        });
+
         Ok(AwsResponse::ok_json(json!({})))
     }
 
