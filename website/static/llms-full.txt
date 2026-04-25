@@ -6,7 +6,7 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~500ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 23 services (1,680 operations) are shipped today; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 26 services (1,849 operations) are shipped today; more land progressively as they hit the bar.
 
 Key design principles:
 - **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models (54,000+ generated test variants). CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
@@ -80,11 +80,11 @@ Default is `memory` mode — all state lives in RAM, startup is instant,
 shutdown is a no-op. Pass `--storage-mode=persistent --data-path=<dir>` to
 mirror all service state to disk and reload on the next launch.
 
-All 21 services are fully persisted: S3, SQS, SNS, EventBridge, IAM/STS,
+All 26 services are fully persisted: S3, SQS, SNS, EventBridge, IAM/STS,
 SSM, Secrets Manager, CloudWatch Logs, KMS, DynamoDB, Kinesis, SES,
 API Gateway v2, CloudFormation, Cognito, Lambda, Step Functions, RDS,
-ElastiCache, and Bedrock. State is written to disk on every mutation and
-reloaded on startup.
+ElastiCache, ECR, ECS, Elastic Load Balancing v2, and Bedrock. State is
+written to disk on every mutation and reloaded on startup.
 
 The data directory is guarded by `fakecloud.version.toml`. A format mismatch
 fails startup loudly — there is no auto-migration. S3 object bodies stream
@@ -338,6 +338,24 @@ Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 AddTagsToResource, CreateCacheCluster, CreateGlobalReplicationGroup, CreateCacheSubnetGroup, CreateReplicationGroup, CreateServerlessCache, CreateServerlessCacheSnapshot, CreateSnapshot, CreateUser, CreateUserGroup, DecreaseReplicaCount, DeleteCacheCluster, DeleteGlobalReplicationGroup, DeleteCacheSubnetGroup, DeleteReplicationGroup, DeleteServerlessCache, DeleteServerlessCacheSnapshot, DeleteSnapshot, DeleteUser, DeleteUserGroup, DescribeCacheClusters, DescribeCacheEngineVersions, DescribeGlobalReplicationGroups, DescribeCacheParameterGroups, DescribeReservedCacheNodes, DescribeReservedCacheNodesOfferings, DescribeCacheSubnetGroups, DescribeEngineDefaultParameters, DescribeReplicationGroups, DescribeServerlessCaches, DescribeServerlessCacheSnapshots, DescribeSnapshots, DescribeUserGroups, DescribeUsers, DisassociateGlobalReplicationGroup, FailoverGlobalReplicationGroup, IncreaseReplicaCount, ListTagsForResource, ModifyCacheSubnetGroup, ModifyGlobalReplicationGroup, ModifyReplicationGroup, ModifyServerlessCache, RemoveTagsFromResource, TestFailover
 
 Features: cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users and user groups, failover and replica-count changes, tagging, and Docker-backed Redis and Valkey for implemented creation flows.
+
+Protocol: Query (form-encoded body, `Action` parameter, XML responses)
+
+### ECR (58 actions)
+
+Full registry surface — repositories, images (real OCI v2 push/pull via `docker push`/`pull`), lifecycle policies and evaluation, image scanning, pull-through cache rules, registry settings, replication, signing.
+
+Protocol: REST/JSON (control plane) + OCI v2 Distribution (data plane)
+
+### ECS (60 actions)
+
+Clusters, task definitions, real Fargate-style task execution via Docker, services with rolling deployments, task sets (EXTERNAL deployment controller), container instances, capacity providers, attributes, task protection, ECS Exec via `docker exec`, the agent-side Submit*/DiscoverPollEndpoint surface, awslogs forwarding to CloudWatch Logs, secrets[] resolution against SecretsManager + SSM Parameter Store, task role credentials served from /_fakecloud/ecs/creds/{taskId}, tagging.
+
+Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
+
+### Elastic Load Balancing v2 (51 actions)
+
+Full control plane — Application/Network/Gateway load balancer CRUD, target groups + targets + health (synthetic), listeners + rules + certificates, LB/listener/target-group attributes, capacity reservations, mTLS trust stores + revocations, resource policies, IP pools, IP address types, subnets, security groups, SSL policies, tags. ForwardConfig.TargetGroups references on rules and listeners block target group deletion. Data plane (in-process HTTP routing) intentionally not implemented.
 
 Protocol: Query (form-encoded body, `Action` parameter, XML responses)
 

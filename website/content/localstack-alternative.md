@@ -1,6 +1,6 @@
 +++
 title = "Free, open-source LocalStack alternative"
-description = "fakecloud is a free, open-source local AWS emulator: 23 services, 1,680 operations, 100% conformance, 6 test-assertion SDKs. No account, no token, no paid tier. Drop-in replacement for LocalStack Community."
+description = "fakecloud is a free, open-source local AWS emulator: 26 services, 1,849 operations, 100% conformance, 6 test-assertion SDKs. No account, no token, no paid tier. Drop-in replacement for LocalStack Community."
 template = "page.html"
 +++
 
@@ -17,14 +17,14 @@ Point any AWS SDK or CLI at `http://localhost:4566` with dummy credentials. That
 
 ## Goal: 100% AWS, 100% conformance, 100% integrations
 
-fakecloud aims at every AWS service, each at 100% behavioral conformance, including every cross-service integration. Services land depth-first: a service is supported when it matches real AWS across every documented operation and cross-service wire-up — not when the API surface looks filled in. 23 services are there today (see below); the rest are on the roadmap, prioritized by real-project demand.
+fakecloud aims at every AWS service, each at 100% behavioral conformance, including every cross-service integration. Services land depth-first: a service is supported when it matches real AWS across every documented operation and cross-service wire-up — not when the API surface looks filled in. 26 services are there today (see below); the rest are on the roadmap, prioritized by real-project demand.
 
 This is why fakecloud runs real Lambda code in real runtime containers, runs real PostgreSQL/MySQL/MariaDB for RDS, runs real Redis/Valkey for ElastiCache, fires real S3 -> Lambda and SES inbound -> S3/SNS/Lambda flows, and validates every operation against AWS's own Smithy models on every commit.
 
 ## What fakecloud gives you
 
-- **23 AWS services.** S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager, SSM, CloudWatch Logs, CloudFormation, EventBridge, EventBridge Scheduler, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime.
-- **1,680 API operations. 100% conformance** per implemented service, validated against AWS's own Smithy models on every commit (59,000+ generated test variants).
+- **26 AWS services.** S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager, SSM, CloudWatch Logs, CloudFormation, EventBridge, EventBridge Scheduler, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, ECR, ECS, Elastic Load Balancing v2, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime.
+- **1,849 API operations. 100% conformance** per implemented service, validated against AWS's own Smithy models on every commit (59,000+ generated test variants).
 - **Tested against upstream Terraform acceptance tests.** CI runs `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud, catching waiter and field-presence drift that pure SDK tests miss.
 - **Real Lambda execution.** 13 runtimes in Docker containers. Not a mock, not a stub. Node, Python, Java, Go, .NET, Ruby, custom runtimes.
 - **Real stateful services.** RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey. Your Lambda talking to RDS is talking to a real Postgres.
