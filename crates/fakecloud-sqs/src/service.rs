@@ -805,7 +805,9 @@ async fn run_message_move_task(
         let step: Step = {
             let mut accounts = state_handle.write();
             let state = accounts.get_or_create(&account_id);
-            let Some(source_queue) = state.queues.get_mut(&source_url) else {
+
+            // Source queue must exist (immutable check before any mutation).
+            if !state.queues.contains_key(&source_url) {
                 drop(accounts);
                 finalize_move_task(
                     &state_handle,
@@ -815,41 +817,64 @@ async fn run_message_move_task(
                     MessageMoveTaskStatus::Failed,
                 );
                 return;
+            }
+
+            // Resolve and verify the target before popping anything off the
+            // source — AWS treats the source as the durable copy until the
+            // destination commit, so we must never pop a message we can't
+            // deliver. If the destination is gone, leave the source untouched
+            // and finalize Failed.
+            let target_url_opt = if let Some(ref dest_arn) = destination_arn {
+                state
+                    .queues
+                    .values()
+                    .find(|q| &q.arn == dest_arn)
+                    .map(|q| q.queue_url.clone())
+            } else if dlq_targets.is_empty() {
+                None
+            } else {
+                let url = dlq_targets[idx % dlq_targets.len()].clone();
+                Some(url)
             };
-
-            match source_queue.messages.pop_front() {
-                None => Step::SourceDrained,
-                Some(mut msg) => {
-                    msg.visible_at = None;
-                    msg.receive_count = 0;
-
-                    let target_url = if let Some(ref dest_arn) = destination_arn {
-                        state
-                            .queues
-                            .values()
-                            .find(|q| &q.arn == dest_arn)
-                            .map(|q| q.queue_url.clone())
-                    } else if dlq_targets.is_empty() {
-                        None
-                    } else {
-                        let url = dlq_targets[idx % dlq_targets.len()].clone();
-                        idx += 1;
-                        Some(url)
-                    };
-
-                    match target_url.as_deref().and_then(|u| state.queues.get_mut(u)) {
-                        Some(target_queue) => {
-                            target_queue.messages.push_back(msg);
-                            if let Some(task) = state
-                                .message_move_tasks
-                                .iter_mut()
-                                .find(|t| t.task_handle == task_handle)
-                            {
-                                task.messages_moved += 1;
+            match target_url_opt.filter(|u| state.queues.contains_key(u)) {
+                None => Step::Failed,
+                Some(target_url) => {
+                    // Source is guaranteed to exist (checked above); pop one message.
+                    let popped = state
+                        .queues
+                        .get_mut(&source_url)
+                        .and_then(|q| q.messages.pop_front());
+                    match popped {
+                        None => Step::SourceDrained,
+                        Some(mut msg) => {
+                            msg.visible_at = None;
+                            msg.receive_count = 0;
+                            match state.queues.get_mut(&target_url) {
+                                Some(target_queue) => {
+                                    target_queue.messages.push_back(msg);
+                                    if destination_arn.is_none() {
+                                        idx += 1;
+                                    }
+                                    if let Some(task) = state
+                                        .message_move_tasks
+                                        .iter_mut()
+                                        .find(|t| t.task_handle == task_handle)
+                                    {
+                                        task.messages_moved += 1;
+                                    }
+                                    Step::Moved
+                                }
+                                None => {
+                                    // Target vanished between resolution and
+                                    // the get_mut here. Push the message back
+                                    // to the source so it isn't lost.
+                                    if let Some(source_queue) = state.queues.get_mut(&source_url) {
+                                        source_queue.messages.push_front(msg);
+                                    }
+                                    Step::Failed
+                                }
                             }
-                            Step::Moved
                         }
-                        None => Step::Failed,
                     }
                 }
             }
