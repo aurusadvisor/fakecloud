@@ -567,3 +567,94 @@ export interface EcsCluster {
 export interface EcsClustersResponse {
   clusters: EcsCluster[];
 }
+
+// ── ELBv2 ───────────────────────────────────────────────────────────
+
+export interface Elbv2Tag {
+  key: string;
+  value: string;
+}
+
+export interface Elbv2AvailabilityZone {
+  zoneName: string;
+  subnetId: string;
+}
+
+export interface Elbv2LoadBalancer {
+  arn: string;
+  name: string;
+  dnsName: string;
+  scheme: string;
+  vpcId: string;
+  stateCode: string;
+  stateReason?: string | null;
+  lbType: string;
+  ipAddressType: string;
+  availabilityZones: Elbv2AvailabilityZone[];
+  securityGroups: string[];
+  createdTime: string;
+  tags: Elbv2Tag[];
+}
+
+export interface Elbv2LoadBalancersResponse {
+  loadBalancers: Elbv2LoadBalancer[];
+}
+
+export interface Elbv2Target {
+  id: string;
+  port?: number | null;
+  availabilityZone?: string | null;
+  healthState: string;
+  healthReason?: string | null;
+  healthDescription?: string | null;
+}
+
+export interface Elbv2TargetGroup {
+  arn: string;
+  name: string;
+  protocol?: string | null;
+  port?: number | null;
+  vpcId?: string | null;
+  targetType: string;
+  loadBalancerArns: string[];
+  targets: Elbv2Target[];
+  healthCheckProtocol?: string | null;
+  healthCheckPort?: string | null;
+  healthCheckPath?: string | null;
+  healthyThresholdCount: number;
+  unhealthyThresholdCount: number;
+  createdTime: string;
+  tags: Elbv2Tag[];
+}
+
+export interface Elbv2TargetGroupsResponse {
+  targetGroups: Elbv2TargetGroup[];
+}
+
+export interface Elbv2Listener {
+  arn: string;
+  loadBalancerArn: string;
+  port?: number | null;
+  protocol?: string | null;
+  sslPolicy?: string | null;
+  certificateArns: string[];
+  defaultActionType?: string | null;
+  defaultTargetGroupArn?: string | null;
+}
+
+export interface Elbv2ListenersResponse {
+  listeners: Elbv2Listener[];
+}
+
+export interface Elbv2Rule {
+  arn: string;
+  listenerArn: string;
+  priority: string;
+  isDefault: boolean;
+  conditionFields: string[];
+  actionType?: string | null;
+}
+
+export interface Elbv2RulesResponse {
+  rules: Elbv2Rule[];
+}

@@ -828,6 +828,119 @@ pub struct EcsEventsResponse {
     pub events: Vec<EcsLifecycleEvent>,
 }
 
+// ── ELBv2 ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2LoadBalancer {
+    pub arn: String,
+    pub name: String,
+    pub dns_name: String,
+    pub scheme: String,
+    pub vpc_id: String,
+    pub state_code: String,
+    pub state_reason: Option<String>,
+    pub lb_type: String,
+    pub ip_address_type: String,
+    pub availability_zones: Vec<Elbv2AvailabilityZone>,
+    pub security_groups: Vec<String>,
+    pub created_time: String,
+    pub tags: Vec<Elbv2Tag>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2AvailabilityZone {
+    pub zone_name: String,
+    pub subnet_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2Tag {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2LoadBalancersResponse {
+    pub load_balancers: Vec<Elbv2LoadBalancer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2TargetGroup {
+    pub arn: String,
+    pub name: String,
+    pub protocol: Option<String>,
+    pub port: Option<i32>,
+    pub vpc_id: Option<String>,
+    pub target_type: String,
+    pub load_balancer_arns: Vec<String>,
+    pub targets: Vec<Elbv2Target>,
+    pub health_check_protocol: Option<String>,
+    pub health_check_port: Option<String>,
+    pub health_check_path: Option<String>,
+    pub healthy_threshold_count: i32,
+    pub unhealthy_threshold_count: i32,
+    pub created_time: String,
+    pub tags: Vec<Elbv2Tag>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2Target {
+    pub id: String,
+    pub port: Option<i32>,
+    pub availability_zone: Option<String>,
+    pub health_state: String,
+    pub health_reason: Option<String>,
+    pub health_description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2TargetGroupsResponse {
+    pub target_groups: Vec<Elbv2TargetGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2Listener {
+    pub arn: String,
+    pub load_balancer_arn: String,
+    pub port: Option<i32>,
+    pub protocol: Option<String>,
+    pub ssl_policy: Option<String>,
+    pub certificate_arns: Vec<String>,
+    pub default_action_type: Option<String>,
+    pub default_target_group_arn: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2ListenersResponse {
+    pub listeners: Vec<Elbv2Listener>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2Rule {
+    pub arn: String,
+    pub listener_arn: String,
+    pub priority: String,
+    pub is_default: bool,
+    pub condition_fields: Vec<String>,
+    pub action_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Elbv2RulesResponse {
+    pub rules: Vec<Elbv2Rule>,
+}
+
 /// Request to bootstrap an IAM admin user in a specific account.
 /// Used by `/_fakecloud/iam/create-admin` to solve the multi-account
 /// bootstrap problem: there's no per-account root credential, so this

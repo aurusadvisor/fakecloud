@@ -216,6 +216,111 @@ pub(crate) fn elasticache_serverless_cache_response(
     }
 }
 
+pub(crate) fn elbv2_load_balancer_response(
+    lb: &fakecloud_elbv2::state::LoadBalancer,
+) -> types::Elbv2LoadBalancer {
+    types::Elbv2LoadBalancer {
+        arn: lb.arn.clone(),
+        name: lb.name.clone(),
+        dns_name: lb.dns_name.clone(),
+        scheme: lb.scheme.clone(),
+        vpc_id: lb.vpc_id.clone(),
+        state_code: lb.state_code.clone(),
+        state_reason: lb.state_reason.clone(),
+        lb_type: lb.lb_type.clone(),
+        ip_address_type: lb.ip_address_type.clone(),
+        availability_zones: lb
+            .availability_zones
+            .iter()
+            .map(|az| types::Elbv2AvailabilityZone {
+                zone_name: az.zone_name.clone(),
+                subnet_id: az.subnet_id.clone(),
+            })
+            .collect(),
+        security_groups: lb.security_groups.clone(),
+        created_time: lb.created_time.to_rfc3339(),
+        tags: lb
+            .tags
+            .iter()
+            .map(|t| types::Elbv2Tag {
+                key: t.key.clone(),
+                value: t.value.clone(),
+            })
+            .collect(),
+    }
+}
+
+pub(crate) fn elbv2_target_group_response(
+    tg: &fakecloud_elbv2::state::TargetGroup,
+) -> types::Elbv2TargetGroup {
+    types::Elbv2TargetGroup {
+        arn: tg.arn.clone(),
+        name: tg.name.clone(),
+        protocol: tg.protocol.clone(),
+        port: tg.port,
+        vpc_id: tg.vpc_id.clone(),
+        target_type: tg.target_type.clone(),
+        load_balancer_arns: tg.load_balancer_arns.clone(),
+        targets: tg
+            .targets
+            .iter()
+            .map(|t| types::Elbv2Target {
+                id: t.id.clone(),
+                port: t.port,
+                availability_zone: t.availability_zone.clone(),
+                health_state: t.health.state.clone(),
+                health_reason: t.health.reason.clone(),
+                health_description: t.health.description.clone(),
+            })
+            .collect(),
+        health_check_protocol: tg.health_check_protocol.clone(),
+        health_check_port: tg.health_check_port.clone(),
+        health_check_path: tg.health_check_path.clone(),
+        healthy_threshold_count: tg.healthy_threshold_count,
+        unhealthy_threshold_count: tg.unhealthy_threshold_count,
+        created_time: tg.created_time.to_rfc3339(),
+        tags: tg
+            .tags
+            .iter()
+            .map(|t| types::Elbv2Tag {
+                key: t.key.clone(),
+                value: t.value.clone(),
+            })
+            .collect(),
+    }
+}
+
+pub(crate) fn elbv2_listener_response(
+    l: &fakecloud_elbv2::state::Listener,
+) -> types::Elbv2Listener {
+    let default = l.default_actions.first();
+    types::Elbv2Listener {
+        arn: l.arn.clone(),
+        load_balancer_arn: l.load_balancer_arn.clone(),
+        port: l.port,
+        protocol: l.protocol.clone(),
+        ssl_policy: l.ssl_policy.clone(),
+        certificate_arns: l
+            .certificates
+            .iter()
+            .map(|c| c.certificate_arn.clone())
+            .collect(),
+        default_action_type: default.map(|a| a.action_type.clone()),
+        default_target_group_arn: default.and_then(|a| a.target_group_arn.clone()),
+    }
+}
+
+pub(crate) fn elbv2_rule_response(r: &fakecloud_elbv2::state::Rule) -> types::Elbv2Rule {
+    types::Elbv2Rule {
+        arn: r.arn.clone(),
+        listener_arn: r.listener_arn.clone(),
+        priority: r.priority.clone(),
+        is_default: r.is_default,
+        condition_fields: r.conditions.iter().map(|c| c.field.clone()).collect(),
+        action_type: r.actions.first().map(|a| a.action_type.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;

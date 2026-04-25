@@ -33,6 +33,10 @@ from fakecloud.types import (
     ElastiCacheClustersResponse,
     ElastiCacheReplicationGroupsResponse,
     ElastiCacheServerlessCachesResponse,
+    Elbv2ListenersResponse,
+    Elbv2LoadBalancersResponse,
+    Elbv2RulesResponse,
+    Elbv2TargetGroupsResponse,
     EventHistoryResponse,
     EvictContainerResponse,
     ExpirationTickResponse,
@@ -278,6 +282,62 @@ class _SyncEcsClient:
         resp = self._client.get(f"{self._base}/_fakecloud/ecs/events")
         _check(resp)
         return EcsEventsResponse.from_dict(resp.json())
+
+
+class Elbv2Client:
+    """Async ELBv2 (Elastic Load Balancing v2) introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def get_load_balancers(self) -> Elbv2LoadBalancersResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/elbv2/load-balancers")
+        _check(resp)
+        return Elbv2LoadBalancersResponse.from_dict(resp.json())
+
+    async def get_target_groups(self) -> Elbv2TargetGroupsResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/elbv2/target-groups")
+        _check(resp)
+        return Elbv2TargetGroupsResponse.from_dict(resp.json())
+
+    async def get_listeners(self) -> Elbv2ListenersResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/elbv2/listeners")
+        _check(resp)
+        return Elbv2ListenersResponse.from_dict(resp.json())
+
+    async def get_rules(self) -> Elbv2RulesResponse:
+        resp = await self._client.get(f"{self._base}/_fakecloud/elbv2/rules")
+        _check(resp)
+        return Elbv2RulesResponse.from_dict(resp.json())
+
+
+class _SyncElbv2Client:
+    """Sync ELBv2 introspection client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def get_load_balancers(self) -> Elbv2LoadBalancersResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/elbv2/load-balancers")
+        _check(resp)
+        return Elbv2LoadBalancersResponse.from_dict(resp.json())
+
+    def get_target_groups(self) -> Elbv2TargetGroupsResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/elbv2/target-groups")
+        _check(resp)
+        return Elbv2TargetGroupsResponse.from_dict(resp.json())
+
+    def get_listeners(self) -> Elbv2ListenersResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/elbv2/listeners")
+        _check(resp)
+        return Elbv2ListenersResponse.from_dict(resp.json())
+
+    def get_rules(self) -> Elbv2RulesResponse:
+        resp = self._client.get(f"{self._base}/_fakecloud/elbv2/rules")
+        _check(resp)
+        return Elbv2RulesResponse.from_dict(resp.json())
 
 
 class SesClient:
@@ -1043,6 +1103,10 @@ class FakeCloud:
     def ecs(self) -> EcsClient:
         return EcsClient(self._client, self._base)
 
+    @property
+    def elbv2(self) -> Elbv2Client:
+        return Elbv2Client(self._client, self._base)
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def aclose(self) -> None:
@@ -1160,6 +1224,10 @@ class FakeCloudSync:
     @property
     def ecs(self) -> _SyncEcsClient:
         return _SyncEcsClient(self._client, self._base)
+
+    @property
+    def elbv2(self) -> _SyncElbv2Client:
+        return _SyncElbv2Client(self._client, self._base)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 

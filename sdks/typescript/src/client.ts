@@ -49,6 +49,10 @@ import type {
   AuthEventsResponse,
   StepFunctionsExecutionsResponse,
   EcsClustersResponse,
+  Elbv2LoadBalancersResponse,
+  Elbv2TargetGroupsResponse,
+  Elbv2ListenersResponse,
+  Elbv2RulesResponse,
 } from "./types.js";
 
 export class FakeCloudError extends Error {
@@ -484,6 +488,7 @@ export class FakeCloud {
   private readonly _stepfunctions: StepFunctionsClient;
   private readonly _bedrock: BedrockClient;
   private readonly _ecs: EcsClient;
+  private readonly _elbv2: Elbv2Client;
 
   constructor(baseUrl: string = "http://localhost:4566") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -505,6 +510,7 @@ export class FakeCloud {
     this._stepfunctions = new StepFunctionsClient(this.baseUrl);
     this._bedrock = new BedrockClient(this.baseUrl);
     this._ecs = new EcsClient(this.baseUrl);
+    this._elbv2 = new Elbv2Client(this.baseUrl);
   }
 
   // ── Health & Reset ─────────────────────────────────────────────
@@ -610,6 +616,10 @@ export class FakeCloud {
   get ecs(): EcsClient {
     return this._ecs;
   }
+
+  get elbv2(): Elbv2Client {
+    return this._elbv2;
+  }
 }
 
 export class EcsClient {
@@ -618,6 +628,31 @@ export class EcsClient {
   /** List every ECS cluster fakecloud has seen, across every account. */
   async getClusters(): Promise<EcsClustersResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/ecs/clusters`);
+    return parse(resp);
+  }
+}
+
+export class Elbv2Client {
+  constructor(private baseUrl: string) {}
+
+  /** List every ELBv2 load balancer fakecloud has seen, across every account. */
+  async getLoadBalancers(): Promise<Elbv2LoadBalancersResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/elbv2/load-balancers`);
+    return parse(resp);
+  }
+
+  async getTargetGroups(): Promise<Elbv2TargetGroupsResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/elbv2/target-groups`);
+    return parse(resp);
+  }
+
+  async getListeners(): Promise<Elbv2ListenersResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/elbv2/listeners`);
+    return parse(resp);
+  }
+
+  async getRules(): Promise<Elbv2RulesResponse> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/elbv2/rules`);
     return parse(resp);
   }
 }

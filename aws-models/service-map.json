@@ -98,5 +98,9 @@
   "ecs": {
     "repo_dir": "ecs",
     "service_name": "ecs"
+  },
+  "elasticloadbalancingv2": {
+    "repo_dir": "elastic-load-balancing-v2",
+    "service_name": "elasticloadbalancing"
   }
 }

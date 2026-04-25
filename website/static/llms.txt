@@ -4,8 +4,8 @@
 
 - **Goal:** 100% of AWS services, each at 100% conformance, with 100% of cross-service integrations. Approach is depth-first — a service is added when it passes the full Smithy-model test variants and cross-service wire-ups, not when the API surface looks filled in.
 - Single static binary (~19 MB), ~500ms startup, ~10 MiB idle memory, no Docker required to run fakecloud itself
-- **23 AWS services shipped today, 1,680 operations, 100% conformance per implemented service** — validated against AWS's own Smithy models on every commit (54,000+ generated test variants). More services land as they hit the conformance bar; roadmap is driven by real-project demand.
-- Services: S3, SQS, SNS, EventBridge, EventBridge Scheduler, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime
+- **26 AWS services shipped today, 1,810 operations, 100% conformance per implemented service** — validated against AWS's own Smithy models on every commit (59,000+ generated test variants). More services land as they hit the conformance bar; roadmap is driven by real-project demand.
+- Services: S3, SQS, SNS, EventBridge, EventBridge Scheduler, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, ECR, ECS, Elastic Load Balancing v2, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime
 - 30+ cross-service integrations: S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more
 - Real Lambda execution via Docker across 13 runtimes (Node.js 18/20/22, Python 3.9-3.12, Java 11/17/21, .NET 6/8, Ruby 3.2, Go, custom `provided.al2` / `provided.al2023`)
 - Real stateful services: RDS runs real PostgreSQL/MySQL/MariaDB via Docker; ElastiCache runs real Redis/Valkey via Docker
@@ -55,6 +55,9 @@
 - **API Gateway v2** (28 ops): HTTP APIs, routes with path parameters and wildcards, Lambda proxy integration v2.0, HTTP proxy, mock integrations, stages, deployments, JWT and Lambda authorizers, CORS
 - **Bedrock** (101 ops): foundation models, guardrails, custom models, import/copy/invocation/evaluation jobs, inference profiles, prompt routers, marketplace endpoints, automated reasoning policies
 - **Bedrock Runtime** (10 ops): InvokeModel (Anthropic, Titan, Meta, Cohere, Mistral), Converse, streaming, ApplyGuardrail, CountTokens, async invoke, configurable responses, fault injection
+- **ECR** (58 ops): full registry — repos, images (real OCI v2 push/pull via `docker push`/`pull`), lifecycle policies, scanning, pull-through cache, registry settings, signing
+- **ECS** (60 ops): clusters, task definitions, real Fargate-style task execution via Docker, services with rolling deployments, container instances, capacity providers, task sets, ECS Exec
+- **Elastic Load Balancing v2** (Application/Network/Gateway): load balancer CRUD, subnets, security groups, IP address types, IPAM pools, account limits, SSL policies, tags
 
 ## Introspection endpoints (for tests)
 
@@ -67,6 +70,10 @@ fakecloud exposes `/_fakecloud/*` endpoints your tests can use to assert on side
 - `GET /_fakecloud/lambda/invocations`: list Lambda invocations and their results
 - `GET /_fakecloud/cognito/confirmation-codes`: list Cognito confirmation codes (for testing signup flows)
 - `POST /_fakecloud/iam/create-admin`: bootstrap an admin user in a specific account (for multi-account tests)
+- `GET /_fakecloud/elbv2/load-balancers`: list ALB/NLB/GWLB load balancers (for testing infra setups)
+- `GET /_fakecloud/elbv2/target-groups`: list target groups
+- `GET /_fakecloud/elbv2/listeners`: list listeners
+- `GET /_fakecloud/elbv2/rules`: list listener rules
 - See [SDK docs](https://fakecloud.dev/docs/sdks/) for the full endpoint list
 
 ## Optional

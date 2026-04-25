@@ -1333,3 +1333,210 @@ class EcsEventsResponse:
         return cls(
             events=[EcsLifecycleEvent.from_dict(e) for e in data.get("events", [])],
         )
+
+
+# ── ELBv2 ───────────────────────────────────────────────────────────
+
+
+@dataclass
+class Elbv2Tag:
+    key: str
+    value: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2Tag:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class Elbv2AvailabilityZone:
+    zone_name: str
+    subnet_id: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2AvailabilityZone:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class Elbv2LoadBalancer:
+    arn: str
+    name: str
+    dns_name: str
+    scheme: str
+    vpc_id: str
+    state_code: str
+    lb_type: str
+    ip_address_type: str
+    availability_zones: List[Elbv2AvailabilityZone]
+    security_groups: List[str]
+    created_time: str
+    tags: List[Elbv2Tag]
+    state_reason: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2LoadBalancer:
+        return cls(
+            arn=data["arn"],
+            name=data["name"],
+            dns_name=data["dnsName"],
+            scheme=data["scheme"],
+            vpc_id=data["vpcId"],
+            state_code=data["stateCode"],
+            lb_type=data["lbType"],
+            ip_address_type=data["ipAddressType"],
+            availability_zones=[
+                Elbv2AvailabilityZone.from_dict(z)
+                for z in data.get("availabilityZones", [])
+            ],
+            security_groups=list(data.get("securityGroups", [])),
+            created_time=data["createdTime"],
+            tags=[Elbv2Tag.from_dict(t) for t in data.get("tags", [])],
+            state_reason=data.get("stateReason"),
+        )
+
+
+@dataclass
+class Elbv2LoadBalancersResponse:
+    load_balancers: List[Elbv2LoadBalancer]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2LoadBalancersResponse:
+        return cls(
+            load_balancers=[
+                Elbv2LoadBalancer.from_dict(lb) for lb in data.get("loadBalancers", [])
+            ],
+        )
+
+
+@dataclass
+class Elbv2Target:
+    id: str
+    health_state: str
+    port: Optional[int] = None
+    availability_zone: Optional[str] = None
+    health_reason: Optional[str] = None
+    health_description: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2Target:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class Elbv2TargetGroup:
+    arn: str
+    name: str
+    target_type: str
+    load_balancer_arns: List[str]
+    targets: List[Elbv2Target]
+    healthy_threshold_count: int
+    unhealthy_threshold_count: int
+    created_time: str
+    tags: List[Elbv2Tag]
+    protocol: Optional[str] = None
+    port: Optional[int] = None
+    vpc_id: Optional[str] = None
+    health_check_protocol: Optional[str] = None
+    health_check_port: Optional[str] = None
+    health_check_path: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2TargetGroup:
+        return cls(
+            arn=data["arn"],
+            name=data["name"],
+            target_type=data["targetType"],
+            load_balancer_arns=list(data.get("loadBalancerArns", [])),
+            targets=[Elbv2Target.from_dict(t) for t in data.get("targets", [])],
+            healthy_threshold_count=data["healthyThresholdCount"],
+            unhealthy_threshold_count=data["unhealthyThresholdCount"],
+            created_time=data["createdTime"],
+            tags=[Elbv2Tag.from_dict(t) for t in data.get("tags", [])],
+            protocol=data.get("protocol"),
+            port=data.get("port"),
+            vpc_id=data.get("vpcId"),
+            health_check_protocol=data.get("healthCheckProtocol"),
+            health_check_port=data.get("healthCheckPort"),
+            health_check_path=data.get("healthCheckPath"),
+        )
+
+
+@dataclass
+class Elbv2TargetGroupsResponse:
+    target_groups: List[Elbv2TargetGroup]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2TargetGroupsResponse:
+        return cls(
+            target_groups=[
+                Elbv2TargetGroup.from_dict(tg) for tg in data.get("targetGroups", [])
+            ],
+        )
+
+
+@dataclass
+class Elbv2Listener:
+    arn: str
+    load_balancer_arn: str
+    certificate_arns: List[str]
+    port: Optional[int] = None
+    protocol: Optional[str] = None
+    ssl_policy: Optional[str] = None
+    default_action_type: Optional[str] = None
+    default_target_group_arn: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2Listener:
+        return cls(
+            arn=data["arn"],
+            load_balancer_arn=data["loadBalancerArn"],
+            certificate_arns=list(data.get("certificateArns", [])),
+            port=data.get("port"),
+            protocol=data.get("protocol"),
+            ssl_policy=data.get("sslPolicy"),
+            default_action_type=data.get("defaultActionType"),
+            default_target_group_arn=data.get("defaultTargetGroupArn"),
+        )
+
+
+@dataclass
+class Elbv2ListenersResponse:
+    listeners: List[Elbv2Listener]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2ListenersResponse:
+        return cls(
+            listeners=[
+                Elbv2Listener.from_dict(item) for item in data.get("listeners", [])
+            ],
+        )
+
+
+@dataclass
+class Elbv2Rule:
+    arn: str
+    listener_arn: str
+    priority: str
+    is_default: bool
+    condition_fields: List[str]
+    action_type: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2Rule:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class Elbv2RulesResponse:
+    rules: List[Elbv2Rule]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Elbv2RulesResponse:
+        return cls(
+            rules=[Elbv2Rule.from_dict(r) for r in data.get("rules", [])],
+        )

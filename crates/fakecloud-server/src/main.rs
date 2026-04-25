@@ -27,7 +27,8 @@ use introspection::{
     ecr_image_response, ecr_pull_through_rule_response, ecr_repository_response,
     ecs_cluster_response, ecs_lifecycle_event, ecs_task_response, elasticache_cluster_response,
     elasticache_replication_group_response, elasticache_serverless_cache_response,
-    rds_instance_response,
+    elbv2_listener_response, elbv2_load_balancer_response, elbv2_rule_response,
+    elbv2_target_group_response, rds_instance_response,
 };
 use kinesis_lambda_poller::KinesisLambdaPoller;
 use reset::ResetState;
@@ -41,6 +42,7 @@ use fakecloud_dynamodb::service::DynamoDbService;
 use fakecloud_ecr::service::EcrService;
 use fakecloud_ecs::service::EcsService;
 use fakecloud_elasticache::service::ElastiCacheService;
+use fakecloud_elbv2::service::Elbv2Service;
 use fakecloud_eventbridge::service::EventBridgeService;
 use fakecloud_iam::iam_service::IamService;
 use fakecloud_iam::sts_service::StsService;
@@ -1930,6 +1932,13 @@ async fn main() {
     }
     registry.register(Arc::new(ecs_service));
 
+    let elbv2_state: fakecloud_elbv2::state::SharedElbv2State = Arc::new(parking_lot::RwLock::new(
+        fakecloud_elbv2::state::Elbv2Accounts::new(),
+    ));
+    let elbv2_introspection_state = elbv2_state.clone();
+    let elbv2_service = Elbv2Service::new(elbv2_state);
+    registry.register(Arc::new(elbv2_service));
+
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {
         let mut sns_eb_bus = DeliveryBus::new().with_sqs(sqs_delivery.clone());
@@ -3717,6 +3726,83 @@ async fn main() {
                         }
                         events.sort_by(|a, b| a.at.cmp(&b.at));
                         axum::Json(types::EcsEventsResponse { events })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/elbv2/load-balancers",
+            axum::routing::get({
+                let st = elbv2_introspection_state.clone();
+                move || {
+                    let st = st.clone();
+                    async move {
+                        let accounts = st.read();
+                        let mut load_balancers: Vec<types::Elbv2LoadBalancer> = Vec::new();
+                        for (_, s) in accounts.iter() {
+                            load_balancers.extend(
+                                s.load_balancers.values().map(elbv2_load_balancer_response),
+                            );
+                        }
+                        load_balancers.sort_by(|a, b| a.arn.cmp(&b.arn));
+                        axum::Json(types::Elbv2LoadBalancersResponse { load_balancers })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/elbv2/target-groups",
+            axum::routing::get({
+                let st = elbv2_introspection_state.clone();
+                move || {
+                    let st = st.clone();
+                    async move {
+                        let accounts = st.read();
+                        let mut target_groups: Vec<types::Elbv2TargetGroup> = Vec::new();
+                        for (_, s) in accounts.iter() {
+                            target_groups.extend(
+                                s.target_groups.values().map(elbv2_target_group_response),
+                            );
+                        }
+                        target_groups.sort_by(|a, b| a.arn.cmp(&b.arn));
+                        axum::Json(types::Elbv2TargetGroupsResponse { target_groups })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/elbv2/listeners",
+            axum::routing::get({
+                let st = elbv2_introspection_state.clone();
+                move || {
+                    let st = st.clone();
+                    async move {
+                        let accounts = st.read();
+                        let mut listeners: Vec<types::Elbv2Listener> = Vec::new();
+                        for (_, s) in accounts.iter() {
+                            listeners
+                                .extend(s.listeners.values().map(elbv2_listener_response));
+                        }
+                        listeners.sort_by(|a, b| a.arn.cmp(&b.arn));
+                        axum::Json(types::Elbv2ListenersResponse { listeners })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/elbv2/rules",
+            axum::routing::get({
+                let st = elbv2_introspection_state.clone();
+                move || {
+                    let st = st.clone();
+                    async move {
+                        let accounts = st.read();
+                        let mut rules: Vec<types::Elbv2Rule> = Vec::new();
+                        for (_, s) in accounts.iter() {
+                            rules.extend(s.rules.values().map(elbv2_rule_response));
+                        }
+                        rules.sort_by(|a, b| a.arn.cmp(&b.arn));
+                        axum::Json(types::Elbv2RulesResponse { rules })
                     }
                 }
             }),

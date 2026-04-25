@@ -44,6 +44,8 @@ SERVICES=(
     "scheduler:scheduler"
     "apigatewayv2:apigatewayv2"
     "ecr:ecr"
+    "ecs:ecs"
+    "elasticloadbalancingv2:elastic-load-balancing-v2"
 )
 
 # Sparse checkout only the models we need
