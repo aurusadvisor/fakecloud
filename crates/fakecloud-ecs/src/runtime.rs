@@ -406,6 +406,11 @@ impl EcsRuntime {
             .await;
         self.containers.write().remove(task_id);
 
+        // Forward logs BEFORE flipping the task to STOPPED so a client
+        // that polls DescribeTasks and immediately queries DescribeLogStreams
+        // can't observe the STOPPED transition before the awslogs group/stream
+        // has been materialised.
+        self.forward_awslogs_if_configured(state, account_id, task_id, &captured);
         finalize_stopped(
             state,
             account_id,
@@ -415,7 +420,6 @@ impl EcsRuntime {
             "EssentialContainerExited",
             None,
         );
-        self.forward_awslogs_if_configured(state, account_id, task_id, &captured);
         self.emit_state_change(
             state,
             account_id,
