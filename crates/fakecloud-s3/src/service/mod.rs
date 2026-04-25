@@ -105,8 +105,15 @@ impl S3Service {
     }
 
     /// Encrypt object body bytes for SSE-KMS storage. Returns ciphertext as
-    /// raw bytes (a UTF-8 fakecloud-kms envelope), or the plaintext unchanged
-    /// when no hook is configured (preserving legacy in-process tests).
+    /// raw bytes (a UTF-8 fakecloud-kms envelope) on success.
+    ///
+    /// Fail-closed: if the KMS hook reports an error (key denied, key not
+    /// found, etc.), this returns `Err` so PutObject aborts with a 500
+    /// rather than silently storing plaintext. AWS S3 has the same
+    /// behavior — `KMS.NotFoundException` and friends surface as
+    /// `AccessDenied` / `KMS.*` errors back to the caller. When no hook is
+    /// wired (legacy / in-process tests with no KMS dependency), the
+    /// plaintext is returned unchanged so existing tests keep working.
     pub(crate) fn encrypt_object_body(
         &self,
         account_id: &str,
@@ -114,53 +121,64 @@ impl S3Service {
         bucket: &str,
         plaintext: &[u8],
         kms_key_id: Option<&str>,
-    ) -> bytes::Bytes {
+    ) -> Result<bytes::Bytes, AwsServiceError> {
         let Some(hook) = &self.kms_hook else {
-            return bytes::Bytes::copy_from_slice(plaintext);
+            return Ok(bytes::Bytes::copy_from_slice(plaintext));
         };
         let key = kms_key_id.filter(|k| !k.is_empty()).unwrap_or("aws/s3");
         let bucket_arn = format!("arn:aws:s3:::{bucket}");
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("aws:s3:arn".to_string(), bucket_arn);
         match hook.encrypt(account_id, region, key, plaintext, "s3.amazonaws.com", ctx) {
-            Ok(envelope) => bytes::Bytes::from(envelope.into_bytes()),
+            Ok(envelope) => Ok(bytes::Bytes::from(envelope.into_bytes())),
             Err(err) => {
-                tracing::warn!(
-                    bucket = %bucket,
-                    error = %err,
-                    "KMS encrypt failed for S3 object; storing plaintext"
-                );
-                bytes::Bytes::copy_from_slice(plaintext)
+                tracing::warn!(bucket = %bucket, error = %err, "SSE-KMS encrypt failed");
+                Err(AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMS.InternalFailureException",
+                    format!("Failed to encrypt object via KMS: {err}"),
+                ))
             }
         }
     }
 
     /// Decrypt object body bytes that were stored as a fakecloud-kms
     /// envelope. Caller is expected to gate this on
-    /// `obj.sse_algorithm == Some("aws:kms")`. Bytes that fail to decrypt
-    /// (legacy snapshots written before the hook landed) are returned
-    /// as-is rather than producing an error response.
+    /// `obj.sse_algorithm == Some("aws:kms")`.
+    ///
+    /// Fail-closed: when a hook is wired and the bytes look like an
+    /// envelope but don't decrypt (key revoked, malformed ciphertext),
+    /// this returns `Err` so GetObject surfaces a 500. When no hook is
+    /// wired, or the bytes aren't UTF-8 (legacy snapshots from before
+    /// the hook landed), the bytes are returned unchanged.
     pub(crate) fn decrypt_object_body(
         &self,
         account_id: &str,
         bucket: &str,
         ciphertext: &[u8],
-    ) -> bytes::Bytes {
+    ) -> Result<bytes::Bytes, AwsServiceError> {
         let Some(hook) = &self.kms_hook else {
-            return bytes::Bytes::copy_from_slice(ciphertext);
+            return Ok(bytes::Bytes::copy_from_slice(ciphertext));
         };
-        // Stored envelope is base64 ASCII; bytes outside that range can't
-        // be decrypted, so short-circuit to plaintext.
+        // Stored envelope is base64 ASCII; non-UTF-8 bytes are pre-hook
+        // legacy snapshots, return as-is.
         let envelope = match std::str::from_utf8(ciphertext) {
             Ok(s) => s,
-            Err(_) => return bytes::Bytes::copy_from_slice(ciphertext),
+            Err(_) => return Ok(bytes::Bytes::copy_from_slice(ciphertext)),
         };
         let bucket_arn = format!("arn:aws:s3:::{bucket}");
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("aws:s3:arn".to_string(), bucket_arn);
         match hook.decrypt(account_id, envelope, "s3.amazonaws.com", ctx) {
-            Ok(bytes) => bytes::Bytes::from(bytes),
-            Err(_) => bytes::Bytes::copy_from_slice(ciphertext),
+            Ok(bytes) => Ok(bytes::Bytes::from(bytes)),
+            Err(err) => {
+                tracing::warn!(bucket = %bucket, error = %err, "SSE-KMS decrypt failed");
+                Err(AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMS.InternalFailureException",
+                    format!("Failed to decrypt object via KMS: {err}"),
+                ))
+            }
         }
     }
 }

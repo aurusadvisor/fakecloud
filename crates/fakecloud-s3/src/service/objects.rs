@@ -939,6 +939,9 @@ impl S3Service {
         // SSE-KMS: encrypt the body via the KMS hook so it lands as a
         // fakecloud-kms envelope on disk and through replication. Plaintext
         // size is preserved for headers via `data_size` further down.
+        // Fail-closed: a KMS error here aborts PutObject before any
+        // mutation, matching real S3 (which surfaces KMS errors back to
+        // the caller rather than silently storing plaintext).
         let stored_bytes = if sse_algorithm.as_deref() == Some("aws:kms") {
             self.encrypt_object_body(
                 account_id,
@@ -946,7 +949,7 @@ impl S3Service {
                 bucket,
                 &data,
                 sse_kms_key_id.as_deref(),
-            )
+            )?
         } else {
             data.clone()
         };
@@ -1170,11 +1173,13 @@ impl S3Service {
         let total_size = obj.size as usize;
         // SSE-KMS: pre-load and decrypt the full body so we can slice
         // ranged/multi-part reads against plaintext (matching real S3,
-        // which transparently decrypts on the read path).
+        // which transparently decrypts on the read path). Fail-closed —
+        // a KMS error surfaces as 500 KMS.InternalFailureException
+        // instead of returning the raw envelope to the caller.
         let decrypted_body: Option<Bytes> =
             if obj.sse_algorithm.as_deref() == Some("aws:kms") && self.kms_hook.is_some() {
                 let raw = state.read_body(&obj.body).map_err(super::io_to_aws)?;
-                Some(self.decrypt_object_body(account_id, bucket, &raw))
+                Some(self.decrypt_object_body(account_id, bucket, &raw)?)
             } else {
                 None
             };
@@ -2186,11 +2191,14 @@ impl S3Service {
         // Checksum: compute new if algorithm specified, or copy from source.
         // For SSE-KMS sources we work on plaintext so the checksum + the
         // destination's stored body line up with what the caller will get
-        // back from a future GetObject.
+        // back from a future GetObject. Fail-closed if the source can't
+        // be decrypted (revoked key, malformed envelope) — copying the
+        // ciphertext over to the destination would silently corrupt the
+        // copy.
         let raw_src_bytes = state.read_body(&src_obj.body).map_err(super::io_to_aws)?;
         let src_bytes =
             if src_obj.sse_algorithm.as_deref() == Some("aws:kms") && self.kms_hook.is_some() {
-                self.decrypt_object_body(account_id, src_bucket, &raw_src_bytes)
+                self.decrypt_object_body(account_id, src_bucket, &raw_src_bytes)?
             } else {
                 raw_src_bytes
             };
@@ -2217,7 +2225,7 @@ impl S3Service {
                 dest_bucket,
                 &src_bytes,
                 new_kms.as_deref(),
-            )
+            )?
         } else {
             src_bytes.clone()
         };
