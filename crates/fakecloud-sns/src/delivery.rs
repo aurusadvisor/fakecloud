@@ -151,19 +151,34 @@ impl SnsDelivery for SnsDeliveryImpl {
             message, &msg_id, subject, &timestamp, topic_arn,
         );
         let signature = crate::signing::sign(&canonical);
-        let sns_envelope = serde_json::json!({
-            "Type": "Notification",
-            "MessageId": msg_id,
-            "TopicArn": topic_arn,
-            "Subject": subject.unwrap_or(""),
-            "Message": message,
-            "Timestamp": timestamp,
-            "SignatureVersion": "1",
-            "Signature": signature,
-            "SigningCertURL": crate::signing::cert_url(&endpoint),
-            "UnsubscribeURL": format!("{}/?Action=Unsubscribe&SubscriptionArn={}", endpoint, topic_arn),
-        });
-        let envelope_str = sns_envelope.to_string();
+        // Subject is omitted from BOTH the canonical string and the JSON
+        // envelope when absent — verifiers iterate the JSON keys to rebuild
+        // canonical, so the two must agree.
+        let mut envelope_map = serde_json::Map::new();
+        envelope_map.insert("Type".into(), "Notification".into());
+        envelope_map.insert("MessageId".into(), msg_id.clone().into());
+        envelope_map.insert("TopicArn".into(), topic_arn.into());
+        if let Some(subj) = subject {
+            envelope_map.insert("Subject".into(), subj.into());
+        }
+        envelope_map.insert("Message".into(), message.into());
+        envelope_map.insert("Timestamp".into(), timestamp.clone().into());
+        // SignatureVersion 2 corresponds to RSA-SHA256 signatures; v1 was SHA-1.
+        envelope_map.insert("SignatureVersion".into(), "2".into());
+        envelope_map.insert("Signature".into(), signature.into());
+        envelope_map.insert(
+            "SigningCertURL".into(),
+            crate::signing::cert_url(&endpoint).into(),
+        );
+        envelope_map.insert(
+            "UnsubscribeURL".into(),
+            format!(
+                "{}/?Action=Unsubscribe&SubscriptionArn={}",
+                endpoint, topic_arn
+            )
+            .into(),
+        );
+        let envelope_str = serde_json::Value::Object(envelope_map).to_string();
 
         for queue_arn in sqs_subscribers {
             self.delivery

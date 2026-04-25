@@ -3308,10 +3308,14 @@ pub(crate) struct SnsLambdaEventInput<'a> {
 /// Used by both direct Publish and cross-service delivery.
 pub(crate) fn build_sns_lambda_event(input: &SnsLambdaEventInput<'_>) -> String {
     let timestamp = input.timestamp.to_rfc3339();
+    // AWS Lambda SNS event always emits the Subject key (empty when unset).
+    // Pass the same value to the canonical builder so the signature covers
+    // exactly what verifiers will reconstruct from the JSON.
+    let subject_for_envelope = input.subject.unwrap_or("");
     let canonical = crate::signing::canonical_notification(
         input.message,
         input.message_id,
-        input.subject,
+        Some(subject_for_envelope),
         &timestamp,
         input.topic_arn,
     );
@@ -3322,7 +3326,8 @@ pub(crate) fn build_sns_lambda_event(input: &SnsLambdaEventInput<'_>) -> String 
             "EventSubscriptionArn": input.subscription_arn,
             "EventSource": "aws:sns",
             "Sns": {
-                "SignatureVersion": "1",
+                // SignatureVersion 2 corresponds to RSA-SHA256 signatures; v1 was SHA-1.
+                "SignatureVersion": "2",
                 "Timestamp": timestamp,
                 "Signature": signature,
                 "SigningCertUrl": crate::signing::cert_url(input.endpoint),
@@ -3332,7 +3337,7 @@ pub(crate) fn build_sns_lambda_event(input: &SnsLambdaEventInput<'_>) -> String 
                 "Type": "Notification",
                 "UnsubscribeUrl": format!("{}/?Action=Unsubscribe&SubscriptionArn={}", input.endpoint, input.subscription_arn),
                 "TopicArn": input.topic_arn,
-                "Subject": input.subject.unwrap_or(""),
+                "Subject": subject_for_envelope,
             }
         }]
     });
@@ -3373,9 +3378,10 @@ fn build_sns_envelope(
     );
     let signature = crate::signing::sign(&canonical);
     map.insert("Timestamp".to_string(), Value::String(timestamp));
+    // SignatureVersion 2 corresponds to RSA-SHA256 signatures; v1 was SHA-1.
     map.insert(
         "SignatureVersion".to_string(),
-        Value::String("1".to_string()),
+        Value::String("2".to_string()),
     );
     map.insert("Signature".to_string(), Value::String(signature));
     map.insert(
