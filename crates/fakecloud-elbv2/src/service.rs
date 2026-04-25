@@ -201,10 +201,7 @@ fn parse_tags(req: &AwsRequest) -> Vec<Tag> {
 }
 
 fn validate_ip_address_type(ipt: &str) -> Result<(), AwsServiceError> {
-    if !matches!(
-        ipt,
-        "ipv4" | "dualstack" | "dualstack-without-public-ipv4"
-    ) {
+    if !matches!(ipt, "ipv4" | "dualstack" | "dualstack-without-public-ipv4") {
         return Err(invalid_param(format!(
             "IpAddressType must be one of ipv4|dualstack|dualstack-without-public-ipv4, got '{ipt}'"
         )));
