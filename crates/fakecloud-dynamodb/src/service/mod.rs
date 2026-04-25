@@ -39,12 +39,22 @@ pub(super) struct KinesisDeliveryTarget {
     pub name: String,
 }
 
+/// Operation flavor for the per-item KMS audit-trail emitter. Reads
+/// emit a paired `Decrypt` after `GenerateDataKey`; writes only emit
+/// `GenerateDataKey`, mirroring AWS's audit shape.
+pub(crate) enum TableKmsOp {
+    Read,
+    Write,
+}
+
 pub struct DynamoDbService {
     state: SharedDynamoDbState,
     pub(crate) s3_state: Option<SharedS3State>,
     pub(crate) s3_store: Option<Arc<dyn S3Store>>,
     delivery: Option<Arc<DeliveryBus>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    pub(crate) kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
+    pub(crate) region: String,
     /// Serializes concurrent snapshot writes so the newest observed
     /// state always wins on disk. Without it, two tasks could race
     /// between state.read().clone() and store.save() and leave older
@@ -60,6 +70,8 @@ impl DynamoDbService {
             s3_store: None,
             delivery: None,
             snapshot_store: None,
+            kms_hook: None,
+            region: "us-east-1".to_string(),
             snapshot_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -82,6 +94,61 @@ impl DynamoDbService {
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
+    }
+
+    pub fn with_kms_hook(mut self, hook: Arc<dyn fakecloud_core::delivery::KmsHook>) -> Self {
+        self.kms_hook = Some(hook);
+        self
+    }
+
+    pub fn with_region(mut self, region: impl Into<String>) -> Self {
+        self.region = region.into();
+        self
+    }
+
+    /// Record `GenerateDataKey` + `Decrypt` for an SSE-KMS table on a
+    /// PutItem/UpdateItem (write) and GetItem/Query/Scan (read). DDB
+    /// item bodies are nested attribute maps — encrypting them in
+    /// fakecloud would balloon scope without adding test coverage that
+    /// users actually want, so we just emit the audit-trail records the
+    /// AWS API produces and let callers assert KMS usage via
+    /// `/_fakecloud/kms/usage`.
+    pub(crate) fn record_table_kms_usage(
+        &self,
+        account_id: &str,
+        table_arn: &str,
+        kms_key_arn: Option<&str>,
+        operation: TableKmsOp,
+    ) {
+        let Some(hook) = &self.kms_hook else { return };
+        let key = kms_key_arn
+            .filter(|k| !k.is_empty())
+            .unwrap_or("aws/dynamodb");
+        // DynamoDB SSE-KMS uses the AWS-documented encryption context:
+        // {aws:dynamodb:tableName: <name>, aws:dynamodb:subscriberId: <account>}
+        // — see the AWS DynamoDB encryption-at-rest docs. The table arn
+        // ends with `:table/<name>`, so derive the name from it.
+        let table_name = table_arn.rsplit('/').next().unwrap_or(table_arn);
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("aws:dynamodb:tableName".to_string(), table_name.to_string());
+        ctx.insert(
+            "aws:dynamodb:subscriberId".to_string(),
+            account_id.to_string(),
+        );
+        let envelope = match hook.encrypt(
+            account_id,
+            &self.region,
+            key,
+            b"ddb-item",
+            "dynamodb.amazonaws.com",
+            ctx.clone(),
+        ) {
+            Ok(env) => env,
+            Err(_) => return,
+        };
+        if matches!(operation, TableKmsOp::Read) {
+            let _ = hook.decrypt(account_id, &envelope, "dynamodb.amazonaws.com", ctx);
+        }
     }
 
     /// Persist the current in-memory state as a snapshot. Called after

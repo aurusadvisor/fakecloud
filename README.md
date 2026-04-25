@@ -53,12 +53,12 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
 | S3                     | 107 | Versioning, lifecycle, notifications, multipart, replication, website, **real SSE-KMS encrypt/decrypt** |
-| SQS                    |  23 | FIFO, DLQs, long polling, batch                                        |
-| SNS                    |  42 | Fan-out to SQS/Lambda/HTTP, filter policies                            |
+| SQS                    |  23 | FIFO, DLQs, long polling, batch, **real KMS encrypt/decrypt on `KmsMasterKeyId` queues** |
+| SNS                    |  42 | Fan-out to SQS/Lambda/HTTP, filter policies, **KMS audit-trail on `KmsMasterKeyId` topics** |
 | EventBridge            |  57 | Pattern matching, schedules, archives, replay, API destinations        |
 | EventBridge Scheduler  |  12 | at/rate/cron, SQS targets, DLQ routing, one-shot self-delete           |
 | Lambda                 |  85 | Real Docker, 13 runtimes, ESM with FilterCriteria + partial-batch failure |
-| DynamoDB               |  57 | Transactions, PartiQL, backups, global tables, streams                 |
+| DynamoDB               |  57 | Transactions, PartiQL, backups, global tables, streams, **KMS audit-trail on SSE-KMS tables** |
 | IAM                    | 176 | Users, roles, policies, groups, OIDC/SAML, **PassRole trust enforcement** |
 | STS                    |  11 | AssumeRole, session tokens, federation                                 |
 | SSM                    | 146 | Parameters, documents, commands, maintenance, patch baselines, **SecureString -> real KMS encrypt/decrypt** |

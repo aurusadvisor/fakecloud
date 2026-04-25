@@ -713,7 +713,9 @@ async fn main() {
         } else {
             None
         };
-    let mut sqs_service = SqsService::new(sqs_state.clone());
+    let mut sqs_service = SqsService::new(sqs_state.clone())
+        .with_kms_hook(kms_hook_for_services.clone())
+        .with_region(cli.region.clone());
     if let Some(store) = sqs_snapshot_store {
         sqs_service = sqs_service.with_snapshot_store(store);
     }
@@ -776,7 +778,9 @@ async fn main() {
         } else {
             None
         };
-    let mut sns_service = SnsService::new(sns_state.clone(), delivery_for_sns);
+    let mut sns_service = SnsService::new(sns_state.clone(), delivery_for_sns)
+        .with_kms_hook(kms_hook_for_services.clone())
+        .with_region(cli.region.clone());
     if let Some(store) = sns_snapshot_store {
         sns_service = sns_service.with_snapshot_store(store);
     }
@@ -1439,7 +1443,9 @@ async fn main() {
     let mut dynamodb_service = DynamoDbService::new(dynamodb_state_for_register)
         .with_s3(s3_state.clone())
         .with_s3_store(s3_store.clone())
-        .with_delivery(delivery_for_dynamodb_register);
+        .with_delivery(delivery_for_dynamodb_register)
+        .with_kms_hook(kms_hook_for_services.clone())
+        .with_region(cli.region.clone());
     if let Some(store) = dynamodb_snapshot_store {
         dynamodb_service = dynamodb_service.with_snapshot_store(store);
     }
