@@ -12,6 +12,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_core::validation::validate_string_length;
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
@@ -2981,6 +2982,8 @@ impl EcrService {
         use crate::state::PullTimeExclusion;
         let body = request.json_body();
         let principal_arn = req_str(&body, "principalArn")?.to_string();
+        // Smithy `com.amazonaws.ecr#PrincipalArn` length 0..=200.
+        validate_string_length("principalArn", &principal_arn, 0, 200)?;
         let account = target_account_id(request, &body);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&account);
@@ -3002,6 +3005,7 @@ impl EcrService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
         let principal_arn = req_str(&body, "principalArn")?.to_string();
+        validate_string_length("principalArn", &principal_arn, 0, 200)?;
         let account = target_account_id(request, &body);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&account);
