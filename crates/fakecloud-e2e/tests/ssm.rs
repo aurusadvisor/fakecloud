@@ -368,7 +368,11 @@ async fn ssm_secure_string_with_decryption() {
         .await
         .unwrap();
 
-    // Get WITHOUT WithDecryption (default) - returns kms-prefixed "encrypted" form
+    // Get WITHOUT WithDecryption (default) — returns the ciphertext
+    // envelope under the `kms:<key>:` prefix the rest of fakecloud uses.
+    // The body is opaque base64; assert only the shape and the absence
+    // of the plaintext, matching real AWS where the un-decrypted value
+    // is an opaque KMS ciphertext blob.
     let resp = client
         .get_parameter()
         .name("/secret/password")
@@ -376,7 +380,15 @@ async fn ssm_secure_string_with_decryption() {
         .await
         .unwrap();
     let param = resp.parameter().unwrap();
-    assert_eq!(param.value().unwrap(), "kms:alias/aws/ssm:super-secret-123");
+    let value = param.value().unwrap();
+    assert!(
+        value.starts_with("kms:alias/aws/ssm:"),
+        "expected kms-prefixed envelope, got: {value}"
+    );
+    assert!(
+        !value.contains("super-secret-123"),
+        "un-decrypted SecureString must not leak plaintext, got: {value}"
+    );
 
     // Get WITH WithDecryption=true - should return actual value
     let resp = client

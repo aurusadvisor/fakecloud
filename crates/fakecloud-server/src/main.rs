@@ -223,9 +223,16 @@ async fn main() {
     let kms_usage_state: fakecloud_kms::hook::SharedKmsUsageState = Arc::new(
         parking_lot::RwLock::new(fakecloud_kms::hook::KmsUsageState::default()),
     );
-    let kms_hook_for_services: Arc<dyn fakecloud_core::delivery::KmsHook> = Arc::new(
-        KmsHookAdapter::new(kms_state.clone(), kms_usage_state.clone()),
-    );
+    // Hook's snapshot store is set below once kms_snapshot_store is
+    // initialized (depends on the persistence config). The OnceLock
+    // wiring lets us hand the same Arc to all services up-front and
+    // populate the store after persistence is read in.
+    let kms_hook_adapter = Arc::new(KmsHookAdapter::new(
+        kms_state.clone(),
+        kms_usage_state.clone(),
+    ));
+    let kms_hook_for_services: Arc<dyn fakecloud_core::delivery::KmsHook> =
+        kms_hook_adapter.clone();
     let cloudformation_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -1286,10 +1293,15 @@ async fn main() {
             None
         };
     let mut kms_service = KmsService::new(kms_state.clone());
-    if let Some(store) = kms_snapshot_store {
+    if let Some(store) = kms_snapshot_store.clone() {
         kms_service = kms_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(kms_service));
+    // Wire the snapshot store into the hook adapter too, so hook-driven
+    // auto-provisioning (`aws/<service>` first-use) persists immediately.
+    if let Some(store) = kms_snapshot_store {
+        kms_hook_adapter.set_snapshot_store(store);
+    }
 
     registry.register(Arc::new(OrganizationsService::new(
         organizations_state.clone(),
@@ -4116,6 +4128,12 @@ async fn shutdown_signal() {
 /// call into KMS without a direct crate dependency.
 struct KmsHookAdapter {
     inner: fakecloud_kms::hook::KmsServiceHook,
+    /// Shared KMS state — used to snapshot after the hook auto-provisions
+    /// an `aws/<service>` AWS-managed key on first use, so the new key
+    /// survives a server restart and the corresponding ciphertext stays
+    /// decryptable.
+    state: fakecloud_kms::state::SharedKmsState,
+    snapshot_store: std::sync::OnceLock<Arc<dyn fakecloud_persistence::SnapshotStore>>,
 }
 
 impl KmsHookAdapter {
@@ -4124,7 +4142,36 @@ impl KmsHookAdapter {
         usage: fakecloud_kms::hook::SharedKmsUsageState,
     ) -> Self {
         Self {
-            inner: fakecloud_kms::hook::KmsServiceHook::new(state, usage),
+            inner: fakecloud_kms::hook::KmsServiceHook::new(state.clone(), usage),
+            state,
+            snapshot_store: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn set_snapshot_store(&self, store: Arc<dyn fakecloud_persistence::SnapshotStore>) {
+        let _ = self.snapshot_store.set(store);
+    }
+
+    fn key_count(&self) -> usize {
+        self.state.read().iter().map(|(_, s)| s.keys.len()).sum()
+    }
+
+    fn save_snapshot_blocking(&self) {
+        let Some(store) = self.snapshot_store.get() else {
+            return;
+        };
+        let snapshot = fakecloud_kms::state::KmsSnapshot {
+            schema_version: fakecloud_kms::state::KMS_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(self.state.read().clone()),
+            state: None,
+        };
+        match serde_json::to_vec(&snapshot) {
+            Ok(bytes) => {
+                if let Err(err) = store.save(&bytes) {
+                    tracing::error!(%err, "kms hook snapshot save failed");
+                }
+            }
+            Err(err) => tracing::error!(%err, "kms hook snapshot serialize failed"),
         }
     }
 }
@@ -4139,7 +4186,9 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
         service_principal: &str,
         encryption_context: std::collections::HashMap<String, String>,
     ) -> Result<String, String> {
-        self.inner
+        let before = self.key_count();
+        let result = self
+            .inner
             .encrypt(
                 account_id,
                 region,
@@ -4148,7 +4197,13 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
                 service_principal,
                 encryption_context,
             )
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        // Auto-provisioned a new AWS-managed key — persist immediately so
+        // a restart can still decrypt its ciphertext.
+        if result.is_ok() && self.key_count() > before {
+            self.save_snapshot_blocking();
+        }
+        result
     }
 
     fn decrypt(
