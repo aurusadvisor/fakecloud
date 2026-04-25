@@ -223,16 +223,11 @@ impl SesV2Service {
         let rendered_html = template.html_body.as_deref().map(&substitute);
         let rendered_text = template.text_body.as_deref().map(&substitute);
 
-        // Build a simplified MIME message
-        let mut mime = format!("Subject: {}\r\n", rendered_subject);
-        mime.push_str("MIME-Version: 1.0\r\n");
-        mime.push_str("Content-Type: text/html; charset=UTF-8\r\n");
-        mime.push_str("\r\n");
-        if let Some(ref html) = rendered_html {
-            mime.push_str(html);
-        } else if let Some(ref text) = rendered_text {
-            mime.push_str(text);
-        }
+        let mime = crate::mime::build_message(&crate::mime::MimeInputs {
+            subject: &rendered_subject,
+            text: rendered_text.as_deref(),
+            html: rendered_html.as_deref(),
+        });
 
         let response = json!({
             "RenderedTemplate": mime,
