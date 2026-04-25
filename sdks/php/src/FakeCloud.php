@@ -35,6 +35,7 @@ final class FakeCloud
     private StepFunctionsClient $stepfunctions;
     private BedrockClient $bedrock;
     private EcsClient $ecs;
+    private Elbv2Client $elbv2;
 
     public function __construct(string $baseUrl = self::DEFAULT_BASE_URL)
     {
@@ -56,6 +57,7 @@ final class FakeCloud
         $this->stepfunctions = new StepFunctionsClient($this->http);
         $this->bedrock = new BedrockClient($this->http);
         $this->ecs = new EcsClient($this->http);
+        $this->elbv2 = new Elbv2Client($this->http);
     }
 
     public function baseUrl(): string
@@ -114,6 +116,7 @@ final class FakeCloud
     public function stepfunctions(): StepFunctionsClient { return $this->stepfunctions; }
     public function bedrock(): BedrockClient { return $this->bedrock; }
     public function ecs(): EcsClient { return $this->ecs; }
+    public function elbv2(): Elbv2Client { return $this->elbv2; }
 }
 
 // ── Sub-clients ────────────────────────────────────────────────
@@ -524,6 +527,39 @@ final class EcsClient
     {
         return EcsClustersResponse::fromArray(
             $this->http->get('/_fakecloud/ecs/clusters')
+        );
+    }
+}
+
+final class Elbv2Client
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    public function getLoadBalancers(): Elbv2LoadBalancersResponse
+    {
+        return Elbv2LoadBalancersResponse::fromArray(
+            $this->http->get('/_fakecloud/elbv2/load-balancers')
+        );
+    }
+
+    public function getTargetGroups(): Elbv2TargetGroupsResponse
+    {
+        return Elbv2TargetGroupsResponse::fromArray(
+            $this->http->get('/_fakecloud/elbv2/target-groups')
+        );
+    }
+
+    public function getListeners(): Elbv2ListenersResponse
+    {
+        return Elbv2ListenersResponse::fromArray(
+            $this->http->get('/_fakecloud/elbv2/listeners')
+        );
+    }
+
+    public function getRules(): Elbv2RulesResponse
+    {
+        return Elbv2RulesResponse::fromArray(
+            $this->http->get('/_fakecloud/elbv2/rules')
         );
     }
 }

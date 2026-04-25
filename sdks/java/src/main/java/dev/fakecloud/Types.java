@@ -481,4 +481,87 @@ public final class Types {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record EcsClustersResponse(List<EcsCluster> clusters) {}
+
+    // ── ELBv2 ─────────────────────────────────────────────────────
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2Tag(String key, String value) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2AvailabilityZone(String zoneName, String subnetId) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2LoadBalancer(
+            String arn,
+            String name,
+            String dnsName,
+            String scheme,
+            String vpcId,
+            String stateCode,
+            String stateReason,
+            String lbType,
+            String ipAddressType,
+            List<Elbv2AvailabilityZone> availabilityZones,
+            List<String> securityGroups,
+            String createdTime,
+            List<Elbv2Tag> tags) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2LoadBalancersResponse(List<Elbv2LoadBalancer> loadBalancers) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2Target(
+            String id,
+            Integer port,
+            String availabilityZone,
+            String healthState,
+            String healthReason,
+            String healthDescription) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2TargetGroup(
+            String arn,
+            String name,
+            String protocol,
+            Integer port,
+            String vpcId,
+            String targetType,
+            List<String> loadBalancerArns,
+            List<Elbv2Target> targets,
+            String healthCheckProtocol,
+            String healthCheckPort,
+            String healthCheckPath,
+            int healthyThresholdCount,
+            int unhealthyThresholdCount,
+            String createdTime,
+            List<Elbv2Tag> tags) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2TargetGroupsResponse(List<Elbv2TargetGroup> targetGroups) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2Listener(
+            String arn,
+            String loadBalancerArn,
+            Integer port,
+            String protocol,
+            String sslPolicy,
+            List<String> certificateArns,
+            String defaultActionType,
+            String defaultTargetGroupArn) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2ListenersResponse(List<Elbv2Listener> listeners) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2Rule(
+            String arn,
+            String listenerArn,
+            String priority,
+            boolean isDefault,
+            List<String> conditionFields,
+            String actionType) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2RulesResponse(List<Elbv2Rule> rules) {}
 }

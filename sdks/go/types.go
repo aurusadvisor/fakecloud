@@ -713,3 +713,95 @@ type EcsLifecycleEvent struct {
 type EcsEventsResponse struct {
 	Events []EcsLifecycleEvent `json:"events"`
 }
+
+// ── ELBv2 ──────────────────────────────────────────────────────────
+
+type Elbv2Tag struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type Elbv2AvailabilityZone struct {
+	ZoneName string `json:"zoneName"`
+	SubnetID string `json:"subnetId"`
+}
+
+// Elbv2LoadBalancer is a snapshot of one ALB / NLB / GWLB.
+type Elbv2LoadBalancer struct {
+	ARN               string                  `json:"arn"`
+	Name              string                  `json:"name"`
+	DNSName           string                  `json:"dnsName"`
+	Scheme            string                  `json:"scheme"`
+	VpcID             string                  `json:"vpcId"`
+	StateCode         string                  `json:"stateCode"`
+	StateReason       *string                 `json:"stateReason,omitempty"`
+	LbType            string                  `json:"lbType"`
+	IPAddressType     string                  `json:"ipAddressType"`
+	AvailabilityZones []Elbv2AvailabilityZone `json:"availabilityZones"`
+	SecurityGroups    []string                `json:"securityGroups"`
+	CreatedTime       string                  `json:"createdTime"`
+	Tags              []Elbv2Tag              `json:"tags"`
+}
+
+type Elbv2LoadBalancersResponse struct {
+	LoadBalancers []Elbv2LoadBalancer `json:"loadBalancers"`
+}
+
+type Elbv2Target struct {
+	ID                string  `json:"id"`
+	Port              *int32  `json:"port,omitempty"`
+	AvailabilityZone  *string `json:"availabilityZone,omitempty"`
+	HealthState       string  `json:"healthState"`
+	HealthReason      *string `json:"healthReason,omitempty"`
+	HealthDescription *string `json:"healthDescription,omitempty"`
+}
+
+type Elbv2TargetGroup struct {
+	ARN                     string        `json:"arn"`
+	Name                    string        `json:"name"`
+	Protocol                *string       `json:"protocol,omitempty"`
+	Port                    *int32        `json:"port,omitempty"`
+	VpcID                   *string       `json:"vpcId,omitempty"`
+	TargetType              string        `json:"targetType"`
+	LoadBalancerARNs        []string      `json:"loadBalancerArns"`
+	Targets                 []Elbv2Target `json:"targets"`
+	HealthCheckProtocol     *string       `json:"healthCheckProtocol,omitempty"`
+	HealthCheckPort         *string       `json:"healthCheckPort,omitempty"`
+	HealthCheckPath         *string       `json:"healthCheckPath,omitempty"`
+	HealthyThresholdCount   int32         `json:"healthyThresholdCount"`
+	UnhealthyThresholdCount int32         `json:"unhealthyThresholdCount"`
+	CreatedTime             string        `json:"createdTime"`
+	Tags                    []Elbv2Tag    `json:"tags"`
+}
+
+type Elbv2TargetGroupsResponse struct {
+	TargetGroups []Elbv2TargetGroup `json:"targetGroups"`
+}
+
+type Elbv2Listener struct {
+	ARN                   string   `json:"arn"`
+	LoadBalancerARN       string   `json:"loadBalancerArn"`
+	Port                  *int32   `json:"port,omitempty"`
+	Protocol              *string  `json:"protocol,omitempty"`
+	SslPolicy             *string  `json:"sslPolicy,omitempty"`
+	CertificateARNs       []string `json:"certificateArns"`
+	DefaultActionType     *string  `json:"defaultActionType,omitempty"`
+	DefaultTargetGroupARN *string  `json:"defaultTargetGroupArn,omitempty"`
+}
+
+type Elbv2ListenersResponse struct {
+	Listeners []Elbv2Listener `json:"listeners"`
+}
+
+type Elbv2Rule struct {
+	ARN             string   `json:"arn"`
+	ListenerARN     string   `json:"listenerArn"`
+	Priority        string   `json:"priority"`
+	IsDefault       bool     `json:"isDefault"`
+	ConditionFields []string `json:"conditionFields"`
+	ActionType      *string  `json:"actionType,omitempty"`
+}
+
+type Elbv2RulesResponse struct {
+	Rules []Elbv2Rule `json:"rules"`
+}

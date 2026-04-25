@@ -21,6 +21,10 @@ import dev.fakecloud.Types.EcrImagesResponse;
 import dev.fakecloud.Types.EcrPullThroughRulesResponse;
 import dev.fakecloud.Types.EcrRepositoriesResponse;
 import dev.fakecloud.Types.EcsClustersResponse;
+import dev.fakecloud.Types.Elbv2ListenersResponse;
+import dev.fakecloud.Types.Elbv2LoadBalancersResponse;
+import dev.fakecloud.Types.Elbv2RulesResponse;
+import dev.fakecloud.Types.Elbv2TargetGroupsResponse;
 import dev.fakecloud.Types.ElastiCacheClustersResponse;
 import dev.fakecloud.Types.ElastiCacheReplicationGroupsResponse;
 import dev.fakecloud.Types.ElastiCacheServerlessCachesResponse;
@@ -88,6 +92,7 @@ public final class FakeCloud {
     private final StepFunctionsClient stepfunctions;
     private final BedrockClient bedrock;
     private final EcsClient ecs;
+    private final Elbv2Client elbv2;
 
     public FakeCloud() {
         this(DEFAULT_BASE_URL);
@@ -112,6 +117,7 @@ public final class FakeCloud {
         this.stepfunctions = new StepFunctionsClient(http);
         this.bedrock = new BedrockClient(http);
         this.ecs = new EcsClient(http);
+        this.elbv2 = new Elbv2Client(http);
     }
 
     static String trimTrailingSlashes(String url) {
@@ -168,6 +174,7 @@ public final class FakeCloud {
     public StepFunctionsClient stepfunctions() { return stepfunctions; }
     public BedrockClient bedrock() { return bedrock; }
     public EcsClient ecs() { return ecs; }
+    public Elbv2Client elbv2() { return elbv2; }
 
     // ── Sub-clients ────────────────────────────────────────────────
 
@@ -501,6 +508,27 @@ public final class FakeCloud {
 
         public EcsClustersResponse getClusters() {
             return http.get("/_fakecloud/ecs/clusters", EcsClustersResponse.class);
+        }
+    }
+
+    public static final class Elbv2Client {
+        private final HttpTransport http;
+        Elbv2Client(HttpTransport http) { this.http = http; }
+
+        public Elbv2LoadBalancersResponse getLoadBalancers() {
+            return http.get("/_fakecloud/elbv2/load-balancers", Elbv2LoadBalancersResponse.class);
+        }
+
+        public Elbv2TargetGroupsResponse getTargetGroups() {
+            return http.get("/_fakecloud/elbv2/target-groups", Elbv2TargetGroupsResponse.class);
+        }
+
+        public Elbv2ListenersResponse getListeners() {
+            return http.get("/_fakecloud/elbv2/listeners", Elbv2ListenersResponse.class);
+        }
+
+        public Elbv2RulesResponse getRules() {
+            return http.get("/_fakecloud/elbv2/rules", Elbv2RulesResponse.class);
         }
     }
 }
