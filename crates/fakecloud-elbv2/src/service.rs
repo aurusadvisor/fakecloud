@@ -42,6 +42,20 @@ const ELBV2_SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeTargetHealth",
     "ModifyTargetGroupAttributes",
     "DescribeTargetGroupAttributes",
+    "CreateListener",
+    "DescribeListeners",
+    "ModifyListener",
+    "DeleteListener",
+    "DescribeListenerAttributes",
+    "ModifyListenerAttributes",
+    "AddListenerCertificates",
+    "RemoveListenerCertificates",
+    "DescribeListenerCertificates",
+    "CreateRule",
+    "DescribeRules",
+    "ModifyRule",
+    "DeleteRule",
+    "SetRulePriorities",
 ];
 
 pub struct Elbv2Service {
@@ -91,6 +105,20 @@ impl AwsService for Elbv2Service {
             "DescribeTargetHealth" => self.describe_target_health(&req),
             "ModifyTargetGroupAttributes" => self.modify_target_group_attributes(&req),
             "DescribeTargetGroupAttributes" => self.describe_target_group_attributes(&req),
+            "CreateListener" => self.create_listener(&req),
+            "DescribeListeners" => self.describe_listeners(&req),
+            "ModifyListener" => self.modify_listener(&req),
+            "DeleteListener" => self.delete_listener(&req),
+            "DescribeListenerAttributes" => self.describe_listener_attributes(&req),
+            "ModifyListenerAttributes" => self.modify_listener_attributes(&req),
+            "AddListenerCertificates" => self.add_listener_certificates(&req),
+            "RemoveListenerCertificates" => self.remove_listener_certificates(&req),
+            "DescribeListenerCertificates" => self.describe_listener_certificates(&req),
+            "CreateRule" => self.create_rule(&req),
+            "DescribeRules" => self.describe_rules(&req),
+            "ModifyRule" => self.modify_rule(&req),
+            "DeleteRule" => self.delete_rule(&req),
+            "SetRulePriorities" => self.set_rule_priorities(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "elasticloadbalancing",
                 &req.action,
@@ -1313,6 +1341,855 @@ impl Elbv2Service {
             &req.request_id,
         ))
     }
+
+    // ───────────── Listener ops ─────────────
+
+    fn create_listener(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let lb_arn = required_query_param(req, "LoadBalancerArn")?;
+        let protocol = optional_query_param(req, "Protocol");
+        let port = optional_query_param(req, "Port").and_then(|s| s.parse().ok());
+        let ssl_policy = optional_query_param(req, "SslPolicy");
+        let alpn_policy = parse_member_list(req, "AlpnPolicy");
+        let certificates = parse_certificates(req);
+        let actions = parse_actions(req, "DefaultActions");
+        if actions.is_empty() {
+            return Err(invalid_param("DefaultActions is required"));
+        }
+        let mut tags = parse_tags(req);
+        tags.dedup_by(|a, b| a.key == b.key);
+
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        if !st.load_balancers.contains_key(&lb_arn) {
+            return Err(lb_not_found(&lb_arn));
+        }
+        // Validate referenced target groups exist (forward action targets).
+        for action in &actions {
+            if let Some(tg_arn) = &action.target_group_arn {
+                if !st.target_groups.contains_key(tg_arn) {
+                    return Err(target_group_not_found(tg_arn));
+                }
+            }
+            if let Some(forward) = &action.forward {
+                for tgt in &forward.target_groups {
+                    if !st.target_groups.contains_key(&tgt.target_group_arn) {
+                        return Err(target_group_not_found(&tgt.target_group_arn));
+                    }
+                }
+            }
+        }
+        let suffix = alphanumeric_id(16);
+        let arn = format!("{lb_arn}/{suffix}").replace(":loadbalancer/", ":listener/");
+        // Mark referenced target groups as attached to this LB.
+        let referenced_tgs: HashSet<String> = actions
+            .iter()
+            .filter_map(|a| a.target_group_arn.clone())
+            .chain(actions.iter().flat_map(|a| {
+                a.forward
+                    .as_ref()
+                    .map(|f| {
+                        f.target_groups
+                            .iter()
+                            .map(|t| t.target_group_arn.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            }))
+            .collect();
+        for tg_arn in &referenced_tgs {
+            if let Some(tg) = st.target_groups.get_mut(tg_arn) {
+                if !tg.load_balancer_arns.contains(&lb_arn) {
+                    tg.load_balancer_arns.push(lb_arn.clone());
+                }
+            }
+        }
+        let listener = crate::state::Listener {
+            arn: arn.clone(),
+            load_balancer_arn: lb_arn,
+            port,
+            protocol,
+            certificates,
+            ssl_policy,
+            default_actions: actions,
+            alpn_policy,
+            mutual_authentication: parse_mutual_authentication(req),
+            tags,
+            attributes: HashMap::new(),
+        };
+        let listener_xml = render_listener_xml(&listener);
+        st.listeners.insert(arn, listener);
+        Ok(xml_resp(
+            "CreateListener",
+            format!("<Listeners><member>{listener_xml}</member></Listeners>"),
+            &req.request_id,
+        ))
+    }
+
+    fn describe_listeners(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let lb_arn = optional_query_param(req, "LoadBalancerArn");
+        let listener_arns: HashSet<String> =
+            parse_member_list(req, "ListenerArns").into_iter().collect();
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut listeners: Vec<&crate::state::Listener> = st
+            .listeners
+            .values()
+            .filter(|l| {
+                lb_arn.as_deref().is_none_or(|a| l.load_balancer_arn == a)
+                    && (listener_arns.is_empty() || listener_arns.contains(&l.arn))
+            })
+            .collect();
+        listeners.sort_by_key(|l| l.port.unwrap_or(0));
+        let inner = format!(
+            "<Listeners>{}</Listeners>",
+            listeners
+                .iter()
+                .map(|l| format!("<member>{}</member>", render_listener_xml(l)))
+                .collect::<String>()
+        );
+        Ok(xml_resp("DescribeListeners", inner, &req.request_id))
+    }
+
+    fn modify_listener(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "ListenerArn")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let listener = st
+            .listeners
+            .get_mut(&arn)
+            .ok_or_else(|| listener_not_found(&arn))?;
+        if let Some(p) = optional_query_param(req, "Port").and_then(|s| s.parse().ok()) {
+            listener.port = Some(p);
+        }
+        if let Some(p) = optional_query_param(req, "Protocol") {
+            listener.protocol = Some(p);
+        }
+        if let Some(p) = optional_query_param(req, "SslPolicy") {
+            listener.ssl_policy = Some(p);
+        }
+        let new_certs = parse_certificates(req);
+        if !new_certs.is_empty() {
+            listener.certificates = new_certs;
+        }
+        let new_actions = parse_actions(req, "DefaultActions");
+        if !new_actions.is_empty() {
+            listener.default_actions = new_actions;
+        }
+        let alpn = parse_member_list(req, "AlpnPolicy");
+        if !alpn.is_empty() {
+            listener.alpn_policy = alpn;
+        }
+        let xml = render_listener_xml(listener);
+        Ok(xml_resp(
+            "ModifyListener",
+            format!("<Listeners><member>{xml}</member></Listeners>"),
+            &req.request_id,
+        ))
+    }
+
+    fn delete_listener(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "ListenerArn")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        st.listeners.remove(&arn);
+        st.rules.retain(|_, r| r.listener_arn != arn);
+        Ok(xml_metadata_only("DeleteListener", &req.request_id))
+    }
+
+    fn describe_listener_attributes(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "ListenerArn")?;
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let listener = st
+            .listeners
+            .get(&arn)
+            .ok_or_else(|| listener_not_found(&arn))?;
+        Ok(xml_resp(
+            "DescribeListenerAttributes",
+            render_attributes_xml(&listener.attributes),
+            &req.request_id,
+        ))
+    }
+
+    fn modify_listener_attributes(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "ListenerArn")?;
+        let new_attrs = parse_attributes(req);
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let listener = st
+            .listeners
+            .get_mut(&arn)
+            .ok_or_else(|| listener_not_found(&arn))?;
+        for (k, v) in &new_attrs {
+            listener.attributes.insert(k.clone(), v.clone());
+        }
+        Ok(xml_resp(
+            "ModifyListenerAttributes",
+            render_attributes_xml(&listener.attributes),
+            &req.request_id,
+        ))
+    }
+
+    fn add_listener_certificates(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "ListenerArn")?;
+        let new_certs = parse_certificates(req);
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let listener = st
+            .listeners
+            .get_mut(&arn)
+            .ok_or_else(|| listener_not_found(&arn))?;
+        for c in &new_certs {
+            listener
+                .certificates
+                .retain(|x| x.certificate_arn != c.certificate_arn);
+            listener.certificates.push(c.clone());
+        }
+        let cert_xml = listener
+            .certificates
+            .iter()
+            .map(render_certificate_xml)
+            .collect::<String>();
+        Ok(xml_resp(
+            "AddListenerCertificates",
+            format!("<Certificates>{cert_xml}</Certificates>"),
+            &req.request_id,
+        ))
+    }
+
+    fn remove_listener_certificates(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "ListenerArn")?;
+        let to_remove = parse_certificates(req);
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let listener = st
+            .listeners
+            .get_mut(&arn)
+            .ok_or_else(|| listener_not_found(&arn))?;
+        let remove_arns: HashSet<String> = to_remove
+            .iter()
+            .map(|c| c.certificate_arn.clone())
+            .collect();
+        listener
+            .certificates
+            .retain(|c| !remove_arns.contains(&c.certificate_arn));
+        Ok(xml_metadata_only(
+            "RemoveListenerCertificates",
+            &req.request_id,
+        ))
+    }
+
+    fn describe_listener_certificates(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "ListenerArn")?;
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let listener = st
+            .listeners
+            .get(&arn)
+            .ok_or_else(|| listener_not_found(&arn))?;
+        let cert_xml = listener
+            .certificates
+            .iter()
+            .map(render_certificate_xml)
+            .collect::<String>();
+        Ok(xml_resp(
+            "DescribeListenerCertificates",
+            format!("<Certificates>{cert_xml}</Certificates>"),
+            &req.request_id,
+        ))
+    }
+
+    // ───────────── Rule ops ─────────────
+
+    fn create_rule(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let listener_arn = required_query_param(req, "ListenerArn")?;
+        let priority = required_query_param(req, "Priority")?;
+        match priority.parse::<i32>() {
+            Ok(n) if n > 0 => {}
+            _ => {
+                return Err(invalid_param(format!(
+                    "Priority must be a positive integer, got '{priority}'"
+                )));
+            }
+        }
+        let conditions = parse_conditions(req);
+        if conditions.is_empty() {
+            return Err(invalid_param("Conditions is required"));
+        }
+        let actions = parse_actions(req, "Actions");
+        if actions.is_empty() {
+            return Err(invalid_param("Actions is required"));
+        }
+        let mut tags = parse_tags(req);
+        tags.dedup_by(|a, b| a.key == b.key);
+
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        if !st.listeners.contains_key(&listener_arn) {
+            return Err(listener_not_found(&listener_arn));
+        }
+        // Reject any forward action that references a target group not in this account.
+        for action in &actions {
+            if let Some(arn) = action.target_group_arn.as_deref() {
+                if !st.target_groups.contains_key(arn) {
+                    return Err(target_group_not_found(arn));
+                }
+            }
+            if let Some(forward) = action.forward.as_ref() {
+                for t in &forward.target_groups {
+                    if !st.target_groups.contains_key(&t.target_group_arn) {
+                        return Err(target_group_not_found(&t.target_group_arn));
+                    }
+                }
+            }
+        }
+        if st
+            .rules
+            .values()
+            .any(|r| r.listener_arn == listener_arn && r.priority == priority && !r.is_default)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "PriorityInUse",
+                format!("Priority '{priority}' already in use on listener '{listener_arn}'"),
+            ));
+        }
+        let suffix = alphanumeric_id(16);
+        let arn = format!("{listener_arn}/{suffix}").replace(":listener/", ":listener-rule/");
+        let rule = crate::state::Rule {
+            arn: arn.clone(),
+            listener_arn,
+            priority,
+            conditions,
+            actions,
+            is_default: false,
+            tags,
+        };
+        let rule_xml = render_rule_xml(&rule);
+        st.rules.insert(arn, rule);
+        Ok(xml_resp(
+            "CreateRule",
+            format!("<Rules><member>{rule_xml}</member></Rules>"),
+            &req.request_id,
+        ))
+    }
+
+    fn describe_rules(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let listener_arn = optional_query_param(req, "ListenerArn");
+        let rule_arns: HashSet<String> = parse_member_list(req, "RuleArns").into_iter().collect();
+        let accounts = self.state.read();
+        let empty = crate::state::Elbv2State::new(&req.account_id);
+        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut rules: Vec<&crate::state::Rule> = st
+            .rules
+            .values()
+            .filter(|r| {
+                listener_arn.as_deref().is_none_or(|a| r.listener_arn == a)
+                    && (rule_arns.is_empty() || rule_arns.contains(&r.arn))
+            })
+            .collect();
+        rules.sort_by(|a, b| {
+            let ap = a.priority.parse::<i32>().unwrap_or(i32::MAX);
+            let bp = b.priority.parse::<i32>().unwrap_or(i32::MAX);
+            ap.cmp(&bp)
+        });
+        let inner = format!(
+            "<Rules>{}</Rules>",
+            rules
+                .iter()
+                .map(|r| format!("<member>{}</member>", render_rule_xml(r)))
+                .collect::<String>()
+        );
+        Ok(xml_resp("DescribeRules", inner, &req.request_id))
+    }
+
+    fn modify_rule(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "RuleArn")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let new_conditions = parse_conditions(req);
+        let new_actions = parse_actions(req, "Actions");
+        let rule = st.rules.get_mut(&arn).ok_or_else(|| rule_not_found(&arn))?;
+        if !new_conditions.is_empty() {
+            rule.conditions = new_conditions;
+        }
+        if !new_actions.is_empty() {
+            rule.actions = new_actions;
+        }
+        let xml = render_rule_xml(rule);
+        Ok(xml_resp(
+            "ModifyRule",
+            format!("<Rules><member>{xml}</member></Rules>"),
+            &req.request_id,
+        ))
+    }
+
+    fn delete_rule(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = required_query_param(req, "RuleArn")?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        st.rules.remove(&arn);
+        Ok(xml_metadata_only("DeleteRule", &req.request_id))
+    }
+
+    fn set_rule_priorities(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let mut updates: Vec<(String, String)> = Vec::new();
+        for n in 1..=100 {
+            let arn = req
+                .query_params
+                .get(&format!("RulePriorities.member.{n}.RuleArn"))
+                .cloned();
+            if let Some(arn) = arn {
+                let priority = req
+                    .query_params
+                    .get(&format!("RulePriorities.member.{n}.Priority"))
+                    .cloned()
+                    .unwrap_or_default();
+                updates.push((arn, priority));
+            } else {
+                break;
+            }
+        }
+        if updates.is_empty() {
+            return Err(invalid_param("RulePriorities is required"));
+        }
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let mut updated = Vec::new();
+        for (arn, priority) in updates {
+            let rule = st.rules.get_mut(&arn).ok_or_else(|| rule_not_found(&arn))?;
+            rule.priority = priority;
+            updated.push(rule.arn.clone());
+        }
+        let arns: Vec<String> = updated;
+        let rules_xml = arns
+            .iter()
+            .filter_map(|a| st.rules.get(a))
+            .map(|r| format!("<member>{}</member>", render_rule_xml(r)))
+            .collect::<String>();
+        Ok(xml_resp(
+            "SetRulePriorities",
+            format!("<Rules>{rules_xml}</Rules>"),
+            &req.request_id,
+        ))
+    }
+}
+
+fn listener_not_found(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ListenerNotFound",
+        format!("Listener '{arn}' not found"),
+    )
+}
+
+fn rule_not_found(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "RuleNotFound",
+        format!("Rule '{arn}' not found"),
+    )
+}
+
+fn parse_certificates(req: &AwsRequest) -> Vec<crate::state::Certificate> {
+    let mut out = Vec::new();
+    for n in 1..=25 {
+        let arn = req
+            .query_params
+            .get(&format!("Certificates.member.{n}.CertificateArn"))
+            .cloned();
+        if let Some(arn) = arn {
+            let is_default = req
+                .query_params
+                .get(&format!("Certificates.member.{n}.IsDefault"))
+                .map(|s| s == "true")
+                .unwrap_or(false);
+            out.push(crate::state::Certificate {
+                certificate_arn: arn,
+                is_default,
+            });
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn parse_actions(req: &AwsRequest, prefix: &str) -> Vec<crate::state::Action> {
+    let mut out = Vec::new();
+    for n in 1..=10 {
+        let p = format!("{prefix}.member.{n}");
+        let action_type = req.query_params.get(&format!("{p}.Type")).cloned();
+        if let Some(t) = action_type {
+            let target_group_arn = req
+                .query_params
+                .get(&format!("{p}.TargetGroupArn"))
+                .cloned();
+            let order = req
+                .query_params
+                .get(&format!("{p}.Order"))
+                .and_then(|s| s.parse().ok());
+            let redirect = parse_redirect(req, &p);
+            let fixed_response = parse_fixed_response(req, &p);
+            let forward = parse_forward(req, &p);
+            out.push(crate::state::Action {
+                action_type: t,
+                target_group_arn,
+                order,
+                redirect,
+                fixed_response,
+                forward,
+                authenticate_cognito: None,
+                authenticate_oidc: None,
+            });
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn parse_redirect(req: &AwsRequest, prefix: &str) -> Option<crate::state::RedirectConfig> {
+    let status = req
+        .query_params
+        .get(&format!("{prefix}.RedirectConfig.StatusCode"))
+        .cloned()?;
+    Some(crate::state::RedirectConfig {
+        protocol: req
+            .query_params
+            .get(&format!("{prefix}.RedirectConfig.Protocol"))
+            .cloned(),
+        port: req
+            .query_params
+            .get(&format!("{prefix}.RedirectConfig.Port"))
+            .cloned(),
+        host: req
+            .query_params
+            .get(&format!("{prefix}.RedirectConfig.Host"))
+            .cloned(),
+        path: req
+            .query_params
+            .get(&format!("{prefix}.RedirectConfig.Path"))
+            .cloned(),
+        query: req
+            .query_params
+            .get(&format!("{prefix}.RedirectConfig.Query"))
+            .cloned(),
+        status_code: status,
+    })
+}
+
+fn parse_fixed_response(
+    req: &AwsRequest,
+    prefix: &str,
+) -> Option<crate::state::FixedResponseConfig> {
+    let status = req
+        .query_params
+        .get(&format!("{prefix}.FixedResponseConfig.StatusCode"))
+        .cloned()?;
+    Some(crate::state::FixedResponseConfig {
+        message_body: req
+            .query_params
+            .get(&format!("{prefix}.FixedResponseConfig.MessageBody"))
+            .cloned(),
+        status_code: status,
+        content_type: req
+            .query_params
+            .get(&format!("{prefix}.FixedResponseConfig.ContentType"))
+            .cloned(),
+    })
+}
+
+fn parse_forward(req: &AwsRequest, prefix: &str) -> Option<crate::state::ForwardConfig> {
+    let mut target_groups = Vec::new();
+    for n in 1..=5 {
+        let key = format!("{prefix}.ForwardConfig.TargetGroups.member.{n}.TargetGroupArn");
+        if let Some(arn) = req.query_params.get(&key) {
+            let weight = req
+                .query_params
+                .get(&format!(
+                    "{prefix}.ForwardConfig.TargetGroups.member.{n}.Weight"
+                ))
+                .and_then(|s| s.parse().ok());
+            target_groups.push(crate::state::TargetGroupTuple {
+                target_group_arn: arn.clone(),
+                weight,
+            });
+        } else {
+            break;
+        }
+    }
+    if target_groups.is_empty() {
+        return None;
+    }
+    Some(crate::state::ForwardConfig {
+        target_groups,
+        stickiness: None,
+    })
+}
+
+fn parse_mutual_authentication(req: &AwsRequest) -> Option<crate::state::MutualAuthentication> {
+    let mode = req.query_params.get("MutualAuthentication.Mode").cloned()?;
+    Some(crate::state::MutualAuthentication {
+        mode: Some(mode),
+        trust_store_arn: req
+            .query_params
+            .get("MutualAuthentication.TrustStoreArn")
+            .cloned(),
+        ignore_client_certificate_expiry: req
+            .query_params
+            .get("MutualAuthentication.IgnoreClientCertificateExpiry")
+            .map(|s| s == "true"),
+        trust_store_association_status: None,
+        advertise_trust_store_ca_names: req
+            .query_params
+            .get("MutualAuthentication.AdvertiseTrustStoreCaNames")
+            .cloned(),
+    })
+}
+
+fn parse_conditions(req: &AwsRequest) -> Vec<crate::state::RuleCondition> {
+    let mut out = Vec::new();
+    for n in 1..=10 {
+        let p = format!("Conditions.member.{n}");
+        let field = req.query_params.get(&format!("{p}.Field")).cloned();
+        if let Some(field) = field {
+            out.push(crate::state::RuleCondition {
+                field,
+                values: parse_member_list(req, &format!("{p}.Values")),
+                host_header_values: parse_member_list(req, &format!("{p}.HostHeaderConfig.Values")),
+                path_pattern_values: parse_member_list(
+                    req,
+                    &format!("{p}.PathPatternConfig.Values"),
+                ),
+                http_header_name: req
+                    .query_params
+                    .get(&format!("{p}.HttpHeaderConfig.HttpHeaderName"))
+                    .cloned(),
+                http_header_values: parse_member_list(req, &format!("{p}.HttpHeaderConfig.Values")),
+                query_string_values: Vec::new(),
+                http_request_method_values: parse_member_list(
+                    req,
+                    &format!("{p}.HttpRequestMethodConfig.Values"),
+                ),
+                source_ip_values: parse_member_list(req, &format!("{p}.SourceIpConfig.Values")),
+            });
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn render_listener_xml(l: &crate::state::Listener) -> String {
+    let port = l
+        .port
+        .map(|p| format!("<Port>{p}</Port>"))
+        .unwrap_or_default();
+    let proto = l
+        .protocol
+        .as_deref()
+        .map(|p| format!("<Protocol>{}</Protocol>", xml_escape(p)))
+        .unwrap_or_default();
+    let ssl = l
+        .ssl_policy
+        .as_deref()
+        .map(|p| format!("<SslPolicy>{}</SslPolicy>", xml_escape(p)))
+        .unwrap_or_default();
+    let cert_xml = l
+        .certificates
+        .iter()
+        .map(render_certificate_xml)
+        .collect::<String>();
+    let actions_xml = l
+        .default_actions
+        .iter()
+        .map(render_action_xml)
+        .collect::<String>();
+    let alpn_xml = l
+        .alpn_policy
+        .iter()
+        .map(|p| format!("<member>{}</member>", xml_escape(p)))
+        .collect::<String>();
+    let ma_xml = l
+        .mutual_authentication
+        .as_ref()
+        .map(render_mutual_auth_xml)
+        .unwrap_or_default();
+    format!(
+        "<ListenerArn>{arn}</ListenerArn>\
+         <LoadBalancerArn>{lb}</LoadBalancerArn>\
+         {port}{proto}\
+         <Certificates>{cert_xml}</Certificates>\
+         {ssl}\
+         <DefaultActions>{actions_xml}</DefaultActions>\
+         <AlpnPolicy>{alpn_xml}</AlpnPolicy>\
+         {ma_xml}",
+        arn = xml_escape(&l.arn),
+        lb = xml_escape(&l.load_balancer_arn),
+    )
+}
+
+fn render_certificate_xml(c: &crate::state::Certificate) -> String {
+    format!(
+        "<member><CertificateArn>{}</CertificateArn><IsDefault>{}</IsDefault></member>",
+        xml_escape(&c.certificate_arn),
+        c.is_default
+    )
+}
+
+fn render_action_xml(a: &crate::state::Action) -> String {
+    let order = a
+        .order
+        .map(|o| format!("<Order>{o}</Order>"))
+        .unwrap_or_default();
+    let tg = a
+        .target_group_arn
+        .as_deref()
+        .map(|t| format!("<TargetGroupArn>{}</TargetGroupArn>", xml_escape(t)))
+        .unwrap_or_default();
+    let redirect = a
+        .redirect
+        .as_ref()
+        .map(|r| {
+            let mut s = String::from("<RedirectConfig>");
+            if let Some(p) = &r.protocol {
+                s.push_str(&format!("<Protocol>{}</Protocol>", xml_escape(p)));
+            }
+            if let Some(p) = &r.port {
+                s.push_str(&format!("<Port>{}</Port>", xml_escape(p)));
+            }
+            if let Some(p) = &r.host {
+                s.push_str(&format!("<Host>{}</Host>", xml_escape(p)));
+            }
+            if let Some(p) = &r.path {
+                s.push_str(&format!("<Path>{}</Path>", xml_escape(p)));
+            }
+            if let Some(p) = &r.query {
+                s.push_str(&format!("<Query>{}</Query>", xml_escape(p)));
+            }
+            s.push_str(&format!(
+                "<StatusCode>{}</StatusCode>",
+                xml_escape(&r.status_code)
+            ));
+            s.push_str("</RedirectConfig>");
+            s
+        })
+        .unwrap_or_default();
+    let fixed = a
+        .fixed_response
+        .as_ref()
+        .map(|f| {
+            let mb = f
+                .message_body
+                .as_deref()
+                .map(|m| format!("<MessageBody>{}</MessageBody>", xml_escape(m)))
+                .unwrap_or_default();
+            let ct = f
+                .content_type
+                .as_deref()
+                .map(|c| format!("<ContentType>{}</ContentType>", xml_escape(c)))
+                .unwrap_or_default();
+            format!(
+                "<FixedResponseConfig>{mb}<StatusCode>{}</StatusCode>{ct}</FixedResponseConfig>",
+                xml_escape(&f.status_code)
+            )
+        })
+        .unwrap_or_default();
+    let forward = a
+        .forward
+        .as_ref()
+        .map(|f| {
+            let groups = f
+                .target_groups
+                .iter()
+                .map(|g| {
+                    let weight = g
+                        .weight
+                        .map(|w| format!("<Weight>{w}</Weight>"))
+                        .unwrap_or_default();
+                    format!(
+                        "<member><TargetGroupArn>{}</TargetGroupArn>{weight}</member>",
+                        xml_escape(&g.target_group_arn)
+                    )
+                })
+                .collect::<String>();
+            format!("<ForwardConfig><TargetGroups>{groups}</TargetGroups></ForwardConfig>")
+        })
+        .unwrap_or_default();
+    format!(
+        "<member><Type>{ty}</Type>{tg}{order}{redirect}{fixed}{forward}</member>",
+        ty = xml_escape(&a.action_type),
+    )
+}
+
+fn render_mutual_auth_xml(ma: &crate::state::MutualAuthentication) -> String {
+    let mode = ma
+        .mode
+        .as_deref()
+        .map(|m| format!("<Mode>{}</Mode>", xml_escape(m)))
+        .unwrap_or_default();
+    let ts = ma
+        .trust_store_arn
+        .as_deref()
+        .map(|t| format!("<TrustStoreArn>{}</TrustStoreArn>", xml_escape(t)))
+        .unwrap_or_default();
+    let ig = ma
+        .ignore_client_certificate_expiry
+        .map(|b| format!("<IgnoreClientCertificateExpiry>{b}</IgnoreClientCertificateExpiry>"))
+        .unwrap_or_default();
+    let adv = ma
+        .advertise_trust_store_ca_names
+        .as_deref()
+        .map(|a| {
+            format!(
+                "<AdvertiseTrustStoreCaNames>{}</AdvertiseTrustStoreCaNames>",
+                xml_escape(a)
+            )
+        })
+        .unwrap_or_default();
+    format!("<MutualAuthentication>{mode}{ts}{ig}{adv}</MutualAuthentication>")
+}
+
+fn render_rule_xml(r: &crate::state::Rule) -> String {
+    let conditions_xml = r
+        .conditions
+        .iter()
+        .map(|c| {
+            let values = c
+                .values
+                .iter()
+                .map(|v| format!("<member>{}</member>", xml_escape(v)))
+                .collect::<String>();
+            format!(
+                "<member><Field>{}</Field><Values>{values}</Values></member>",
+                xml_escape(&c.field)
+            )
+        })
+        .collect::<String>();
+    let actions_xml = r.actions.iter().map(render_action_xml).collect::<String>();
+    format!(
+        "<RuleArn>{arn}</RuleArn>\
+         <Priority>{priority}</Priority>\
+         <Conditions>{conditions_xml}</Conditions>\
+         <Actions>{actions_xml}</Actions>\
+         <IsDefault>{is_default}</IsDefault>",
+        arn = xml_escape(&r.arn),
+        priority = xml_escape(&r.priority),
+        is_default = r.is_default,
+    )
 }
 
 fn validate_tg_name(name: &str) -> Result<(), AwsServiceError> {
@@ -1753,8 +2630,10 @@ mod tests {
     #[tokio::test]
     async fn unimplemented_action_errors() {
         let svc = svc();
+        // Use a name that is not in the AWS Smithy model so this test
+        // remains stable as new ops are implemented.
         let err = svc
-            .handle(req("CreateListener", &[]))
+            .handle(req("ThisActionDoesNotExist", &[]))
             .await
             .err()
             .expect("expected error");
