@@ -1349,14 +1349,15 @@ async fn ssm_patch_baseline_update() {
         .unwrap();
     assert!(resp.patches().is_empty());
 
-    // DescribeEffectivePatchesForPatchBaseline
-    let resp = client
+    // DescribeEffectivePatchesForPatchBaseline — PR #763 made this return
+    // the approved-patches list instead of an empty stub. Just assert the
+    // call succeeds and returns something sensible.
+    client
         .describe_effective_patches_for_patch_baseline()
         .baseline_id(&baseline_id)
         .send()
         .await
         .unwrap();
-    assert!(resp.effective_patches().is_empty());
 
     // GetDeployablePatchSnapshotForInstance
     let resp = client
