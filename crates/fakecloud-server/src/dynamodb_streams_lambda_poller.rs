@@ -13,6 +13,7 @@ use serde_json::json;
 
 use fakecloud_core::delivery::LambdaDelivery;
 use fakecloud_dynamodb::state::SharedDynamoDbState;
+use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
 
 /// DynamoDB Streams -> Lambda event source mapping poller.
@@ -48,8 +49,18 @@ impl DynamoDbStreamsLambdaPoller {
     }
 
     async fn poll(&self) {
+        struct DdbMapping {
+            uuid: String,
+            stream_arn: String,
+            function_arn: String,
+            batch_size: i64,
+            filter: FilterSet,
+            starting_position: Option<String>,
+            starting_position_timestamp: Option<f64>,
+        }
+
         // Collect enabled mappings that point to DynamoDB streams
-        let mappings: Vec<(String, String, String, i64)> = {
+        let mappings: Vec<DdbMapping> = {
             let lambda_accounts = self.lambda_state.read();
             let lambda = lambda_accounts.default_ref();
             lambda
@@ -60,13 +71,14 @@ impl DynamoDbStreamsLambdaPoller {
                         && m.event_source_arn.contains(":dynamodb:")
                         && m.event_source_arn.contains("/stream/")
                 })
-                .map(|m| {
-                    (
-                        m.uuid.clone(),
-                        m.event_source_arn.clone(),
-                        m.function_arn.clone(),
-                        m.batch_size,
-                    )
+                .map(|m| DdbMapping {
+                    uuid: m.uuid.clone(),
+                    stream_arn: m.event_source_arn.clone(),
+                    function_arn: m.function_arn.clone(),
+                    batch_size: m.batch_size,
+                    filter: FilterSet::from_strings(m.filter_patterns.iter()),
+                    starting_position: m.starting_position.clone(),
+                    starting_position_timestamp: m.starting_position_timestamp,
                 })
                 .collect()
         };
@@ -75,7 +87,16 @@ impl DynamoDbStreamsLambdaPoller {
             return;
         }
 
-        for (mapping_id, stream_arn, function_arn, batch_size) in mappings {
+        for DdbMapping {
+            uuid: mapping_id,
+            stream_arn,
+            function_arn,
+            batch_size,
+            filter,
+            starting_position,
+            starting_position_timestamp,
+        } in mappings
+        {
             // Extract table name from stream ARN
             // Format: arn:aws:dynamodb:region:account:table/TableName/stream/timestamp
             let table_name = if let Some(table_part) = stream_arn.split(":table/").nth(1) {
@@ -84,8 +105,34 @@ impl DynamoDbStreamsLambdaPoller {
                 continue;
             };
 
-            // Get checkpoint for this mapping
-            let checkpoint = self.checkpoints.read().get(&mapping_id).cloned();
+            // AT_TIMESTAMP isn't valid for DDB streams in real AWS;
+            // suppress the field if the user supplied it.
+            let _ = starting_position_timestamp;
+
+            // Initialize the checkpoint based on StartingPosition the
+            // first time we see this mapping. For DDB streams AWS only
+            // accepts TRIM_HORIZON (default — replays existing records)
+            // and LATEST (skip whatever is already in the stream).
+            let checkpoint = {
+                let mut cps = self.checkpoints.write();
+                if !cps.contains_key(&mapping_id) {
+                    let dynamodb_mas = self.dynamodb_state.read();
+                    let dynamodb = dynamodb_mas.default_ref();
+                    if let Some(table) = dynamodb.tables.get(table_name) {
+                        let stream_records = table.stream_records.read();
+                        let init = match starting_position.as_deref().unwrap_or("TRIM_HORIZON") {
+                            "LATEST" => stream_records
+                                .iter()
+                                .map(|r| r.dynamodb.sequence_number.clone())
+                                .max()
+                                .unwrap_or_default(),
+                            _ => String::new(),
+                        };
+                        cps.insert(mapping_id.clone(), init);
+                    }
+                }
+                cps.get(&mapping_id).cloned()
+            };
 
             // Read stream records from DynamoDB
             let records = {
@@ -105,12 +152,9 @@ impl DynamoDbStreamsLambdaPoller {
                 // Filter records after checkpoint
                 let mut filtered: Vec<_> = stream_records
                     .iter()
-                    .filter(|r| {
-                        if let Some(ref cp) = checkpoint {
-                            &r.dynamodb.sequence_number > cp
-                        } else {
-                            true
-                        }
+                    .filter(|r| match checkpoint.as_deref() {
+                        Some(cp) if !cp.is_empty() => r.dynamodb.sequence_number.as_str() > cp,
+                        _ => true,
                     })
                     .take(batch_size.max(0) as usize)
                     .cloned()
@@ -127,9 +171,14 @@ impl DynamoDbStreamsLambdaPoller {
                 continue;
             }
 
-            // Build Lambda event payload
-            let event = json!({
-                "Records": records.iter().map(|record| {
+            // Build per-record Lambda event JSON, then drop any record
+            // whose JSON doesn't match FilterCriteria. AWS treats
+            // filtered-out records as consumed — the checkpoint always
+            // advances past them.
+            let last_seq = records.last().map(|r| r.dynamodb.sequence_number.clone());
+            let event_records: Vec<serde_json::Value> = records
+                .iter()
+                .filter_map(|record| {
                     let mut event_record = json!({
                         "eventID": record.event_id,
                         "eventName": record.event_name,
@@ -152,29 +201,37 @@ impl DynamoDbStreamsLambdaPoller {
                         event_record["dynamodb"]["OldImage"] = json!(old_img);
                     }
 
-                    event_record
-                }).collect::<Vec<_>>()
-            });
+                    if filter.matches(&event_record) {
+                        Some(event_record)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
+            // If the filter dropped every record, advance the
+            // checkpoint past them — AWS treats filtered records as
+            // consumed. Otherwise, hold the checkpoint until after a
+            // successful invoke so failures retry on the next poll.
+            if event_records.is_empty() {
+                if let Some(seq) = last_seq.clone() {
+                    self.checkpoints.write().insert(mapping_id.clone(), seq);
+                }
+                continue;
+            }
+
+            let event = json!({ "Records": &event_records });
             let payload = serde_json::to_string(&event).unwrap_or_default();
 
-            // Invoke Lambda
-            if let Some(ref delivery) = self.lambda_delivery {
-                match delivery.invoke_lambda(&function_arn, &payload).await {
+            let invoke_succeeded = match &self.lambda_delivery {
+                Some(delivery) => match delivery.invoke_lambda(&function_arn, &payload).await {
                     Ok(_) => {
                         tracing::info!(
                             function_arn = %function_arn,
-                            record_count = records.len(),
+                            record_count = event_records.len(),
                             "DynamoDB Streams->Lambda invocation succeeded"
                         );
-
-                        // Update checkpoint to last processed sequence number
-                        if let Some(last_record) = records.last() {
-                            self.checkpoints.write().insert(
-                                mapping_id.clone(),
-                                last_record.dynamodb.sequence_number.clone(),
-                            );
-                        }
+                        true
                     }
                     Err(e) => {
                         tracing::error!(
@@ -182,10 +239,23 @@ impl DynamoDbStreamsLambdaPoller {
                             error = %e,
                             "DynamoDB Streams->Lambda invocation failed"
                         );
+                        false
                     }
-                }
-            } else {
-                // No delivery mechanism, just record
+                },
+                None => true,
+            };
+
+            if !invoke_succeeded {
+                continue;
+            }
+
+            // Successful invoke — advance the checkpoint and record
+            // the invocation when no real Lambda runtime is wired.
+            if let Some(seq) = last_seq.clone() {
+                self.checkpoints.write().insert(mapping_id.clone(), seq);
+            }
+
+            if self.lambda_delivery.is_none() {
                 let mut lambda_accounts = self.lambda_state.write();
                 let lambda = lambda_accounts.default_mut();
                 lambda.invocations.push(LambdaInvocation {
@@ -194,13 +264,6 @@ impl DynamoDbStreamsLambdaPoller {
                     timestamp: Utc::now(),
                     source: "dynamodb:streams".to_string(),
                 });
-
-                // Update checkpoint
-                if let Some(last_record) = records.last() {
-                    self.checkpoints
-                        .write()
-                        .insert(mapping_id, last_record.dynamodb.sequence_number.clone());
-                }
             }
         }
     }
