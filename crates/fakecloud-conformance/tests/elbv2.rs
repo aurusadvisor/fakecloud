@@ -288,7 +288,12 @@ async fn elbv2_modify_ip_pools() {
         .unwrap()
         .load_balancer_arn()
         .unwrap();
-    let _ = client.modify_ip_pools().load_balancer_arn(arn).send().await;
+    client
+        .modify_ip_pools()
+        .load_balancer_arn(arn)
+        .send()
+        .await
+        .unwrap();
 }
 
 // ── Batch 2: TargetGroups + Targets ─────────────────────────────────
@@ -875,7 +880,7 @@ async fn elbv2_describe_listener_certificates() {
         .await
         .unwrap();
     let arn = create.listeners().first().unwrap().listener_arn().unwrap();
-    let _ = client
+    client
         .describe_listener_certificates()
         .listener_arn(arn)
         .send()
@@ -1249,11 +1254,12 @@ async fn elbv2_modify_capacity_reservation() {
         .unwrap()
         .load_balancer_arn()
         .unwrap();
-    let _ = client
+    client
         .modify_capacity_reservation()
         .load_balancer_arn(arn)
         .send()
-        .await;
+        .await
+        .unwrap();
 }
 
 #[test_action(
@@ -1277,7 +1283,7 @@ async fn elbv2_describe_capacity_reservation() {
         .unwrap()
         .load_balancer_arn()
         .unwrap();
-    let _ = client
+    client
         .describe_capacity_reservation()
         .load_balancer_arn(arn)
         .send()
@@ -1340,7 +1346,7 @@ async fn elbv2_modify_trust_store() {
         .unwrap()
         .trust_store_arn()
         .unwrap();
-    let _ = client
+    client
         .modify_trust_store()
         .trust_store_arn(arn)
         .ca_certificates_bundle_s3_bucket("ca-bundles")
@@ -1400,7 +1406,7 @@ async fn elbv2_add_trust_store_revocations() {
         .unwrap()
         .trust_store_arn()
         .unwrap();
-    let _ = client
+    client
         .add_trust_store_revocations()
         .trust_store_arn(arn)
         .revocation_contents(
@@ -1487,7 +1493,7 @@ async fn elbv2_describe_trust_store_revocations() {
         .unwrap()
         .trust_store_arn()
         .unwrap();
-    let _ = client
+    client
         .describe_trust_store_revocations()
         .trust_store_arn(arn)
         .send()
@@ -1518,7 +1524,7 @@ async fn elbv2_describe_trust_store_associations() {
         .unwrap()
         .trust_store_arn()
         .unwrap();
-    let _ = client
+    client
         .describe_trust_store_associations()
         .trust_store_arn(arn)
         .send()
@@ -1631,7 +1637,7 @@ async fn elbv2_get_trust_store_revocation_content() {
         .unwrap()
         .revocation_id()
         .unwrap();
-    let _ = client
+    client
         .get_trust_store_revocation_content()
         .trust_store_arn(arn)
         .revocation_id(id)
@@ -1657,7 +1663,7 @@ async fn elbv2_get_resource_policy() {
         .unwrap()
         .load_balancer_arn()
         .unwrap();
-    let _ = client
+    client
         .get_resource_policy()
         .resource_arn(arn)
         .send()

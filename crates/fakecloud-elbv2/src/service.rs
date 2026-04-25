@@ -1837,9 +1837,10 @@ impl Elbv2Service {
         for (k, v) in &new_attrs {
             lb.attributes.insert(k.clone(), v.clone());
         }
+        let merged = merge_lb_attributes(&lb.lb_type, &lb.attributes);
         Ok(xml_resp(
             "ModifyLoadBalancerAttributes",
-            render_attributes_xml(&lb.attributes),
+            render_attributes_xml(&merged),
             &req.request_id,
         ))
     }
@@ -1856,14 +1857,10 @@ impl Elbv2Service {
             .load_balancers
             .get(&arn)
             .ok_or_else(|| lb_not_found(&arn))?;
-        let attrs = if lb.attributes.is_empty() {
-            default_lb_attributes(&lb.lb_type)
-        } else {
-            lb.attributes.clone()
-        };
+        let merged = merge_lb_attributes(&lb.lb_type, &lb.attributes);
         Ok(xml_resp(
             "DescribeLoadBalancerAttributes",
-            render_attributes_xml(&attrs),
+            render_attributes_xml(&merged),
             &req.request_id,
         ))
     }
@@ -2280,6 +2277,14 @@ fn default_lb_attributes(lb_type: &str) -> HashMap<String, String> {
             "routing.http.preserve_host_header.enabled".to_string(),
             "false".to_string(),
         );
+    }
+    m
+}
+
+fn merge_lb_attributes(lb_type: &str, stored: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut m = default_lb_attributes(lb_type);
+    for (k, v) in stored {
+        m.insert(k.clone(), v.clone());
     }
     m
 }
