@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 25 AWS services with 1,798 total operations, all at 100% Smithy conformance. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 26 AWS services with 1,849 total operations, all at 100% Smithy conformance. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -36,5 +36,6 @@ fakecloud implements 25 AWS services with 1,798 total operations, all at 100% Sm
 | Bedrock Runtime        |  10 | InvokeModel, Converse, streaming, configurable responses, fault inject |
 | ECR                    |  58 | Full API — OCI v2 push/pull, lifecycle eval, scanning, pull-through cache, registry templates, real cosign signature verification |
 | ECS                    |  60 | Full API — clusters, real Fargate-style task execution via Docker, services + rolling deployments, task sets, container instances, ECS Exec, awslogs -> Logs, secrets injection, task role credentials |
+| Elastic Load Balancing v2 |  51 | Full control plane — ALB/NLB/GWLB CRUD, target groups + targets + health, listeners + rules + certificates, attributes, capacity reservations, **mTLS trust stores + revocations**, resource policies, SSL policies, tags |
 
 Detailed per-service pages are coming. If you need specifics on a service today, the conformance baseline at [`conformance-baseline.json`](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json) lists every operation fakecloud handles, and the AWS Smithy models in [`aws-models/`](https://github.com/faiscadev/fakecloud/tree/main/aws-models) are the authoritative source of truth.

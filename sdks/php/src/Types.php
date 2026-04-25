@@ -1468,3 +1468,247 @@ final class EcsClustersResponse
         return new self(array_map(EcsCluster::fromArray(...), $data['clusters'] ?? []));
     }
 }
+
+// ── ELBv2 ──────────────────────────────────────────────────────
+
+final class Elbv2Tag
+{
+    public function __construct(
+        public readonly string $key,
+        public readonly string $value,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['key'], $data['value']);
+    }
+}
+
+final class Elbv2AvailabilityZone
+{
+    public function __construct(
+        public readonly string $zoneName,
+        public readonly string $subnetId,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['zoneName'], $data['subnetId']);
+    }
+}
+
+final class Elbv2LoadBalancer
+{
+    public function __construct(
+        public readonly string $arn,
+        public readonly string $name,
+        public readonly string $dnsName,
+        public readonly string $scheme,
+        public readonly string $vpcId,
+        public readonly string $stateCode,
+        public readonly ?string $stateReason,
+        public readonly string $lbType,
+        public readonly string $ipAddressType,
+        /** @var Elbv2AvailabilityZone[] */
+        public readonly array $availabilityZones,
+        /** @var string[] */
+        public readonly array $securityGroups,
+        public readonly string $createdTime,
+        /** @var Elbv2Tag[] */
+        public readonly array $tags,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['arn'],
+            $data['name'],
+            $data['dnsName'],
+            $data['scheme'],
+            $data['vpcId'],
+            $data['stateCode'],
+            $data['stateReason'] ?? null,
+            $data['lbType'],
+            $data['ipAddressType'],
+            array_map(Elbv2AvailabilityZone::fromArray(...), $data['availabilityZones'] ?? []),
+            $data['securityGroups'] ?? [],
+            $data['createdTime'],
+            array_map(Elbv2Tag::fromArray(...), $data['tags'] ?? []),
+        );
+    }
+}
+
+final class Elbv2LoadBalancersResponse
+{
+    public function __construct(
+        /** @var Elbv2LoadBalancer[] */
+        public readonly array $loadBalancers,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(Elbv2LoadBalancer::fromArray(...), $data['loadBalancers'] ?? []));
+    }
+}
+
+final class Elbv2Target
+{
+    public function __construct(
+        public readonly string $id,
+        public readonly ?int $port,
+        public readonly ?string $availabilityZone,
+        public readonly string $healthState,
+        public readonly ?string $healthReason,
+        public readonly ?string $healthDescription,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['id'],
+            isset($data['port']) ? (int) $data['port'] : null,
+            $data['availabilityZone'] ?? null,
+            $data['healthState'],
+            $data['healthReason'] ?? null,
+            $data['healthDescription'] ?? null,
+        );
+    }
+}
+
+final class Elbv2TargetGroup
+{
+    public function __construct(
+        public readonly string $arn,
+        public readonly string $name,
+        public readonly ?string $protocol,
+        public readonly ?int $port,
+        public readonly ?string $vpcId,
+        public readonly string $targetType,
+        /** @var string[] */
+        public readonly array $loadBalancerArns,
+        /** @var Elbv2Target[] */
+        public readonly array $targets,
+        public readonly ?string $healthCheckProtocol,
+        public readonly ?string $healthCheckPort,
+        public readonly ?string $healthCheckPath,
+        public readonly int $healthyThresholdCount,
+        public readonly int $unhealthyThresholdCount,
+        public readonly string $createdTime,
+        /** @var Elbv2Tag[] */
+        public readonly array $tags,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['arn'],
+            $data['name'],
+            $data['protocol'] ?? null,
+            isset($data['port']) ? (int) $data['port'] : null,
+            $data['vpcId'] ?? null,
+            $data['targetType'],
+            $data['loadBalancerArns'] ?? [],
+            array_map(Elbv2Target::fromArray(...), $data['targets'] ?? []),
+            $data['healthCheckProtocol'] ?? null,
+            $data['healthCheckPort'] ?? null,
+            $data['healthCheckPath'] ?? null,
+            (int) ($data['healthyThresholdCount'] ?? 0),
+            (int) ($data['unhealthyThresholdCount'] ?? 0),
+            $data['createdTime'],
+            array_map(Elbv2Tag::fromArray(...), $data['tags'] ?? []),
+        );
+    }
+}
+
+final class Elbv2TargetGroupsResponse
+{
+    public function __construct(
+        /** @var Elbv2TargetGroup[] */
+        public readonly array $targetGroups,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(Elbv2TargetGroup::fromArray(...), $data['targetGroups'] ?? []));
+    }
+}
+
+final class Elbv2Listener
+{
+    public function __construct(
+        public readonly string $arn,
+        public readonly string $loadBalancerArn,
+        public readonly ?int $port,
+        public readonly ?string $protocol,
+        public readonly ?string $sslPolicy,
+        /** @var string[] */
+        public readonly array $certificateArns,
+        public readonly ?string $defaultActionType,
+        public readonly ?string $defaultTargetGroupArn,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['arn'],
+            $data['loadBalancerArn'],
+            isset($data['port']) ? (int) $data['port'] : null,
+            $data['protocol'] ?? null,
+            $data['sslPolicy'] ?? null,
+            $data['certificateArns'] ?? [],
+            $data['defaultActionType'] ?? null,
+            $data['defaultTargetGroupArn'] ?? null,
+        );
+    }
+}
+
+final class Elbv2ListenersResponse
+{
+    public function __construct(
+        /** @var Elbv2Listener[] */
+        public readonly array $listeners,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(Elbv2Listener::fromArray(...), $data['listeners'] ?? []));
+    }
+}
+
+final class Elbv2Rule
+{
+    public function __construct(
+        public readonly string $arn,
+        public readonly string $listenerArn,
+        public readonly string $priority,
+        public readonly bool $isDefault,
+        /** @var string[] */
+        public readonly array $conditionFields,
+        public readonly ?string $actionType,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['arn'],
+            $data['listenerArn'],
+            $data['priority'],
+            (bool) ($data['isDefault'] ?? false),
+            $data['conditionFields'] ?? [],
+            $data['actionType'] ?? null,
+        );
+    }
+}
+
+final class Elbv2RulesResponse
+{
+    public function __construct(
+        /** @var Elbv2Rule[] */
+        public readonly array $rules,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(Elbv2Rule::fromArray(...), $data['rules'] ?? []));
+    }
+}

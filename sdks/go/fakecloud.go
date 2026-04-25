@@ -115,6 +115,9 @@ func (fc *FakeCloud) Bedrock() *BedrockClient { return &BedrockClient{fc: fc} }
 // ECS returns the ECS sub-client.
 func (fc *FakeCloud) ECS() *ECSClient { return &ECSClient{fc: fc} }
 
+// ELBv2 returns the Elastic Load Balancing v2 sub-client.
+func (fc *FakeCloud) ELBv2() *ELBv2Client { return &ELBv2Client{fc: fc} }
+
 // ── Error type ─────────────────────────────────────────────────────
 
 // APIError is returned when the server responds with a non-2xx status.
