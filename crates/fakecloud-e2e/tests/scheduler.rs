@@ -387,3 +387,63 @@ async fn scheduler_dlq_routing_on_missing_target_queue() {
     assert!(attrs.contains_key("X-Amz-Scheduler-Schedule-Arn"));
     assert!(attrs.contains_key("X-Amz-Scheduler-Error-Code"));
 }
+
+#[tokio::test]
+async fn cross_account_sqs_target_delivers_to_target_account_queue() {
+    use aws_credential_types::Credentials;
+
+    const ACCOUNT_A: &str = "111111111111";
+    const ACCOUNT_B: &str = "222222222222";
+
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "soft")]).await;
+
+    // Bootstrap admins in both accounts so we can sign as either.
+    let (a_akid, a_secret) = server.create_admin(ACCOUNT_A, "admin-a").await;
+    let (b_akid, b_secret) = server.create_admin(ACCOUNT_B, "admin-b").await;
+
+    let cfg_a = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(&a_akid, &a_secret, None, None, "a"))
+        .load()
+        .await;
+    let cfg_b = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(&b_akid, &b_secret, None, None, "b"))
+        .load()
+        .await;
+
+    // Account B owns the destination queue.
+    let sqs_b = aws_sdk_sqs::Client::new(&cfg_b);
+    let dest_url = queue_url(&sqs_b, "xacct-dest").await;
+    let dest_arn = queue_arn(&sqs_b, &dest_url).await;
+    assert!(
+        dest_arn.contains(ACCOUNT_B),
+        "queue ARN should include account B"
+    );
+
+    // Account A creates a schedule whose target points at account B's queue.
+    let scheduler_a = aws_sdk_scheduler::Client::new(&cfg_a);
+    let target = Target::builder()
+        .arn(&dest_arn)
+        .role_arn(format!("arn:aws:iam::{ACCOUNT_A}:role/scheduler"))
+        .input("{\"crossAccount\":true}")
+        .build()
+        .unwrap();
+    scheduler_a
+        .create_schedule()
+        .name("xacct-sched")
+        .schedule_expression("rate(1 minute)")
+        .flexible_time_window(off_window())
+        .target(target)
+        .send()
+        .await
+        .unwrap();
+
+    // Account B receives the message via the same queue.
+    let msg = wait_for_message(&sqs_b, &dest_url, Duration::from_secs(10))
+        .await
+        .expect("cross-account schedule should deliver to account B queue");
+    assert_eq!(msg.body.unwrap(), "{\"crossAccount\":true}");
+}
