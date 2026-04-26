@@ -1107,6 +1107,7 @@ mod tests {
             headers: HeaderMap::new(),
             query_params,
             body: Bytes::from(body.to_string()),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments,
             raw_path: path.to_string(),
             raw_query: raw_query.to_string(),

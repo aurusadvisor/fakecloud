@@ -26,11 +26,81 @@ const REST_XML_SERVICES: &[&str] = &["s3", "cloudfront"];
 const REST_JSON_SERVICES: &[&str] = &["lambda", "ses", "apigateway", "bedrock", "scheduler"];
 
 /// Detected service name and action from an incoming HTTP request.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DetectedRequest {
     pub service: String,
     pub action: String,
     pub protocol: AwsProtocol,
+}
+
+/// Header-only service detection. Skips the form-encoded body sniff so
+/// the dispatch path can decide whether to stream or buffer the body
+/// without first reading it. Returns `None` when only a body sniff
+/// would succeed; the caller must then fall back to [`detect_service`]
+/// after buffering. Used to opt streaming routes (S3 PutObject /
+/// UploadPart, ECR OCI v2 blob upload) out of the global body cap.
+pub fn detect_service_headers_only(
+    headers: &HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> Option<DetectedRequest> {
+    // Mirrors `detect_service` minus step 3 (form-body sniff).
+    if let Some(target) = headers.get("x-amz-target").and_then(|v| v.to_str().ok()) {
+        return parse_amz_target(target);
+    }
+    if let Some(action) = query_params.get("Action") {
+        let service = extract_service_from_auth(headers)
+            .or_else(|| infer_service_from_action(action))
+            .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service));
+        if let Some(service) = service {
+            return Some(DetectedRequest {
+                service,
+                action: action.clone(),
+                protocol: AwsProtocol::Query,
+            });
+        }
+    }
+    if let Some(service) = extract_service_from_auth(headers) {
+        if let Some(protocol) = rest_protocol_for(&service) {
+            return Some(DetectedRequest {
+                service,
+                action: String::new(),
+                protocol,
+            });
+        }
+    }
+    if let Some(credential) = query_params.get("X-Amz-Credential") {
+        let parts: Vec<&str> = credential.split('/').collect();
+        if parts.len() >= 4 {
+            let service = parts[3].to_string();
+            if let Some(protocol) = rest_protocol_for(&service) {
+                return Some(DetectedRequest {
+                    service,
+                    action: String::new(),
+                    protocol,
+                });
+            }
+        }
+    }
+    if query_params.contains_key("AWSAccessKeyId")
+        && query_params.contains_key("Signature")
+        && query_params.contains_key("Expires")
+    {
+        return Some(DetectedRequest {
+            service: "s3".to_string(),
+            action: String::new(),
+            protocol: AwsProtocol::Rest,
+        });
+    }
+    if let Some(host_info) = parse_routing_host_from_headers(headers) {
+        if let Some(protocol) = rest_protocol_for(&host_info.service) {
+            return Some(DetectedRequest {
+                service: host_info.service,
+                action: String::new(),
+                protocol,
+            });
+        }
+    }
+    None
 }
 
 /// Detect the target service and action from HTTP request components.

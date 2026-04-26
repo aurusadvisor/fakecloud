@@ -211,7 +211,17 @@ impl AwsService for EcrService {
         "ecr"
     }
 
-    async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn handle(&self, mut request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // OCI blob upload PATCH/PUT routes through the dispatch-level
+        // streaming path (no body cap). Materialize the stream here
+        // with no upper bound so the existing per-method handlers see
+        // a `Bytes` payload. Future work: have the blob upload state
+        // accept streamed chunks straight to a per-upload spool file
+        // instead of base64-in-memory.
+        if let Some(stream) = request.take_body_stream() {
+            request.body = fakecloud_core::service::drain_request_stream(stream).await?;
+        }
+
         // OCI v2 Distribution requests come in as path-only REST
         // (`/v2/...` with no `X-Amz-Target`). Dispatch them before the
         // JSON control plane. Most OCI paths mutate state too (uploads,

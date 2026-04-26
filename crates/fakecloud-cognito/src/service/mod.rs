@@ -1683,6 +1683,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             query_params: std::collections::HashMap::new(),
             body: bytes::Bytes::from(r#"{}"#),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -1750,6 +1751,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             query_params: std::collections::HashMap::new(),
             body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -1780,6 +1782,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -1815,6 +1818,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             query_params: std::collections::HashMap::new(),
             body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -1846,6 +1850,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -1887,6 +1892,7 @@ mod tests {
                 body: bytes::Bytes::from(
                     serde_json::to_string(&json!({"PoolName": name})).unwrap(),
                 ),
+                body_stream: parking_lot::Mutex::new(None),
                 path_segments: vec![],
                 raw_path: "/".to_string(),
                 raw_query: String::new(),
@@ -1919,6 +1925,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -1951,6 +1958,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2117,6 +2125,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             query_params: std::collections::HashMap::new(),
             body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2147,6 +2156,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2424,6 +2434,7 @@ mod tests {
             body: bytes::Bytes::from(
                 serde_json::to_string(&json!({ "PoolName": "test-pool" })).unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2453,6 +2464,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2501,6 +2513,7 @@ mod tests {
             body: bytes::Bytes::from(
                 serde_json::to_string(&json!({ "PoolName": "test-pool" })).unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2530,6 +2543,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2556,6 +2570,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2583,6 +2598,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2619,6 +2635,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2660,6 +2677,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             query_params: std::collections::HashMap::new(),
             body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2693,6 +2711,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2730,6 +2749,7 @@ mod tests {
             body: bytes::Bytes::from(
                 serde_json::to_string(&json!({"AccessToken": "test-access-token"})).unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2755,6 +2775,7 @@ mod tests {
             body: bytes::Bytes::from(
                 serde_json::to_string(&json!({"AccessToken": "invalid-token"})).unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2790,6 +2811,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             query_params: std::collections::HashMap::new(),
             body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2820,6 +2842,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2866,6 +2889,7 @@ mod tests {
             body: bytes::Bytes::from(
                 serde_json::to_string(&json!({"AccessToken": "del-token"})).unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2909,6 +2933,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             query_params: std::collections::HashMap::new(),
             body: bytes::Bytes::from(r#"{"PoolName":"test"}"#),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2940,6 +2965,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -2981,6 +3007,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -3023,6 +3050,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -3062,6 +3090,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -3088,6 +3117,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -3146,6 +3176,7 @@ mod tests {
             body: bytes::Bytes::from(
                 serde_json::to_string(&json!({ "PoolName": "mfa-pool" })).unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -3173,6 +3204,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -3207,6 +3239,7 @@ mod tests {
                 }))
                 .unwrap(),
             ),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
@@ -3238,6 +3271,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             query_params: std::collections::HashMap::new(),
             body: bytes::Bytes::from(body.to_string()),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),
