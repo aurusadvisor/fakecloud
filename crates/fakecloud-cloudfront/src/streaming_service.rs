@@ -218,7 +218,11 @@ impl CloudFrontService {
                 "StreamingDistribution must be disabled before deletion",
             ));
         }
+        let arn = d.arn.clone();
         account.streaming_distributions.remove(&id);
+        // Tags are keyed by ARN — drop them too so ListTagsForResource
+        // doesn't return tags for a deleted resource.
+        account.tags.remove(&arn);
         drop(state);
         Ok(crate::policies::empty(StatusCode::NO_CONTENT))
     }

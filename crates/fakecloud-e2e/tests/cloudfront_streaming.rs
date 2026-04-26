@@ -135,3 +135,57 @@ async fn list_streaming_distributions_includes_created() {
         "list should contain at least one streaming distribution"
     );
 }
+
+#[tokio::test]
+async fn delete_streaming_distribution_clears_tags() {
+    use aws_sdk_cloudfront::types::{
+        StreamingDistributionConfigWithTags, Tag as SdkTag, Tags as SdkTags,
+    };
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+
+    let create = cf
+        .create_streaming_distribution_with_tags()
+        .streaming_distribution_config_with_tags(
+            StreamingDistributionConfigWithTags::builder()
+                .streaming_distribution_config(streaming_cfg("e2e-sd-tagcleanup", false))
+                .tags(
+                    SdkTags::builder()
+                        .items(SdkTag::builder().key("env").value("e2e").build().unwrap())
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let dist = create.streaming_distribution().unwrap();
+    let id = dist.id().to_string();
+    let arn = dist.arn().to_string();
+    let etag = create.e_tag().unwrap().to_string();
+
+    // Confirm tags exist via ListTagsForResource.
+    let tags = cf
+        .list_tags_for_resource()
+        .resource(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tags().unwrap().items().len(), 1);
+
+    cf.delete_streaming_distribution()
+        .id(&id)
+        .if_match(&etag)
+        .send()
+        .await
+        .unwrap();
+
+    // After delete, tags must be gone.
+    let tags = cf
+        .list_tags_for_resource()
+        .resource(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tags.tags().unwrap().items().len(), 0);
+}
