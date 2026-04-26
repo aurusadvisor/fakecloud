@@ -8,6 +8,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::extras::{StoredAnycastIpList, StoredResourcePolicy, StoredTrustStore, StoredVpcOrigin};
+use crate::extras2::StoredConnectionGroup;
 use crate::fle::{
     StoredFieldLevelEncryption, StoredFieldLevelEncryptionProfile, StoredRealtimeLogConfig,
 };
@@ -75,6 +76,7 @@ pub struct AccountState {
     pub trust_stores: HashMap<String, StoredTrustStore>,
     /// Resource policies keyed by resource ARN.
     pub resource_policies: HashMap<String, StoredResourcePolicy>,
+    pub connection_groups: HashMap<String, StoredConnectionGroup>,
 }
 
 impl CloudFrontAccounts {
