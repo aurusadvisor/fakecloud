@@ -854,7 +854,10 @@ fn build_distribution_xml(dist: &StoredDistribution) -> String {
         "<InProgressInvalidationBatches>{}</InProgressInvalidationBatches>",
         dist.in_progress_invalidation_batches
     ));
-    out.push_str(&format!("<DomainName>{}</DomainName>", esc(&dist.domain_name)));
+    out.push_str(&format!(
+        "<DomainName>{}</DomainName>",
+        esc(&dist.domain_name)
+    ));
     out.push_str("<ActiveTrustedSigners><Enabled>false</Enabled><Quantity>0</Quantity></ActiveTrustedSigners>");
     out.push_str("<ActiveTrustedKeyGroups><Enabled>false</Enabled><Quantity>0</Quantity></ActiveTrustedKeyGroups>");
     let inner = quick_xml::se::to_string_with_root("DistributionConfig", &dist.config)
@@ -1437,8 +1440,10 @@ mod tests {
     #[tokio::test]
     async fn xml_metacharacters_in_user_input_are_escaped() {
         let svc = CloudFrontService::new(make_state());
-        let body = minimal_dist_config_xml("escape-ref")
-            .replace("<Comment></Comment>", "<Comment><![CDATA[a&b<c>d]]></Comment>");
+        let body = minimal_dist_config_xml("escape-ref").replace(
+            "<Comment></Comment>",
+            "<Comment><![CDATA[a&b<c>d]]></Comment>",
+        );
         let create = svc
             .handle(make_request(
                 http::Method::POST,
