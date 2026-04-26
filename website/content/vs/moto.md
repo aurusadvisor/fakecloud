@@ -24,7 +24,7 @@ fakecloud is a different tool for a different problem.
 | Works with AWS CLI | Yes | **No** |
 | Real Lambda execution | Yes (13 runtimes, real containers) | **No** (stubbed responses) |
 | Real RDS databases | Yes (PostgreSQL/MySQL/MariaDB via Docker) | **No** (in-memory stubs) |
-| Real ElastiCache | Yes (Redis/Valkey via Docker) | **No** |
+| Real ElastiCache | Yes (Redis/Valkey/Memcached via Docker) | **No** |
 | Real `docker push`/`pull` to ECR | Yes (OCI v2 Distribution) | **No** (Moto ships the JSON control plane only) |
 | Real cross-service wiring | Yes (S3 -> Lambda, SNS fan-out, etc fire end-to-end) | Partial (Moto simulates some events, not real execution) |
 | Setup for Python unit tests | HTTP endpoint override + fakecloud running | `@mock_aws` decorator |

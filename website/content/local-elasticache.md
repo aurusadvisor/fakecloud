@@ -1,6 +1,6 @@
 +++
 title = "Local ElastiCache for integration tests"
-description = "Run local ElastiCache for integration tests with fakecloud. 75 operations, real Redis/Valkey via Docker, replication groups, serverless caches. Free, no account required."
+description = "Run local ElastiCache for integration tests with fakecloud. 75 operations, real Redis/Valkey/Memcached via Docker, replication groups, serverless caches. Free, no account required."
 template = "page.html"
 +++
 
@@ -11,12 +11,12 @@ curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh
 fakecloud
 ```
 
-Point your AWS SDK at `http://localhost:4566`. Docker required because fakecloud runs **real** Redis / Valkey.
+Point your AWS SDK at `http://localhost:4566`. Docker required because fakecloud runs **real** Redis / Valkey / Memcached.
 
 ## Why fakecloud for ElastiCache
 
 - **75 ElastiCache operations** at 100% conformance — cache clusters, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users / user groups, failover, tagging.
-- **Real Redis and real Valkey.** fakecloud pulls real Redis / Valkey Docker images and runs them as the ElastiCache node. Your `LPUSH`, `ZADD`, `XADD`, streams, pub/sub, Lua scripts — all work because the engine is real.
+- **Real Redis, Valkey, and Memcached.** fakecloud pulls real Redis / Valkey / Memcached Docker images and runs them as the ElastiCache node. Your `LPUSH`, `ZADD`, `XADD`, streams, pub/sub, Lua scripts — all work because the engine is real. Memcached gets a real `memcached:1.6-alpine` container with the full text protocol.
 - **Endpoint works.** `DescribeCacheClusters` returns a real connectable host. Your application connects with a regular Redis client (redis-py, ioredis, lettuce, go-redis).
 - **Paid on LocalStack; free here.** ElastiCache has always been LocalStack Pro-only.
 - **No account, no auth token, no paid tier.** AGPL-3.0.
@@ -74,6 +74,18 @@ aws --endpoint-url http://localhost:4566 elasticache create-replication-group \
 
 Real primary + replica nodes via Redis replication.
 
+## Memcached
+
+```sh
+aws --endpoint-url http://localhost:4566 elasticache create-cache-cluster \
+  --cache-cluster-id mymc \
+  --engine memcached \
+  --cache-node-type cache.t3.micro \
+  --num-cache-nodes 1
+```
+
+Real `memcached` text protocol — `set`, `get`, `delete`, `stats`, CAS, all work. AWS does not support replication groups or serverless caches for Memcached, and neither does fakecloud.
+
 ## Serverless caches
 
 ```sh
@@ -110,13 +122,13 @@ test('app caches via real redis behind ElastiCache emulation', async () => {
 
 ## How it differs from alternatives
 
-| Tool | Real Redis | Real Valkey | Replication groups | Serverless caches | Price |
-|---|---|---|---|---|---|
-| fakecloud | Yes (Docker) | Yes (Docker) | Yes | Yes | Free |
-| LocalStack Pro | Yes | Yes | Yes | Partial | Paid |
-| LocalStack Community | **No** | **No** | — | — | — (not available) |
-| Plain `docker run redis` | Yes | N/A | Manual | N/A | Free, but no ElastiCache API |
-| Moto | Stubbed | Stubbed | Stubbed | Stubbed | Free |
+| Tool | Real Redis | Real Valkey | Real Memcached | Replication groups | Serverless caches | Price |
+|---|---|---|---|---|---|---|
+| fakecloud | Yes (Docker) | Yes (Docker) | Yes (Docker) | Yes | Yes | Free |
+| LocalStack Pro | Yes | Yes | Yes | Yes | Partial | Paid |
+| LocalStack Community | **No** | **No** | **No** | — | — | — (not available) |
+| Plain `docker run redis` | Yes | N/A | N/A | Manual | N/A | Free, but no ElastiCache API |
+| Moto | Stubbed | Stubbed | Stubbed | Stubbed | Stubbed | Free |
 
 ## Links
 

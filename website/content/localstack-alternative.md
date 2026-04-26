@@ -19,7 +19,7 @@ Point any AWS SDK or CLI at `http://localhost:4566` with dummy credentials. That
 
 fakecloud aims at every AWS service, each at 100% behavioral conformance, including every cross-service integration. Services land depth-first: a service is supported when it matches real AWS across every documented operation and cross-service wire-up — not when the API surface looks filled in. 26 services are there today (see below); the rest are on the roadmap, prioritized by real-project demand.
 
-This is why fakecloud runs real Lambda code in real runtime containers, runs real PostgreSQL/MySQL/MariaDB for RDS, runs real Redis/Valkey for ElastiCache, fires real S3 -> Lambda and SES inbound -> S3/SNS/Lambda flows, and validates every operation against AWS's own Smithy models on every commit.
+This is why fakecloud runs real Lambda code in real runtime containers, runs real PostgreSQL/MySQL/MariaDB for RDS, runs real Redis/Valkey/Memcached for ElastiCache, fires real S3 -> Lambda and SES inbound -> S3/SNS/Lambda flows, and validates every operation against AWS's own Smithy models on every commit.
 
 ## What fakecloud gives you
 
@@ -27,7 +27,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 - **1,924 API operations. 100% conformance** per implemented service, validated against AWS's own Smithy models on every commit (59,000+ generated test variants).
 - **Tested against upstream Terraform acceptance tests.** CI runs `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud, catching waiter and field-presence drift that pure SDK tests miss.
 - **Real Lambda execution.** 13 runtimes in Docker containers. Not a mock, not a stub. Node, Python, Java, Go, .NET, Ruby, custom runtimes.
-- **Real stateful services.** RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey. Your Lambda talking to RDS is talking to a real Postgres.
+- **Real stateful services.** RDS runs real PostgreSQL/MySQL/MariaDB. ElastiCache runs real Redis/Valkey/Memcached. Your Lambda talking to RDS is talking to a real Postgres.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, 15+ more end-to-end integrations.
 - **Fast.** ~500ms startup. ~10 MiB idle memory. ~19 MB binary. No Docker required to run fakecloud itself.
 - **Test-assertion SDKs** for TypeScript, Python, Go, PHP, Java, and Rust. Assert that an email was sent, an SNS message published, a Lambda invoked, without writing raw HTTP.
@@ -51,7 +51,7 @@ This is why fakecloud runs real Lambda code in real runtime containers, runs rea
 | SES v2 | 110 operations, full send + templates + DKIM | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | SES inbound email | Real receipt rule action execution | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) |
 | RDS | 163 ops, real PostgreSQL/MySQL/MariaDB via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/) |
-| ElastiCache | 75 ops, real Redis/Valkey via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/) |
+| ElastiCache | 75 ops, real Redis/Valkey/Memcached via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | API Gateway v2 | 103 ops, HTTP APIs + developer portals + JWT/Lambda authorizers | [Paid only](https://docs.localstack.cloud/references/licensing/) |
 | Bedrock | 111 ops (control plane + runtime) | Not available |
 
