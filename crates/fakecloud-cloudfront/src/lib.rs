@@ -13,6 +13,8 @@ pub mod policies_service;
 pub mod router;
 pub mod service;
 pub mod state;
+pub mod streaming;
+pub mod streaming_service;
 pub mod xml_io;
 
 pub use service::CloudFrontService;

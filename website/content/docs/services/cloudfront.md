@@ -4,9 +4,9 @@ description = "CloudFront control plane — distributions, invalidations, web AC
 weight = 24
 +++
 
-fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, the full policy resource surface (OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment), CloudFront Functions, public keys + key groups, key value stores, legacy origin access identities, and per-distribution monitoring subscriptions. 93 operations.
+fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, the full policy resource surface (OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment), CloudFront Functions, public keys + key groups, key value stores, legacy origin access identities, per-distribution monitoring subscriptions, and the legacy RTMP streaming distributions. 100 operations.
 
-**Status: Batches 1-3 shipped.** Streaming distributions, field-level encryption, real-time log config, VPC origins, anycast IP lists, trust stores, distribution tenants, and connection functions/groups are still pending across subsequent batches.
+**Status: Batches 1-4 shipped.** Field-level encryption, real-time log config, VPC origins, anycast IP lists, trust stores, distribution tenants, and connection functions/groups are still pending across subsequent batches.
 
 ## Supported today
 
@@ -25,6 +25,7 @@ fakecloud implements CloudFront's REST-XML control plane focused on the operatio
 - **Key Value Stores** — `CreateKeyValueStore` (with optional `ImportSource`), `DescribeKeyValueStore`, `UpdateKeyValueStore`, `DeleteKeyValueStore`, `ListKeyValueStores`.
 - **Legacy Origin Access Identities** — `CreateCloudFrontOriginAccessIdentity`, `Get`, `GetConfig`, `Update`, `Delete`, `List`.
 - **Monitoring Subscriptions** — `CreateMonitoringSubscription`, `GetMonitoringSubscription`, `DeleteMonitoringSubscription` keyed by distribution id.
+- **Streaming Distributions (legacy RTMP)** — `CreateStreamingDistribution`, `CreateStreamingDistributionWithTags`, `GetStreamingDistribution`, `GetStreamingDistributionConfig`, `UpdateStreamingDistribution`, `DeleteStreamingDistribution`, `ListStreamingDistributions`. ETag/If-Match concurrency. `DeleteStreamingDistribution` enforces the AWS rule that the distribution must be `Enabled = false` before deletion (`StreamingDistributionNotDisabled`).
 
 ### Concurrency semantics
 
@@ -78,11 +79,10 @@ aws --endpoint-url http://localhost:4566 cloudfront list-invalidations --distrib
 
 | Surface                                | Status                  |
 |----------------------------------------|-------------------------|
-| Field-Level Encryption                 | Batch 4                 |
-| Real-time Log Config                   | Batch 4                 |
-| Streaming Distributions (legacy RTMP)  | Batch 4                 |
-| VPC Origins + Anycast IP Lists         | Batch 5                 |
-| Trust Stores + Distribution Tenants    | Batch 5                 |
-| Connection Functions / Groups          | Batch 5                 |
+| Field-Level Encryption                 | Batch 5                 |
+| Real-time Log Config                   | Batch 5                 |
+| VPC Origins + Anycast IP Lists         | Batch 6                 |
+| Trust Stores + Distribution Tenants    | Batch 6                 |
+| Connection Functions / Groups          | Batch 6                 |
 
 There is no edge data plane: requests against a CloudFront distribution domain are not actually proxied to origins. Use ELBv2's in-process data plane for HTTP request matching tests today.

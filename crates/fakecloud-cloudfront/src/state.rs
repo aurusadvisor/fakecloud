@@ -16,6 +16,7 @@ use crate::policies::{
     StoredCachePolicy, StoredContinuousDeploymentPolicy, StoredOriginAccessControl,
     StoredOriginRequestPolicy, StoredResponseHeadersPolicy,
 };
+use crate::streaming::StoredStreamingDistribution;
 
 pub type SharedCloudFrontState = Arc<RwLock<CloudFrontAccounts>>;
 
@@ -60,6 +61,7 @@ pub struct AccountState {
     pub origin_access_identities: HashMap<String, StoredOriginAccessIdentity>,
     /// Per-distribution monitoring subscription, keyed by distribution id.
     pub monitoring_subscriptions: HashMap<String, StoredMonitoringSubscription>,
+    pub streaming_distributions: HashMap<String, StoredStreamingDistribution>,
 }
 
 impl CloudFrontAccounts {

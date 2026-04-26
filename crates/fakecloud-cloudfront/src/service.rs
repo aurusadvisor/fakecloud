@@ -118,6 +118,13 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateMonitoringSubscription",
     "GetMonitoringSubscription",
     "DeleteMonitoringSubscription",
+    "CreateStreamingDistribution",
+    "CreateStreamingDistributionWithTags",
+    "GetStreamingDistribution",
+    "GetStreamingDistributionConfig",
+    "UpdateStreamingDistribution",
+    "DeleteStreamingDistribution",
+    "ListStreamingDistributions",
 ];
 
 pub struct CloudFrontService {
@@ -263,6 +270,13 @@ impl AwsService for CloudFrontService {
             "CreateMonitoringSubscription" => self.create_monitoring_subscription(&req, &resolved),
             "GetMonitoringSubscription" => self.get_monitoring_subscription(&resolved),
             "DeleteMonitoringSubscription" => self.delete_monitoring_subscription(&resolved),
+            "CreateStreamingDistribution" => self.create_streaming_distribution(&req, false),
+            "CreateStreamingDistributionWithTags" => self.create_streaming_distribution(&req, true),
+            "GetStreamingDistribution" => self.get_streaming_distribution(&resolved),
+            "GetStreamingDistributionConfig" => self.get_streaming_distribution_config(&resolved),
+            "UpdateStreamingDistribution" => self.update_streaming_distribution(&req, &resolved),
+            "DeleteStreamingDistribution" => self.delete_streaming_distribution(&req, &resolved),
+            "ListStreamingDistributions" => self.list_streaming_distributions(&req),
             other => Err(aws_error(
                 StatusCode::NOT_IMPLEMENTED,
                 "InvalidAction",
