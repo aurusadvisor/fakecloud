@@ -585,7 +585,7 @@ impl ApiGatewayService {
             "CreateDomainNameAccessAssociation" => self.create_dnaa(req),
             "GetDomainNameAccessAssociations" => self.get_dnaas(req),
             "DeleteDomainNameAccessAssociation" => self.delete_dnaa(req, &params),
-            "RejectDomainNameAccessAssociation" => self.reject_dnaa(req),
+            "RejectDomainNameAccessAssociation" => self.reject_dnaa(req, &params),
             "ImportApiKeys" => self.import_api_keys(req),
             "ImportDocumentationParts" => self.import_documentation_parts(req, &params),
             "CreateBasePathMapping" => self.create_base_path_mapping(req, &params),
@@ -3028,20 +3028,24 @@ impl ApiGatewayService {
         ok_no_content()
     }
 
-    fn reject_dnaa(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    fn reject_dnaa(
+        &self,
+        req: &AwsRequest,
+        params: &HashMap<String, String>,
+    ) -> Result<AwsResponse, AwsServiceError> {
         // Reject deletes (rejects) the association on the receiving
-        // account side. AWS returns 202 with no body.
-        let body = req.json_body();
-        let arn = body
+        // account side. The arn arrives as a query string parameter.
+        // AWS returns 202 with no body.
+        let arn = params
             .get("domainNameAccessAssociationArn")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if !arn.is_empty() {
-            let mut accounts = self.state.write();
-            let state = accounts.get_or_create(&request_account(req));
-            state.domain_name_access_associations.remove(&arn);
+            .cloned()
+            .unwrap_or_default();
+        if arn.is_empty() {
+            return Err(bad_request("domainNameAccessAssociationArn is required"));
         }
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request_account(req));
+        state.domain_name_access_associations.remove(&arn);
         ok_no_content()
     }
 

@@ -72,7 +72,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | RDS                    | 163 | Real Postgres, MySQL, MariaDB, Oracle, SQL Server, Db2 via Docker; lifecycle ops emit `aws.rds` EventBridge events |
 | ElastiCache            |  75 | Real Redis, Valkey, Memcached via Docker                               |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
-| API Gateway v1         | 118 | REST APIs, resources, methods, integrations (`MOCK`/`HTTP`/`HTTP_PROXY`/`AWS_PROXY` Lambda), deployments, stages, API keys, usage plans, authorizers, models, request validators, VPC links, domain names, base path mappings, client certs, gateway responses, docs, tags |
+| API Gateway v1         | 124 | REST APIs, resources, methods, integrations (`MOCK`/`HTTP`/`HTTP_PROXY`/`AWS_PROXY` Lambda), deployments, stages, API keys, usage plans, authorizers, models, request validators, VPC links, domain names, base path mappings, client certs, gateway responses, docs, tags |
 | API Gateway v2         | 103 | HTTP APIs, routes, integrations, stages, deployments, authorizers, domains, models, VPC links, routing rules, developer portals, CORS, tags |
 | Bedrock                | 101 | Foundation models, guardrails, custom models, invocation/eval jobs    |
 | Bedrock Runtime        |  10 | InvokeModel, Converse, streaming, configurable responses, fault inject |

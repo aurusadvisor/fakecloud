@@ -456,12 +456,26 @@ pub fn resolve(
         (Method::GET, ["domainnameaccessassociations"]) => {
             Some(ResolvedAction::new("GetDomainNameAccessAssociations"))
         }
-        (Method::DELETE, ["domainnameaccessassociations", arn @ ..]) => Some(
-            ResolvedAction::new("DeleteDomainNameAccessAssociation")
-                .with("domainNameAccessAssociationArn", &arn.join("/")),
-        ),
+        (Method::DELETE, ["domainnameaccessassociations", first, rest @ ..]) => {
+            let mut arn = (*first).to_string();
+            for seg in rest {
+                arn.push('/');
+                arn.push_str(seg);
+            }
+            Some(
+                ResolvedAction::new("DeleteDomainNameAccessAssociation")
+                    .with("domainNameAccessAssociationArn", &arn),
+            )
+        }
         (Method::POST, ["rejectdomainnameaccessassociations"]) => {
-            Some(ResolvedAction::new("RejectDomainNameAccessAssociation"))
+            let mut a = ResolvedAction::new("RejectDomainNameAccessAssociation");
+            if let Some(arn) = query_params.get("domainNameAccessAssociationArn") {
+                a = a.with("domainNameAccessAssociationArn", arn);
+            }
+            if let Some(name) = query_params.get("domainName") {
+                a = a.with("domainName", name);
+            }
+            Some(a)
         }
 
         // ImportDocumentationParts (PUT on the same path that POST hits
