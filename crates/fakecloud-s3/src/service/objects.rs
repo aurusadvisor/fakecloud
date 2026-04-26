@@ -12,8 +12,8 @@ use crate::state::{AclGrant, S3Object};
 
 use super::{
     canned_acl_grants_for_object, check_get_conditionals, check_head_conditionals,
-    check_object_lock_for_overwrite, compute_checksum, compute_md5, deliver_notifications,
-    etag_matches, extract_user_metadata, extract_xml_value, is_frozen, is_valid_storage_class,
+    check_object_lock_for_overwrite, compute_checksum, deliver_notifications, etag_matches,
+    extract_user_metadata, extract_xml_value, is_frozen, is_valid_storage_class,
     make_delete_marker, no_such_bucket, no_such_key, parse_delete_objects_xml, parse_grant_headers,
     parse_range_header, parse_url_encoded_tags, precondition_failed, replicate_through_store,
     resolve_object, s3_xml, url_encode_s3_key, xml_escape, RangeResult, S3Service,
@@ -732,40 +732,28 @@ impl S3Service {
         }; // read lock dropped
 
         // --- Preparation phase: compute object data outside any lock ---
-        // Streaming PutObject: drain the raw HTTP body to a tempfile on
-        // disk while computing MD5 + size in constant memory. For
-        // disk-mode the spool lands inside the S3 root so the eventual
-        // rename is a same-FS metadata move; for memory-mode the spool
-        // is read back into bytes and unlinked once the store consumes
-        // it. Buffered (non-streaming) callers fall through with the
-        // existing `req.body` flow.
-        let spooled: Option<fakecloud_core::service::SpooledBody> =
-            if let Some(stream) = req.take_body_stream() {
-                Some(
-                    fakecloud_core::service::spool_request_stream(
-                        stream,
-                        self.store.spool_dir().as_deref(),
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            };
-        let buffered_body: Option<Bytes> = if spooled.is_none() {
-            Some(req.body.clone())
-        } else {
-            None
-        };
-        let data_size: u64 = match (&spooled, &buffered_body) {
-            (Some(s), _) => s.size,
-            (None, Some(b)) => b.len() as u64,
-            (None, None) => 0,
-        };
-        let etag: String = match (&spooled, &buffered_body) {
-            (Some(s), _) => s.md5_hex.clone(),
-            (None, Some(b)) => compute_md5(b),
-            (None, None) => compute_md5(&Bytes::new()),
-        };
+        // PutObject is a streaming-only route: dispatch always wires
+        // `body_stream` for PUT-on-bucket-key requests routed through
+        // S3, and the test helper does the same for direct service
+        // calls. We drain the stream into a tempfile here, computing
+        // MD5 + size in constant memory; in disk mode the spool lands
+        // on the S3 root so the eventual rename is a same-FS metadata
+        // move, in memory mode the store reads the file back and
+        // unlinks it.
+        let stream = req.take_body_stream().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedRequestBody",
+                "PutObject requires a streaming request body",
+            )
+        })?;
+        let spooled = fakecloud_core::service::spool_request_stream(
+            stream,
+            self.store.spool_dir().as_deref(),
+        )
+        .await?;
+        let data_size: u64 = spooled.size;
+        let etag: String = spooled.md5_hex.clone();
         let content_type = req
             .headers
             .get("content-type")
@@ -925,19 +913,17 @@ impl S3Service {
                 None
             }
         });
-        // Checksum computation. For buffered uploads we hash the in-memory
-        // body. For streamed uploads with an explicit checksum algorithm
-        // requested by the client, fold the spool file through the
-        // hasher in 1 MiB chunks (constant memory). Streamed uploads
-        // with no checksum algorithm skip this entirely.
-        let checksum_value = match (&checksum_algorithm, &buffered_body, &spooled) {
-            (Some(algo), Some(b), _) => Some(compute_checksum(algo, b)),
-            (Some(algo), None, Some(spool)) => Some(
-                super::compute_checksum_streaming(algo, &spool.path)
+        // Checksum computation: when the client requested an explicit
+        // algorithm, fold the spool through the hasher in 1 MiB chunks.
+        // Constant memory; skipped when no algorithm is requested.
+        let checksum_value = if let Some(algo) = &checksum_algorithm {
+            Some(
+                super::compute_checksum_streaming(algo, &spooled.path)
                     .await
                     .map_err(super::io_to_aws)?,
-            ),
-            _ => None,
+            )
+        } else {
+            None
         };
 
         // Object lock - explicit headers or bucket default
@@ -978,43 +964,28 @@ impl S3Service {
             }
         }
 
-        // SSE-KMS: encrypt the body via the KMS hook so it lands as a
-        // fakecloud-kms envelope on disk and through replication. The
-        // KMS hook needs the plaintext as `Bytes` so streamed uploads
-        // get materialized here once (acceptable: KMS-encrypted objects
-        // are typically smaller than streamable plaintext, and the
-        // alternative would require chunked AES-GCM, which AWS itself
-        // doesn't expose). Fail-closed: a KMS error here aborts
-        // PutObject before any mutation. Non-KMS streamed uploads fall
-        // through with `body_source = BodySource::File` and never
-        // touch RAM.
+        // SSE-KMS: read the spool back into memory so the KMS hook can
+        // produce an envelope-encrypted blob (AES-GCM needs the whole
+        // plaintext at once — chunked AEAD isn't part of the AWS S3
+        // wire format). Fail-closed: a KMS error aborts PutObject
+        // before any mutation. Non-KMS uploads pass `BodySource::File`
+        // straight to the store and never copy the payload into RAM.
         let plaintext_size = data_size;
         let body_source: BodySource = if sse_algorithm.as_deref() == Some("aws:kms") {
-            let plaintext: Bytes = match (&buffered_body, &spooled) {
-                (Some(b), _) => b.clone(),
-                (None, Some(spool)) => {
-                    let bytes = tokio::fs::read(&spool.path)
-                        .await
-                        .map_err(super::io_to_aws)?;
-                    let _ = tokio::fs::remove_file(&spool.path).await;
-                    Bytes::from(bytes)
-                }
-                (None, None) => Bytes::new(),
-            };
+            let bytes = tokio::fs::read(&spooled.path)
+                .await
+                .map_err(super::io_to_aws)?;
+            let _ = tokio::fs::remove_file(&spooled.path).await;
             let cipher = self.encrypt_object_body(
                 account_id,
                 &region,
                 bucket,
-                &plaintext,
+                &Bytes::from(bytes),
                 sse_kms_key_id.as_deref(),
             )?;
             BodySource::Bytes(cipher)
-        } else if let Some(b) = &buffered_body {
-            BodySource::Bytes(b.clone())
-        } else if let Some(spool) = spooled {
-            BodySource::File(spool.path)
         } else {
-            BodySource::Bytes(Bytes::new())
+            BodySource::File(spooled.path)
         };
         let obj = S3Object {
             key: key.to_string(),

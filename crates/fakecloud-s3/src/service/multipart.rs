@@ -193,45 +193,24 @@ impl S3Service {
             }
         }
 
-        // Streaming part body: spool chunks to a tempfile while computing
-        // MD5 + size in constant memory. Buffered callers (tests, the
-        // legacy buffered code path) fall through with the existing
-        // `req.body` flow.
-        let spooled: Option<fakecloud_core::service::SpooledBody> =
-            if let Some(stream) = req.take_body_stream() {
-                Some(
-                    fakecloud_core::service::spool_request_stream(
-                        stream,
-                        self.store.spool_dir().as_deref(),
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            };
-        let buffered_body: Option<Bytes> = if spooled.is_none() {
-            Some(req.body.clone())
-        } else {
-            None
-        };
-        let part_size: u64 = match (&spooled, &buffered_body) {
-            (Some(s), _) => s.size,
-            (None, Some(b)) => b.len() as u64,
-            (None, None) => 0,
-        };
-        let etag: String = match (&spooled, &buffered_body) {
-            (Some(s), _) => s.md5_hex.clone(),
-            (None, Some(b)) => compute_md5(b),
-            (None, None) => compute_md5(&Bytes::new()),
-        };
-
-        let body_source: BodySource = if let Some(b) = &buffered_body {
-            BodySource::Bytes(b.clone())
-        } else if let Some(spool) = spooled {
-            BodySource::File(spool.path)
-        } else {
-            BodySource::Bytes(Bytes::new())
-        };
+        // UploadPart is streaming-only: spool chunks to a tempfile
+        // while computing MD5 + size in constant memory, then hand
+        // the file to the store as `BodySource::File`.
+        let stream = req.take_body_stream().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedRequestBody",
+                "UploadPart requires a streaming request body",
+            )
+        })?;
+        let spooled = fakecloud_core::service::spool_request_stream(
+            stream,
+            self.store.spool_dir().as_deref(),
+        )
+        .await?;
+        let part_size = spooled.size;
+        let etag = spooled.md5_hex.clone();
+        let body_source = BodySource::File(spooled.path);
 
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);

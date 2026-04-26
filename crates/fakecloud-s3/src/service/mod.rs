@@ -3208,6 +3208,12 @@ mod tests {
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join("&");
+        // Wire body_stream from the same bytes so streaming-only handlers
+        // (put_object, upload_part) can consume it. Buffered handlers
+        // (put_object_tagging, put_object_acl, …) read `body` directly
+        // and ignore the stream.
+        let stream_body =
+            fakecloud_core::service::RequestBodyStream::from(Bytes::copy_from_slice(body));
         AwsRequest {
             service: "s3".to_string(),
             action: String::new(),
@@ -3217,7 +3223,7 @@ mod tests {
             headers: HeaderMap::new(),
             query_params,
             body: Bytes::copy_from_slice(body),
-            body_stream: parking_lot::Mutex::new(None),
+            body_stream: parking_lot::Mutex::new(Some(stream_body)),
             path_segments: segments,
             raw_path: path.to_string(),
             raw_query,
