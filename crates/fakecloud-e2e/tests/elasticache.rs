@@ -1821,7 +1821,9 @@ async fn elasticache_create_memcached_cluster_and_connect() {
     let mut buf = vec![0u8; 32];
     let n = stream.read(&mut buf).await.unwrap();
     assert!(
-        std::str::from_utf8(&buf[..n]).unwrap().starts_with("STORED"),
+        std::str::from_utf8(&buf[..n])
+            .unwrap()
+            .starts_with("STORED"),
         "memcached SET should return STORED"
     );
     stream.write_all(b"get foo\r\n").await.unwrap();
@@ -1866,7 +1868,10 @@ async fn elasticache_describe_engine_default_parameters_memcached() {
         .unwrap();
 
     let defaults = response.engine_defaults().expect("engine defaults");
-    assert_eq!(defaults.cache_parameter_group_family(), Some("memcached1.6"));
+    assert_eq!(
+        defaults.cache_parameter_group_family(),
+        Some("memcached1.6")
+    );
     let params = defaults.parameters();
     assert_eq!(params.len(), 2);
     assert!(params
