@@ -19,8 +19,119 @@ use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError, ResponseBody};
 
+use std::path::{Path, PathBuf};
+
 use crate::service::EcrService;
 use crate::state::{Image, Layer, LayerUpload};
+
+/// Per-upload spool file path. Uploads spool to a tempfile under the
+/// system temp dir keyed by upload id; the file is appended to by every
+/// `UploadLayerPart` / OCI blob `PATCH` and `PUT` chunk and then read
+/// once on commit. The path is stored on the upload state so multiple
+/// in-flight chunks can append in arrival order.
+fn spool_path_for(upload_id: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("fakecloud-ecr-upload-{upload_id}"))
+}
+
+/// Create the per-upload spool file (truncating if a stray file exists)
+/// and return its path. Called from `InitiateLayerUpload` /
+/// `blob_upload_start` so subsequent chunks can append.
+pub(crate) fn create_upload_spool(upload_id: &str) -> std::io::Result<PathBuf> {
+    let path = spool_path_for(upload_id);
+    // Truncate to make sure a previous failed upload with the same UUID
+    // (impossible in practice but cheap insurance) doesn't leak.
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)?;
+    Ok(path)
+}
+
+/// Append `bytes` to the upload spool file. Used by the JSON
+/// `UploadLayerPart` route, where the SDK sends a base64-encoded chunk.
+pub(crate) fn append_bytes_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
+    f.write_all(bytes)?;
+    f.sync_data()?;
+    Ok(())
+}
+
+/// Stream a request body to the upload spool file. Returns the number
+/// of bytes appended. Used by the OCI blob `PATCH` and `PUT` routes —
+/// the body is consumed chunk-by-chunk from hyper, never materialized.
+pub(crate) async fn append_stream(
+    path: &Path,
+    stream: fakecloud_core::service::RequestBodyStream,
+) -> Result<u64, AwsServiceError> {
+    use http_body_util::BodyExt;
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .await
+        .map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                format!("failed to open upload spool: {e}"),
+            )
+        })?;
+    let mut written: u64 = 0;
+    let mut body = stream;
+    loop {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                if let Ok(chunk) = frame.into_data() {
+                    if !chunk.is_empty() {
+                        if let Err(e) = file.write_all(&chunk).await {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "InternalError",
+                                format!("failed to write upload chunk: {e}"),
+                            ));
+                        }
+                        written += chunk.len() as u64;
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MalformedRequestBody",
+                    format!("failed to read upload chunk: {e}"),
+                ));
+            }
+            None => break,
+        }
+    }
+    if let Err(e) = file.flush().await {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalError",
+            format!("failed to flush upload spool: {e}"),
+        ));
+    }
+    Ok(written)
+}
+
+/// Read an upload spool file fully into memory and unlink it.
+/// Read the upload spool file fully into memory without unlinking it.
+/// Called at commit time to compute the SHA-256 and (on success)
+/// promote the bytes into a `Layer`. The spool file is unlinked
+/// separately via [`unlink_spool`] only after the digest matches; a
+/// digest mismatch leaves the spool in place so the caller can retry
+/// `CompleteLayerUpload` with the correct digest instead of having to
+/// re-upload the entire blob.
+pub(crate) fn read_spool(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
+/// Best-effort cleanup of a stray spool file on cancel / error paths.
+pub(crate) fn unlink_spool(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
 
 /// Classify an OCI v2 request by method + path. Returns `None` when
 /// the path is not a recognised OCI endpoint (the caller responds
@@ -74,10 +185,10 @@ pub(crate) async fn dispatch(
             blob_upload_start(service, request, &repo_name)
         }
         (&Method::PATCH, ["blobs", "uploads", upload_id]) => {
-            blob_upload_patch(service, request, &repo_name, upload_id)
+            blob_upload_patch(service, request, &repo_name, upload_id).await
         }
         (&Method::PUT, ["blobs", "uploads", upload_id]) => {
-            blob_upload_finish(service, request, &repo_name, upload_id)
+            blob_upload_finish(service, request, &repo_name, upload_id).await
         }
         (&Method::DELETE, ["blobs", "uploads", upload_id]) => {
             blob_upload_cancel(service, request, &repo_name, upload_id)
@@ -493,13 +604,20 @@ fn blob_upload_start(
         return Ok(resp);
     }
 
+    let spool = create_upload_spool(&upload_id).map_err(|e| {
+        AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalError",
+            format!("failed to create upload spool: {e}"),
+        )
+    })?;
     state.layer_uploads.insert(
         upload_id.clone(),
         LayerUpload {
             upload_id: upload_id.clone(),
             repository_name: name.to_string(),
             created_at: Utc::now(),
-            blob_b64: String::new(),
+            spool_path: spool.to_string_lossy().to_string(),
             last_byte_received: 0,
         },
     );
@@ -517,13 +635,50 @@ fn blob_upload_start(
     Ok(resp)
 }
 
-fn blob_upload_patch(
+async fn blob_upload_patch(
     service: &EcrService,
     request: &AwsRequest,
     name: &str,
     upload_id: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let chunk = request.body.to_vec();
+    // Resolve the upload + spool path under a short-lived read guard
+    // so the streaming append below doesn't hold a Send-unfriendly
+    // `parking_lot::RwLockWriteGuard` across `.await`.
+    let (spool, start) = {
+        let accounts = service.state_handle().read();
+        let state = accounts
+            .get(&request.account_id)
+            .ok_or_else(|| repo_not_found(name))?;
+        let upload = state
+            .layer_uploads
+            .get(upload_id)
+            .ok_or_else(|| upload_unknown(upload_id))?;
+        if upload.repository_name != name {
+            return Err(upload_unknown(upload_id));
+        }
+        (PathBuf::from(&upload.spool_path), upload.last_byte_received)
+    };
+
+    // Two ingestion modes — true streaming when the dispatcher handed
+    // us the raw body stream (1 GiB push lands in constant memory),
+    // and a buffered fallback for legacy callers that already read the
+    // body into `request.body` (small chunks from tests, edge proxies).
+    let appended: u64 = if let Some(stream) = request.take_body_stream() {
+        append_stream(&spool, stream).await?
+    } else {
+        let chunk = &request.body;
+        if !chunk.is_empty() {
+            tokio::task::block_in_place(|| append_bytes_sync(&spool, chunk)).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    format!("failed to append upload chunk: {e}"),
+                )
+            })?;
+        }
+        chunk.len() as u64
+    };
+
     let mut accounts = service.state_handle().write();
     let state = accounts
         .get_mut(&request.account_id)
@@ -535,11 +690,7 @@ fn blob_upload_patch(
     if upload.repository_name != name {
         return Err(upload_unknown(upload_id));
     }
-    let mut existing = B64.decode(upload.blob_b64.as_bytes()).unwrap_or_default();
-    let start = existing.len() as u64;
-    existing.extend_from_slice(&chunk);
-    upload.blob_b64 = B64.encode(&existing);
-    upload.last_byte_received = start + chunk.len() as u64;
+    upload.last_byte_received = start + appended;
     let range_end = upload.last_byte_received.saturating_sub(1);
     let mut resp = base_response(StatusCode::ACCEPTED, "application/json", Vec::new());
     resp.headers.insert(
@@ -557,7 +708,7 @@ fn blob_upload_patch(
     Ok(resp)
 }
 
-fn blob_upload_finish(
+async fn blob_upload_finish(
     service: &EcrService,
     request: &AwsRequest,
     name: &str,
@@ -570,32 +721,61 @@ fn blob_upload_finish(
             "digest query parameter required on PUT",
         )
     })?;
-    let final_chunk = request.body.to_vec();
 
-    let mut accounts = service.state_handle().write();
-    let state = accounts
-        .get_mut(&request.account_id)
-        .ok_or_else(|| repo_not_found(name))?;
-    let upload = state
-        .layer_uploads
-        .get(upload_id)
-        .ok_or_else(|| upload_unknown(upload_id))?;
-    if upload.repository_name != name {
-        return Err(upload_unknown(upload_id));
+    // Append the final chunk into the spool file (streaming when
+    // available, buffered otherwise) before reading it back to compute
+    // the SHA-256.
+    let spool = {
+        let accounts = service.state_handle().read();
+        let state = accounts
+            .get(&request.account_id)
+            .ok_or_else(|| repo_not_found(name))?;
+        let upload = state
+            .layer_uploads
+            .get(upload_id)
+            .ok_or_else(|| upload_unknown(upload_id))?;
+        if upload.repository_name != name {
+            return Err(upload_unknown(upload_id));
+        }
+        PathBuf::from(&upload.spool_path)
+    };
+
+    if let Some(stream) = request.take_body_stream() {
+        append_stream(&spool, stream).await?;
+    } else if !request.body.is_empty() {
+        tokio::task::block_in_place(|| append_bytes_sync(&spool, &request.body)).map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                format!("failed to append final upload chunk: {e}"),
+            )
+        })?;
     }
-    let mut combined = B64.decode(upload.blob_b64.as_bytes()).unwrap_or_default();
-    combined.extend_from_slice(&final_chunk);
+
+    let combined = read_spool(&spool).map_err(|e| {
+        AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalError",
+            format!("failed to read upload spool: {e}"),
+        )
+    })?;
     let computed = sha256_digest(&combined);
     if digest != computed {
+        // Spool stays in place — the OCI client can retry the final
+        // PUT with the correct digest instead of re-uploading every
+        // PATCH chunk.
         return Err(digest_invalid());
     }
-    // Commit. Removing upload after validation so retries can correct
-    // a bad digest query param on the last PUT.
-    let upload = state.layer_uploads.remove(upload_id).unwrap();
-    let _ = upload;
-    // Drop the write guard before calling into KMS (which acquires its
-    // own lock) so we don't hold two incompatible locks concurrently.
-    drop(accounts);
+    {
+        let mut accounts = service.state_handle().write();
+        let state = accounts
+            .get_mut(&request.account_id)
+            .ok_or_else(|| repo_not_found(name))?;
+        // Commit. Removing upload after validation so retries can correct
+        // a bad digest query param on the last PUT.
+        state.layer_uploads.remove(upload_id);
+    }
+    unlink_spool(&spool);
     let (stored_bytes, encrypted_with) =
         encrypt_layer_bytes(service, &request.account_id, name, &combined);
     let mut accounts = service.state_handle().write();
@@ -650,7 +830,9 @@ fn blob_upload_cancel(
     if !belongs {
         return Err(upload_unknown(upload_id));
     }
-    state.layer_uploads.remove(upload_id);
+    if let Some(removed) = state.layer_uploads.remove(upload_id) {
+        unlink_spool(Path::new(&removed.spool_path));
+    }
     Ok(base_response(
         StatusCode::NO_CONTENT,
         "application/json",

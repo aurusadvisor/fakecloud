@@ -190,16 +190,36 @@ impl AwsService for S3Service {
     }
 
     async fn handle(&self, mut req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        // PutObject / UploadPart / UploadPartCopy enter dispatch via the
-        // streaming path with `body = Bytes::new()` and the raw HTTP body
-        // available through `take_body_stream`. Materialize it here with
-        // no upper bound — the dispatch-level body cap intentionally
-        // doesn't gate streaming routes. The per-service handlers that
-        // need to spill to disk (PutObject in persistent mode) can call
-        // `take_body_stream` themselves before this point in a future
-        // refactor; today they read `req.body` like any other handler.
-        if let Some(stream) = req.take_body_stream() {
-            req.body = fakecloud_core::service::drain_request_stream(stream).await?;
+        // PutObject / UploadPart enter dispatch via the streaming path
+        // with `body = Bytes::new()` and the raw HTTP body available on
+        // `req.body_stream`. Those handlers consume the stream directly
+        // — spooling chunks to disk while computing MD5 + size in
+        // constant memory — so a 1 GiB upload never materializes into
+        // RAM. Every *other* PUT-on-bucket-key the streaming dispatch
+        // flagged (PutObjectTagging, PutObjectAcl, PutObjectRetention,
+        // PutObjectLegalHold, CopyObject, …) reads a small XML/JSON
+        // body from `req.body`, so drain the stream for them.
+        let is_put_to_key = req.method == Method::PUT
+            && req.path_segments.len() >= 2
+            && req
+                .path_segments
+                .first()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+        let q = &req.query_params;
+        let is_put_object = is_put_to_key
+            && !q.contains_key("tagging")
+            && !q.contains_key("acl")
+            && !q.contains_key("retention")
+            && !q.contains_key("legal-hold")
+            && !q.contains_key("renameObject")
+            && !q.contains_key("encryption")
+            && !req.headers.contains_key("x-amz-copy-source");
+        let is_upload_part = is_put_to_key && q.contains_key("partNumber");
+        if !is_put_object && !is_upload_part {
+            if let Some(stream) = req.take_body_stream() {
+                req.body = fakecloud_core::service::drain_request_stream(stream).await?;
+            }
         }
 
         // S3 REST routing: method + path segments + query params
@@ -279,14 +299,16 @@ impl AwsService for S3Service {
                                 part_number,
                             );
                         }
-                        return self.upload_part(
-                            account_id,
-                            &req,
-                            b,
-                            key.as_deref().unwrap(),
-                            &upload_id,
-                            part_number,
-                        );
+                        return self
+                            .upload_part(
+                                account_id,
+                                &req,
+                                b,
+                                key.as_deref().unwrap(),
+                                &upload_id,
+                                part_number,
+                            )
+                            .await;
                     }
                 }
             }
@@ -639,7 +661,7 @@ impl AwsService for S3Service {
                 } else if req.headers.contains_key("x-amz-copy-source") {
                     self.copy_object(account_id, &req, b, k)
                 } else {
-                    self.put_object(account_id, &req, b, k)
+                    self.put_object(account_id, &req, b, k).await
                 }
             }
             (&Method::GET, Some(b), Some(k)) => {
@@ -3397,8 +3419,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn upload_part_rejects_invalid_part_number() {
+    #[tokio::test]
+    async fn upload_part_rejects_invalid_part_number() {
         let svc = make_service();
         seed_bucket(&svc, "b");
         let upload_id = initiate_mpu(&svc, "b", "k");
@@ -3406,31 +3428,34 @@ mod tests {
         // part_number < 1 is masked as NoSuchUpload (matching AWS behavior).
         let req = make_request(Method::PUT, "/b/k", &[("partNumber", "0")], b"body");
         assert_aws_err(
-            svc.upload_part("123456789012", &req, "b", "k", &upload_id, 0),
+            svc.upload_part("123456789012", &req, "b", "k", &upload_id, 0)
+                .await,
             "NoSuchUpload",
         );
 
         // part_number > 10000 returns InvalidArgument.
         let req2 = make_request(Method::PUT, "/b/k", &[("partNumber", "10001")], b"body");
         assert_aws_err(
-            svc.upload_part("123456789012", &req2, "b", "k", &upload_id, 10_001),
+            svc.upload_part("123456789012", &req2, "b", "k", &upload_id, 10_001)
+                .await,
             "InvalidArgument",
         );
     }
 
-    #[test]
-    fn upload_part_missing_upload_errors() {
+    #[tokio::test]
+    async fn upload_part_missing_upload_errors() {
         let svc = make_service();
         seed_bucket(&svc, "b");
         let req = make_request(Method::PUT, "/b/k", &[("partNumber", "1")], b"body");
         assert_aws_err(
-            svc.upload_part("123456789012", &req, "b", "k", "not-an-upload", 1),
+            svc.upload_part("123456789012", &req, "b", "k", "not-an-upload", 1)
+                .await,
             "NoSuchUpload",
         );
     }
 
-    #[test]
-    fn mpu_full_lifecycle_creates_object() {
+    #[tokio::test]
+    async fn mpu_full_lifecycle_creates_object() {
         let svc = make_service();
         seed_bucket(&svc, "b");
         let upload_id = initiate_mpu(&svc, "b", "k");
@@ -3441,6 +3466,7 @@ mod tests {
         let req = make_request(Method::PUT, "/b/k", &[("partNumber", "1")], part_body);
         let resp = svc
             .upload_part("123456789012", &req, "b", "k", &upload_id, 1)
+            .await
             .unwrap();
         let etag = resp
             .headers
@@ -3472,8 +3498,8 @@ mod tests {
         assert!(!bucket.multipart_uploads.contains_key(&upload_id));
     }
 
-    #[test]
-    fn mpu_complete_rejects_small_non_last_part() {
+    #[tokio::test]
+    async fn mpu_complete_rejects_small_non_last_part() {
         let svc = make_service();
         seed_bucket(&svc, "b");
         let upload_id = initiate_mpu(&svc, "b", "k");
@@ -3487,6 +3513,7 @@ mod tests {
                 body.as_bytes(),
             );
             svc.upload_part("123456789012", &req, "b", "k", &upload_id, n)
+                .await
                 .unwrap();
         }
 
@@ -3564,13 +3591,14 @@ mod tests {
         assert!(body.contains(&u2));
     }
 
-    #[test]
-    fn list_parts_after_upload_returns_parts() {
+    #[tokio::test]
+    async fn list_parts_after_upload_returns_parts() {
         let svc = make_service();
         seed_bucket(&svc, "b");
         let upload_id = initiate_mpu(&svc, "b", "k");
         let req = make_request(Method::PUT, "/b/k", &[("partNumber", "1")], b"data");
         svc.upload_part("123456789012", &req, "b", "k", &upload_id, 1)
+            .await
             .unwrap();
 
         let list_req = make_request(Method::GET, "/b/k", &[("uploadId", &upload_id)], b"");
@@ -3869,33 +3897,33 @@ mod tests {
         );
     }
 
-    #[test]
-    fn put_object_key_too_long() {
+    #[tokio::test]
+    async fn put_object_key_too_long() {
         let svc = make_service();
         seed_bucket(&svc, "b");
         let long_key = "x".repeat(1025);
         let req = make_request(Method::PUT, &format!("/b/{long_key}"), &[], b"data");
         assert_aws_err(
-            svc.put_object("123456789012", &req, "b", &long_key),
+            svc.put_object("123456789012", &req, "b", &long_key).await,
             "KeyTooLongError",
         );
     }
 
-    #[test]
-    fn put_object_with_aws_tag_prefix() {
+    #[tokio::test]
+    async fn put_object_with_aws_tag_prefix() {
         let svc = make_service();
         seed_bucket(&svc, "b");
         let mut req = make_request(Method::PUT, "/b/tagged", &[], b"data");
         req.headers
             .insert("x-amz-tagging", "aws:reserved=nope".parse().unwrap());
         assert_aws_err(
-            svc.put_object("123456789012", &req, "b", "tagged"),
+            svc.put_object("123456789012", &req, "b", "tagged").await,
             "InvalidTag",
         );
     }
 
-    #[test]
-    fn put_object_acl_and_grant_conflict() {
+    #[tokio::test]
+    async fn put_object_acl_and_grant_conflict() {
         let svc = make_service();
         seed_bucket(&svc, "b");
         let mut req = make_request(Method::PUT, "/b/conflict", &[], b"data");
@@ -3904,7 +3932,7 @@ mod tests {
         req.headers
             .insert("x-amz-grant-read", "id=abc123".parse().unwrap());
         assert_aws_err(
-            svc.put_object("123456789012", &req, "b", "conflict"),
+            svc.put_object("123456789012", &req, "b", "conflict").await,
             "InvalidRequest",
         );
     }
@@ -4025,8 +4053,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn upload_part_nonexistent_upload() {
+    #[tokio::test]
+    async fn upload_part_nonexistent_upload() {
         let svc = make_service();
         seed_bucket(&svc, "b");
         let req = make_request(
@@ -4036,7 +4064,8 @@ mod tests {
             b"data",
         );
         assert_aws_err(
-            svc.upload_part("123456789012", &req, "b", "key", "bogus", 1),
+            svc.upload_part("123456789012", &req, "b", "key", "bogus", 1)
+                .await,
             "NoSuchUpload",
         );
     }
@@ -4379,8 +4408,8 @@ mod tests {
 
     // ── Happy-path handler tests (objects.rs coverage) ──
 
-    #[test]
-    fn put_object_via_handler_and_get_back() {
+    #[tokio::test]
+    async fn put_object_via_handler_and_get_back() {
         let svc = make_service();
         seed_bucket(&svc, "hp");
 
@@ -4388,6 +4417,7 @@ mod tests {
         let req = make_request(Method::PUT, "/hp/test.txt", &[], b"hello world");
         let resp = svc
             .put_object("123456789012", &req, "hp", "test.txt")
+            .await
             .unwrap();
         assert_eq!(resp.status, StatusCode::OK);
 
@@ -4399,8 +4429,8 @@ mod tests {
         assert_eq!(resp.body.expect_bytes(), b"hello world");
     }
 
-    #[test]
-    fn put_object_with_content_type() {
+    #[tokio::test]
+    async fn put_object_with_content_type() {
         let svc = make_service();
         seed_bucket(&svc, "ct");
 
@@ -4408,6 +4438,7 @@ mod tests {
         req.headers
             .insert("content-type", "application/json".parse().unwrap());
         svc.put_object("123456789012", &req, "ct", "doc.json")
+            .await
             .unwrap();
 
         let req = make_request(Method::GET, "/ct/doc.json", &[], b"");
@@ -4417,8 +4448,8 @@ mod tests {
         assert_eq!(resp.content_type, "application/json");
     }
 
-    #[test]
-    fn put_object_with_metadata() {
+    #[tokio::test]
+    async fn put_object_with_metadata() {
         let svc = make_service();
         seed_bucket(&svc, "meta");
 
@@ -4427,7 +4458,9 @@ mod tests {
             .insert("x-amz-meta-color", "blue".parse().unwrap());
         req.headers
             .insert("x-amz-meta-size", "large".parse().unwrap());
-        svc.put_object("123456789012", &req, "meta", "obj").unwrap();
+        svc.put_object("123456789012", &req, "meta", "obj")
+            .await
+            .unwrap();
 
         let req = make_request(Method::HEAD, "/meta/obj", &[], b"");
         let resp = svc
@@ -4439,25 +4472,27 @@ mod tests {
             .is_some_and(|v| v == "blue"));
     }
 
-    #[test]
-    fn put_object_returns_etag() {
+    #[tokio::test]
+    async fn put_object_returns_etag() {
         let svc = make_service();
         seed_bucket(&svc, "etag");
 
         let req = make_request(Method::PUT, "/etag/f.txt", &[], b"content");
         let resp = svc
             .put_object("123456789012", &req, "etag", "f.txt")
+            .await
             .unwrap();
         assert!(resp.headers.get("etag").is_some());
     }
 
-    #[test]
-    fn head_object_returns_headers() {
+    #[tokio::test]
+    async fn head_object_returns_headers() {
         let svc = make_service();
         seed_bucket(&svc, "head");
 
         let req = make_request(Method::PUT, "/head/f.txt", &[], b"12345");
         svc.put_object("123456789012", &req, "head", "f.txt")
+            .await
             .unwrap();
 
         let req = make_request(Method::HEAD, "/head/f.txt", &[], b"");
@@ -4474,13 +4509,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn delete_object_via_handler() {
+    #[tokio::test]
+    async fn delete_object_via_handler() {
         let svc = make_service();
         seed_bucket(&svc, "del");
 
         let req = make_request(Method::PUT, "/del/rm.txt", &[], b"bye");
         svc.put_object("123456789012", &req, "del", "rm.txt")
+            .await
             .unwrap();
 
         let req = make_request(Method::DELETE, "/del/rm.txt", &[], b"");
@@ -4494,14 +4530,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn copy_object_via_handler() {
+    #[tokio::test]
+    async fn copy_object_via_handler() {
         let svc = make_service();
         seed_bucket(&svc, "cpsrc");
         seed_bucket(&svc, "cpdst");
 
         let req = make_request(Method::PUT, "/cpsrc/orig.txt", &[], b"original");
         svc.put_object("123456789012", &req, "cpsrc", "orig.txt")
+            .await
             .unwrap();
 
         let mut req = make_request(Method::PUT, "/cpdst/copy.txt", &[], b"");
@@ -4517,13 +4554,14 @@ mod tests {
         assert_eq!(resp.body.expect_bytes(), b"original");
     }
 
-    #[test]
-    fn copy_object_within_same_bucket() {
+    #[tokio::test]
+    async fn copy_object_within_same_bucket() {
         let svc = make_service();
         seed_bucket(&svc, "same");
 
         let req = make_request(Method::PUT, "/same/a.txt", &[], b"aaa");
         svc.put_object("123456789012", &req, "same", "a.txt")
+            .await
             .unwrap();
 
         let mut req = make_request(Method::PUT, "/same/b.txt", &[], b"");
@@ -4539,15 +4577,17 @@ mod tests {
         assert_eq!(resp.body.expect_bytes(), b"aaa");
     }
 
-    #[test]
-    fn list_objects_v2_via_handler() {
+    #[tokio::test]
+    async fn list_objects_v2_via_handler() {
         let svc = make_service();
         seed_bucket(&svc, "lsv2");
 
         for i in 0..3 {
             let key = format!("file{i}.txt");
             let req = make_request(Method::PUT, &format!("/lsv2/{key}"), &[], b"data");
-            svc.put_object("123456789012", &req, "lsv2", &key).unwrap();
+            svc.put_object("123456789012", &req, "lsv2", &key)
+                .await
+                .unwrap();
         }
 
         let req = make_request(Method::GET, "/lsv2", &[("list-type", "2")], b"");
@@ -4556,14 +4596,16 @@ mod tests {
         assert!(body.contains("<KeyCount>3</KeyCount>"));
     }
 
-    #[test]
-    fn list_objects_v2_with_prefix() {
+    #[tokio::test]
+    async fn list_objects_v2_with_prefix() {
         let svc = make_service();
         seed_bucket(&svc, "pfx");
 
         for key in &["docs/a.txt", "docs/b.txt", "images/c.png"] {
             let req = make_request(Method::PUT, &format!("/pfx/{key}"), &[], b"x");
-            svc.put_object("123456789012", &req, "pfx", key).unwrap();
+            svc.put_object("123456789012", &req, "pfx", key)
+                .await
+                .unwrap();
         }
 
         let req = make_request(
@@ -4577,14 +4619,16 @@ mod tests {
         assert!(body.contains("<KeyCount>2</KeyCount>"));
     }
 
-    #[test]
-    fn list_objects_v2_with_delimiter() {
+    #[tokio::test]
+    async fn list_objects_v2_with_delimiter() {
         let svc = make_service();
         seed_bucket(&svc, "dlm");
 
         for key in &["a/1.txt", "a/2.txt", "b/3.txt", "root.txt"] {
             let req = make_request(Method::PUT, &format!("/dlm/{key}"), &[], b"x");
-            svc.put_object("123456789012", &req, "dlm", key).unwrap();
+            svc.put_object("123456789012", &req, "dlm", key)
+                .await
+                .unwrap();
         }
 
         let req = make_request(
@@ -4601,13 +4645,14 @@ mod tests {
         assert!(body.contains("root.txt"));
     }
 
-    #[test]
-    fn list_objects_v1_via_handler() {
+    #[tokio::test]
+    async fn list_objects_v1_via_handler() {
         let svc = make_service();
         seed_bucket(&svc, "lsv1");
 
         let req = make_request(Method::PUT, "/lsv1/test.txt", &[], b"data");
         svc.put_object("123456789012", &req, "lsv1", "test.txt")
+            .await
             .unwrap();
 
         let req = make_request(Method::GET, "/lsv1", &[], b"");
@@ -4616,15 +4661,17 @@ mod tests {
         assert!(body.contains("<Key>test.txt</Key>"));
     }
 
-    #[test]
-    fn delete_objects_batch() {
+    #[tokio::test]
+    async fn delete_objects_batch() {
         let svc = make_service();
         seed_bucket(&svc, "bdel");
 
         for i in 0..3 {
             let key = format!("d{i}.txt");
             let req = make_request(Method::PUT, &format!("/bdel/{key}"), &[], b"x");
-            svc.put_object("123456789012", &req, "bdel", &key).unwrap();
+            svc.put_object("123456789012", &req, "bdel", &key)
+                .await
+                .unwrap();
         }
 
         let delete_xml = b"<Delete><Object><Key>d0.txt</Key></Object><Object><Key>d1.txt</Key></Object></Delete>";
@@ -4639,29 +4686,34 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn put_object_overwrites_existing() {
+    #[tokio::test]
+    async fn put_object_overwrites_existing() {
         let svc = make_service();
         seed_bucket(&svc, "ow");
 
         let req = make_request(Method::PUT, "/ow/f.txt", &[], b"version1");
-        svc.put_object("123456789012", &req, "ow", "f.txt").unwrap();
+        svc.put_object("123456789012", &req, "ow", "f.txt")
+            .await
+            .unwrap();
 
         let req = make_request(Method::PUT, "/ow/f.txt", &[], b"version2");
-        svc.put_object("123456789012", &req, "ow", "f.txt").unwrap();
+        svc.put_object("123456789012", &req, "ow", "f.txt")
+            .await
+            .unwrap();
 
         let req = make_request(Method::GET, "/ow/f.txt", &[], b"");
         let resp = svc.get_object("123456789012", &req, "ow", "f.txt").unwrap();
         assert_eq!(resp.body.expect_bytes(), b"version2");
     }
 
-    #[test]
-    fn get_object_attributes_via_handler() {
+    #[tokio::test]
+    async fn get_object_attributes_via_handler() {
         let svc = make_service();
         seed_bucket(&svc, "attr");
 
         let req = make_request(Method::PUT, "/attr/f.txt", &[], b"content");
         svc.put_object("123456789012", &req, "attr", "f.txt")
+            .await
             .unwrap();
 
         let mut req = make_request(Method::GET, "/attr/f.txt", &[], b"");
@@ -4678,8 +4730,8 @@ mod tests {
 
     // ── Multipart upload happy path ──
 
-    #[test]
-    fn multipart_upload_lifecycle() {
+    #[tokio::test]
+    async fn multipart_upload_lifecycle() {
         let svc = make_service();
         seed_bucket(&svc, "mp");
 
@@ -4698,6 +4750,7 @@ mod tests {
         let req = make_request(Method::PUT, "/mp/big.bin", &[], &big_data);
         let resp = svc
             .upload_part("123456789012", &req, "mp", "big.bin", upload_id, 1)
+            .await
             .unwrap();
         let etag1 = resp
             .headers
@@ -4711,6 +4764,7 @@ mod tests {
         let req = make_request(Method::PUT, "/mp/big.bin", &[], b"part2-data");
         let resp = svc
             .upload_part("123456789012", &req, "mp", "big.bin", upload_id, 2)
+            .await
             .unwrap();
         let etag2 = resp
             .headers
@@ -4873,8 +4927,8 @@ mod tests {
 
     // ── Versioned object operations ──
 
-    #[test]
-    fn versioned_put_and_get() {
+    #[tokio::test]
+    async fn versioned_put_and_get() {
         let svc = make_service();
         seed_bucket(&svc, "vb");
 
@@ -4890,7 +4944,10 @@ mod tests {
 
         // Put v1
         let req = make_request(Method::PUT, "/vb/key", &[], b"version1");
-        let resp = svc.put_object("123456789012", &req, "vb", "key").unwrap();
+        let resp = svc
+            .put_object("123456789012", &req, "vb", "key")
+            .await
+            .unwrap();
         let v1 = resp
             .headers
             .get("x-amz-version-id")
@@ -4899,7 +4956,10 @@ mod tests {
 
         // Put v2
         let req = make_request(Method::PUT, "/vb/key", &[], b"version2");
-        let resp = svc.put_object("123456789012", &req, "vb", "key").unwrap();
+        let resp = svc
+            .put_object("123456789012", &req, "vb", "key")
+            .await
+            .unwrap();
         let _v2 = resp
             .headers
             .get("x-amz-version-id")
@@ -4921,14 +4981,15 @@ mod tests {
 
     // ── Conditional GET ──
 
-    #[test]
-    fn get_object_if_match_succeeds() {
+    #[tokio::test]
+    async fn get_object_if_match_succeeds() {
         let svc = make_service();
         seed_bucket(&svc, "cond");
 
         let req = make_request(Method::PUT, "/cond/f.txt", &[], b"data");
         let resp = svc
             .put_object("123456789012", &req, "cond", "f.txt")
+            .await
             .unwrap();
         let etag = resp
             .headers
@@ -4946,13 +5007,14 @@ mod tests {
         assert_eq!(resp.body.expect_bytes(), b"data");
     }
 
-    #[test]
-    fn get_object_if_match_fails() {
+    #[tokio::test]
+    async fn get_object_if_match_fails() {
         let svc = make_service();
         seed_bucket(&svc, "cond2");
 
         let req = make_request(Method::PUT, "/cond2/f.txt", &[], b"data");
         svc.put_object("123456789012", &req, "cond2", "f.txt")
+            .await
             .unwrap();
 
         let mut req = make_request(Method::GET, "/cond2/f.txt", &[], b"");
@@ -4964,14 +5026,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn get_object_if_none_match_returns_304() {
+    #[tokio::test]
+    async fn get_object_if_none_match_returns_304() {
         let svc = make_service();
         seed_bucket(&svc, "cond3");
 
         let req = make_request(Method::PUT, "/cond3/f.txt", &[], b"data");
         let resp = svc
             .put_object("123456789012", &req, "cond3", "f.txt")
+            .await
             .unwrap();
         let etag = resp
             .headers
@@ -4990,35 +5053,38 @@ mod tests {
 
     // ── Put with if-none-match (conditional put) ──
 
-    #[test]
-    fn put_object_if_none_match_prevents_overwrite() {
+    #[tokio::test]
+    async fn put_object_if_none_match_prevents_overwrite() {
         let svc = make_service();
         seed_bucket(&svc, "cnm");
 
         let req = make_request(Method::PUT, "/cnm/f.txt", &[], b"first");
         svc.put_object("123456789012", &req, "cnm", "f.txt")
+            .await
             .unwrap();
 
         // Try to put again with if-none-match: *
         let mut req = make_request(Method::PUT, "/cnm/f.txt", &[], b"second");
         req.headers.insert("if-none-match", "*".parse().unwrap());
         assert_aws_err(
-            svc.put_object("123456789012", &req, "cnm", "f.txt"),
+            svc.put_object("123456789012", &req, "cnm", "f.txt").await,
             "PreconditionFailed",
         );
     }
 
     // ── Storage class ──
 
-    #[test]
-    fn put_object_with_storage_class() {
+    #[tokio::test]
+    async fn put_object_with_storage_class() {
         let svc = make_service();
         seed_bucket(&svc, "sc");
 
         let mut req = make_request(Method::PUT, "/sc/f.txt", &[], b"data");
         req.headers
             .insert("x-amz-storage-class", "GLACIER".parse().unwrap());
-        svc.put_object("123456789012", &req, "sc", "f.txt").unwrap();
+        svc.put_object("123456789012", &req, "sc", "f.txt")
+            .await
+            .unwrap();
 
         let req = make_request(Method::HEAD, "/sc/f.txt", &[], b"");
         let resp = svc
@@ -5036,8 +5102,8 @@ mod tests {
 
     // ── Delete versioned object creates delete marker ──
 
-    #[test]
-    fn delete_versioned_object_creates_marker() {
+    #[tokio::test]
+    async fn delete_versioned_object_creates_marker() {
         let svc = make_service();
         seed_bucket(&svc, "dv");
 
@@ -5051,7 +5117,9 @@ mod tests {
             .unwrap();
 
         let req = make_request(Method::PUT, "/dv/key", &[], b"data");
-        svc.put_object("123456789012", &req, "dv", "key").unwrap();
+        svc.put_object("123456789012", &req, "dv", "key")
+            .await
+            .unwrap();
 
         let req = make_request(Method::DELETE, "/dv/key", &[], b"");
         let resp = svc
@@ -5069,15 +5137,17 @@ mod tests {
 
     // ── Copy with metadata replacement ──
 
-    #[test]
-    fn copy_object_with_metadata_replace() {
+    #[tokio::test]
+    async fn copy_object_with_metadata_replace() {
         let svc = make_service();
         seed_bucket(&svc, "cpm");
 
         let mut req = make_request(Method::PUT, "/cpm/src", &[], b"data");
         req.headers
             .insert("x-amz-meta-original", "yes".parse().unwrap());
-        svc.put_object("123456789012", &req, "cpm", "src").unwrap();
+        svc.put_object("123456789012", &req, "cpm", "src")
+            .await
+            .unwrap();
 
         let mut req = make_request(Method::PUT, "/cpm/dst", &[], b"");
         req.headers
@@ -5100,15 +5170,17 @@ mod tests {
 
     // ── Large list with pagination (max-keys) ──
 
-    #[test]
-    fn list_objects_v2_with_max_keys() {
+    #[tokio::test]
+    async fn list_objects_v2_with_max_keys() {
         let svc = make_service();
         seed_bucket(&svc, "pg");
 
         for i in 0..5 {
             let key = format!("k{i}");
             let req = make_request(Method::PUT, &format!("/pg/{key}"), &[], b"x");
-            svc.put_object("123456789012", &req, "pg", &key).unwrap();
+            svc.put_object("123456789012", &req, "pg", &key)
+                .await
+                .unwrap();
         }
 
         let req = make_request(
@@ -5411,12 +5483,14 @@ mod tests {
 
     // ── objects.rs additional coverage ──
 
-    #[test]
-    fn get_object_range_request() {
+    #[tokio::test]
+    async fn get_object_range_request() {
         let svc = make_service();
         seed_bucket(&svc, "range");
         let req = make_request(Method::PUT, "/range/k", &[], b"0123456789ABCDEF");
-        svc.put_object("123456789012", &req, "range", "k").unwrap();
+        svc.put_object("123456789012", &req, "range", "k")
+            .await
+            .unwrap();
 
         let mut req = make_request(Method::GET, "/range/k", &[], b"");
         req.headers.insert("range", "bytes=2-5".parse().unwrap());
@@ -5425,12 +5499,14 @@ mod tests {
         assert_eq!(resp.body.expect_bytes(), b"2345");
     }
 
-    #[test]
-    fn get_object_range_suffix() {
+    #[tokio::test]
+    async fn get_object_range_suffix() {
         let svc = make_service();
         seed_bucket(&svc, "rsx");
         let req = make_request(Method::PUT, "/rsx/k", &[], b"0123456789");
-        svc.put_object("123456789012", &req, "rsx", "k").unwrap();
+        svc.put_object("123456789012", &req, "rsx", "k")
+            .await
+            .unwrap();
 
         let mut req = make_request(Method::GET, "/rsx/k", &[], b"");
         req.headers.insert("range", "bytes=-3".parse().unwrap());
@@ -5439,12 +5515,14 @@ mod tests {
         assert_eq!(resp.body.expect_bytes(), b"789");
     }
 
-    #[test]
-    fn get_object_range_open_ended() {
+    #[tokio::test]
+    async fn get_object_range_open_ended() {
         let svc = make_service();
         seed_bucket(&svc, "roe");
         let req = make_request(Method::PUT, "/roe/k", &[], b"0123456789");
-        svc.put_object("123456789012", &req, "roe", "k").unwrap();
+        svc.put_object("123456789012", &req, "roe", "k")
+            .await
+            .unwrap();
 
         let mut req = make_request(Method::GET, "/roe/k", &[], b"");
         req.headers.insert("range", "bytes=7-".parse().unwrap());
@@ -5453,12 +5531,14 @@ mod tests {
         assert_eq!(resp.body.expect_bytes(), b"789");
     }
 
-    #[test]
-    fn get_object_range_invalid_format() {
+    #[tokio::test]
+    async fn get_object_range_invalid_format() {
         let svc = make_service();
         seed_bucket(&svc, "rinv");
         let req = make_request(Method::PUT, "/rinv/k", &[], b"hello");
-        svc.put_object("123456789012", &req, "rinv", "k").unwrap();
+        svc.put_object("123456789012", &req, "rinv", "k")
+            .await
+            .unwrap();
 
         let mut req = make_request(Method::GET, "/rinv/k", &[], b"");
         req.headers.insert("range", "bogus=2-5".parse().unwrap());
@@ -5468,12 +5548,14 @@ mod tests {
         assert_eq!(resp.body.expect_bytes(), b"hello");
     }
 
-    #[test]
-    fn get_object_if_match_mismatch_errors() {
+    #[tokio::test]
+    async fn get_object_if_match_mismatch_errors() {
         let svc = make_service();
         seed_bucket(&svc, "ifm");
         let req = make_request(Method::PUT, "/ifm/k", &[], b"abc");
-        svc.put_object("123456789012", &req, "ifm", "k").unwrap();
+        svc.put_object("123456789012", &req, "ifm", "k")
+            .await
+            .unwrap();
 
         let mut req = make_request(Method::GET, "/ifm/k", &[], b"");
         req.headers
@@ -5482,12 +5564,14 @@ mod tests {
         assert_aws_err(err, "PreconditionFailed");
     }
 
-    #[test]
-    fn get_object_if_none_match_star_not_modified() {
+    #[tokio::test]
+    async fn get_object_if_none_match_star_not_modified() {
         let svc = make_service();
         seed_bucket(&svc, "inm");
         let req = make_request(Method::PUT, "/inm/k", &[], b"abc");
-        svc.put_object("123456789012", &req, "inm", "k").unwrap();
+        svc.put_object("123456789012", &req, "inm", "k")
+            .await
+            .unwrap();
 
         let mut req = make_request(Method::GET, "/inm/k", &[], b"");
         req.headers.insert("if-none-match", "*".parse().unwrap());
@@ -5495,12 +5579,14 @@ mod tests {
         assert!(err.is_err());
     }
 
-    #[test]
-    fn head_object_range_request() {
+    #[tokio::test]
+    async fn head_object_range_request() {
         let svc = make_service();
         seed_bucket(&svc, "hrng");
         let req = make_request(Method::PUT, "/hrng/k", &[], b"0123456789");
-        svc.put_object("123456789012", &req, "hrng", "k").unwrap();
+        svc.put_object("123456789012", &req, "hrng", "k")
+            .await
+            .unwrap();
 
         let mut req = make_request(Method::HEAD, "/hrng/k", &[], b"");
         req.headers.insert("range", "bytes=2-5".parse().unwrap());
@@ -5508,8 +5594,8 @@ mod tests {
         assert_eq!(resp.status, StatusCode::PARTIAL_CONTENT);
     }
 
-    #[test]
-    fn put_object_with_metadata_headers() {
+    #[tokio::test]
+    async fn put_object_with_metadata_headers() {
         let svc = make_service();
         seed_bucket(&svc, "meta");
         let mut req = make_request(Method::PUT, "/meta/k", &[], b"x");
@@ -5517,7 +5603,9 @@ mod tests {
             .insert("x-amz-meta-user", "alice".parse().unwrap());
         req.headers
             .insert("x-amz-meta-env", "prod".parse().unwrap());
-        svc.put_object("123456789012", &req, "meta", "k").unwrap();
+        svc.put_object("123456789012", &req, "meta", "k")
+            .await
+            .unwrap();
 
         let req = make_request(Method::HEAD, "/meta/k", &[], b"");
         let resp = svc.head_object("123456789012", &req, "meta", "k").unwrap();
@@ -5525,14 +5613,16 @@ mod tests {
         assert_eq!(resp.headers.get("x-amz-meta-env").unwrap(), "prod");
     }
 
-    #[test]
-    fn put_object_with_storage_class_header() {
+    #[tokio::test]
+    async fn put_object_with_storage_class_header() {
         let svc = make_service();
         seed_bucket(&svc, "stor");
         let mut req = make_request(Method::PUT, "/stor/k", &[], b"x");
         req.headers
             .insert("x-amz-storage-class", "STANDARD_IA".parse().unwrap());
-        svc.put_object("123456789012", &req, "stor", "k").unwrap();
+        svc.put_object("123456789012", &req, "stor", "k")
+            .await
+            .unwrap();
 
         let req = make_request(Method::HEAD, "/stor/k", &[], b"");
         let resp = svc.head_object("123456789012", &req, "stor", "k").unwrap();
@@ -5542,8 +5632,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn put_object_with_website_redirect() {
+    #[tokio::test]
+    async fn put_object_with_website_redirect() {
         let svc = make_service();
         seed_bucket(&svc, "wr");
         let mut req = make_request(Method::PUT, "/wr/k", &[], b"x");
@@ -5551,7 +5641,9 @@ mod tests {
             "x-amz-website-redirect-location",
             "/elsewhere".parse().unwrap(),
         );
-        svc.put_object("123456789012", &req, "wr", "k").unwrap();
+        svc.put_object("123456789012", &req, "wr", "k")
+            .await
+            .unwrap();
         let req = make_request(Method::GET, "/wr/k", &[], b"");
         let resp = svc.get_object("123456789012", &req, "wr", "k").unwrap();
         assert_eq!(
@@ -5581,13 +5673,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn list_objects_v2_with_prefix_and_delimiter() {
+    #[tokio::test]
+    async fn list_objects_v2_with_prefix_and_delimiter() {
         let svc = make_service();
         seed_bucket(&svc, "pfxd");
         for k in &["a/1", "a/2", "b/1"] {
             let req = make_request(Method::PUT, &format!("/pfxd/{k}"), &[], b"x");
-            svc.put_object("123456789012", &req, "pfxd", k).unwrap();
+            svc.put_object("123456789012", &req, "pfxd", k)
+                .await
+                .unwrap();
         }
         let req = make_request(
             Method::GET,
@@ -5600,13 +5694,13 @@ mod tests {
         assert!(body.contains("<Contents>"));
     }
 
-    #[test]
-    fn list_objects_v1_basic() {
+    #[tokio::test]
+    async fn list_objects_v1_basic() {
         let svc = make_service();
         seed_bucket(&svc, "v1");
         for k in &["a", "b"] {
             let req = make_request(Method::PUT, &format!("/v1/{k}"), &[], b"x");
-            svc.put_object("123456789012", &req, "v1", k).unwrap();
+            svc.put_object("123456789012", &req, "v1", k).await.unwrap();
         }
         let req = make_request(Method::GET, "/v1", &[], b"");
         let resp = svc.list_objects_v1("123456789012", &req, "v1").unwrap();
@@ -5639,12 +5733,14 @@ mod tests {
 
     // ── restore_object ──
 
-    #[test]
-    fn restore_object_non_archival_errors() {
+    #[tokio::test]
+    async fn restore_object_non_archival_errors() {
         let svc = make_service();
         seed_bucket(&svc, "roc");
         let req = make_request(Method::PUT, "/roc/k", &[], b"x");
-        svc.put_object("123456789012", &req, "roc", "k").unwrap();
+        svc.put_object("123456789012", &req, "roc", "k")
+            .await
+            .unwrap();
 
         let req = make_request(Method::POST, "/roc/k", &[("restore", "")], b"");
         assert_aws_err(
@@ -5653,14 +5749,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn restore_object_glacier_accepted() {
+    #[tokio::test]
+    async fn restore_object_glacier_accepted() {
         let svc = make_service();
         seed_bucket(&svc, "rog");
         let mut req = make_request(Method::PUT, "/rog/k", &[], b"x");
         req.headers
             .insert("x-amz-storage-class", "GLACIER".parse().unwrap());
-        svc.put_object("123456789012", &req, "rog", "k").unwrap();
+        svc.put_object("123456789012", &req, "rog", "k")
+            .await
+            .unwrap();
 
         let req = make_request(Method::POST, "/rog/k", &[("restore", "")], b"");
         let resp = svc
@@ -5682,8 +5780,8 @@ mod tests {
 
     // ── list_object_versions ──
 
-    #[test]
-    fn list_object_versions_basic() {
+    #[tokio::test]
+    async fn list_object_versions_basic() {
         let svc = make_service();
         seed_bucket(&svc, "lov");
         {
@@ -5693,9 +5791,13 @@ mod tests {
             b.versioning = Some("Enabled".to_string());
         }
         let req = make_request(Method::PUT, "/lov/k", &[], b"v1");
-        svc.put_object("123456789012", &req, "lov", "k").unwrap();
+        svc.put_object("123456789012", &req, "lov", "k")
+            .await
+            .unwrap();
         let req = make_request(Method::PUT, "/lov/k", &[], b"v2");
-        svc.put_object("123456789012", &req, "lov", "k").unwrap();
+        svc.put_object("123456789012", &req, "lov", "k")
+            .await
+            .unwrap();
 
         let req = make_request(Method::GET, "/lov", &[("versions", "")], b"");
         let resp = svc
@@ -5716,14 +5818,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn put_object_custom_content_type() {
+    #[tokio::test]
+    async fn put_object_custom_content_type() {
         let svc = make_service();
         seed_bucket(&svc, "ct");
         let mut req = make_request(Method::PUT, "/ct/k", &[], b"hi");
         req.headers
             .insert("content-type", "text/plain".parse().unwrap());
-        svc.put_object("123456789012", &req, "ct", "k").unwrap();
+        svc.put_object("123456789012", &req, "ct", "k")
+            .await
+            .unwrap();
         let req = make_request(Method::GET, "/ct/k", &[], b"");
         let resp = svc.get_object("123456789012", &req, "ct", "k").unwrap();
         assert_eq!(resp.content_type, "text/plain");
@@ -5737,12 +5841,14 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn get_object_attributes_basic() {
+    #[tokio::test]
+    async fn get_object_attributes_basic() {
         let svc = make_service();
         seed_bucket(&svc, "goa");
         let req = make_request(Method::PUT, "/goa/k", &[], b"hi");
-        svc.put_object("123456789012", &req, "goa", "k").unwrap();
+        svc.put_object("123456789012", &req, "goa", "k")
+            .await
+            .unwrap();
 
         let mut req = make_request(Method::GET, "/goa/k", &[("attributes", "")], b"");
         req.headers.insert(
@@ -5793,12 +5899,14 @@ mod tests {
             .is_err());
     }
 
-    #[test]
-    fn get_object_acl_returns_acl_xml() {
+    #[tokio::test]
+    async fn get_object_acl_returns_acl_xml() {
         let svc = make_service();
         seed_bucket(&svc, "acl");
         let req = make_request(Method::PUT, "/acl/k", &[], b"x");
-        svc.put_object("123456789012", &req, "acl", "k").unwrap();
+        svc.put_object("123456789012", &req, "acl", "k")
+            .await
+            .unwrap();
         let req = make_request(Method::GET, "/acl/k", &[("acl", "")], b"");
         let resp = svc
             .get_object_acl("123456789012", &req, "acl", "k")
@@ -5955,12 +6063,14 @@ mod tests {
             .is_err());
     }
 
-    #[test]
-    fn put_object_tagging_lifecycle() {
+    #[tokio::test]
+    async fn put_object_tagging_lifecycle() {
         let svc = make_service();
         seed_bucket(&svc, "pota");
         let req = make_request(Method::PUT, "/pota/k", &[], b"x");
-        svc.put_object("123456789012", &req, "pota", "k").unwrap();
+        svc.put_object("123456789012", &req, "pota", "k")
+            .await
+            .unwrap();
 
         let xml =
             b"<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>";
