@@ -1154,6 +1154,7 @@ mod tests {
             request_id: Uuid::new_v4().to_string(),
             headers: HeaderMap::new(),
             query_params: std::collections::HashMap::new(),
+            body_stream: parking_lot::Mutex::new(None),
             body: Bytes::from(body.to_string()),
             path_segments: path
                 .split('/')
