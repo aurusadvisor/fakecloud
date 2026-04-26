@@ -29,6 +29,7 @@ pub(crate) struct ResetState {
     pub apigatewayv1: fakecloud_apigateway::SharedApiGatewayState,
     pub apigatewayv2: fakecloud_apigatewayv2::state::SharedApiGatewayV2State,
     pub bedrock: fakecloud_bedrock::state::SharedBedrockState,
+    pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
     pub organizations: fakecloud_organizations::state::SharedOrganizationsState,
     pub container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     pub rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
@@ -146,6 +147,9 @@ impl ResetState {
             }
             "bedrock" | "bedrock-runtime" => {
                 self.bedrock.write().reset();
+            }
+            "cloudfront" => {
+                *self.cloudfront.write() = fakecloud_cloudfront::CloudFrontAccounts::new();
             }
             "organizations" => {
                 *self.organizations.write() = None;
@@ -320,6 +324,14 @@ impl ResetState {
                     state.reset();
                 }
             }
+            "cloudfront" => {
+                // CloudFront is a global service in AWS; per-account resets
+                // simply drop that account's distribution / invalidation /
+                // tag map, matching the multi-account semantics other
+                // services use here.
+                let mut state = self.cloudfront.write();
+                state.accounts.remove(account_id);
+            }
             _ => {
                 return Err(format!("Unknown service: {service}"));
             }
@@ -387,6 +399,7 @@ impl ResetState {
         self.apigatewayv1.write().reset();
         self.apigatewayv2.write().reset();
         self.bedrock.write().reset();
+        *self.cloudfront.write() = fakecloud_cloudfront::CloudFrontAccounts::new();
         // Organizations is a cross-account singleton (not MultiAccountState);
         // a full reset drops the org entirely so subsequent runs start
         // with no org, matching the no-in-use default state.
@@ -690,6 +703,9 @@ mod tests {
                     "us-east-1",
                     "http://localhost:4566",
                 ),
+            )),
+            cloudfront: Arc::new(parking_lot::RwLock::new(
+                fakecloud_cloudfront::CloudFrontAccounts::new(),
             )),
             organizations: Arc::new(parking_lot::RwLock::new(None)),
             container_runtime: None,

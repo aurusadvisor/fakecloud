@@ -433,6 +433,7 @@ impl CloudFrontService {
             .to_string();
         let parsed: CopyDistributionRequest = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid request XML: {e}")))?;
+        validate_caller_reference(&parsed.caller_reference)?;
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -768,7 +769,7 @@ impl CloudFrontService {
         dist.last_modified_time = Utc::now();
         let body = format!(
             "{XML_DECL}<AssociateDistributionWebACLResult xmlns=\"{NS}\"><Id>{}</Id><WebACLArn>{}</WebACLArn></AssociateDistributionWebACLResult>",
-            id, parsed.web_acl_arn,
+            esc(id), esc(&parsed.web_acl_arn),
             NS = crate::NAMESPACE,
             XML_DECL = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
         );
@@ -798,7 +799,7 @@ impl CloudFrontService {
         dist.last_modified_time = Utc::now();
         let body = format!(
             "{XML_DECL}<DisassociateDistributionWebACLResult xmlns=\"{NS}\"><Id>{}</Id></DisassociateDistributionWebACLResult>",
-            id,
+            esc(id),
             NS = crate::NAMESPACE,
             XML_DECL = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
         );
@@ -815,6 +816,26 @@ struct AssociateAliasRequest {
 
 // ─── XML body builders ────────────────────────────────────────────────
 
+/// XML-escape a user-provided string before injecting it into hand-rolled
+/// XML response bodies. The 5 standard XML metacharacters are escaped;
+/// everything else passes through unchanged. Keep this in sync with
+/// `quick_xml`'s entity table — using their own primitive would mean a
+/// `Writer` per call and we serialize directly into a `String`.
+fn esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn build_distribution_xml(dist: &StoredDistribution) -> String {
     let mut out = String::with_capacity(2048);
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
@@ -822,9 +843,9 @@ fn build_distribution_xml(dist: &StoredDistribution) -> String {
         "<Distribution xmlns=\"{ns}\">",
         ns = crate::NAMESPACE
     ));
-    out.push_str(&format!("<Id>{}</Id>", dist.id));
-    out.push_str(&format!("<ARN>{}</ARN>", dist.arn));
-    out.push_str(&format!("<Status>{}</Status>", dist.status));
+    out.push_str(&format!("<Id>{}</Id>", esc(&dist.id)));
+    out.push_str(&format!("<ARN>{}</ARN>", esc(&dist.arn)));
+    out.push_str(&format!("<Status>{}</Status>", esc(&dist.status)));
     out.push_str(&format!(
         "<LastModifiedTime>{}</LastModifiedTime>",
         rfc3339(&dist.last_modified_time)
@@ -833,7 +854,7 @@ fn build_distribution_xml(dist: &StoredDistribution) -> String {
         "<InProgressInvalidationBatches>{}</InProgressInvalidationBatches>",
         dist.in_progress_invalidation_batches
     ));
-    out.push_str(&format!("<DomainName>{}</DomainName>", dist.domain_name));
+    out.push_str(&format!("<DomainName>{}</DomainName>", esc(&dist.domain_name)));
     out.push_str("<ActiveTrustedSigners><Enabled>false</Enabled><Quantity>0</Quantity></ActiveTrustedSigners>");
     out.push_str("<ActiveTrustedKeyGroups><Enabled>false</Enabled><Quantity>0</Quantity></ActiveTrustedKeyGroups>");
     let inner = quick_xml::se::to_string_with_root("DistributionConfig", &dist.config)
@@ -858,14 +879,14 @@ fn build_distribution_list_xml(dists: &[StoredDistribution], root: &str) -> Stri
     out.push_str("<Items>");
     for d in dists {
         out.push_str("<DistributionSummary>");
-        out.push_str(&format!("<Id>{}</Id>", d.id));
-        out.push_str(&format!("<ARN>{}</ARN>", d.arn));
-        out.push_str(&format!("<Status>{}</Status>", d.status));
+        out.push_str(&format!("<Id>{}</Id>", esc(&d.id)));
+        out.push_str(&format!("<ARN>{}</ARN>", esc(&d.arn)));
+        out.push_str(&format!("<Status>{}</Status>", esc(&d.status)));
         out.push_str(&format!(
             "<LastModifiedTime>{}</LastModifiedTime>",
             rfc3339(&d.last_modified_time)
         ));
-        out.push_str(&format!("<DomainName>{}</DomainName>", d.domain_name));
+        out.push_str(&format!("<DomainName>{}</DomainName>", esc(&d.domain_name)));
         let aliases = d.config.aliases.clone().unwrap_or_default();
         out.push_str(&render_inline("Aliases", &aliases));
         let origins = d.config.origins.clone();
@@ -876,13 +897,14 @@ fn build_distribution_list_xml(dists: &[StoredDistribution], root: &str) -> Stri
         out.push_str(&render_inline("CacheBehaviors", &cb));
         let cer = d.config.custom_error_responses.clone().unwrap_or_default();
         out.push_str(&render_inline("CustomErrorResponses", &cer));
-        out.push_str(&format!("<Comment>{}</Comment>", d.config.comment));
+        out.push_str(&format!("<Comment>{}</Comment>", esc(&d.config.comment)));
         out.push_str(&format!(
             "<PriceClass>{}</PriceClass>",
-            d.config
+            esc(&d
+                .config
                 .price_class
                 .clone()
-                .unwrap_or_else(|| "PriceClass_All".to_string())
+                .unwrap_or_else(|| "PriceClass_All".to_string()))
         ));
         out.push_str(&format!("<Enabled>{}</Enabled>", d.config.enabled));
         out.push_str(&render_inline(
@@ -895,14 +917,15 @@ fn build_distribution_list_xml(dists: &[StoredDistribution], root: &str) -> Stri
         ));
         out.push_str(&format!(
             "<WebACLId>{}</WebACLId>",
-            d.config.web_acl_id.clone().unwrap_or_default()
+            esc(&d.config.web_acl_id.clone().unwrap_or_default())
         ));
         out.push_str(&format!(
             "<HttpVersion>{}</HttpVersion>",
-            d.config
+            esc(&d
+                .config
                 .http_version
                 .clone()
-                .unwrap_or_else(|| "http2".to_string())
+                .unwrap_or_else(|| "http2".to_string()))
         ));
         out.push_str(&format!(
             "<IsIPV6Enabled>{}</IsIPV6Enabled>",
@@ -935,8 +958,8 @@ fn build_invalidation_xml(inv: &StoredInvalidation) -> String {
         "<Invalidation xmlns=\"{ns}\">",
         ns = crate::NAMESPACE
     ));
-    out.push_str(&format!("<Id>{}</Id>", inv.id));
-    out.push_str(&format!("<Status>{}</Status>", inv.status));
+    out.push_str(&format!("<Id>{}</Id>", esc(&inv.id)));
+    out.push_str(&format!("<Status>{}</Status>", esc(&inv.status)));
     out.push_str(&format!(
         "<CreateTime>{}</CreateTime>",
         rfc3339(&inv.create_time)
@@ -961,12 +984,12 @@ fn build_invalidation_list_xml(items: &[&StoredInvalidation]) -> String {
         out.push_str("<Items>");
         for inv in items {
             out.push_str("<InvalidationSummary>");
-            out.push_str(&format!("<Id>{}</Id>", inv.id));
+            out.push_str(&format!("<Id>{}</Id>", esc(&inv.id)));
             out.push_str(&format!(
                 "<CreateTime>{}</CreateTime>",
                 rfc3339(&inv.create_time)
             ));
-            out.push_str(&format!("<Status>{}</Status>", inv.status));
+            out.push_str(&format!("<Status>{}</Status>", esc(&inv.status)));
             out.push_str("</InvalidationSummary>");
         }
         out.push_str("</Items>");
@@ -982,9 +1005,9 @@ fn build_tags_xml(tags: &[Tag]) -> String {
     out.push_str("<Items>");
     for t in tags {
         out.push_str("<Tag>");
-        out.push_str(&format!("<Key>{}</Key>", t.key));
+        out.push_str(&format!("<Key>{}</Key>", esc(&t.key)));
         if let Some(v) = &t.value {
-            out.push_str(&format!("<Value>{v}</Value>"));
+            out.push_str(&format!("<Value>{}</Value>", esc(v)));
         }
         out.push_str("</Tag>");
     }
@@ -1409,5 +1432,80 @@ mod tests {
         let xml = std::str::from_utf8(list.body.expect_bytes()).unwrap();
         assert!(xml.contains("<Key>env</Key>"));
         assert!(xml.contains("<Value>prod</Value>"));
+    }
+
+    #[tokio::test]
+    async fn xml_metacharacters_in_user_input_are_escaped() {
+        let svc = CloudFrontService::new(make_state());
+        let body = minimal_dist_config_xml("escape-ref")
+            .replace("<Comment></Comment>", "<Comment><![CDATA[a&b<c>d]]></Comment>");
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &body,
+            ))
+            .await
+            .unwrap();
+        let xml = std::str::from_utf8(create.body.expect_bytes()).unwrap();
+        let dist_id = xml
+            .split("<Id>")
+            .nth(1)
+            .unwrap()
+            .split("</Id>")
+            .next()
+            .unwrap();
+        let arn = xml
+            .split("<ARN>")
+            .nth(1)
+            .unwrap()
+            .split("</ARN>")
+            .next()
+            .unwrap();
+
+        let tag_body = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Tags xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+  <Items><Tag><Key>env</Key><Value>a&amp;b&lt;c&gt;d</Value></Tag></Items>
+</Tags>"#;
+        let arn_q = format!("Operation=Tag&Resource={}", arn);
+        svc.handle(make_request(
+            http::Method::POST,
+            "/2020-05-31/tagging",
+            &arn_q,
+            tag_body,
+        ))
+        .await
+        .unwrap();
+
+        let list = svc
+            .handle(make_request(
+                http::Method::GET,
+                "/2020-05-31/tagging",
+                &format!("Resource={}", arn),
+                "",
+            ))
+            .await
+            .unwrap();
+        let xml = std::str::from_utf8(list.body.expect_bytes()).unwrap();
+        assert!(xml.contains("<Value>a&amp;b&lt;c&gt;d</Value>"));
+        assert!(!xml.contains("<Value>a&b<c>d</Value>"));
+
+        // Force the distribution into the list-rendering path so the
+        // unescaped Comment field would surface there.
+        let list_resp = svc
+            .handle(make_request(
+                http::Method::GET,
+                "/2020-05-31/distribution",
+                "",
+                "",
+            ))
+            .await
+            .unwrap();
+        let xml = std::str::from_utf8(list_resp.body.expect_bytes()).unwrap();
+        // Ensure raw `<` from the user-supplied comment never lands inside
+        // a Comment element on the wire.
+        assert!(!xml.contains("<Comment>a&b<c>d"));
+        assert!(xml.contains(dist_id));
     }
 }

@@ -58,7 +58,6 @@ ID=$(echo "$DIST" | jq -r '.Distribution.Id')
 # Invalidate something
 aws --endpoint-url http://localhost:4566 cloudfront create-invalidation \
   --distribution-id "$ID" \
-  --paths "/*" \
   --invalidation-batch '{"Paths":{"Quantity":1,"Items":["/*"]},"CallerReference":"inv-1"}'
 
 # List
