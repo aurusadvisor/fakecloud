@@ -659,25 +659,17 @@ async fn blob_upload_patch(
         PathBuf::from(&upload.spool_path)
     };
 
-    // Two ingestion modes — true streaming when the dispatcher handed
-    // us the raw body stream (1 GiB push lands in constant memory),
-    // and a buffered fallback for legacy callers that already read the
-    // body into `request.body` (small chunks from tests, edge proxies).
-    let appended: u64 = if let Some(stream) = request.take_body_stream() {
-        append_stream(&spool, stream).await?
-    } else {
-        let chunk = &request.body;
-        if !chunk.is_empty() {
-            tokio::task::block_in_place(|| append_bytes_sync(&spool, chunk)).map_err(|e| {
-                AwsServiceError::aws_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "InternalError",
-                    format!("failed to append upload chunk: {e}"),
-                )
-            })?;
-        }
-        chunk.len() as u64
-    };
+    // Streaming-only: dispatch flags blob-upload PATCH/PUT to keep
+    // `body_stream` populated, so we always consume it here. A 1 GiB
+    // push lands in constant memory.
+    let stream = request.take_body_stream().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "BLOB_UPLOAD_INVALID",
+            "blob upload PATCH requires a streaming request body",
+        )
+    })?;
+    let appended = append_stream(&spool, stream).await?;
 
     let mut accounts = service.state_handle().write();
     let state = accounts
@@ -744,17 +736,18 @@ async fn blob_upload_finish(
         PathBuf::from(&upload.spool_path)
     };
 
-    if let Some(stream) = request.take_body_stream() {
-        append_stream(&spool, stream).await?;
-    } else if !request.body.is_empty() {
-        tokio::task::block_in_place(|| append_bytes_sync(&spool, &request.body)).map_err(|e| {
-            AwsServiceError::aws_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "InternalError",
-                format!("failed to append final upload chunk: {e}"),
-            )
-        })?;
-    }
+    // Final PUT may carry an empty body (chunks already streamed via
+    // PATCH) or one last chunk. Either way, dispatch keeps body_stream
+    // populated; we drain it into the spool unconditionally so a
+    // single-call OCI upload (PATCH-less) works the same way.
+    let stream = request.take_body_stream().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "BLOB_UPLOAD_INVALID",
+            "blob upload PUT requires a streaming request body",
+        )
+    })?;
+    append_stream(&spool, stream).await?;
 
     let combined = read_spool(&spool).map_err(|e| {
         AwsServiceError::aws_error(
