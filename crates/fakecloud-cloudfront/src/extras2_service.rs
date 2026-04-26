@@ -310,8 +310,11 @@ impl CloudFrontService {
         body.push_str(XML_DECL);
         body.push_str(&format!("<ManagedCertificateDetails xmlns=\"{NS}\">"));
         body.push_str(&format!(
-            "<CertificateArn>arn:aws:acm:us-east-1:{}:certificate/{}</CertificateArn>",
-            DEFAULT_ACCOUNT, id
+            "<CertificateArn>{}</CertificateArn>",
+            esc(&format!(
+                "arn:aws:acm:us-east-1:{}:certificate/{}",
+                DEFAULT_ACCOUNT, id
+            ))
         ));
         body.push_str("<CertificateStatus>issued</CertificateStatus>");
         body.push_str("<ValidationTokenHost>cloudfront</ValidationTokenHost>");
