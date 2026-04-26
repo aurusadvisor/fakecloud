@@ -3872,18 +3872,17 @@ async fn main() {
                     let ss = ss.clone();
                     async move {
                         let activity_arn = req.activity_arn;
-                        let account_id = activity_arn
-                            .split(':')
-                            .nth(4)
-                            .unwrap_or("")
-                            .to_string();
                         let token = format!(
                             "FCToken-injected-{}-{}",
                             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                             uuid::Uuid::new_v4().simple(),
                         );
                         let mut accounts = ss.write();
-                        let state = accounts.get_or_create(&account_id);
+                        // Default-account namespace keeps the introspection
+                        // endpoint simple. Multi-account callers can switch
+                        // FAKECLOUD's default account before calling, or
+                        // create the activity in the default account.
+                        let state = accounts.default_mut();
                         if !state.activities.contains_key(&activity_arn) {
                             return (
                                 axum::http::StatusCode::NOT_FOUND,
