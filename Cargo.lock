@@ -758,6 +758,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-route53"
+version = "1.110.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27aa79519d4d75164790b47ba99b8eee18a36e317f87f96bdffac12457f18a29"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-smithy-xml",
+ "aws-types",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-s3"
 version = "1.119.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2228,6 +2252,7 @@ dependencies = [
  "fakecloud-organizations",
  "fakecloud-persistence",
  "fakecloud-rds",
+ "fakecloud-route53",
  "fakecloud-s3",
  "fakecloud-scheduler",
  "fakecloud-sdk",
@@ -2428,6 +2453,7 @@ dependencies = [
  "aws-sdk-kms",
  "aws-sdk-lambda",
  "aws-sdk-rds",
+ "aws-sdk-route53",
  "aws-sdk-s3",
  "aws-sdk-scheduler",
  "aws-sdk-secretsmanager",
@@ -2533,6 +2559,7 @@ dependencies = [
  "aws-sdk-lambda",
  "aws-sdk-organizations",
  "aws-sdk-rds",
+ "aws-sdk-route53",
  "aws-sdk-s3",
  "aws-sdk-scheduler",
  "aws-sdk-secretsmanager",
@@ -2865,6 +2892,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fakecloud-route53"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "fakecloud-s3"
 version = "0.12.0"
 dependencies = [
@@ -3080,6 +3128,7 @@ dependencies = [
  "aws-sdk-kms",
  "aws-sdk-lambda",
  "aws-sdk-rds",
+ "aws-sdk-route53",
  "aws-sdk-s3",
  "aws-sdk-scheduler",
  "aws-sdk-secretsmanager",
