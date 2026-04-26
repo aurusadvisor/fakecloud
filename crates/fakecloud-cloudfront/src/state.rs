@@ -7,6 +7,10 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use crate::functions::{
+    StoredFunction, StoredKeyGroup, StoredKeyValueStore, StoredMonitoringSubscription,
+    StoredOriginAccessIdentity, StoredPublicKey,
+};
 use crate::model::{DistributionConfig, InvalidationBatch};
 use crate::policies::{
     StoredCachePolicy, StoredContinuousDeploymentPolicy, StoredOriginAccessControl,
@@ -49,6 +53,13 @@ pub struct AccountState {
     pub origin_request_policies: HashMap<String, StoredOriginRequestPolicy>,
     pub response_headers_policies: HashMap<String, StoredResponseHeadersPolicy>,
     pub continuous_deployment_policies: HashMap<String, StoredContinuousDeploymentPolicy>,
+    pub functions: HashMap<String, StoredFunction>,
+    pub public_keys: HashMap<String, StoredPublicKey>,
+    pub key_groups: HashMap<String, StoredKeyGroup>,
+    pub key_value_stores: HashMap<String, StoredKeyValueStore>,
+    pub origin_access_identities: HashMap<String, StoredOriginAccessIdentity>,
+    /// Per-distribution monitoring subscription, keyed by distribution id.
+    pub monitoring_subscriptions: HashMap<String, StoredMonitoringSubscription>,
 }
 
 impl CloudFrontAccounts {
