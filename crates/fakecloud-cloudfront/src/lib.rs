@@ -6,6 +6,8 @@
 //! `us-east-1`.
 
 pub mod extras;
+pub mod extras2;
+pub mod extras2_service;
 pub mod extras_service;
 pub mod fle;
 pub mod fle_service;

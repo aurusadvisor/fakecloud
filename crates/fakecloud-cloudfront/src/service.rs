@@ -160,6 +160,17 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "GetResourcePolicy",
     "PutResourcePolicy",
     "DeleteResourcePolicy",
+    "CreateConnectionGroup",
+    "GetConnectionGroup",
+    "GetConnectionGroupByRoutingEndpoint",
+    "UpdateConnectionGroup",
+    "DeleteConnectionGroup",
+    "ListConnectionGroups",
+    "ListDomainConflicts",
+    "UpdateDomainAssociation",
+    "VerifyDnsConfiguration",
+    "GetManagedCertificateDetails",
+    "UpdateDistributionWithStagingConfig",
 ];
 
 pub struct CloudFrontService {
@@ -357,6 +368,21 @@ impl AwsService for CloudFrontService {
             "GetResourcePolicy" => self.get_resource_policy(&req),
             "PutResourcePolicy" => self.put_resource_policy(&req),
             "DeleteResourcePolicy" => self.delete_resource_policy(&req),
+            "CreateConnectionGroup" => self.create_connection_group(&req),
+            "GetConnectionGroup" => self.get_connection_group(&resolved),
+            "GetConnectionGroupByRoutingEndpoint" => {
+                self.get_connection_group_by_routing_endpoint(&req)
+            }
+            "UpdateConnectionGroup" => self.update_connection_group(&req, &resolved),
+            "DeleteConnectionGroup" => self.delete_connection_group(&req, &resolved),
+            "ListConnectionGroups" => self.list_connection_groups(&req),
+            "ListDomainConflicts" => self.list_domain_conflicts(&req),
+            "UpdateDomainAssociation" => self.update_domain_association(&req),
+            "VerifyDnsConfiguration" => self.verify_dns_configuration(&req),
+            "GetManagedCertificateDetails" => self.get_managed_certificate_details(&resolved),
+            "UpdateDistributionWithStagingConfig" => {
+                self.update_distribution_with_staging_config(&req, &resolved)
+            }
             other => Err(aws_error(
                 StatusCode::NOT_IMPLEMENTED,
                 "InvalidAction",
@@ -1058,7 +1084,7 @@ pub(crate) fn esc(s: &str) -> String {
     out
 }
 
-fn build_distribution_xml(dist: &StoredDistribution) -> String {
+pub(crate) fn build_distribution_xml(dist: &StoredDistribution) -> String {
     let mut out = String::with_capacity(2048);
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
     out.push_str(&format!(

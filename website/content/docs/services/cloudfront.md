@@ -4,9 +4,9 @@ description = "CloudFront control plane — distributions, invalidations, web AC
 weight = 24
 +++
 
-fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, the full policy resource surface (OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment), CloudFront Functions, public keys + key groups, key value stores, legacy origin access identities, per-distribution monitoring subscriptions, the legacy RTMP streaming distributions, field-level encryption configs + profiles, realtime log configs, VPC origins, anycast IP lists, trust stores, and resource policies. 136 operations.
+fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, the full policy resource surface (OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment), CloudFront Functions, public keys + key groups, key value stores, legacy origin access identities, per-distribution monitoring subscriptions, the legacy RTMP streaming distributions, field-level encryption configs + profiles, realtime log configs, VPC origins, anycast IP lists, trust stores, resource policies, connection groups, domain association + DNS verification, managed certificate details, and the promote-staging distribution swap. 147 operations.
 
-**Status: Batches 1-6a shipped.** Distribution tenants, connection groups, connection functions, domain ops, and managed certificate details are still pending in subsequent batches.
+**Status: Batches 1-6b shipped.** Distribution tenants and connection functions are deferred to a later batch.
 
 ## Supported today
 
@@ -33,6 +33,10 @@ fakecloud implements CloudFront's REST-XML control plane focused on the operatio
 - **Anycast IP Lists** — `CreateAnycastIpList`, `GetAnycastIpList`, `UpdateAnycastIpList`, `DeleteAnycastIpList`, `ListAnycastIpLists`. `IpCount` validated to AWS allowed values (3 or 21). Synthesized deterministic `AnycastIps` payload returned on every read.
 - **Trust Stores** — `CreateTrustStore`, `GetTrustStore` (by `identifier`), `UpdateTrustStore`, `DeleteTrustStore`, `ListTrustStores`. ETag/If-Match concurrency. `UpdateTrustStore` accepts the `httpPayload` `CaCertificatesBundleSource` body shape AWS uses (no name).
 - **Resource Policies** — `PutResourcePolicy`, `GetResourcePolicy`, `DeleteResourcePolicy`. Policy documents are stored verbatim per resource ARN and round-tripped on get.
+- **Connection Groups** — `CreateConnectionGroup`, `GetConnectionGroup`, `GetConnectionGroupByRoutingEndpoint`, `UpdateConnectionGroup`, `DeleteConnectionGroup`, `ListConnectionGroups`. ETag/If-Match concurrency. Routing endpoint synthesized as `<id>.cloudfront.net`. `Delete` enforces the AWS rule that the group must be `Enabled = false` first (`ResourceInUse`). Duplicate `Name` rejected with `EntityAlreadyExists`.
+- **Domain ops** — `ListDomainConflicts` (returns empty conflicts in fakecloud since there is no global DNS namespace), `UpdateDomainAssociation` (round-trips `Domain` + target `DistributionId`/`DistributionTenantId`), `VerifyDnsConfiguration` (returns a deterministic `valid-configuration` status).
+- **Managed Certificate Details** — `GetManagedCertificateDetails` returns a synthesized ACM certificate ARN + `issued` status keyed by the supplied identifier.
+- **Promote-staging** — `UpdateDistributionWithStagingConfig` swaps the distribution's `ETag` against the configured `StagingDistributionId` and rejects unknown staging ids with `NoSuchDistribution`.
 
 ### Concurrency semantics
 
@@ -86,8 +90,7 @@ aws --endpoint-url http://localhost:4566 cloudfront list-invalidations --distrib
 
 | Surface                                | Status                  |
 |----------------------------------------|-------------------------|
-| Distribution Tenants                   | Batch 6b                |
-| Connection Functions / Groups          | Batch 6b                |
-| Domain ops + Managed Certificate       | Batch 6b                |
+| Distribution Tenants                   | deferred                |
+| Connection Functions                   | deferred                |
 
 There is no edge data plane: requests against a CloudFront distribution domain are not actually proxied to origins. Use ELBv2's in-process data plane for HTTP request matching tests today.
