@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{HostedZoneFeatures, ResourceRecordSet, VPC};
+use crate::model::{HealthCheckConfig, HostedZoneFeatures, ResourceRecordSet, VPC};
 
 pub type SharedRoute53State = Arc<RwLock<Route53Accounts>>;
 
@@ -38,6 +38,7 @@ impl Route53Accounts {
 pub struct AccountState {
     pub hosted_zones: HashMap<String, StoredHostedZone>,
     pub changes: HashMap<String, StoredChange>,
+    pub health_checks: HashMap<String, StoredHealthCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,4 +62,13 @@ pub struct StoredChange {
     pub status: String,
     pub submitted_at: DateTime<Utc>,
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredHealthCheck {
+    pub id: String,
+    pub caller_reference: String,
+    pub version: i64,
+    pub config: HealthCheckConfig,
+    pub created_time: DateTime<Utc>,
 }
