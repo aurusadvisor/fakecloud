@@ -39,6 +39,10 @@ pub struct AccountState {
     pub hosted_zones: HashMap<String, StoredHostedZone>,
     pub changes: HashMap<String, StoredChange>,
     pub health_checks: HashMap<String, StoredHealthCheck>,
+    /// Keyed by `(traffic_policy_id, version)`. Each `CreateTrafficPolicyVersion`
+    /// inserts a new entry alongside the existing versions.
+    pub traffic_policies: HashMap<(String, i64), StoredTrafficPolicy>,
+    pub traffic_policy_instances: HashMap<String, StoredTrafficPolicyInstance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,5 +74,30 @@ pub struct StoredHealthCheck {
     pub caller_reference: String,
     pub version: i64,
     pub config: HealthCheckConfig,
+    pub created_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredTrafficPolicy {
+    pub id: String,
+    pub version: i64,
+    pub name: String,
+    pub policy_type: String,
+    pub document: String,
+    pub comment: Option<String>,
+    pub created_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredTrafficPolicyInstance {
+    pub id: String,
+    pub hosted_zone_id: String,
+    pub name: String,
+    pub ttl: i64,
+    pub state: String,
+    pub message: String,
+    pub traffic_policy_id: String,
+    pub traffic_policy_version: i64,
+    pub traffic_policy_type: String,
     pub created_time: DateTime<Utc>,
 }
