@@ -100,13 +100,32 @@ impl AwsRequest {
 /// does NOT apply to streaming routes; this helper exists so the
 /// transitional buffered consumer doesn't have to depend on `axum`.
 pub async fn drain_request_stream(stream: RequestBodyStream) -> Result<Bytes, AwsServiceError> {
-    axum::body::to_bytes(stream, usize::MAX).await.map_err(|_| {
-        AwsServiceError::aws_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "RequestEntityTooLarge",
-            "Failed to read streaming request body",
-        )
-    })
+    use http_body_util::BodyExt;
+    match stream.collect().await {
+        Ok(c) => Ok(c.to_bytes()),
+        Err(e) => {
+            let msg = e.to_string();
+            // Hyper / axum surface `body limit exceeded` with a
+            // payload-too-large variant. Everything else (connection
+            // reset, malformed chunked encoding, premature EOF) maps
+            // to a 400 BadRequest so callers can distinguish.
+            let too_large = msg.to_ascii_lowercase().contains("limit");
+            let (status, code, message) = if too_large {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "RequestEntityTooLarge",
+                    "Streaming request body exceeded the configured limit",
+                )
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "MalformedRequestBody",
+                    "Failed to read streaming request body",
+                )
+            };
+            Err(AwsServiceError::aws_error(status, code, message))
+        }
+    }
 }
 
 /// A response body. Most handlers return [`ResponseBody::Bytes`] built from

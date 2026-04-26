@@ -33,10 +33,27 @@ pub async fn dispatch(
     // the raw body to the service handler. The handler spills it to
     // disk on the fly. Header-only detection covers every streaming
     // candidate (none of them rely on form-body sniffing).
-    let stream_route = streaming_route(&parts.method, parts.uri.path(), &parts.headers);
+    let stream_route = streaming_route(
+        &parts.method,
+        parts.uri.path(),
+        &parts.headers,
+        &query_params,
+    );
     let header_only = protocol::detect_service_headers_only(&parts.headers, &query_params);
     let stream_dispatch = match (&stream_route, &header_only) {
+        // Header-only detection agrees with the URL match — covers S3
+        // PUT object (SigV4 service=s3 in Authorization).
         (Some(sr), Some(detected)) if sr.0 == detected.service => Some(detected.clone()),
+        // ECR OCI v2 blob upload has no AWS auth header; the path
+        // alone (`/v2/.../blobs/uploads/...`) tells us the route is
+        // ECR. Synthesize a DetectedRequest so dispatch picks the
+        // streaming path. Same special-case the buffered branch
+        // applies on detect_service None (see below).
+        (Some((service, _)), None) if *service == "ecr" => Some(protocol::DetectedRequest {
+            service: "ecr".to_string(),
+            action: String::new(),
+            protocol: AwsProtocol::Rest,
+        }),
         _ => None,
     };
 
@@ -653,6 +670,7 @@ fn streaming_route(
     method: &http::Method,
     path: &str,
     headers: &http::HeaderMap,
+    query_params: &HashMap<String, String>,
 ) -> Option<(&'static str, &'static str)> {
     // ECR OCI v2 blob upload (PATCH chunk + final PUT).
     if (method == http::Method::PATCH || method == http::Method::PUT)
@@ -662,20 +680,31 @@ fn streaming_route(
         return Some(("ecr", ""));
     }
 
-    // S3 PutObject / UploadPart / UploadPartCopy. Detect via SigV4
-    // service field in the Authorization header (or presigned query).
+    // S3 PutObject / UploadPart / UploadPartCopy. Detect either via
+    // SigV4 service field in the Authorization header OR via a SigV4
+    // presigned URL (X-Amz-Credential .../s3/...) OR a SigV2 presigned
+    // URL (AWSAccessKeyId + Signature + Expires query parameters).
     if method == http::Method::PUT {
-        let auth = headers
+        let after = path.trim_start_matches('/');
+        if !after.contains('/') {
+            return None;
+        }
+        let header_s3 = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if let Some(info) = fakecloud_aws::sigv4::parse_sigv4(auth) {
-            if info.service == "s3" {
-                let after = path.trim_start_matches('/');
-                if after.contains('/') {
-                    return Some(("s3", ""));
-                }
-            }
+            .and_then(fakecloud_aws::sigv4::parse_sigv4)
+            .map(|info| info.service == "s3")
+            .unwrap_or(false);
+        let presigned_v4_s3 = query_params
+            .get("X-Amz-Credential")
+            .and_then(|c| c.split('/').nth(3).map(|s| s.to_string()))
+            .map(|service| service == "s3")
+            .unwrap_or(false);
+        let presigned_v2 = query_params.contains_key("AWSAccessKeyId")
+            && query_params.contains_key("Signature")
+            && query_params.contains_key("Expires");
+        if header_s3 || presigned_v4_s3 || presigned_v2 {
+            return Some(("s3", ""));
         }
     }
 
