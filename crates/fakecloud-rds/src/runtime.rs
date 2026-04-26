@@ -104,6 +104,47 @@ impl RdsRuntime {
                 ];
                 (image, "3306", env_vars)
             }
+            "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => {
+                // Oracle Database Free is the no-cost dev edition shipped by
+                // Oracle. The container exposes a "FREEPDB1" pluggable
+                // database and creates the SYSTEM user with the password
+                // from ORACLE_PASSWORD.
+                let image = "gvenzl/oracle-free:23-slim".to_string();
+                let env_vars = vec![
+                    format!("ORACLE_PASSWORD={password}"),
+                    format!("APP_USER={username}"),
+                    format!("APP_USER_PASSWORD={password}"),
+                    format!("ORACLE_DATABASE={db_name}"),
+                ];
+                (image, "1521", env_vars)
+            }
+            "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" => {
+                // SQL Server Express is free for dev/test with no license
+                // ceiling. SA password must satisfy MSSQL's complexity
+                // requirements (>=8 chars, mix of classes); callers should
+                // supply one that does or the container will refuse to
+                // start.
+                let image = "mcr.microsoft.com/mssql/server:2022-latest".to_string();
+                let env_vars = vec![
+                    "ACCEPT_EULA=Y".to_string(),
+                    format!("MSSQL_SA_PASSWORD={password}"),
+                    "MSSQL_PID=Express".to_string(),
+                ];
+                (image, "1433", env_vars)
+            }
+            "db2-se" | "db2-ae" => {
+                // Db2 Community Edition is free under the standard IBM
+                // Community License. The container exposes a single
+                // database named after DBNAME, owned by db2inst1.
+                let image = "icr.io/db2_community/db2:latest".to_string();
+                let env_vars = vec![
+                    "LICENSE=accept".to_string(),
+                    "DB2INSTANCE=db2inst1".to_string(),
+                    format!("DB2INST1_PASSWORD={password}"),
+                    format!("DBNAME={db_name}"),
+                ];
+                (image, "50000", env_vars)
+            }
             _ => {
                 return Err(RuntimeError::ContainerStartFailed(format!(
                     "Unsupported engine: {}",
@@ -111,6 +152,9 @@ impl RdsRuntime {
                 )))
             }
         };
+
+        // Db2 needs --privileged to set kernel parameters during startup.
+        let needs_privileged = matches!(engine, "db2-se" | "db2-ae");
 
         // Build container create args
         let mut args = vec![
@@ -122,6 +166,10 @@ impl RdsRuntime {
             "--label".to_string(),
             format!("fakecloud-instance={}", self.instance_id),
         ];
+
+        if needs_privileged {
+            args.push("--privileged".to_string());
+        }
 
         for env_var in env_vars {
             args.push("-e".to_string());
@@ -175,6 +223,13 @@ impl RdsRuntime {
                 self.wait_for_mysql(username, password, db_name, host_port)
                     .await
             }
+            "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => {
+                self.wait_for_oracle(&container_id, host_port).await
+            }
+            "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" => {
+                self.wait_for_sqlserver(&container_id, host_port).await
+            }
+            "db2-se" | "db2-ae" => self.wait_for_db2(&container_id, host_port).await,
             _ => unreachable!("engine already validated"),
         };
 
@@ -231,6 +286,9 @@ impl RdsRuntime {
         let port = match engine {
             "postgres" => "5432",
             "mysql" | "mariadb" => "3306",
+            "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => "1521",
+            "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" => "1433",
+            "db2-se" | "db2-ae" => "50000",
             _ => "5432", // fallback
         };
 
@@ -245,6 +303,15 @@ impl RdsRuntime {
                 self.wait_for_mysql(username, password, db_name, host_port)
                     .await?
             }
+            "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => {
+                self.wait_for_oracle(&running.container_id, host_port)
+                    .await?
+            }
+            "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" => {
+                self.wait_for_sqlserver(&running.container_id, host_port)
+                    .await?
+            }
+            "db2-se" | "db2-ae" => self.wait_for_db2(&running.container_id, host_port).await?,
             _ => {
                 self.wait_for_postgres(username, password, db_name, host_port)
                     .await?
@@ -360,6 +427,95 @@ impl RdsRuntime {
         Err(RuntimeError::ContainerStartFailed(
             "MySQL/MariaDB container did not become ready within 20 seconds".to_string(),
         ))
+    }
+
+    /// Wait for Oracle Database Free to finish bootstrapping. The
+    /// `gvenzl/oracle-free` image prints `DATABASE IS READY TO USE!`
+    /// to stdout once the listener accepts connections, so we poll
+    /// `docker logs` until that marker appears (or the deadline elapses).
+    /// Oracle XE/Free typically takes 30-90 seconds on first start.
+    async fn wait_for_oracle(
+        &self,
+        container_id: &str,
+        host_port: u16,
+    ) -> Result<(), RuntimeError> {
+        self.wait_for_log_marker(container_id, "DATABASE IS READY TO USE!", 240)
+            .await?;
+        self.wait_for_tcp(host_port, 30).await
+    }
+
+    /// Wait for SQL Server to be ready. The official mssql/server image
+    /// emits `SQL Server is now ready for client connections.` once it
+    /// accepts TCP connections on 1433.
+    async fn wait_for_sqlserver(
+        &self,
+        container_id: &str,
+        host_port: u16,
+    ) -> Result<(), RuntimeError> {
+        self.wait_for_log_marker(
+            container_id,
+            "SQL Server is now ready for client connections",
+            180,
+        )
+        .await?;
+        self.wait_for_tcp(host_port, 30).await
+    }
+
+    /// Wait for Db2 Community Edition to finish setup. The
+    /// `icr.io/db2_community/db2` image prints `Setup has completed.`
+    /// once the instance is up and the database has been created.
+    async fn wait_for_db2(&self, container_id: &str, host_port: u16) -> Result<(), RuntimeError> {
+        self.wait_for_log_marker(container_id, "Setup has completed", 360)
+            .await?;
+        self.wait_for_tcp(host_port, 60).await
+    }
+
+    /// Poll `docker logs <container>` until the supplied marker appears
+    /// in stdout or stderr. `deadline_secs` caps total wait.
+    async fn wait_for_log_marker(
+        &self,
+        container_id: &str,
+        marker: &str,
+        deadline_secs: u64,
+    ) -> Result<(), RuntimeError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(deadline_secs);
+        while std::time::Instant::now() < deadline {
+            let output = tokio::process::Command::new(&self.cli)
+                .args(["logs", container_id])
+                .output()
+                .await
+                .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stdout.contains(marker) || stderr.contains(marker) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        Err(RuntimeError::ContainerStartFailed(format!(
+            "container did not log '{}' within {} seconds",
+            marker, deadline_secs
+        )))
+    }
+
+    /// TCP-probe the host port until it accepts a connection or the
+    /// deadline elapses. Use after `wait_for_log_marker` since the
+    /// listener may bind a moment after the readiness log line.
+    async fn wait_for_tcp(&self, host_port: u16, deadline_secs: u64) -> Result<(), RuntimeError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(deadline_secs);
+        while std::time::Instant::now() < deadline {
+            if tokio::net::TcpStream::connect(("127.0.0.1", host_port))
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Err(RuntimeError::ContainerStartFailed(format!(
+            "TCP probe to 127.0.0.1:{} did not succeed within {}s",
+            host_port, deadline_secs
+        )))
     }
 
     async fn remove_container(&self, container_id: &str) {

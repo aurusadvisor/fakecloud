@@ -8,7 +8,7 @@
 - Services: S3, SQS, SNS, EventBridge, EventBridge Scheduler, IAM, STS, SSM, DynamoDB, Lambda, Secrets Manager, CloudWatch Logs, KMS, CloudFormation, SES (v2 + v1 inbound), Cognito User Pools, Kinesis, RDS, ElastiCache, ECR, ECS, Elastic Load Balancing v2, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime
 - 30+ cross-service integrations: S3 notifications, SNS fan-out, EventBridge rules, DynamoDB Streams, CloudWatch Logs subscriptions, Cognito triggers, API Gateway -> Lambda, Step Functions task integrations, SES inbound -> S3/SNS/Lambda, and more
 - Real Lambda execution via Docker across 13 runtimes (Node.js 18/20/22, Python 3.9-3.12, Java 11/17/21, .NET 6/8, Ruby 3.2, Go, custom `provided.al2` / `provided.al2023`)
-- Real stateful services: RDS runs real PostgreSQL/MySQL/MariaDB via Docker; ElastiCache runs real Redis/Valkey via Docker
+- Real stateful services: RDS runs real PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2 via Docker; ElastiCache runs real Redis/Valkey/Memcached via Docker
 - First-party test-assertion SDKs for TypeScript, Python, Go, PHP, Java, and Rust — assert on emails sent, SNS messages published, Lambda invocations, Cognito confirmation codes, etc. without raw HTTP
 - Multi-account, SCPs, ABAC (tag-based conditions), permission boundaries, session policies, KMS key policies, bucket policies — full Allow/Deny/NotPrincipal semantics
 - CI runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud to catch provider-level drift
@@ -49,7 +49,7 @@
 - **SES** (110 ops): v2 API (send email, templates, configuration sets, event destinations, DKIM, suppression list) + v1 inbound (receipt rules with real S3/SNS/Lambda action execution, receipt filters)
 - **Cognito User Pools** (122 ops): user pools, app clients, users, groups, MFA (SMS, TOTP, WebAuthn), identity providers (Google, Facebook, SAML, OIDC), resource servers, domains, devices, full authentication flows (USER_PASSWORD_AUTH, USER_SRP_AUTH, REFRESH_TOKEN_AUTH, CUSTOM_AUTH), triggers
 - **Kinesis** (39 ops): data streams, records, shard iterators, retention changes, enhanced fan-out consumers, tagging
-- **RDS** (163 ops): DB instances with real PostgreSQL/MySQL/MariaDB engines via Docker, snapshots, read replicas, parameter groups, subnet groups, engine/version discovery, tagging
+- **RDS** (163 ops): DB instances with real PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2 engines via Docker, snapshots, read replicas, parameter groups, subnet groups, engine/version discovery, tagging
 - **ElastiCache** (75 ops): cache clusters with real Redis/Valkey via Docker, replication groups, global replication groups, serverless caches and snapshots, subnet groups, users/user groups, failover, tagging
 - **Step Functions** (37 ops): state machines, executions, full ASL interpreter (Pass, Task, Choice, Wait, Parallel, Map, Succeed, Fail), Retry/Catch, Lambda/SQS/SNS/EventBridge/DynamoDB task integrations
 - **API Gateway v2** (103 ops): HTTP APIs, routes with path parameters and wildcards, Lambda proxy integration v2.0, HTTP proxy, mock integrations, stages, deployments, JWT and Lambda authorizers, domain names, API mappings, models, route responses, integration responses, routing rules, VPC links, CORS, developer portals + portal products + product pages, tags
