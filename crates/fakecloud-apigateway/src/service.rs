@@ -1619,6 +1619,7 @@ impl ApiGatewayService {
             query_params: HashMap::new(),
             headers: req.headers.clone(),
             body: bytes::Bytes::from(body_str.into_bytes()),
+            body_stream: parking_lot::Mutex::new(None),
             account_id: req.account_id.clone(),
             region: req.region.clone(),
             request_id: req.request_id.clone(),

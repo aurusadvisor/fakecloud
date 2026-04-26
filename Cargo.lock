@@ -2424,6 +2424,7 @@ dependencies = [
  "chrono",
  "fakecloud-aws",
  "http 1.4.0",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -108,6 +108,7 @@ mod tests {
             query_params: HashMap::from([("param".to_string(), "value".to_string())]),
             headers,
             body: Bytes::from(br#"{"test":"data"}"#.to_vec()),
+            body_stream: parking_lot::Mutex::new(None),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),
             request_id: "request-id".to_string(),

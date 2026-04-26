@@ -721,6 +721,7 @@ pub(crate) mod test_helpers {
             headers: HeaderMap::new(),
             query_params: HashMap::new(),
             body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),

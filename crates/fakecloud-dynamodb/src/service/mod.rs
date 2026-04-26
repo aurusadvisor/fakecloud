@@ -3191,6 +3191,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             query_params: HashMap::new(),
             body: serde_json::to_vec(&body).unwrap().into(),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),

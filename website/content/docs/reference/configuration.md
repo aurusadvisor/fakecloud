@@ -16,7 +16,7 @@ fakecloud is configured via CLI flags or environment variables. Flags take prece
 | `--data-path`        | `FAKECLOUD_DATA_PATH`       | —                  | Directory to persist state to. Required when `--storage-mode=persistent`.                |
 | `--s3-cache-size`    | `FAKECLOUD_S3_CACHE_SIZE`   | `268435456`        | In-memory LRU cache for S3 object bodies in persistent mode. Default 256 MiB.            |
 |                      | `FAKECLOUD_CONTAINER_CLI`   | auto-detect        | Container CLI to use (`docker` or `podman`)                                              |
-|                      | `FAKECLOUD_MAX_REQUEST_BODY_BYTES` | `1073741824` | Max bytes a request body can buffer before fakecloud returns 413. Default 1 GiB. Each request materializes its body into RAM, so raise this only when stress-testing past 1 GiB single-request payloads. |
+|                      | `FAKECLOUD_MAX_REQUEST_BODY_BYTES` | `1073741824` | Max bytes a buffered request body can absorb before fakecloud returns 413. Default 1 GiB. Streaming routes (S3 `PutObject` / `UploadPart` / `UploadPartCopy`, ECR OCI blob upload `PATCH` / `PUT`) bypass this cap entirely — the dispatch path hands the raw HTTP body to the per-service handler. Raise this only when stress-testing buffered requests past 1 GiB. |
 
 ## Examples
 
