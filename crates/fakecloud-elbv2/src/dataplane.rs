@@ -239,8 +239,6 @@ async fn handle_request(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let port = parts.uri.port_u16().unwrap_or(0);
-    let _ = port;
 
     // Pick the listener for this connection. ALBs may have multiple
     // listeners (e.g. 80 + 443); we pick the first listener belonging
@@ -254,6 +252,11 @@ async fn handle_request(
         Some(l) => l,
         None => return canned(StatusCode::BAD_GATEWAY, "No listener"),
     };
+
+    let listener_port: u16 = listener
+        .port
+        .and_then(|p| u16::try_from(p).ok())
+        .unwrap_or(80);
 
     let rules: Vec<&Rule> = snap.rules_for_listener(&listener.arn);
     let actions = select_actions(
@@ -281,6 +284,7 @@ async fn handle_request(
                 parts.uri,
                 parts.headers,
                 body_bytes,
+                listener_port,
             )
             .await
         }
@@ -423,7 +427,13 @@ fn redirect_action(
         .and_then(|p| if p == "#{port}" { None } else { Some(p) })
         .map(|p| format!(":{p}"))
         .unwrap_or_default();
-    let location = format!("{proto}://{host}{port_seg}{path}{query}").to_lowercase();
+    // Only the scheme and host are case-insensitive; path and query
+    // must preserve original casing (RFC 3986).
+    let location = format!(
+        "{proto}://{host}{port_seg}{path}{query}",
+        proto = proto.to_lowercase(),
+        host = host.to_lowercase(),
+    );
     let mut resp = Response::new(Full::new(Bytes::new()));
     *resp.status_mut() = status;
     if let Ok(v) = HeaderValue::from_str(&location) {
@@ -432,6 +442,7 @@ fn redirect_action(
     resp
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn forward_action(
     dp: &DataPlane,
     snap: &LbSnapshot,
@@ -440,6 +451,7 @@ async fn forward_action(
     uri: http::Uri,
     headers: HeaderMap,
     body: Bytes,
+    listener_port: u16,
 ) -> Response<Full<Bytes>> {
     // Prefer `forward.target_groups` (weighted), fall back to the
     // single `target_group_arn` field for legacy actions.
@@ -562,7 +574,7 @@ async fn forward_action(
     );
     forwarded_headers.insert(
         HeaderName::from_static("x-forwarded-port"),
-        HeaderValue::from_str(&upstream_port.to_string()).unwrap(),
+        HeaderValue::from_str(&listener_port.to_string()).unwrap(),
     );
     let trace_id = format!("Root=1-{:x}-{}", chrono::Utc::now().timestamp(), short_id());
     forwarded_headers.insert(

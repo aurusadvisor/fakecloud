@@ -142,6 +142,12 @@ async fn elbv2_dataplane_forwards_to_target() {
         .await
         .expect("data plane should bind a port for the active LB");
 
+    // Wait for the target to reach `healthy` so the forward action
+    // doesn't race with the prober and pick an `initial`-state target
+    // that the data plane filters out.
+    let became_healthy = wait_for_target_healthy(&elbv2, &tg_arn, Duration::from_secs(10)).await;
+    assert!(became_healthy, "target should reach healthy state");
+
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("http://127.0.0.1:{port}/foo/bar"))
@@ -160,6 +166,31 @@ async fn elbv2_dataplane_forwards_to_target() {
         .unwrap();
     // 503 is forwarded as-is — the data plane does not synthesize.
     assert_eq!(resp.status().as_u16(), 503);
+}
+
+async fn wait_for_target_healthy(
+    elbv2: &aws_sdk_elasticloadbalancingv2::Client,
+    tg_arn: &str,
+    deadline: Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        let resp = elbv2
+            .describe_target_health()
+            .target_group_arn(tg_arn)
+            .send()
+            .await
+            .unwrap();
+        if let Some(d) = resp.target_health_descriptions().first() {
+            if let Some(h) = d.target_health() {
+                if h.state().map(|s| s.as_str()) == Some("healthy") {
+                    return true;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
 }
 
 #[tokio::test]

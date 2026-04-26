@@ -68,16 +68,18 @@ fn condition_matches(
                 .any(|want| header_values.iter().any(|got| pattern_matches(want, got)))
         }
         "query-string" => {
+            // ALB query-string condition matching is case-insensitive
+            // for both keys and values per AWS docs.
             let pairs = parse_query(uri.query().unwrap_or(""));
             cond.query_string_values.iter().any(|kv| {
                 pairs.iter().any(|(k, v)| {
                     let key_ok = match kv.key.as_deref() {
                         None => true,
-                        Some(want) => pattern_matches(want, k),
+                        Some(want) => pattern_matches_ci(want, k),
                     };
                     let val_ok = match kv.value.as_deref() {
                         None => true,
-                        Some(want) => pattern_matches(want, v),
+                        Some(want) => pattern_matches_ci(want, v),
                     };
                     key_ok && val_ok
                 })
