@@ -465,6 +465,24 @@ pub struct StepFunctionsExecutionsResponse {
     pub executions: Vec<StepFunctionsExecution>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SfnEnqueueActivityTaskRequest {
+    pub activity_arn: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SfnEnqueueActivityTaskResponse {
+    pub task_token: String,
+}
+
 // ── Cognito ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

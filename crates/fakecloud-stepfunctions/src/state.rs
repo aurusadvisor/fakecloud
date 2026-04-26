@@ -97,10 +97,33 @@ pub struct MapRun {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskTokenState {
     pub activity_arn: String,
-    pub status: String, // PENDING / SUCCEEDED / FAILED / HEARTBEAT
+    /// PENDING (waiting for `GetActivityTask` to dequeue) /
+    /// IN_PROGRESS (worker has picked it up) /
+    /// SUCCEEDED / FAILED / TIMED_OUT.
+    pub status: String,
     pub output: Option<String>,
     pub error: Option<String>,
     pub cause: Option<String>,
+    /// Input the state machine wanted the worker to process. `None`
+    /// for tokens minted by external `GetActivityTask` callers without
+    /// any associated activity execution (legacy synthetic path).
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default = "default_now")]
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    /// Per AWS docs: state machine fails the task if no heartbeat in
+    /// this many seconds while the worker is running.
+    #[serde(default)]
+    pub heartbeat_seconds: Option<i64>,
+    /// Overall timeout for the task; counted from `created_at`.
+    #[serde(default)]
+    pub timeout_seconds: Option<i64>,
+}
+
+fn default_now() -> DateTime<Utc> {
+    Utc::now()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

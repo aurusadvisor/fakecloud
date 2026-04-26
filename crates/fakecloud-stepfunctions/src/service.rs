@@ -173,7 +173,7 @@ impl AwsService for StepFunctionsService {
             "DeleteActivity" => self.delete_activity(&req),
             "DescribeActivity" => self.describe_activity(&req),
             "ListActivities" => self.list_activities(&req),
-            "GetActivityTask" => self.get_activity_task(&req),
+            "GetActivityTask" => self.get_activity_task(&req).await,
             "SendTaskFailure" => self.send_task_failure(&req),
             "SendTaskHeartbeat" => self.send_task_heartbeat(&req),
             "SendTaskSuccess" => self.send_task_success(&req),
@@ -862,41 +862,65 @@ impl StepFunctionsService {
         Ok(AwsResponse::ok_json(body))
     }
 
-    fn get_activity_task(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn get_activity_task(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let arn = body["activityArn"]
             .as_str()
             .ok_or_else(|| missing("activityArn"))?
             .to_string();
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        if !state.activities.contains_key(&arn) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ActivityDoesNotExist",
-                format!("Activity does not exist: {arn}"),
-            ));
+        // Activity must exist before we'll accept long-poll calls.
+        {
+            let accounts = self.state.read();
+            let state = accounts
+                .get(&req.account_id)
+                .ok_or_else(|| activity_not_found(&arn))?;
+            if !state.activities.contains_key(&arn) {
+                return Err(activity_not_found(&arn));
+            }
         }
-        // Mint a synthetic task token tied to this activity. No worker
-        // pool to dispatch from in fakecloud, so we return an empty input.
-        let token = format!(
-            "FCToken-{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        );
-        state.task_tokens.insert(
-            token.clone(),
-            crate::state::TaskTokenState {
-                activity_arn: arn,
-                status: "PENDING".to_string(),
-                output: None,
-                error: None,
-                cause: None,
-            },
-        );
-        Ok(AwsResponse::ok_json(json!({
-            "taskToken": token,
-            "input": "{}",
-        })))
+
+        // AWS GetActivityTask blocks up to 60s. fakecloud defaults to 5s
+        // so test suites don't stall when no worker is feeding the queue.
+        let max_wait_secs: u64 = std::env::var("FAKECLOUD_SFN_GET_ACTIVITY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_wait_secs);
+
+        loop {
+            // Try to dequeue oldest PENDING token for this activity.
+            {
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(&req.account_id);
+                let mut candidates: Vec<(String, chrono::DateTime<chrono::Utc>)> = state
+                    .task_tokens
+                    .iter()
+                    .filter(|(_, t)| t.activity_arn == arn && t.status == "PENDING")
+                    .map(|(k, t)| (k.clone(), t.created_at))
+                    .collect();
+                candidates.sort_by_key(|c| c.1);
+                if let Some((token, _)) = candidates.into_iter().next() {
+                    let now = chrono::Utc::now();
+                    let entry = state.task_tokens.get_mut(&token).expect("just looked up");
+                    entry.status = "IN_PROGRESS".to_string();
+                    entry.last_heartbeat_at = Some(now);
+                    let input = entry.input.clone().unwrap_or_else(|| "{}".to_string());
+                    return Ok(AwsResponse::ok_json(json!({
+                        "taskToken": token,
+                        "input": input,
+                    })));
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                // No task available in window — return empty token (matches
+                // AWS behavior).
+                return Ok(AwsResponse::ok_json(json!({
+                    "taskToken": "",
+                    "input": "",
+                })));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
     }
 
     fn send_task_success(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -908,7 +932,23 @@ impl StepFunctionsService {
     }
 
     fn send_task_heartbeat(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        self.update_task_token(req, "HEARTBEAT")
+        // Heartbeats only refresh `last_heartbeat_at`; they don't change
+        // the task's lifecycle status. The interpreter's heartbeat-timeout
+        // check reads `last_heartbeat_at` to decide whether to fail the
+        // task with `States.HeartbeatTimeout`.
+        let body = req.json_body();
+        let token = body["taskToken"]
+            .as_str()
+            .ok_or_else(|| missing("taskToken"))?
+            .to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let entry = state
+            .task_tokens
+            .get_mut(&token)
+            .ok_or_else(|| task_does_not_exist(&token))?;
+        entry.last_heartbeat_at = Some(chrono::Utc::now());
+        Ok(AwsResponse::ok_json(json!({})))
     }
 
     fn update_task_token(
@@ -923,13 +963,10 @@ impl StepFunctionsService {
             .to_string();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let entry = state.task_tokens.get_mut(&token).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "TaskDoesNotExist",
-                format!("Task does not exist: {token}"),
-            )
-        })?;
+        let entry = state
+            .task_tokens
+            .get_mut(&token)
+            .ok_or_else(|| task_does_not_exist(&token))?;
         entry.status = new_status.to_string();
         if new_status == "SUCCEEDED" {
             entry.output = body["output"].as_str().map(String::from);
@@ -1403,6 +1440,22 @@ fn state_machine_not_found(arn: &str) -> AwsServiceError {
         StatusCode::BAD_REQUEST,
         "StateMachineDoesNotExist",
         format!("State Machine Does Not Exist: '{arn}'"),
+    )
+}
+
+fn activity_not_found(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ActivityDoesNotExist",
+        format!("Activity does not exist: {arn}"),
+    )
+}
+
+fn task_does_not_exist(token: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "TaskDoesNotExist",
+        format!("Task does not exist: {token}"),
     )
 }
 
