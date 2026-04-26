@@ -106,9 +106,26 @@ pub trait SnsDelivery: Send + Sync {
 
 /// Trait for putting events onto an EventBridge bus from cross-service integrations.
 pub trait EventBridgeDelivery: Send + Sync {
-    /// Put an event onto the specified event bus.
+    /// Put an event onto the specified event bus in the default account.
     /// The implementation should handle rule matching and target delivery.
     fn put_event(&self, source: &str, detail_type: &str, detail: &str, event_bus_name: &str);
+
+    /// Put an event onto the specified event bus owned by `target_account_id`.
+    /// Used for cross-account delivery where the source service (e.g. Scheduler)
+    /// has a target ARN containing the destination account. The default impl
+    /// falls back to the default-account `put_event` for backwards compat —
+    /// real implementations should override and route to the target account's
+    /// state.
+    fn put_event_to_account(
+        &self,
+        source: &str,
+        detail_type: &str,
+        detail: &str,
+        event_bus_name: &str,
+        _target_account_id: &str,
+    ) {
+        self.put_event(source, detail_type, detail, event_bus_name);
+    }
 }
 
 /// Trait for invoking Lambda functions from cross-service integrations.
@@ -291,7 +308,7 @@ impl DeliveryBus {
         }
     }
 
-    /// Put an event onto an EventBridge bus.
+    /// Put an event onto an EventBridge bus in the default account.
     pub fn put_event_to_eventbridge(
         &self,
         source: &str,
@@ -301,6 +318,27 @@ impl DeliveryBus {
     ) {
         if let Some(ref sender) = self.eventbridge_sender {
             sender.put_event(source, detail_type, detail, event_bus_name);
+        }
+    }
+
+    /// Put an event onto an EventBridge bus in a specific account. Used by
+    /// Scheduler to deliver to cross-account event buses.
+    pub fn put_event_to_eventbridge_for_account(
+        &self,
+        source: &str,
+        detail_type: &str,
+        detail: &str,
+        event_bus_name: &str,
+        target_account_id: &str,
+    ) {
+        if let Some(ref sender) = self.eventbridge_sender {
+            sender.put_event_to_account(
+                source,
+                detail_type,
+                detail,
+                event_bus_name,
+                target_account_id,
+            );
         }
     }
 

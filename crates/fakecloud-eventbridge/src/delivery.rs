@@ -21,8 +21,15 @@ impl EventBridgeDeliveryImpl {
     }
 }
 
-impl EventBridgeDelivery for EventBridgeDeliveryImpl {
-    fn put_event(&self, source: &str, detail_type: &str, detail: &str, event_bus_name: &str) {
+impl EventBridgeDeliveryImpl {
+    fn put_event_in_account(
+        &self,
+        source: &str,
+        detail_type: &str,
+        detail: &str,
+        event_bus_name: &str,
+        target_account_id: Option<&str>,
+    ) {
         let event_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
 
@@ -37,7 +44,10 @@ impl EventBridgeDelivery for EventBridgeDeliveryImpl {
         };
 
         let mut accounts = self.state.write();
-        let state = accounts.default_mut();
+        let state = match target_account_id {
+            Some(account_id) if !account_id.is_empty() => accounts.get_or_create(account_id),
+            _ => accounts.default_mut(),
+        };
         state.events.push(event);
 
         // Find matching rules and their targets
@@ -95,6 +105,29 @@ impl EventBridgeDelivery for EventBridgeDeliveryImpl {
             }
             // Lambda and other targets could be added here
         }
+    }
+}
+
+impl EventBridgeDelivery for EventBridgeDeliveryImpl {
+    fn put_event(&self, source: &str, detail_type: &str, detail: &str, event_bus_name: &str) {
+        self.put_event_in_account(source, detail_type, detail, event_bus_name, None);
+    }
+
+    fn put_event_to_account(
+        &self,
+        source: &str,
+        detail_type: &str,
+        detail: &str,
+        event_bus_name: &str,
+        target_account_id: &str,
+    ) {
+        self.put_event_in_account(
+            source,
+            detail_type,
+            detail,
+            event_bus_name,
+            Some(target_account_id),
+        );
     }
 }
 
@@ -289,5 +322,48 @@ mod tests {
         assert_eq!(calls.len(), 1);
         let env: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
         assert_eq!(env["detail"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn put_event_to_account_writes_to_target_account_bus() {
+        let state = make_shared();
+        let bus = Arc::new(DeliveryBus::new());
+        let delivery = EventBridgeDeliveryImpl::new(state.clone(), bus);
+        delivery.put_event_to_account("scheduler", "Fired", r#"{}"#, "default", "999988887777");
+
+        let guard = state.read();
+        let target = guard
+            .get("999988887777")
+            .expect("target account should be created on demand");
+        assert_eq!(target.events.len(), 1);
+        assert_eq!(target.events[0].source, "scheduler");
+        // The default account's bus should be untouched.
+        assert!(guard.default_ref().events.is_empty());
+    }
+
+    #[test]
+    fn put_event_to_account_dispatches_to_rules_in_target_account() {
+        let state = make_shared();
+        let q_arn = "arn:aws:sqs:us-east-1:999988887777:cross-q".to_string();
+        {
+            let mut s_accounts = state.write();
+            let s = s_accounts.get_or_create("999988887777");
+            let rule = make_rule("xacct-rule", None, &q_arn);
+            s.rules
+                .insert(("default".to_string(), "xacct-rule".to_string()), rule);
+        }
+        let recorder = Arc::new(Recorder::default());
+        let bus = Arc::new(DeliveryBus::new().with_sqs(recorder.clone()));
+        let delivery = EventBridgeDeliveryImpl::new(state, bus);
+        delivery.put_event_to_account(
+            "scheduler",
+            "Cross",
+            r#"{"hi":1}"#,
+            "default",
+            "999988887777",
+        );
+        let calls = recorder.sqs.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, q_arn);
     }
 }

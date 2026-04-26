@@ -11,6 +11,7 @@ fakecloud implements the full **EventBridge Scheduler** surface (`scheduler.amaz
 - **Schedules** — `at(yyyy-mm-ddThh:mm:ss)` one-shot, `rate(N unit)` recurring, `cron(...)` recurring
 - **Schedule groups** — create/get/delete/list; a `default` group is seeded per account and cannot be deleted
 - **Targets** — SQS (with `Target.Input` JSON), SNS, Lambda, Step Functions, EventBridge; `Target.RoleArn` is accepted (STS assume-role is a no-op in fakecloud)
+- **Cross-account targets** — `Target.Arn` may point to a queue/topic/function/state-machine/event-bus in a different account. Delivery routes by the ARN's account segment, matching fakecloud's ARN-routed multi-account model. Trust verification is a no-op (matches the existing fakecloud STS posture)
 - **Flexible time window** — `OFF` and `FLEXIBLE` modes; `MaximumWindowInMinutes` is required when `FLEXIBLE`
 - **ActionAfterCompletion: DELETE** — one-shot `at(...)` schedules self-delete after firing
 - **Dead-letter routing** — when target delivery fails (e.g. queue missing), the `Target.Input` is forwarded to `DeadLetterConfig.Arn` with `X-Amz-Scheduler-*` metadata attributes (Attempt, Schedule-Arn, Target-Arn, Error-Code, Error-Message, Group)
@@ -40,7 +41,6 @@ Scheduler shares fakecloud's cross-service delivery bus, so targets resolve to l
 ## Non-goals
 
 - KMS encryption on schedule state
-- Cross-account target delivery (use the single-account surface)
 - End-to-end IAM policy evaluation beyond the existing `test/test` root bypass
 
 ## Source

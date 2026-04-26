@@ -65,7 +65,19 @@ pub fn deliver_target(bus: &Arc<DeliveryBus>, schedule: &Schedule) -> Result<(),
 
     if arn.contains(":events:") {
         let bus_name = event_bus_name_from_arn(arn);
-        bus.put_event_to_eventbridge("aws.scheduler", "Scheduled Event", body, &bus_name);
+        let target_account = account_id_from_arn(arn);
+        match target_account {
+            Some(account) => bus.put_event_to_eventbridge_for_account(
+                "aws.scheduler",
+                "Scheduled Event",
+                body,
+                &bus_name,
+                &account,
+            ),
+            None => {
+                bus.put_event_to_eventbridge("aws.scheduler", "Scheduled Event", body, &bus_name)
+            }
+        }
         return Ok(());
     }
 
@@ -156,6 +168,17 @@ fn fifo_dedup_id(queue_arn: &str, _schedule_arn: &str) -> Option<String> {
         return None;
     }
     Some(uuid::Uuid::new_v4().to_string())
+}
+
+/// Extract the account-id segment from any AWS ARN. Returns `None` when
+/// the ARN is malformed or omits the account (some service ARNs do).
+fn account_id_from_arn(arn: &str) -> Option<String> {
+    let account = arn.split(':').nth(4)?;
+    if account.is_empty() {
+        None
+    } else {
+        Some(account.to_string())
+    }
 }
 
 /// Extract the EventBridge bus name from a `:events:` target ARN.
@@ -383,6 +406,42 @@ mod tests {
             "default"
         );
         assert_eq!(event_bus_name_from_arn("arn:malformed"), "default");
+    }
+
+    #[test]
+    fn deliver_target_sqs_cross_account_routes_by_arn_account() {
+        // The SQS target points to account 999988887777 even though the
+        // schedule lives in account 1. Account-aware SQS routing is the
+        // SqsDelivery impl's responsibility — at this layer we just verify
+        // the ARN is forwarded unchanged to the bus, so a real impl can
+        // route it to the right account's state.
+        let recorder = Arc::new(Recorder {
+            calls: Mutex::new(Vec::new()),
+            fail_arn: None,
+        });
+        let bus = Arc::new(DeliveryBus::new().with_sqs(recorder.clone()));
+        let sched = make_schedule(
+            "arn:aws:sqs:us-east-1:999988887777:cross-q",
+            None,
+            Some(r#"{"v":1}"#),
+        );
+        assert!(deliver_target(&bus, &sched).is_ok());
+        let calls = recorder.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "arn:aws:sqs:us-east-1:999988887777:cross-q");
+    }
+
+    #[test]
+    fn account_id_from_arn_extracts_account_segment() {
+        assert_eq!(
+            account_id_from_arn("arn:aws:events:us-east-1:111122223333:event-bus/main"),
+            Some("111122223333".to_string())
+        );
+        assert_eq!(
+            account_id_from_arn("arn:aws:events:us-east-1::event-bus/x"),
+            None
+        );
+        assert_eq!(account_id_from_arn("arn:malformed"), None);
     }
 
     #[test]
