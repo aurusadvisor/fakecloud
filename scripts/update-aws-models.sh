@@ -42,6 +42,7 @@ SERVICES=(
     "bedrock:bedrock"
     "bedrock-runtime:bedrock-runtime"
     "scheduler:scheduler"
+    "apigateway:api-gateway"
     "apigatewayv2:apigatewayv2"
     "ecr:ecr"
     "ecs:ecs"

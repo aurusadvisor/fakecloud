@@ -4,7 +4,7 @@ description = "HTTP APIs, Lambda proxy integration, JWT and Lambda authorizers, 
 weight = 20
 +++
 
-fakecloud implements **103 of 103** API Gateway v2 operations at 100% conformance (HTTP APIs; REST APIs are a separate v1 service not yet implemented).
+fakecloud implements **103 of 103** API Gateway v2 operations at 100% conformance (HTTP APIs). REST APIs are covered separately on the [API Gateway v1](./apigateway.md) page.
 
 ## Supported features
 

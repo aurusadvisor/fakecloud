@@ -102,11 +102,12 @@ pub fn service_protocol(service_name: &str) -> Protocol {
         },
         "s3" => Protocol::Rest,
         "lambda" => Protocol::Rest,
-        // `service_name` in `service-map.json` for API Gateway v2 is
-        // `apigateway` — matches the `service_name()` reported by
-        // fakecloud's `ApiGatewayV2Service`. restJson1 wire format; no
-        // hardcoded op table, relies on the generic `@http`-driven builder.
-        "apigateway" => Protocol::Rest,
+        // API Gateway v1 (REST APIs) and v2 (HTTP APIs) are separate
+        // Smithy models with distinct `service_name` entries in
+        // `service-map.json`. fakecloud's facade routes both behind the
+        // single SigV4 service identifier `apigateway`, but probing
+        // keeps them separate. restJson1 wire format for both.
+        "apigateway" | "apigatewayv1" | "apigatewayv2" => Protocol::Rest,
         // restJson1 services — REST routing with @http traits + JSON bodies.
         "ses" => Protocol::Rest,
         "bedrock" => Protocol::Rest,

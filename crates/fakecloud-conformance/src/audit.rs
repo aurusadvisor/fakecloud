@@ -90,14 +90,25 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["service.rs"],
             &["bedrock", "bedrock-runtime"],
         ),
-        // fakecloud's APIGWv2 crate reports `service_name() = "apigateway"`,
-        // which matches the Smithy service-map entry, but handwritten conformance
-        // tests tag `apigatewayv2` to stay consistent with the AWS SDK crate.
+        // API Gateway v1 (REST APIs) and v2 (HTTP APIs) are separate AWS
+        // services with different Smithy models but share one SigV4 service
+        // name (`apigateway`). Each crate owns its own
+        // `supported_actions()` list; tag tests strictly so v1 coverage
+        // never double-counts as v2 coverage when an action name happens
+        // to exist in both models. The v1 tag list also includes the
+        // Smithy `service_name` (`apigatewayv1`) so the auto-probe runner
+        // matches it to the v1 crate's `supported_actions()` for gating.
         (
             "apigateway",
+            "apigateway",
+            &["service.rs"],
+            &["apigateway", "apigatewayv1"],
+        ),
+        (
+            "apigatewayv2",
             "apigatewayv2",
             &["service.rs"],
-            &["apigateway", "apigatewayv2"],
+            &["apigatewayv2"],
         ),
         ("ecr", "ecr", &["service.rs"], &["ecr"]),
         ("ecs", "ecs", &["service.rs"], &["ecs"]),

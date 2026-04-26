@@ -612,6 +612,10 @@ impl TestServer {
         aws_sdk_apigatewayv2::Client::new(&self.aws_config().await)
     }
 
+    pub async fn apigateway_client(&self) -> aws_sdk_apigateway::Client {
+        aws_sdk_apigateway::Client::new(&self.aws_config().await)
+    }
+
     pub async fn bedrock_client(&self) -> aws_sdk_bedrock::Client {
         aws_sdk_bedrock::Client::new(&self.aws_config().await)
     }

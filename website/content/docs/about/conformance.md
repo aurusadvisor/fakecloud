@@ -35,7 +35,7 @@ Every response is validated against the operation's Smithy output shape. Missing
 
 ## Current coverage
 
-59,000+ generated test variants across all 26 services, at 100% conformance.
+59,000+ generated test variants across all 27 services, at 100% conformance.
 
 See the harness and methodology at [`crates/fakecloud-conformance/`](https://github.com/faiscadev/fakecloud/tree/main/crates/fakecloud-conformance).
 
@@ -94,7 +94,7 @@ The real-AWS job is locked down hard:
 
 ### Why E2E isn't parity
 
-The E2E suite is much bigger (280+ tests, 26 services) but it doesn't run against real AWS — ever. Two reasons:
+The E2E suite is much bigger (280+ tests, 27 services) but it doesn't run against real AWS — ever. Two reasons:
 
 1. **A lot of E2E is testing fakecloud itself.** Introspection endpoints, persistence mode, `/_fakecloud/*/tick` processors, warm Lambda container introspection, forced SQS DLQ moves, auth event logs in Cognito — none of that exists on real AWS. Running those tests against AWS would be meaningless; they'd just fail at the first `/_fakecloud/*` request.
 

@@ -6,7 +6,7 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~500ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 26 services (1,924 operations) are shipped today; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 27 services (2,048 operations) are shipped today; more land progressively as they hit the bar.
 
 Key design principles:
 - **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models (54,000+ generated test variants). CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
@@ -80,9 +80,9 @@ Default is `memory` mode — all state lives in RAM, startup is instant,
 shutdown is a no-op. Pass `--storage-mode=persistent --data-path=<dir>` to
 mirror all service state to disk and reload on the next launch.
 
-All 26 services are fully persisted: S3, SQS, SNS, EventBridge, IAM/STS,
+All 27 services are fully persisted: S3, SQS, SNS, EventBridge, IAM/STS,
 SSM, Secrets Manager, CloudWatch Logs, KMS, DynamoDB, Kinesis, SES,
-API Gateway v2, CloudFormation, Cognito, Lambda, Step Functions, RDS,
+API Gateway v1, API Gateway v2, CloudFormation, Cognito, Lambda, Step Functions, RDS,
 ElastiCache, ECR, ECS, Elastic Load Balancing v2, and Bedrock. State is
 written to disk on every mutation and reloaded on startup.
 
@@ -367,6 +367,25 @@ Features: Complete Amazon States Language (ASL) interpreter with all state types
 
 Protocol: JSON (JSON body, `X-Amz-Target` header, JSON responses)
 
+### API Gateway v1 / REST APIs (118 actions)
+
+**REST APIs:** CreateRestApi, GetRestApi, GetRestApis, UpdateRestApi, PutRestApi (OpenAPI overwrite/merge), ImportRestApi, DeleteRestApi
+**Resources:** CreateResource, GetResource, GetResources, UpdateResource, DeleteResource
+**Methods:** PutMethod, GetMethod, UpdateMethod, DeleteMethod
+**Method Responses:** PutMethodResponse, GetMethodResponse, UpdateMethodResponse, DeleteMethodResponse
+**Integrations:** PutIntegration, GetIntegration, UpdateIntegration, DeleteIntegration (`MOCK`/`HTTP`/`HTTP_PROXY`/`AWS_PROXY` Lambda v1.0 proxy event)
+**Integration Responses:** PutIntegrationResponse, GetIntegrationResponse, UpdateIntegrationResponse, DeleteIntegrationResponse
+**Deployments:** CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment
+**Stages:** CreateStage, GetStage, GetStages, UpdateStage, DeleteStage, FlushStageCache, FlushStageAuthorizersCache
+**Models & Validators:** CreateModel, GetModel(s), UpdateModel, DeleteModel, GetModelTemplate, CreateRequestValidator, GetRequestValidator(s), UpdateRequestValidator, DeleteRequestValidator
+**Authorizers:** CreateAuthorizer, GetAuthorizer(s), UpdateAuthorizer, DeleteAuthorizer (TOKEN/REQUEST/COGNITO_USER_POOLS)
+**API Keys & Usage Plans:** CreateApiKey, GetApiKey(s), UpdateApiKey, DeleteApiKey, CreateUsagePlan, GetUsagePlan(s), UpdateUsagePlan, DeleteUsagePlan, CreateUsagePlanKey, GetUsagePlanKey(s), DeleteUsagePlanKey, GetUsage, UpdateUsage
+**VPC Links / Domains:** CreateVpcLink, GetVpcLink(s), UpdateVpcLink, DeleteVpcLink, CreateDomainName, GetDomainName(s), UpdateDomainName, DeleteDomainName, CreateBasePathMapping, GetBasePathMapping(s), UpdateBasePathMapping, DeleteBasePathMapping
+**Client Certs / Docs / Gateway Responses:** GenerateClientCertificate, GetClientCertificate(s), UpdateClientCertificate, DeleteClientCertificate, CreateDocumentationPart/Version, GetDocumentationPart(s)/Version(s), UpdateDocumentationPart/Version, DeleteDocumentationPart/Version, PutGatewayResponse, GetGatewayResponse(s), UpdateGatewayResponse, DeleteGatewayResponse
+**Other:** GetExport, GetSdk, GetSdkType(s), TagResource, UntagResource, GetTags, GetAccount, UpdateAccount, TestInvokeMethod, TestInvokeAuthorizer
+
+Protocol: REST (URL paths + HTTP methods, HAL+JSON responses with singular `item` collection key)
+
 ### API Gateway v2 (103 actions)
 
 **APIs:** CreateApi, DeleteApi, GetApi, GetApis, UpdateApi, ImportApi, ReimportApi, ExportApi
@@ -431,6 +450,7 @@ fakecloud implements real cross-service message delivery:
 - **SES -> SNS/EventBridge**: Email event fanout (send, delivery, bounce, complaint) via configured event destinations
 - **SES Inbound -> S3/SNS/Lambda**: Receipt rules evaluate inbound email and execute S3, SNS, and Lambda actions
 - **Step Functions -> Lambda/SQS/SNS/EventBridge/DynamoDB**: Task states invoke Lambda, send SQS messages, publish to SNS topics, put EventBridge events, and read/write DynamoDB items
+- **API Gateway v1 -> Lambda**: REST API methods with `AWS_PROXY` integrations invoke Lambda functions with proxy event v1.0 format
 - **API Gateway v2 -> Lambda**: HTTP API routes invoke Lambda functions with proxy integration v2.0 format
 - **CloudFormation -> Lambda/SNS**: Custom resources invoke via ServiceToken, stack events notify via NotificationARNs
 - **SecretsManager -> Lambda**: Rotation invokes Lambda for all 4 steps
@@ -443,7 +463,7 @@ fakecloud handles three AWS protocol families:
 
 - **Query protocol** (SQS, SNS, IAM, STS, CloudFormation, SES v1, RDS, ElastiCache): form-encoded body with `Action` parameter, XML responses
 - **JSON protocol** (SSM, EventBridge, DynamoDB, Secrets Manager, CloudWatch Logs, KMS, Cognito User Pools, Kinesis, Step Functions): JSON body, `X-Amz-Target` header, JSON responses
-- **REST protocol** (S3, Lambda, SES v2, API Gateway v2, Bedrock, Bedrock Runtime): HTTP method + path-based routing, XML or JSON responses
+- **REST protocol** (S3, Lambda, SES v2, API Gateway v1, API Gateway v2, Bedrock, Bedrock Runtime): HTTP method + path-based routing, XML or JSON responses
 
 SigV4 signatures are parsed for service routing but never validated. Use any dummy credentials.
 
