@@ -1198,3 +1198,86 @@ async fn apigateway_v1_account() {
     let _ = client.get_account().send().await;
     let _ = client.update_account().send().await;
 }
+
+#[test_action(
+    "apigateway",
+    "CreateDomainNameAccessAssociation",
+    checksum = "4e193636"
+)]
+#[test_action("apigateway", "GetDomainNameAccessAssociations", checksum = "86f72000")]
+#[test_action(
+    "apigateway",
+    "DeleteDomainNameAccessAssociation",
+    checksum = "2ddb73e5"
+)]
+#[test_action(
+    "apigateway",
+    "RejectDomainNameAccessAssociation",
+    checksum = "f79e4802"
+)]
+#[tokio::test]
+async fn apigateway_v1_domain_name_access_associations() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+
+    let assoc = client
+        .create_domain_name_access_association()
+        .domain_name_arn("arn:aws:apigateway:us-east-1::/domainnames/private.conf.example.com")
+        .access_association_source("arn:aws:vpce:us-east-1:123456789012:vpc-endpoint/vpce-1234")
+        .access_association_source_type(
+            aws_sdk_apigateway::types::AccessAssociationSourceType::Vpce,
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = assoc
+        .domain_name_access_association_arn()
+        .unwrap_or_default()
+        .to_string();
+
+    let _ = client.get_domain_name_access_associations().send().await;
+    let _ = client
+        .reject_domain_name_access_association()
+        .domain_name_access_association_arn(&arn)
+        .domain_name_arn("arn:aws:apigateway:us-east-1::/domainnames/private.conf.example.com")
+        .send()
+        .await;
+    let _ = client
+        .delete_domain_name_access_association()
+        .domain_name_access_association_arn(arn)
+        .send()
+        .await;
+}
+
+#[test_action("apigateway", "ImportApiKeys", checksum = "0115480d")]
+#[tokio::test]
+async fn apigateway_v1_import_api_keys() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+    let body = aws_sdk_apigateway::primitives::Blob::new(
+        b"key-name,key-value,description,true\n".to_vec(),
+    );
+    let _ = client
+        .import_api_keys()
+        .body(body)
+        .format(aws_sdk_apigateway::types::ApiKeysFormat::Csv)
+        .send()
+        .await;
+}
+
+#[test_action("apigateway", "ImportDocumentationParts", checksum = "1b14cc44")]
+#[tokio::test]
+async fn apigateway_v1_import_documentation_parts() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+    let (api_id, _) = create_api(&client, "conf-import-docs").await;
+    let body = aws_sdk_apigateway::primitives::Blob::new(
+        br#"{"documentationParts": [{"location": {"type": "API"}, "properties": "{}"}]}"#.to_vec(),
+    );
+    let _ = client
+        .import_documentation_parts()
+        .rest_api_id(&api_id)
+        .body(body)
+        .send()
+        .await;
+}

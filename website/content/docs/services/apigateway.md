@@ -4,7 +4,7 @@ description = "REST APIs, resources/methods/integrations, deployments, stages, A
 weight = 19
 +++
 
-fakecloud implements **118 of 124** API Gateway v1 (REST APIs) operations at 100% conformance for the implemented surface. v1 is exposed under the same SigV4 service name (`apigateway`) as v2; URL prefix selects which handler runs.
+fakecloud implements **124 of 124** API Gateway v1 (REST APIs) operations at 100% conformance for the implemented surface. v1 is exposed under the same SigV4 service name (`apigateway`) as v2; URL prefix selects which handler runs.
 
 REST APIs (v1) and HTTP APIs (v2) are independent AWS services. The v2 (HTTP APIs) page is at [API Gateway v2](./apigatewayv2.md).
 

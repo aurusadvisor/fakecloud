@@ -21,6 +21,8 @@ const V1_CONTROL_PREFIXES: &[&str] = &[
     "usageplans",
     "vpclinks",
     "domainnames",
+    "domainnameaccessassociations",
+    "rejectdomainnameaccessassociations",
     "clientcertificates",
     "sdktypes",
     "tags",

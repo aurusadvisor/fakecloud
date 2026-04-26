@@ -383,7 +383,10 @@ pub fn resolve(
                 .with("authorizerId", id),
         ),
 
-        // API Keys
+        // API Keys (ImportApiKeys is the same path with `?mode=import`)
+        (Method::POST, ["apikeys"]) if is_import_mode(query_params) => {
+            Some(ResolvedAction::new("ImportApiKeys"))
+        }
         (Method::POST, ["apikeys"]) => Some(ResolvedAction::new("CreateApiKey")),
         (Method::GET, ["apikeys"]) => Some(ResolvedAction::new("GetApiKeys")),
         (Method::GET, ["apikeys", id]) => {
@@ -442,6 +445,29 @@ pub fn resolve(
         }
         (Method::PATCH, ["vpclinks", id]) => {
             Some(ResolvedAction::new("UpdateVpcLink").with("vpcLinkId", id))
+        }
+
+        // Domain name access associations (cross-account access for
+        // private custom domain names). Stored opaquely; the AWS shape
+        // only requires round-tripping the JSON envelope.
+        (Method::POST, ["domainnameaccessassociations"]) => {
+            Some(ResolvedAction::new("CreateDomainNameAccessAssociation"))
+        }
+        (Method::GET, ["domainnameaccessassociations"]) => {
+            Some(ResolvedAction::new("GetDomainNameAccessAssociations"))
+        }
+        (Method::DELETE, ["domainnameaccessassociations", arn @ ..]) => Some(
+            ResolvedAction::new("DeleteDomainNameAccessAssociation")
+                .with("domainNameAccessAssociationArn", &arn.join("/")),
+        ),
+        (Method::POST, ["rejectdomainnameaccessassociations"]) => {
+            Some(ResolvedAction::new("RejectDomainNameAccessAssociation"))
+        }
+
+        // ImportDocumentationParts (PUT on the same path that POST hits
+        // for CreateDocumentationPart).
+        (Method::PUT, ["restapis", api, "documentation", "parts"]) => {
+            Some(ResolvedAction::new("ImportDocumentationParts").with("restApiId", api))
         }
 
         // Domain names + base path mappings

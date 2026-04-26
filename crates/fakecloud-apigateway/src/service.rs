@@ -105,6 +105,12 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "GetDomainNames",
     "DeleteDomainName",
     "UpdateDomainName",
+    "CreateDomainNameAccessAssociation",
+    "DeleteDomainNameAccessAssociation",
+    "GetDomainNameAccessAssociations",
+    "RejectDomainNameAccessAssociation",
+    "ImportApiKeys",
+    "ImportDocumentationParts",
     "CreateBasePathMapping",
     "GetBasePathMapping",
     "GetBasePathMappings",
@@ -576,6 +582,12 @@ impl ApiGatewayService {
             "GetDomainNames" => self.get_domain_names(req),
             "DeleteDomainName" => self.delete_domain_name(req, &params),
             "UpdateDomainName" => self.update_domain_name(req, &params),
+            "CreateDomainNameAccessAssociation" => self.create_dnaa(req),
+            "GetDomainNameAccessAssociations" => self.get_dnaas(req),
+            "DeleteDomainNameAccessAssociation" => self.delete_dnaa(req, &params),
+            "RejectDomainNameAccessAssociation" => self.reject_dnaa(req),
+            "ImportApiKeys" => self.import_api_keys(req),
+            "ImportDocumentationParts" => self.import_documentation_parts(req, &params),
             "CreateBasePathMapping" => self.create_base_path_mapping(req, &params),
             "GetBasePathMapping" => self.get_base_path_mapping(req, &params),
             "GetBasePathMappings" => self.get_base_path_mappings(req, &params),
@@ -2956,6 +2968,205 @@ impl ApiGatewayService {
             }
         });
         ok(v.clone())
+    }
+
+    /// Cross-account access associations for private custom domain
+    /// names. Stored as opaque JSON envelopes keyed by ARN. AWS uses
+    /// these to model "account A can attach the private domain owned by
+    /// account B"; fakecloud's multi-account model is ARN-routed and
+    /// trusts the request, so we round-trip the envelope.
+    fn create_dnaa(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = make_id();
+        let arn = format!(
+            "arn:aws:apigateway:{}:{}:/domainnameaccessassociations/{}",
+            req.region, req.account_id, id
+        );
+        let mut entry = body.clone();
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(
+                "domainNameAccessAssociationArn".to_string(),
+                Value::String(arn.clone()),
+            );
+        }
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request_account(req));
+        state
+            .domain_name_access_associations
+            .insert(arn.clone(), entry.clone());
+        ok_status(StatusCode::CREATED, entry)
+    }
+
+    fn get_dnaas(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let items: Vec<Value> = accounts
+            .get(&request_account(req))
+            .map(|s| {
+                s.domain_name_access_associations
+                    .values()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        ok(json!({"item": items}))
+    }
+
+    fn delete_dnaa(
+        &self,
+        req: &AwsRequest,
+        params: &HashMap<String, String>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let arn = params
+            .get("domainNameAccessAssociationArn")
+            .cloned()
+            .unwrap_or_default();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request_account(req));
+        if state.domain_name_access_associations.remove(&arn).is_none() {
+            return Err(not_found("DomainNameAccessAssociation not found"));
+        }
+        ok_no_content()
+    }
+
+    fn reject_dnaa(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Reject deletes (rejects) the association on the receiving
+        // account side. AWS returns 202 with no body.
+        let body = req.json_body();
+        let arn = body
+            .get("domainNameAccessAssociationArn")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if !arn.is_empty() {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request_account(req));
+            state.domain_name_access_associations.remove(&arn);
+        }
+        ok_no_content()
+    }
+
+    /// Bulk import API keys from a CSV/JSON payload. fakecloud accepts
+    /// both shapes; the v1 client typically POSTs a CSV blob with one
+    /// `name,key,description,enabled` row per key. We parse what we can
+    /// and create real `ApiKey` entries.
+    fn import_api_keys(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = String::from_utf8_lossy(req.body.as_ref()).to_string();
+        let mut ids: Vec<String> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request_account(req));
+        // Try JSON first.
+        if let Ok(parsed) = serde_json::from_str::<Value>(&body) {
+            if let Some(arr) = parsed.as_array() {
+                for entry in arr {
+                    let id = make_id();
+                    let key = ApiKey {
+                        id: id.clone(),
+                        name: entry
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        description: entry
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(String::from),
+                        enabled: entry
+                            .get("enabled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
+                        value: entry
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&id)
+                            .to_string(),
+                        created_date: chrono::Utc::now(),
+                        last_updated_date: chrono::Utc::now(),
+                        stage_keys: Vec::new(),
+                        tags: HashMap::new(),
+                        customer_id: entry
+                            .get("customerId")
+                            .and_then(Value::as_str)
+                            .map(String::from),
+                    };
+                    state.api_keys.insert(id.clone(), key);
+                    ids.push(id);
+                }
+            } else {
+                warnings.push("expected JSON array of api key entries".to_string());
+            }
+        } else {
+            // CSV fallback: name,key,description,enabled
+            for (n, line) in body.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                let cols: Vec<&str> = trimmed.split(',').collect();
+                if cols.len() < 2 {
+                    warnings.push(format!("line {n}: malformed CSV row"));
+                    continue;
+                }
+                let id = make_id();
+                let key = ApiKey {
+                    id: id.clone(),
+                    name: cols[0].to_string(),
+                    description: cols.get(2).map(|s| s.to_string()),
+                    enabled: cols
+                        .get(3)
+                        .map(|s| !matches!(s.trim().to_ascii_lowercase().as_str(), "false" | "0"))
+                        .unwrap_or(true),
+                    value: cols[1].to_string(),
+                    created_date: chrono::Utc::now(),
+                    last_updated_date: chrono::Utc::now(),
+                    stage_keys: Vec::new(),
+                    tags: HashMap::new(),
+                    customer_id: None,
+                };
+                state.api_keys.insert(id.clone(), key);
+                ids.push(id);
+            }
+        }
+        ok_status(
+            StatusCode::CREATED,
+            json!({
+                "ids": ids,
+                "warnings": warnings,
+            }),
+        )
+    }
+
+    /// Bulk import documentation parts under a given REST API.
+    fn import_documentation_parts(
+        &self,
+        req: &AwsRequest,
+        params: &HashMap<String, String>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let api_id = params.get("restApiId").cloned().unwrap_or_default();
+        let body = req.json_body();
+        let mut ids: Vec<String> = Vec::new();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request_account(req));
+        let parts = state.documentation_parts.entry(api_id.clone()).or_default();
+        let entries = body
+            .get("documentationParts")
+            .or(Some(&body))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for entry in entries {
+            let id = make_id();
+            let mut value = entry.clone();
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("id".to_string(), Value::String(id.clone()));
+            }
+            parts.insert(id.clone(), value);
+            ids.push(id);
+        }
+        ok(json!({
+            "ids": ids,
+            "warnings": Vec::<String>::new(),
+        }))
     }
 
     fn create_base_path_mapping(

@@ -91,6 +91,9 @@ pub struct ApiGatewayState {
     /// Domain names keyed by domain.
     #[serde(default)]
     pub domain_names: HashMap<String, serde_json::Value>,
+    /// Domain name access associations keyed by ARN.
+    #[serde(default)]
+    pub domain_name_access_associations: HashMap<String, serde_json::Value>,
     /// Base path mappings keyed by `domain` -> `basePath`.
     #[serde(default)]
     pub base_path_mappings: HashMap<String, HashMap<String, serde_json::Value>>,
@@ -139,6 +142,7 @@ impl ApiGatewayState {
             usage_plan_keys: HashMap::new(),
             vpc_links: HashMap::new(),
             domain_names: HashMap::new(),
+            domain_name_access_associations: HashMap::new(),
             base_path_mappings: HashMap::new(),
             client_certificates: HashMap::new(),
             documentation_parts: HashMap::new(),
@@ -167,6 +171,7 @@ impl ApiGatewayState {
         self.usage_plan_keys.clear();
         self.vpc_links.clear();
         self.domain_names.clear();
+        self.domain_name_access_associations.clear();
         self.base_path_mappings.clear();
         self.client_certificates.clear();
         self.documentation_parts.clear();
