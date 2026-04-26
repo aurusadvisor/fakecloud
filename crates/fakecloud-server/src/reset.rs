@@ -30,6 +30,7 @@ pub(crate) struct ResetState {
     pub apigatewayv2: fakecloud_apigatewayv2::state::SharedApiGatewayV2State,
     pub bedrock: fakecloud_bedrock::state::SharedBedrockState,
     pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
+    pub route53: fakecloud_route53::SharedRoute53State,
     pub organizations: fakecloud_organizations::state::SharedOrganizationsState,
     pub container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     pub rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
@@ -150,6 +151,9 @@ impl ResetState {
             }
             "cloudfront" => {
                 *self.cloudfront.write() = fakecloud_cloudfront::CloudFrontAccounts::new();
+            }
+            "route53" => {
+                *self.route53.write() = fakecloud_route53::Route53Accounts::new();
             }
             "organizations" => {
                 *self.organizations.write() = None;
@@ -332,6 +336,10 @@ impl ResetState {
                 let mut state = self.cloudfront.write();
                 state.accounts.remove(account_id);
             }
+            "route53" => {
+                let mut state = self.route53.write();
+                state.accounts.remove(account_id);
+            }
             _ => {
                 return Err(format!("Unknown service: {service}"));
             }
@@ -400,6 +408,7 @@ impl ResetState {
         self.apigatewayv2.write().reset();
         self.bedrock.write().reset();
         *self.cloudfront.write() = fakecloud_cloudfront::CloudFrontAccounts::new();
+        *self.route53.write() = fakecloud_route53::Route53Accounts::new();
         // Organizations is a cross-account singleton (not MultiAccountState);
         // a full reset drops the org entirely so subsequent runs start
         // with no org, matching the no-in-use default state.
@@ -706,6 +715,9 @@ mod tests {
             )),
             cloudfront: Arc::new(parking_lot::RwLock::new(
                 fakecloud_cloudfront::CloudFrontAccounts::new(),
+            )),
+            route53: Arc::new(parking_lot::RwLock::new(
+                fakecloud_route53::Route53Accounts::new(),
             )),
             organizations: Arc::new(parking_lot::RwLock::new(None)),
             container_runtime: None,

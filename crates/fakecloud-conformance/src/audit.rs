@@ -121,6 +121,7 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["elbv2", "elasticloadbalancing", "elasticloadbalancingv2"],
         ),
         ("cloudfront", "cloudfront", &["service.rs"], &["cloudfront"]),
+        ("route53", "route53", &["service.rs"], &["route53"]),
     ];
 
     mappings

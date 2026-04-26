@@ -36,6 +36,7 @@ fakecloud-rds = { workspace = true }
 fakecloud-elasticache = { workspace = true }
 fakecloud-elbv2 = { workspace = true }
 fakecloud-cloudfront = { workspace = true }
+fakecloud-route53 = { workspace = true }
 fakecloud-ecr = { workspace = true }
 fakecloud-ecs = { workspace = true }
 fakecloud-stepfunctions = { workspace = true }

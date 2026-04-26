@@ -110,5 +110,9 @@
   "cloudfront": {
     "repo_dir": "cloudfront",
     "service_name": "cloudfront"
+  },
+  "route53": {
+    "repo_dir": "route-53",
+    "service_name": "route53"
   }
 }

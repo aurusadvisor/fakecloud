@@ -329,6 +329,10 @@ async fn main() {
         parking_lot::RwLock::new(fakecloud_cloudfront::CloudFrontAccounts::new()),
     );
 
+    let route53_state: fakecloud_route53::SharedRoute53State = Arc::new(parking_lot::RwLock::new(
+        fakecloud_route53::Route53Accounts::new(),
+    ));
+
     let bedrock_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -580,6 +584,7 @@ async fn main() {
         ecr: ecr_state.clone(),
         ecs: ecs_state.clone(),
         cloudfront: cloudfront_state.clone(),
+        route53: route53_state.clone(),
         stepfunctions: stepfunctions_state.clone(),
         scheduler: scheduler_state.clone(),
         apigatewayv1: apigatewayv1_state.clone(),
@@ -1962,6 +1967,9 @@ async fn main() {
 
     let cloudfront_service = CloudFrontService::new(cloudfront_state.clone());
     registry.register(Arc::new(cloudfront_service));
+
+    let route53_service = fakecloud_route53::Route53Service::new(route53_state.clone());
+    registry.register(Arc::new(route53_service));
 
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {
