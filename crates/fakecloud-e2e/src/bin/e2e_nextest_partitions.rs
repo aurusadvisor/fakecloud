@@ -22,6 +22,7 @@ const LAMBDA_RUNTIME_PYTHON_FILTER: &str = concat!(
     "test(test_invoke_python3_11) | ",
     "test(test_invoke_python3_12) | ",
     "test(test_invoke_python3_13) | ",
+    "test(test_invoke_python3_14) | ",
     "test(test_invoke_warm_start) | ",
     "test(test_invoke_with_payload) | ",
     "test(test_invoke_with_environment) | ",
@@ -33,7 +34,8 @@ const LAMBDA_RUNTIME_NODEJS_FILTER: &str = concat!(
     " and (",
     "test(test_invoke_nodejs18) | ",
     "test(test_invoke_nodejs20) | ",
-    "test(test_invoke_nodejs22)",
+    "test(test_invoke_nodejs22) | ",
+    "test(test_invoke_nodejs24)",
     ")"
 );
 const LAMBDA_RUNTIME_RUBY_FILTER: &str = concat!(
@@ -54,10 +56,17 @@ const LAMBDA_RUNTIME_JAVA_FILTER: &str = concat!(
     "binary(lambda_invoke)",
     " and (",
     "test(test_invoke_java17) | ",
-    "test(test_invoke_java21)",
+    "test(test_invoke_java21) | ",
+    "test(test_invoke_java25)",
     ")"
 );
-const LAMBDA_RUNTIME_DOTNET_FILTER: &str = "binary(lambda_invoke) and test(test_invoke_dotnet8)";
+const LAMBDA_RUNTIME_DOTNET_FILTER: &str = concat!(
+    "binary(lambda_invoke)",
+    " and (",
+    "test(test_invoke_dotnet8) | ",
+    "test(test_invoke_dotnet10)",
+    ")"
+);
 
 #[derive(Clone, Copy)]
 struct Partition {

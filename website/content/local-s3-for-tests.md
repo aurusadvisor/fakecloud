@@ -121,7 +121,7 @@ aws --endpoint-url http://localhost:4566 s3api put-bucket-notification-configura
   }'
 ```
 
-Now `PutObject` fires the Lambda for real — not a stub. fakecloud runs Lambda code in real runtime containers across 13 runtimes.
+Now `PutObject` fires the Lambda for real — not a stub. fakecloud runs Lambda code in real runtime containers across 23 runtimes.
 
 ## How it differs from alternatives
 

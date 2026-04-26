@@ -68,6 +68,26 @@ def handler(event, context):
 "#;
 
 #[tokio::test]
+async fn test_invoke_python3_14() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let zip = make_zip(&[("index.py", PYTHON_HANDLER.as_bytes())]);
+
+    let result = create_and_invoke(
+        &client,
+        "py314-func",
+        Runtime::Python314,
+        "index.handler",
+        zip,
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(body["statusCode"], 200);
+    assert_eq!(body["body"], "hello from python");
+}
+
+#[tokio::test]
 async fn test_invoke_python3_13() {
     let server = TestServer::start().await;
     let client = server.lambda_client().await;
@@ -132,6 +152,26 @@ exports.handler = async (event) => {
     return { statusCode: 200, body: "hello from nodejs" };
 };
 "#;
+
+#[tokio::test]
+async fn test_invoke_nodejs24() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let zip = make_zip(&[("index.js", NODEJS_HANDLER.as_bytes())]);
+
+    let result = create_and_invoke(
+        &client,
+        "node24-func",
+        Runtime::Nodejs24x,
+        "index.handler",
+        zip,
+        None,
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(body["statusCode"], 200);
+    assert_eq!(body["body"], "hello from nodejs");
+}
 
 #[tokio::test]
 async fn test_invoke_nodejs22() {
@@ -301,6 +341,33 @@ async fn test_invoke_provided_al2() {
 // but use a minimal approach: create the function and verify Invoke attempts execution.
 
 #[tokio::test]
+async fn test_invoke_java25() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let zip = make_zip(&[("dummy.class", b"not-a-real-class")]);
+
+    client
+        .create_function()
+        .function_name("java25-func")
+        .runtime(Runtime::Java25)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("dummy")
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .invoke()
+        .function_name("java25-func")
+        .payload(Blob::new(b"{}".to_vec()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code(), 200);
+}
+
+#[tokio::test]
 async fn test_invoke_java21() {
     let server = TestServer::start().await;
     let client = server.lambda_client().await;
@@ -360,6 +427,33 @@ async fn test_invoke_java17() {
 }
 
 // ---- .NET runtime test ----
+
+#[tokio::test]
+async fn test_invoke_dotnet10() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let zip = make_zip(&[("dummy.dll", b"not-a-real-dll")]);
+
+    client
+        .create_function()
+        .function_name("dotnet10-func")
+        .runtime(Runtime::Dotnet10)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("dummy")
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .invoke()
+        .function_name("dotnet10-func")
+        .payload(Blob::new(b"{}".to_vec()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status_code(), 200);
+}
 
 #[tokio::test]
 async fn test_invoke_dotnet8() {

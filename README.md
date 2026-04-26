@@ -39,7 +39,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 - **100% conformance** per implemented service. Every operation validated against AWS's own Smithy models — 59,000+ generated test variants on every commit.
 - **Tested against upstream Terraform acceptance tests.** CI runs `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud. Catches waiter/field-presence/drift bugs that pure SDK tests miss.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations actually execute end-to-end.
-- **Real infrastructure for stateful services.** Lambda runs in Docker containers (13 runtimes). RDS runs real Postgres/MySQL/MariaDB/Oracle/SQL Server/Db2. ElastiCache runs real Redis/Valkey/Memcached.
+- **Real infrastructure for stateful services.** Lambda runs in Docker containers (23 runtimes). RDS runs real Postgres/MySQL/MariaDB/Oracle/SQL Server/Db2. ElastiCache runs real Redis/Valkey/Memcached.
 - **Single binary.** ~19 MB, ~10 MiB idle memory, ~500ms startup. No Docker required to run fakecloud itself (only to exercise the services that need real containers).
 - **Bedrock, the whole surface.** 111 operations across runtime + full control plane: `InvokeModel`/`Converse` (with streaming), guardrails (real content evaluation + PII detection), custom model jobs, model import, inference profiles, provisioned throughput, async batch via S3, prompt management, agreements, automated reasoning. Configurable responses per prompt + fault injection for deterministic Bedrock tests. LocalStack's Ultimate-tier Bedrock covers 4 ops backed by Ollama; fakecloud is free and covers the full Bedrock shape. See [`/bedrock-emulator/`](https://fakecloud.dev/bedrock-emulator/).
 - **First-party test SDKs** for TypeScript, Python, Go, PHP, Java, and Rust. Assert on what your code called without writing raw HTTP.
@@ -57,7 +57,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | SNS                    |  42 | Fan-out to SQS/Lambda/HTTP, filter policies, **KMS audit-trail on `KmsMasterKeyId` topics** |
 | EventBridge            |  57 | Pattern matching, schedules, archives, replay, API destinations        |
 | EventBridge Scheduler  |  12 | at/rate/cron, SQS targets, DLQ routing, one-shot self-delete           |
-| Lambda                 |  85 | Real Docker, 13 runtimes, ESM with FilterCriteria + partial-batch failure |
+| Lambda                 |  85 | Real Docker, 23 runtimes, ESM with FilterCriteria + partial-batch failure |
 | DynamoDB               |  57 | Transactions, PartiQL, backups, global tables, streams, **KMS audit-trail on SSE-KMS tables** |
 | IAM                    | 176 | Users, roles, policies, groups, OIDC/SAML, **PassRole trust enforcement** |
 | STS                    |  11 | AssumeRole, session tokens, federation                                 |
