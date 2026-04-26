@@ -140,6 +140,49 @@ pub fn route(method: &Method, path: &str, _raw_query: &str) -> Option<Route> {
             Some(Route::just("GetTrafficPolicyInstanceCount"))
         }
 
+        // ─── DNSSEC ──────────────────────────────────────────────────
+        (&Method::GET, ["hostedzone", id, "dnssec"]) => Some(Route::with_id("GetDNSSEC", id)),
+        (&Method::POST, ["hostedzone", id, "enable-dnssec"]) => {
+            Some(Route::with_id("EnableHostedZoneDNSSEC", id))
+        }
+        (&Method::POST, ["hostedzone", id, "disable-dnssec"]) => {
+            Some(Route::with_id("DisableHostedZoneDNSSEC", id))
+        }
+
+        // ─── Key Signing Keys ────────────────────────────────────────
+        (&Method::POST, ["keysigningkey"]) => Some(Route::just("CreateKeySigningKey")),
+        (&Method::DELETE, ["keysigningkey", zone, name]) => {
+            Some(Route::with_two("DeleteKeySigningKey", zone, name))
+        }
+        (&Method::POST, ["keysigningkey", zone, name, "activate"]) => {
+            Some(Route::with_two("ActivateKeySigningKey", zone, name))
+        }
+        (&Method::POST, ["keysigningkey", zone, name, "deactivate"]) => {
+            Some(Route::with_two("DeactivateKeySigningKey", zone, name))
+        }
+
+        // ─── Query Logging ───────────────────────────────────────────
+        (&Method::POST, ["queryloggingconfig"]) => Some(Route::just("CreateQueryLoggingConfig")),
+        (&Method::GET, ["queryloggingconfig"]) => Some(Route::just("ListQueryLoggingConfigs")),
+        (&Method::GET, ["queryloggingconfig", id]) => {
+            Some(Route::with_id("GetQueryLoggingConfig", id))
+        }
+        (&Method::DELETE, ["queryloggingconfig", id]) => {
+            Some(Route::with_id("DeleteQueryLoggingConfig", id))
+        }
+
+        // ─── CIDR Collections ────────────────────────────────────────
+        (&Method::POST, ["cidrcollection"]) => Some(Route::just("CreateCidrCollection")),
+        (&Method::GET, ["cidrcollection"]) => Some(Route::just("ListCidrCollections")),
+        (&Method::POST, ["cidrcollection", id]) => Some(Route::with_id("ChangeCidrCollection", id)),
+        (&Method::DELETE, ["cidrcollection", id]) => {
+            Some(Route::with_id("DeleteCidrCollection", id))
+        }
+        (&Method::GET, ["cidrcollection", id]) => Some(Route::with_id("ListCidrLocations", id)),
+        (&Method::GET, ["cidrcollection", id, "cidrblocks"]) => {
+            Some(Route::with_id("ListCidrBlocks", id))
+        }
+
         _ => None,
     }
 }
