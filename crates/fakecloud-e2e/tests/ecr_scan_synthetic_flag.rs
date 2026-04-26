@@ -80,8 +80,17 @@ async fn describe_image_scan_findings_returns_well_formed_response() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["imageScanFindings"]["findings"].is_array());
     assert!(body["imageScanFindings"]["findingSeverityCounts"].is_object());
-    assert!(body["imageScanFindings"]["isSynthetic"].is_null(),
-        "isSynthetic was a fakecloud-only marker that has been removed; AWS's DescribeImageScanFindings returns no such field");
+    // Verify *absence* of the `isSynthetic` field — `is_null()` would
+    // accept an explicit `null`, which is a different shape than what
+    // AWS returns. Use the parent object's key set instead.
+    let scan_findings = body["imageScanFindings"]
+        .as_object()
+        .expect("imageScanFindings is an object");
+    assert!(
+        !scan_findings.contains_key("isSynthetic"),
+        "isSynthetic was a fakecloud-only marker that has been removed; AWS's \
+         DescribeImageScanFindings returns no such field, so the key must be absent",
+    );
 }
 
 use base64::Engine;

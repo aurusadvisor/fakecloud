@@ -103,7 +103,18 @@ async fn build_image_tar(tar_path: &Path, layers: &[Layer]) -> std::io::Result<(
 
     let mut layer_filenames: Vec<String> = Vec::new();
     for (idx, layer) in layers.iter().enumerate() {
-        let bytes = engine.decode(&layer.blob_b64).unwrap_or_default();
+        // Surface base64-decode failures explicitly. Silently
+        // substituting empty bytes would have Trivy scan a 0-byte
+        // layer and report "no findings" on what is actually a
+        // corrupted blob — the caller falls back to synthetic-empty
+        // findings, which is the same outcome but logged rather
+        // than masquerading as a clean scan.
+        let bytes = engine.decode(&layer.blob_b64).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("layer {} base64 decode failed: {}", layer.digest, err),
+            )
+        })?;
         let filename = format!("layer-{idx}.tar");
         let mut header = tar::Header::new_gnu();
         header.set_size(bytes.len() as u64);
