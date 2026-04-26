@@ -58,7 +58,7 @@
 - **Bedrock Runtime** (10 ops): InvokeModel (Anthropic, Titan, Meta, Cohere, Mistral), Converse, streaming, ApplyGuardrail, CountTokens, async invoke, configurable responses, fault injection
 - **ECR** (58 ops): full registry — repos, images (real OCI v2 push/pull via `docker push`/`pull`), lifecycle policies, scanning, pull-through cache, registry settings, signing
 - **ECS** (60 ops): clusters, task definitions, real Fargate-style task execution via Docker, services with rolling deployments, container instances, capacity providers, task sets, ECS Exec
-- **Elastic Load Balancing v2** (51 ops, Application/Network/Gateway): load balancer CRUD, target groups + targets + health, listeners + rules + certificates, LB/listener/target-group attributes, capacity reservations, mTLS trust stores + revocations, subnets, security groups, IP address types, IPAM pools, SSL policies, resource policies, tags
+- **Elastic Load Balancing v2** (51 ops, Application/Network/Gateway): load balancer CRUD, target groups + targets + real health probes, listeners + rules + certificates, LB/listener/target-group attributes, capacity reservations, mTLS trust stores + revocations, subnets, security groups, IP address types, IPAM pools, SSL policies, resource policies, tags. In-process HTTP data plane for ALBs (per-LB TCP bind, rule matching, forward / fixed-response / redirect, sticky sessions, X-Forwarded-* headers)
 
 ## Introspection endpoints (for tests)
 

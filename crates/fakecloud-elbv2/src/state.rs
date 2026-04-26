@@ -83,6 +83,13 @@ pub struct LoadBalancer {
     pub tags: Vec<Tag>,
     pub attributes: HashMap<String, String>,
     pub minimum_capacity_units: Option<i32>,
+    /// In-process data plane TCP port assigned by the OS once the
+    /// data plane supervisor binds a listener for this LB. `None`
+    /// until the supervisor has reconciled this LB on the current
+    /// run. Skipped on (de)serialize because the value is runtime-
+    /// only — restarts get fresh ports.
+    #[serde(skip)]
+    pub bound_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -85,6 +85,21 @@ A background prober walks every target group with `HealthCheckEnabled=true` and 
 
 Set `FAKECLOUD_ELBV2_DISABLE_HEALTH_PROBES=true` to turn the prober off and revert to the historical default of synthetic `healthy` for every registered target — useful when targets are placeholder IPs that don't actually answer.
 
-## Not yet implemented
+## Data plane (in-process HTTP routing)
 
-- **In-process HTTP routing.** fakecloud stores the listener/rule wiring exactly, but does not bind a port per ALB and forward HTTP requests to registered targets. The control plane is complete; the data plane is the next axis. Open an issue if you have a use case that needs it.
+For every ALB whose `state_code == "active"`, fakecloud binds a TCP listener on `127.0.0.1:0` (OS-allocated) and serves HTTP/1.1 requests through the listener-rule chain you configured. Connections are parsed, routed against your rules in priority order (first non-default match wins; otherwise the listener default actions), and dispatched to the action:
+
+- **`forward`** — picks a target group via the action's weighted distribution and a target within it via round-robin (skipping `unhealthy` / `unused` targets), then proxies the request via `reqwest`. The request carries `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Port`, and `X-Amzn-Trace-Id` headers. The upstream's status, body, and non-hop-by-hop headers are returned to the client.
+- **`fixed-response`** — returns the configured status code, message body, and content type immediately.
+- **`redirect`** — emits a 301 (`HTTP_301`) or 302 (`HTTP_302`) with a `Location` header built from `protocol`/`host`/`port`/`path`/`query`, falling back to the request's own host/path when a field is omitted.
+- **`authenticate-oidc` / `authenticate-cognito`** — return `501 Not Implemented` with a body identifying the action; treated as next-batch work.
+
+Sticky sessions: when `ForwardConfig.Stickiness.Enabled=true`, the data plane sets an `AWSALB` cookie on the response (with `Max-Age` from `DurationSeconds`) and pins follow-up requests carrying that cookie to the same target as long as it stays healthy. Rule conditions support `host-header`, `path-pattern` (both with `*`/`?` glob wildcards; host-header is case-insensitive), `http-request-method`, `http-header`, `query-string`, and `source-ip` (IPv4 + IPv6 CIDR). Find the bound port via the `boundPort` field on `GET /_fakecloud/elbv2/load-balancers`.
+
+Set `FAKECLOUD_ELBV2_DISABLE_DATAPLANE=true` to turn off the data plane (the control plane keeps working; useful when you only need to assert API calls).
+
+## Next-batch work items
+
+- **HTTPS/TLS termination.** Listeners with `Protocol=HTTPS` are stored exactly; the in-process bind is HTTP-only for now. ACM cert lookup + `rustls` termination + mTLS trust-store wiring lands in a follow-up.
+- **Raw NLB TCP forwarding.** NLB control-plane CRUD is complete; the data-plane TCP byte-copy lands with the TLS work.
+- **`authenticate-oidc` / `authenticate-cognito` actions.** Currently respond `501`; bringing OIDC + Cognito flows online ships separately.
