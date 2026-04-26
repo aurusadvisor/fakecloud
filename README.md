@@ -39,7 +39,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 - **100% conformance** per implemented service. Every operation validated against AWS's own Smithy models — 59,000+ generated test variants on every commit.
 - **Tested against upstream Terraform acceptance tests.** CI runs `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud. Catches waiter/field-presence/drift bugs that pure SDK tests miss.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations actually execute end-to-end.
-- **Real infrastructure for stateful services.** Lambda runs in Docker containers (13 runtimes). RDS runs real Postgres/MySQL/MariaDB. ElastiCache runs real Redis/Valkey.
+- **Real infrastructure for stateful services.** Lambda runs in Docker containers (13 runtimes). RDS runs real Postgres/MySQL/MariaDB. ElastiCache runs real Redis/Valkey/Memcached.
 - **Single binary.** ~19 MB, ~10 MiB idle memory, ~500ms startup. No Docker required to run fakecloud itself (only to exercise the services that need real containers).
 - **Bedrock, the whole surface.** 111 operations across runtime + full control plane: `InvokeModel`/`Converse` (with streaming), guardrails (real content evaluation + PII detection), custom model jobs, model import, inference profiles, provisioned throughput, async batch via S3, prompt management, agreements, automated reasoning. Configurable responses per prompt + fault injection for deterministic Bedrock tests. LocalStack's Ultimate-tier Bedrock covers 4 ops backed by Ollama; fakecloud is free and covers the full Bedrock shape. See [`/bedrock-emulator/`](https://fakecloud.dev/bedrock-emulator/).
 - **First-party test SDKs** for TypeScript, Python, Go, PHP, Java, and Rust. Assert on what your code called without writing raw HTTP.
@@ -70,7 +70,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | Cognito User Pools     | 122 | Pools, clients, MFA, identity providers, full auth flows; verification email -> SES, SMS -> SNS, all 12 Lambda triggers |
 | Kinesis                |  39 | Streams, records, shard iterators, retention                           |
 | RDS                    | 163 | Real Postgres, MySQL, MariaDB via Docker; lifecycle ops emit `aws.rds` EventBridge events |
-| ElastiCache            |  75 | Real Redis, Valkey via Docker                                          |
+| ElastiCache            |  75 | Real Redis, Valkey, Memcached via Docker                               |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
 | API Gateway v2         | 103 | HTTP APIs, routes, integrations, stages, deployments, authorizers, domains, models, VPC links, routing rules, developer portals, CORS, tags |
 | Bedrock                | 101 | Foundation models, guardrails, custom models, invocation/eval jobs    |
@@ -113,7 +113,7 @@ Full guides: [fakecloud.dev/docs/guides](https://fakecloud.dev/docs/guides).
 | SES v2              | Full send + templates + DKIM + suppression         | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | SES inbound email   | Real receipt rule action execution                 | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) |
 | RDS                 | 163 operations, PostgreSQL/MySQL/MariaDB via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
-| ElastiCache         | 75 operations, Redis and Valkey via Docker         | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| ElastiCache         | 75 operations, Redis, Valkey, Memcached via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | API Gateway v2      | 103 operations — HTTP APIs + developer portals     | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | Bedrock             | 111 operations (control plane + runtime)           | Not available                                                                  |
 | ECR                 | 58 operations, real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/)              |

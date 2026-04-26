@@ -29,7 +29,7 @@ fakecloud is a single Rust binary built from a Cargo workspace. Each AWS service
 | `fakecloud-cognito`        | Cognito User Pools                                                       |
 | `fakecloud-kinesis`        | Kinesis                                                                  |
 | `fakecloud-rds`            | RDS with Docker-backed database execution                                |
-| `fakecloud-elasticache`    | ElastiCache with Docker-backed Redis/Valkey                              |
+| `fakecloud-elasticache`    | ElastiCache with Docker-backed Redis/Valkey/Memcached                    |
 | `fakecloud-bedrock`        | Bedrock + Bedrock Runtime                                                |
 | `fakecloud-apigatewayv2`   | API Gateway v2 (HTTP APIs)                                               |
 | `fakecloud-stepfunctions`  | Step Functions (ASL interpreter)                                         |

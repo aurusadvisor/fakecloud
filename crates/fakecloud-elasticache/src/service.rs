@@ -26,14 +26,28 @@ const ELASTICACHE_NS: &str = "http://elasticache.amazonaws.com/doc/2015-02-02/";
 /// validated against this list at the wire boundary so a typo can't slip in.
 const ENGINE_REDIS: &str = "redis";
 const ENGINE_VALKEY: &str = "valkey";
-const SUPPORTED_ENGINES: &[&str] = &[ENGINE_REDIS, ENGINE_VALKEY];
+const ENGINE_MEMCACHED: &str = "memcached";
+const SUPPORTED_ENGINES: &[&str] = &[ENGINE_REDIS, ENGINE_VALKEY, ENGINE_MEMCACHED];
 
 fn validate_engine(engine: &str) -> Result<(), AwsServiceError> {
     if !SUPPORTED_ENGINES.contains(&engine) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "InvalidParameterValue",
-            format!("Invalid value for Engine: {engine}. Supported engines: redis, valkey"),
+            format!(
+                "Invalid value for Engine: {engine}. Supported engines: redis, valkey, memcached"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_memcached_for(engine: &str, feature: &str) -> Result<(), AwsServiceError> {
+    if engine == ENGINE_MEMCACHED {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            format!("{feature} is not supported for the memcached engine."),
         ));
     }
     Ok(())
@@ -772,10 +786,10 @@ impl ElastiCacheService {
         let engine = optional_param(request, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
         validate_engine(&engine)?;
 
-        let default_version = if engine == ENGINE_VALKEY {
-            "8.0"
-        } else {
-            "7.1"
+        let default_version = match engine.as_str() {
+            ENGINE_VALKEY => "8.0",
+            ENGINE_MEMCACHED => "1.6.22",
+            _ => "7.1",
         };
         let engine_version =
             optional_param(request, "EngineVersion").unwrap_or_else(|| default_version.to_string());
@@ -831,6 +845,15 @@ impl ElastiCacheService {
             }
 
             if let Some(ref group_id) = replication_group_id {
+                if engine == ENGINE_MEMCACHED {
+                    state.cancel_cache_cluster_creation(&cache_cluster_id);
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        "Replication groups are not supported for the memcached engine."
+                            .to_string(),
+                    ));
+                }
                 if !state.replication_groups.contains_key(group_id) {
                     state.cancel_cache_cluster_creation(&cache_cluster_id);
                     return Err(AwsServiceError::aws_error(
@@ -863,7 +886,12 @@ impl ElastiCacheService {
             )
         })?;
 
-        let running = match runtime.ensure_redis(&cache_cluster_id).await {
+        let runtime_result = if engine == ENGINE_MEMCACHED {
+            runtime.ensure_memcached(&cache_cluster_id).await
+        } else {
+            runtime.ensure_redis(&cache_cluster_id).await
+        };
+        let running = match runtime_result {
             Ok(r) => r,
             Err(e) => {
                 self.state
@@ -1020,6 +1048,7 @@ impl ElastiCacheService {
         let description = required_param(request, "ReplicationGroupDescription")?;
         let engine = optional_param(request, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
         validate_engine(&engine)?;
+        reject_memcached_for(&engine, "Replication groups")?;
         let default_version = if engine == ENGINE_VALKEY {
             "8.0"
         } else {
@@ -4086,7 +4115,15 @@ fn parse_required_bool(req: &AwsRequest, name: &str) -> Result<bool, AwsServiceE
 }
 
 fn validate_serverless_engine(engine: &str) -> Result<(), AwsServiceError> {
-    validate_engine(engine)
+    validate_engine(engine)?;
+    if engine == ENGINE_MEMCACHED {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            "Serverless caches are not supported for the memcached engine.".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn default_major_engine_version(engine: &str) -> &'static str {
@@ -5405,10 +5442,18 @@ mod tests {
     }
 
     #[test]
-    fn filter_engine_versions_no_match() {
+    fn filter_engine_versions_by_memcached() {
         let versions = default_engine_versions();
         let filtered =
             filter_engine_versions(&versions, &Some("memcached".to_string()), &None, &None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].engine, "memcached");
+    }
+
+    #[test]
+    fn filter_engine_versions_unknown_engine() {
+        let versions = default_engine_versions();
+        let filtered = filter_engine_versions(&versions, &Some("oracle".to_string()), &None, &None);
         assert!(filtered.is_empty());
     }
 
@@ -5959,9 +6004,41 @@ mod tests {
 
         let req = request(
             "CreateCacheCluster",
-            &[("CacheClusterId", "bad-engine"), ("Engine", "memcached")],
+            &[("CacheClusterId", "bad-engine"), ("Engine", "oracle")],
         );
         assert!(service.create_cache_cluster(&req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_replication_group_rejects_memcached() {
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let service = ElastiCacheService::new(shared);
+
+        let req = request(
+            "CreateReplicationGroup",
+            &[
+                ("ReplicationGroupId", "rg-mc"),
+                ("ReplicationGroupDescription", "no memcached"),
+                ("Engine", "memcached"),
+            ],
+        );
+        assert!(service.create_replication_group(&req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_serverless_cache_rejects_memcached() {
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let service = ElastiCacheService::new(shared);
+
+        let req = request(
+            "CreateServerlessCache",
+            &[("ServerlessCacheName", "sc-mc"), ("Engine", "memcached")],
+        );
+        assert!(service.create_serverless_cache(&req).await.is_err());
     }
 
     #[tokio::test]

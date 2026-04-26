@@ -2,6 +2,16 @@ mod helpers;
 
 use helpers::TestServer;
 
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 // CacheCluster tests
 
 #[tokio::test]
@@ -1765,4 +1775,128 @@ async fn elasticache_delete_nonexistent_serverless_cache_snapshot_errors() {
         .await;
 
     assert!(result.is_err());
+}
+
+// Memcached engine tests
+
+#[tokio::test]
+async fn elasticache_create_memcached_cluster_and_connect() {
+    if !docker_available() {
+        return;
+    }
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let create_resp = client
+        .create_cache_cluster()
+        .cache_cluster_id("mc-cluster")
+        .cache_node_type("cache.t3.micro")
+        .engine("memcached")
+        .send()
+        .await
+        .unwrap();
+
+    let cluster = create_resp.cache_cluster().expect("cache cluster");
+    assert_eq!(cluster.engine(), Some("memcached"));
+    assert_eq!(cluster.engine_version(), Some("1.6.22"));
+    assert_eq!(cluster.cache_cluster_status(), Some("available"));
+
+    let describe = client
+        .describe_cache_clusters()
+        .cache_cluster_id("mc-cluster")
+        .show_cache_node_info(true)
+        .send()
+        .await
+        .unwrap();
+    let endpoint = describe.cache_clusters()[0].cache_nodes()[0]
+        .endpoint()
+        .expect("endpoint");
+    let port = endpoint.port().expect("port");
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .expect("memcached connect");
+    stream.write_all(b"set foo 0 0 3\r\nbar\r\n").await.unwrap();
+    let mut buf = vec![0u8; 32];
+    let n = stream.read(&mut buf).await.unwrap();
+    assert!(
+        std::str::from_utf8(&buf[..n])
+            .unwrap()
+            .starts_with("STORED"),
+        "memcached SET should return STORED"
+    );
+    stream.write_all(b"get foo\r\n").await.unwrap();
+    let mut buf = vec![0u8; 64];
+    let n = stream.read(&mut buf).await.unwrap();
+    let response = std::str::from_utf8(&buf[..n]).unwrap();
+    assert!(response.contains("bar"), "expected bar in {response}");
+
+    client
+        .delete_cache_cluster()
+        .cache_cluster_id("mc-cluster")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn elasticache_memcached_replication_group_rejected() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let result = client
+        .create_replication_group()
+        .replication_group_id("mc-rg")
+        .replication_group_description("memcached should be rejected")
+        .engine("memcached")
+        .send()
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn elasticache_describe_engine_default_parameters_memcached() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let response = client
+        .describe_engine_default_parameters()
+        .cache_parameter_group_family("memcached1.6")
+        .send()
+        .await
+        .unwrap();
+
+    let defaults = response.engine_defaults().expect("engine defaults");
+    assert_eq!(
+        defaults.cache_parameter_group_family(),
+        Some("memcached1.6")
+    );
+    let params = defaults.parameters();
+    assert_eq!(params.len(), 2);
+    assert!(params
+        .iter()
+        .any(|p| p.parameter_name() == Some("max_item_size")));
+}
+
+#[tokio::test]
+async fn elasticache_describe_cache_engine_versions_includes_memcached() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let response = client
+        .describe_cache_engine_versions()
+        .engine("memcached")
+        .send()
+        .await
+        .unwrap();
+
+    let versions = response.cache_engine_versions();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].engine(), Some("memcached"));
+    assert_eq!(versions[0].engine_version(), Some("1.6.22"));
+    assert_eq!(
+        versions[0].cache_parameter_group_family(),
+        Some("memcached1.6")
+    );
 }

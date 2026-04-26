@@ -9,6 +9,12 @@ pub struct RunningCacheContainer {
     pub host_port: u16,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CacheEngineKind {
+    Redis,
+    Memcached,
+}
+
 pub struct ElastiCacheRuntime {
     cli: String,
     containers: RwLock<HashMap<String, RunningCacheContainer>>,
@@ -54,18 +60,42 @@ impl ElastiCacheRuntime {
         &self,
         resource_id: &str,
     ) -> Result<RunningCacheContainer, RuntimeError> {
+        self.spawn_container(resource_id, "redis:7-alpine", 6379, CacheEngineKind::Redis)
+            .await
+    }
+
+    pub async fn ensure_memcached(
+        &self,
+        resource_id: &str,
+    ) -> Result<RunningCacheContainer, RuntimeError> {
+        self.spawn_container(
+            resource_id,
+            "memcached:1.6-alpine",
+            11211,
+            CacheEngineKind::Memcached,
+        )
+        .await
+    }
+
+    async fn spawn_container(
+        &self,
+        resource_id: &str,
+        image: &str,
+        container_port: u16,
+        engine: CacheEngineKind,
+    ) -> Result<RunningCacheContainer, RuntimeError> {
         self.stop_container(resource_id).await;
 
         let output = tokio::process::Command::new(&self.cli)
             .args([
                 "create",
                 "-p",
-                ":6379",
+                &format!(":{container_port}"),
                 "--label",
                 &format!("fakecloud-elasticache={resource_id}"),
                 "--label",
                 &format!("fakecloud-instance={}", self.instance_id),
-                "redis:7-alpine",
+                image,
             ])
             .output()
             .await
@@ -92,7 +122,7 @@ impl ElastiCacheRuntime {
             )));
         }
 
-        let host_port = match self.lookup_port(&container_id, 6379).await {
+        let host_port = match self.lookup_port(&container_id, container_port).await {
             Ok(host_port) => host_port,
             Err(error) => {
                 self.remove_container(&container_id).await;
@@ -100,7 +130,11 @@ impl ElastiCacheRuntime {
             }
         };
 
-        if let Err(error) = self.wait_for_redis(host_port).await {
+        let wait_result = match engine {
+            CacheEngineKind::Redis => self.wait_for_redis(host_port).await,
+            CacheEngineKind::Memcached => self.wait_for_memcached(host_port).await,
+        };
+        if let Err(error) = wait_result {
             self.remove_container(&container_id).await;
             return Err(error);
         }
@@ -180,6 +214,30 @@ impl ElastiCacheRuntime {
 
         Err(RuntimeError::ContainerStartFailed(
             "redis container did not become ready within 20 seconds".to_string(),
+        ))
+    }
+
+    async fn wait_for_memcached(&self, host_port: u16) -> Result<(), RuntimeError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let Ok(mut stream) =
+                tokio::net::TcpStream::connect(format!("127.0.0.1:{host_port}")).await
+            else {
+                continue;
+            };
+            if stream.write_all(b"version\r\n").await.is_err() {
+                continue;
+            }
+            let mut buf = [0u8; 32];
+            match tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 && buf.starts_with(b"VERSION") => return Ok(()),
+                _ => continue,
+            }
+        }
+
+        Err(RuntimeError::ContainerStartFailed(
+            "memcached container did not become ready within 20 seconds".to_string(),
         ))
     }
 

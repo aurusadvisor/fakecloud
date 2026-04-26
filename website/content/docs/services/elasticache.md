@@ -1,23 +1,23 @@
 +++
 title = "ElastiCache"
-description = "Real Redis and Valkey clusters via Docker. Replication groups, snapshots, user/group management."
+description = "Real Redis, Valkey, and Memcached clusters via Docker. Replication groups, snapshots, user/group management."
 weight = 18
 +++
 
-fakecloud implements **75 of 75** ElastiCache operations at 100% Smithy conformance. Cache clusters run in **real Docker containers** — your code connects to a real Redis or Valkey instance.
+fakecloud implements **75 of 75** ElastiCache operations at 100% Smithy conformance. Cache clusters run in **real Docker containers** — your code connects to a real Redis, Valkey, or Memcached instance.
 
 ## Supported features
 
 - **Cache clusters** — CreateCacheCluster, ModifyCacheCluster, DeleteCacheCluster, DescribeCacheClusters
-- **Real engines via Docker** — Redis, Valkey
-- **Replication groups** — CreateReplicationGroup with primary/replica topology
+- **Real engines via Docker** — Redis, Valkey, Memcached
+- **Replication groups** — CreateReplicationGroup with primary/replica topology (Redis/Valkey only — matches AWS)
 - **Global replication groups** — cross-region global datastores (CRUD)
-- **Serverless caches** — CreateServerlessCache, ModifyServerlessCache
+- **Serverless caches** — CreateServerlessCache, ModifyServerlessCache (Redis/Valkey only — matches AWS)
 - **Snapshots** — CreateSnapshot, CopySnapshot, DeleteSnapshot, RestoreReplicationGroupFromSnapshot
 - **Serverless cache snapshots** — CRUD
 - **Subnet groups** — CRUD
 - **Users and user groups** — IAM-integrated auth
-- **Parameter groups** — CRUD
+- **Parameter groups** — CRUD (default groups for redis7, valkey8, memcached1.6)
 - **Security groups** — cache security group CRUD
 - **Failover** — TestFailover, TestMigration
 - **Tagging** — AddTagsToResource, RemoveTagsFromResource
@@ -29,13 +29,13 @@ Query protocol. Form-encoded body, `Action` parameter, XML responses.
 
 ## How the Docker integration works
 
-When you call `CreateCacheCluster` or `CreateReplicationGroup` for a Redis/Valkey topology, fakecloud starts real Docker containers running the corresponding official image and reports the mapped host port(s). Your application connects with a normal Redis client.
+When you call `CreateCacheCluster` (or `CreateReplicationGroup` for Redis/Valkey topologies), fakecloud starts a real Docker container running the corresponding official image (`redis:7-alpine`, `valkey:8-alpine`, or `memcached:1.6-alpine`) and reports the mapped host port. Your application connects with a normal Redis or Memcached client.
 
 ## Gotchas
 
 - **Requires a Docker socket.** ElastiCache needs access to `/var/run/docker.sock`.
-- **First use pulls the image.** Expect a slower first run while the Redis/Valkey image downloads.
-- **Memcached is not supported via Docker.** Memcached cluster operations conform to AWS (CRUD works) but don't run a real backing process.
+- **First use pulls the image.** Expect a slower first run while the Redis/Valkey/Memcached image downloads.
+- **Memcached is cache-cluster only.** AWS does not support replication groups or serverless caches for Memcached, and neither does fakecloud. Use `CreateCacheCluster` with `Engine=memcached`.
 
 ## Source
 
