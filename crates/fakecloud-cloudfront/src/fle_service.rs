@@ -226,6 +226,9 @@ impl CloudFrontService {
                 "FieldLevelEncryptionProfileConfig.Name is required",
             ));
         }
+        if cfg.caller_reference.is_empty() {
+            return Err(invalid_argument("CallerReference is required"));
+        }
         let mut state = self.state.write();
         let account = state
             .accounts
