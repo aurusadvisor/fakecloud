@@ -390,6 +390,10 @@ pub struct ChangeCidrCollectionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct CidrCollectionChanges {
+    // The Smithy `CidrCollectionChanges` list has no `xmlName` trait on
+    // its member, so the on-wire element name is the restXml default:
+    // `<member>`, not `<CidrCollectionChange>`. The Rust SDK does send
+    // `<member>` — verified against `cidr_collection_lifecycle` E2E.
     #[serde(default, rename = "member")]
     pub change: Vec<CidrCollectionChange>,
 }
