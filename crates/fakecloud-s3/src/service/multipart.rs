@@ -173,6 +173,26 @@ impl S3Service {
         }
         let pn = part_number as u32;
 
+        // Pre-validate the bucket/upload/key under a short read guard
+        // so a bogus request doesn't cause us to spool the whole body
+        // to disk before returning the error.
+        {
+            let accts = self.state.read();
+            let __empty = crate::state::S3State::new(account_id, "us-east-1");
+            let state = accts.get(account_id).unwrap_or(&__empty);
+            let b = state
+                .buckets
+                .get(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            let upload = b
+                .multipart_uploads
+                .get(upload_id)
+                .ok_or_else(|| no_such_upload(upload_id))?;
+            if upload.key != key {
+                return Err(no_such_upload(upload_id));
+            }
+        }
+
         // Streaming part body: spool chunks to a tempfile while computing
         // MD5 + size in constant memory. Buffered callers (tests, the
         // legacy buffered code path) fall through with the existing

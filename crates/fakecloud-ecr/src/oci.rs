@@ -644,7 +644,7 @@ async fn blob_upload_patch(
     // Resolve the upload + spool path under a short-lived read guard
     // so the streaming append below doesn't hold a Send-unfriendly
     // `parking_lot::RwLockWriteGuard` across `.await`.
-    let (spool, start) = {
+    let spool = {
         let accounts = service.state_handle().read();
         let state = accounts
             .get(&request.account_id)
@@ -656,7 +656,7 @@ async fn blob_upload_patch(
         if upload.repository_name != name {
             return Err(upload_unknown(upload_id));
         }
-        (PathBuf::from(&upload.spool_path), upload.last_byte_received)
+        PathBuf::from(&upload.spool_path)
     };
 
     // Two ingestion modes — true streaming when the dispatcher handed
@@ -690,7 +690,11 @@ async fn blob_upload_patch(
     if upload.repository_name != name {
         return Err(upload_unknown(upload_id));
     }
-    upload.last_byte_received = start + appended;
+    // Increment the live counter under the write lock instead of from a
+    // pre-append snapshot — concurrent PATCH calls are serialized by
+    // append order on the spool file, so adding `appended` here is the
+    // race-free progress update.
+    upload.last_byte_received = upload.last_byte_received.saturating_add(appended);
     let range_end = upload.last_byte_received.saturating_sub(1);
     let mut resp = base_response(StatusCode::ACCEPTED, "application/json", Vec::new());
     resp.headers.insert(

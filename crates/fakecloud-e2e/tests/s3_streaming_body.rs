@@ -87,9 +87,10 @@ async fn s3_streaming_upload_part_round_trip() {
         .unwrap();
     let upload_id = init.upload_id().unwrap().to_string();
 
-    // Two 80 MiB parts — each well below the historical buffered cap
-    // but large enough to verify chunked spool reads/writes.
-    let part_size = 80 * 1024 * 1024;
+    // Two 129 MiB parts — each above the historical 128 MiB buffered
+    // cap so the test fails if either part regresses to a single
+    // in-memory `Bytes` allocation.
+    let part_size = 129 * 1024 * 1024;
     let part1 = vec![0xA5u8; part_size];
     let part2 = vec![0x5Au8; part_size];
 

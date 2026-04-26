@@ -927,18 +927,16 @@ impl S3Service {
         });
         // Checksum computation. For buffered uploads we hash the in-memory
         // body. For streamed uploads with an explicit checksum algorithm
-        // requested by the client, read the spool file once with
-        // `tokio::fs` (still bounded by the file size, not by RAM —
-        // tempfile is on the same filesystem). Streamed uploads with no
-        // checksum algorithm skip this entirely.
+        // requested by the client, fold the spool file through the
+        // hasher in 1 MiB chunks (constant memory). Streamed uploads
+        // with no checksum algorithm skip this entirely.
         let checksum_value = match (&checksum_algorithm, &buffered_body, &spooled) {
             (Some(algo), Some(b), _) => Some(compute_checksum(algo, b)),
-            (Some(algo), None, Some(spool)) => {
-                let bytes = tokio::fs::read(&spool.path)
+            (Some(algo), None, Some(spool)) => Some(
+                super::compute_checksum_streaming(algo, &spool.path)
                     .await
-                    .map_err(super::io_to_aws)?;
-                Some(compute_checksum(algo, &Bytes::from(bytes)))
-            }
+                    .map_err(super::io_to_aws)?,
+            ),
             _ => None,
         };
 

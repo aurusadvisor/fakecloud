@@ -215,7 +215,12 @@ impl AwsService for S3Service {
             && !q.contains_key("renameObject")
             && !q.contains_key("encryption")
             && !req.headers.contains_key("x-amz-copy-source");
-        let is_upload_part = is_put_to_key && q.contains_key("partNumber");
+        // UploadPart requires both partNumber AND uploadId; checking
+        // only partNumber would skip body draining for stray PUTs that
+        // happened to carry a partNumber query param without being a
+        // real multipart upload.
+        let is_upload_part =
+            is_put_to_key && q.contains_key("partNumber") && q.contains_key("uploadId");
         if !is_put_object && !is_upload_part {
             if let Some(stream) = req.take_body_stream() {
                 req.body = fakecloud_core::service::drain_request_stream(stream).await?;
@@ -2055,6 +2060,58 @@ pub(crate) fn compute_checksum(algorithm: &str, data: &[u8]) -> String {
             BASE64.encode(hash)
         }
         _ => String::new(),
+    }
+}
+
+/// Streaming variant of [`compute_checksum`] for spool files. Reads
+/// the file in 1 MiB chunks and feeds each chunk into the hasher so a
+/// 1 GiB upload computes its CRC32 / SHA-1 / SHA-256 in constant
+/// memory rather than via `tokio::fs::read` (which would allocate the
+/// whole file as one buffer).
+pub(crate) async fn compute_checksum_streaming(
+    algorithm: &str,
+    path: &std::path::Path,
+) -> Result<String, std::io::Error> {
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut buf = vec![0u8; 1024 * 1024];
+    match algorithm {
+        "CRC32" => {
+            let mut hasher = crc32fast::Hasher::new();
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            Ok(BASE64.encode(hasher.finalize().to_be_bytes()))
+        }
+        "SHA1" => {
+            use sha1::Digest as _;
+            let mut hasher = sha1::Sha1::new();
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            Ok(BASE64.encode(hasher.finalize()))
+        }
+        "SHA256" => {
+            use sha2::Digest as _;
+            let mut hasher = sha2::Sha256::new();
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            Ok(BASE64.encode(hasher.finalize()))
+        }
+        _ => Ok(String::new()),
     }
 }
 

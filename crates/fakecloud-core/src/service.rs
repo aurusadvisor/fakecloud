@@ -205,6 +205,15 @@ pub async fn spool_request_stream(
     let mut size: u64 = 0;
     let mut body = stream;
 
+    // Cleanup helper: drop the file handle before unlinking so
+    // platforms that disallow removing an open file (Windows) still
+    // collect the partial spool. `drop(file)` closes the underlying
+    // OS handle synchronously.
+    async fn cleanup(file: tokio::fs::File, path: &std::path::Path) {
+        drop(file);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
     loop {
         match body.frame().await {
             Some(Ok(frame)) => {
@@ -213,10 +222,7 @@ pub async fn spool_request_stream(
                         hasher.update(&chunk);
                         size += chunk.len() as u64;
                         if let Err(e) = file.write_all(&chunk).await {
-                            // Cleanup the partial spool file before
-                            // bubbling the error so a transport blip
-                            // doesn't leak GiB on disk.
-                            let _ = tokio::fs::remove_file(&path).await;
+                            cleanup(file, &path).await;
                             return Err(AwsServiceError::aws_error(
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "InternalError",
@@ -228,7 +234,7 @@ pub async fn spool_request_stream(
                 // Trailers are ignored — not meaningful for raw payloads.
             }
             Some(Err(e)) => {
-                let _ = tokio::fs::remove_file(&path).await;
+                cleanup(file, &path).await;
                 return Err(stream_error_to_aws(&e.to_string()));
             }
             None => break,
@@ -236,7 +242,7 @@ pub async fn spool_request_stream(
     }
 
     if let Err(e) = file.flush().await {
-        let _ = tokio::fs::remove_file(&path).await;
+        cleanup(file, &path).await;
         return Err(AwsServiceError::aws_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "InternalError",

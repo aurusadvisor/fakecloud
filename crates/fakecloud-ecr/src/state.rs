@@ -271,6 +271,7 @@ pub struct LayerUpload {
     /// constant memory, and then promotes the bytes into a `Layer`.
     /// Storing the path means a 1 GiB push never holds the partial
     /// upload in RAM.
+    #[serde(default)]
     pub spool_path: String,
     pub last_byte_received: u64,
 }
