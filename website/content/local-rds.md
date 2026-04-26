@@ -17,7 +17,7 @@ Point your AWS SDK at `http://localhost:4566`. Docker required because fakecloud
 
 - **163 RDS operations** at 100% conformance — DB instances, snapshots, read replicas, parameter groups, subnet groups, engine/version discovery, tagging, upgrades.
 - **Real database engines.** fakecloud pulls real PostgreSQL / MySQL / MariaDB / Oracle / SQL Server / Db2 Docker images and runs them as the RDS instance. Your SQL schema, indexes, triggers, and extensions all work because they are real engines.
-- **Endpoint works.** `DescribeDBInstances` returns a real connectable host. Your application connects with the usual PostgreSQL / MySQL / Oracle / Microsoft / Db2 driver.
+- **Endpoint works.** `DescribeDBInstances` returns a real connectable host. Your application connects with the usual PostgreSQL / MySQL / Oracle / SQL Server / Db2 driver.
 - **Paid on LocalStack; free here.** RDS has always been LocalStack Pro-only.
 - **No account, no auth token, no paid tier.** AGPL-3.0.
 

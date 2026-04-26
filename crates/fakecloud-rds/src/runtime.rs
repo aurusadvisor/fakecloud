@@ -550,7 +550,7 @@ impl RdsRuntime {
                 format!("-p{password}"),
                 db_name.into(),
             ],
-            _ => vec![
+            "postgres" => vec![
                 "exec".into(),
                 container.container_id.clone(),
                 "pg_dump".into(),
@@ -560,6 +560,24 @@ impl RdsRuntime {
                 db_name.into(),
                 "--no-password".into(),
             ],
+            // Heavy engines don't ship with a portable dump CLI we can
+            // shell out to from the host the same way pg_dump and
+            // mysqldump are guaranteed available. Surface a clear
+            // error so callers (snapshot/read-replica) don't silently
+            // run the wrong tool against an Oracle/SQL Server/Db2
+            // container.
+            "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" | "sqlserver-ee"
+            | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" | "db2-se" | "db2-ae" => {
+                return Err(RuntimeError::ContainerStartFailed(format!(
+                    "engine {engine} is not yet supported by the snapshot/read-replica path; \
+                     emulator stores the API state but cannot dump the underlying database"
+                )));
+            }
+            other => {
+                return Err(RuntimeError::ContainerStartFailed(format!(
+                    "engine {other} is not supported by dump_database"
+                )));
+            }
         };
 
         let output = tokio::process::Command::new(&self.cli)
@@ -605,7 +623,7 @@ impl RdsRuntime {
                 format!("-p{password}"),
                 db_name.into(),
             ],
-            _ => vec![
+            "postgres" => vec![
                 "exec".into(),
                 "-i".into(),
                 container.container_id.clone(),
@@ -618,6 +636,17 @@ impl RdsRuntime {
                 "-v".into(),
                 "ON_ERROR_STOP=1".into(),
             ],
+            "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" | "sqlserver-ee"
+            | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" | "db2-se" | "db2-ae" => {
+                return Err(RuntimeError::ContainerStartFailed(format!(
+                    "engine {engine} is not yet supported by the snapshot-restore path"
+                )));
+            }
+            other => {
+                return Err(RuntimeError::ContainerStartFailed(format!(
+                    "engine {other} is not supported by restore_database"
+                )));
+            }
         };
 
         let mut child = tokio::process::Command::new(&self.cli)

@@ -41,10 +41,15 @@ fn skip_unless_ready(test_name: &str) -> bool {
         );
         return true;
     }
-    if !docker_available() {
-        eprintln!("{test_name}: docker required for RDS heavy engines; skipping");
-        return true;
-    }
+    // Once the user has opted into the heavy-DB lane via the env var,
+    // missing Docker is a hard failure. Silently skipping would mean
+    // the lane runs green on misconfigured CI without exercising any
+    // engine — defeating the point of opting in.
+    assert!(
+        docker_available(),
+        "{test_name}: FAKECLOUD_E2E_HEAVY_DBS=1 was set but docker is unavailable; \
+         heavy-DB lane requires docker"
+    );
     false
 }
 

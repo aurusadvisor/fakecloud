@@ -113,7 +113,7 @@ Full guides: [fakecloud.dev/docs/guides](https://fakecloud.dev/docs/guides).
 | SES v2              | Full send + templates + DKIM + suppression         | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | SES inbound email   | Real receipt rule action execution                 | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) |
 | RDS                 | 163 operations, PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2 via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
-| ElastiCache         | 75 operations, Redis, Valkey, Memcached via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| ElastiCache         | 75 operations, Redis, Valkey, and Memcached via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/)           |
 | API Gateway v2      | 103 operations — HTTP APIs + developer portals     | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | Bedrock             | 111 operations (control plane + runtime)           | Not available                                                                  |
 | ECR                 | 58 operations, real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/)              |
