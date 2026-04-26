@@ -2,6 +2,7 @@
 
 mod helpers;
 
+use base64::Engine;
 use helpers::TestServer;
 
 #[tokio::test]
@@ -249,6 +250,91 @@ async fn tag_resource_round_trip() {
         .expect("list_tags after");
     assert_eq!(after.tags().len(), 1);
     assert_eq!(after.tags()[0].key(), "team");
+}
+
+#[tokio::test]
+async fn start_image_scan_transitions_to_complete() {
+    use std::time::Duration;
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+    client
+        .create_repository()
+        .repository_name("scan-transition-repo")
+        .send()
+        .await
+        .unwrap();
+
+    // Push a minimal manifest so DescribeImageScanFindings can find an image.
+    let http = reqwest::Client::new();
+    let auth = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("AWS:test")
+    );
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "config": {
+            "mediaType": "application/vnd.docker.container.image.v1+json",
+            "size": 0,
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "layers": []
+    });
+    http.put(format!(
+        "{}/v2/scan-transition-repo/manifests/v1",
+        server.endpoint()
+    ))
+    .header("Authorization", &auth)
+    .header(
+        "Content-Type",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    )
+    .body(serde_json::to_vec(&manifest).unwrap())
+    .send()
+    .await
+    .unwrap()
+    .error_for_status()
+    .unwrap();
+
+    use aws_sdk_ecr::types::ImageIdentifier;
+    let scan = client
+        .start_image_scan()
+        .repository_name("scan-transition-repo")
+        .image_id(ImageIdentifier::builder().image_tag("v1").build())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        scan.image_scan_status()
+            .and_then(|s| s.status())
+            .map(|s| s.as_str()),
+        Some("IN_PROGRESS")
+    );
+
+    // Background scanner finishes shortly (synthetic fallback when Trivy
+    // is unavailable; real findings when it is). Poll up to 30s.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut final_status = String::new();
+    while std::time::Instant::now() < deadline {
+        let resp = client
+            .describe_image_scan_findings()
+            .repository_name("scan-transition-repo")
+            .image_id(ImageIdentifier::builder().image_tag("v1").build())
+            .send()
+            .await
+            .unwrap();
+        let status = resp
+            .image_scan_status()
+            .and_then(|s| s.status())
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        if status == "COMPLETE" {
+            final_status = status;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(final_status, "COMPLETE", "scan never reached COMPLETE");
 }
 
 #[tokio::test]

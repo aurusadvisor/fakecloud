@@ -167,13 +167,29 @@ impl EcrService {
     }
 
     async fn save_snapshot(&self) {
-        let Some(store) = self.snapshot_store.clone() else {
+        Self::save_snapshot_with(
+            self.state.clone(),
+            self.snapshot_store.clone(),
+            self.snapshot_lock.clone(),
+        )
+        .await
+    }
+
+    /// Snapshot writer reachable from background tasks (e.g. the async
+    /// image-scanner) that don't hold a `&self` reference. Equivalent
+    /// to [`save_snapshot`] but takes the components as owned clones.
+    pub(crate) async fn save_snapshot_with(
+        state: SharedEcrState,
+        store: Option<Arc<dyn SnapshotStore>>,
+        lock: Arc<AsyncMutex<()>>,
+    ) {
+        let Some(store) = store else {
             return;
         };
-        let _guard = self.snapshot_lock.lock().await;
+        let _guard = lock.lock().await;
         let snapshot = EcrSnapshot {
             schema_version: ECR_SNAPSHOT_SCHEMA_VERSION,
-            accounts: Some(self.state.read().clone()),
+            accounts: Some(state.read().clone()),
         };
         let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             let bytes = serde_json::to_vec(&snapshot)
@@ -914,6 +930,32 @@ fn image_to_details(repo: &Repository, image: &Image, registry_id: &str) -> Valu
         out["lastRecordedPullTime"] = json!(t.timestamp());
     }
     out
+}
+
+/// Return only the layer blobs referenced by the manifest of `image_digest`.
+/// Falls back to all layers if the manifest can't be parsed (e.g. an
+/// OCI-spec image that fakecloud stored in an unfamiliar shape) so the
+/// scan still runs against something. Layers not stored locally are
+/// silently skipped — the scanner only sees what's actually there.
+fn layers_for_image(repo: &Repository, image_digest: &str) -> Vec<crate::state::Layer> {
+    let Some(image) = repo.images.get(image_digest) else {
+        return Vec::new();
+    };
+    let Ok(manifest): Result<Value, _> = serde_json::from_str(&image.image_manifest) else {
+        return repo.layers.values().cloned().collect();
+    };
+    let mut digests: Vec<String> = Vec::new();
+    if let Some(arr) = manifest.get("layers").and_then(|v| v.as_array()) {
+        for layer in arr {
+            if let Some(d) = layer.get("digest").and_then(|v| v.as_str()) {
+                digests.push(d.to_string());
+            }
+        }
+    }
+    digests
+        .into_iter()
+        .filter_map(|d| repo.layers.get(&d).cloned())
+        .collect()
 }
 
 /// Resolve `imageId` into a stored digest for this repo. Accepts either
@@ -1918,29 +1960,72 @@ impl EcrService {
             .cloned()
             .ok_or_else(|| invalid_parameter("Missing imageId"))?;
         let account = target_account_id(request, &body);
-        let mut accounts = self.state.write();
-        let state = accounts
-            .get_mut(&account)
-            .ok_or_else(|| repository_not_found(&name))?;
-        let repo = state
-            .repositories
-            .get_mut(&name)
-            .ok_or_else(|| repository_not_found(&name))?;
-        let digest = resolve_image_digest(repo, &image_id)
-            .ok_or_else(|| image_not_found(&name, &image_id))?;
-        // Synthetic-but-schema-complete findings. Real scanner integration
-        // lives out of scope for a mock; a deterministic non-empty shape
-        // lets callers exercise their findings plumbing.
-        let findings = ImageScanFindings {
-            image_digest: digest.clone(),
-            scan_status: "COMPLETE".to_string(),
-            scan_completed_at: Some(Utc::now()),
-            vulnerability_source_updated_at: Some(Utc::now()),
-            finding_severity_counts: BTreeMap::new(),
-            findings: Vec::new(),
+        let (digest, layers, registry_id) = {
+            let mut accounts = self.state.write();
+            let state = accounts
+                .get_mut(&account)
+                .ok_or_else(|| repository_not_found(&name))?;
+            let repo = state
+                .repositories
+                .get_mut(&name)
+                .ok_or_else(|| repository_not_found(&name))?;
+            let digest = resolve_image_digest(repo, &image_id)
+                .ok_or_else(|| image_not_found(&name, &image_id))?;
+            // Mark scan IN_PROGRESS; real findings written by the
+            // background scanner task. Caller polls
+            // DescribeImageScanFindings to observe completion.
+            repo.scan_findings.insert(
+                digest.clone(),
+                ImageScanFindings {
+                    image_digest: digest.clone(),
+                    scan_status: "IN_PROGRESS".to_string(),
+                    scan_completed_at: None,
+                    vulnerability_source_updated_at: None,
+                    finding_severity_counts: BTreeMap::new(),
+                    findings: Vec::new(),
+                },
+            );
+            // Scope the scan to layers actually referenced by *this*
+            // image's manifest. Other images sitting in the same repo
+            // (different tag, different digest) must not contaminate
+            // the findings — Trivy would otherwise report CVEs from
+            // unrelated images.
+            let layers = layers_for_image(repo, &digest);
+            (digest, layers, repo.registry_id.clone())
         };
-        repo.scan_findings.insert(digest.clone(), findings);
-        let registry_id = repo.registry_id.clone();
+
+        let shared = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let snap_lock = self.snapshot_lock.clone();
+        let account_for_task = account.clone();
+        let name_for_task = name.clone();
+        let digest_for_task = digest.clone();
+        tokio::spawn(async move {
+            let result = crate::scanner::scan_layers(&digest_for_task, &layers).await;
+            {
+                let mut accounts = shared.write();
+                let Some(state) = accounts.get_mut(&account_for_task) else {
+                    return;
+                };
+                let Some(repo) = state.repositories.get_mut(&name_for_task) else {
+                    return;
+                };
+                let findings = result.unwrap_or_else(|| ImageScanFindings {
+                    image_digest: digest_for_task.clone(),
+                    scan_status: "COMPLETE".to_string(),
+                    scan_completed_at: Some(Utc::now()),
+                    vulnerability_source_updated_at: Some(Utc::now()),
+                    finding_severity_counts: BTreeMap::new(),
+                    findings: Vec::new(),
+                });
+                repo.scan_findings.insert(digest_for_task.clone(), findings);
+            }
+            // Persist the COMPLETE state — without this, restarts
+            // restore the snapshot taken at IN_PROGRESS time and the
+            // scan appears stuck forever.
+            EcrService::save_snapshot_with(shared, store, snap_lock).await;
+        });
+
         Ok(AwsResponse::ok_json(json!({
             "registryId": registry_id,
             "repositoryName": name,
@@ -1990,13 +2075,6 @@ impl EcrService {
                 "vulnerabilitySourceUpdatedAt": findings.vulnerability_source_updated_at.map(|t| t.timestamp()),
                 "findings": findings.findings,
                 "findingSeverityCounts": findings.finding_severity_counts,
-                // fakecloud-specific marker: these findings are synthetic
-                // and do not reflect real CVE data. AWS SDKs using Smithy
-                // codegen ignore unknown fields, so this is purely a
-                // signal for introspection callers and security-tooling
-                // integration tests that want to assert they're running
-                // against fakecloud rather than real Inspector output.
-                "isSynthetic": true,
             },
         })))
     }
