@@ -738,7 +738,7 @@ pub fn default_parameters_for_family(family: &str) -> Vec<EngineDefaultParameter
                 minimum_engine_version: "1.4.5".to_string(),
             },
             EngineDefaultParameter {
-                parameter_name: "max_connections".to_string(),
+                parameter_name: "max_simultaneous_connections".to_string(),
                 parameter_value: "65000".to_string(),
                 description: "Maximum number of concurrent connections".to_string(),
                 source: "system".to_string(),
