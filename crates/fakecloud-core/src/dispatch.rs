@@ -26,13 +26,14 @@ pub async fn dispatch(
     let request_id = uuid::Uuid::new_v4().to_string();
 
     let (parts, body) = request.into_parts();
-    // TODO: plumb streaming request bodies end-to-end to remove the cap.
-    // 128 MiB comfortably covers every legitimate single-PutObject (AWS
-    // recommends multipart above ~100 MiB) and each multipart part is
-    // dispatched through here separately, so a 20 GiB upload stays under this
-    // limit per-request.
-    const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
-    let body_bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+    // The dispatch path materializes request bodies into memory so each
+    // service handler sees a `Bytes` payload it can parse synchronously.
+    // The cap is configurable via `FAKECLOUD_MAX_REQUEST_BODY_BYTES`
+    // (default 1 GiB) — enough to absorb the largest legitimate single
+    // S3 PutObject (5 GiB cap on multipart parts; AWS recommends
+    // multipart above ~100 MiB) without OOM risk in tests.
+    let max_body_bytes = max_request_body_bytes();
+    let body_bytes = match axum::body::to_bytes(body, max_body_bytes).await {
         Ok(b) => b,
         Err(_) => {
             return build_error_response(
@@ -611,6 +612,28 @@ impl DispatchConfig {
 /// Extract the 12-digit account ID segment from an AWS ARN.
 ///
 /// ARNs follow `arn:<partition>:<service>:<region>:<account>:<resource>`.
+/// Default request-body buffering cap. fakecloud reads the entire
+/// request body into memory before handing it to a service handler,
+/// so this ceiling caps RAM usage per in-flight request.
+///
+/// Default 1 GiB — comfortably above legitimate single S3 PutObject
+/// payloads (AWS recommends multipart above ~100 MiB) and each
+/// multipart part dispatches through here separately. Override with
+/// `FAKECLOUD_MAX_REQUEST_BODY_BYTES` (decimal bytes) when running
+/// stress tests that push past the default.
+const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024 * 1024;
+
+fn max_request_body_bytes() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("FAKECLOUD_MAX_REQUEST_BODY_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MAX_REQUEST_BODY_BYTES)
+    })
+}
+
 /// For the cross-account decision in IAM enforcement, the "resource
 /// account" is the ARN's account segment. Some services (notably S3)
 /// produce ARNs with an empty account field — for those we return
@@ -770,6 +793,14 @@ impl ProtocolExt for AwsProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_max_request_body_bytes_is_one_gib() {
+        // Without the env override, the cap defaults to 1 GiB. The
+        // public function caches via OnceLock so only the first call
+        // in the process matters; we assert the constant directly.
+        assert_eq!(DEFAULT_MAX_REQUEST_BODY_BYTES, 1024 * 1024 * 1024);
+    }
 
     #[test]
     fn dispatch_config_new_defaults_to_off() {
