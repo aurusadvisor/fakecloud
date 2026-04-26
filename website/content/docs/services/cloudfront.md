@@ -4,9 +4,9 @@ description = "CloudFront control plane — distributions, invalidations, web AC
 weight = 24
 +++
 
-fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, and the full Origin Access Control + policy resource surface. 59 operations.
+fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, the full policy resource surface (OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment), CloudFront Functions, public keys + key groups, key value stores, legacy origin access identities, and per-distribution monitoring subscriptions. 93 operations.
 
-**Status: Batches 1-2 shipped.** CloudFront Functions, key groups, OAIs (legacy), public keys, streaming distributions, field-level encryption, real-time log config, VPC origins, anycast IP lists, trust stores, distribution tenants, and connection functions/groups are still pending across subsequent batches.
+**Status: Batches 1-3 shipped.** Streaming distributions, field-level encryption, real-time log config, VPC origins, anycast IP lists, trust stores, distribution tenants, and connection functions/groups are still pending across subsequent batches.
 
 ## Supported today
 
@@ -20,6 +20,11 @@ fakecloud implements CloudFront's REST-XML control plane focused on the operatio
 - **Origin Request Policy** — `CreateOriginRequestPolicy`, `GetOriginRequestPolicy`, `GetOriginRequestPolicyConfig`, `UpdateOriginRequestPolicy`, `DeleteOriginRequestPolicy`, `ListOriginRequestPolicies`. Managed `Managed-CORS-S3Origin`, `Managed-CORS-CustomOrigin`, `Managed-AllViewer`, `Managed-UserAgentRefererHeaders`, `Managed-AllViewerExceptHostHeader` pre-seeded.
 - **Response Headers Policy** — `CreateResponseHeadersPolicy`, `GetResponseHeadersPolicy`, `GetResponseHeadersPolicyConfig`, `UpdateResponseHeadersPolicy`, `DeleteResponseHeadersPolicy`, `ListResponseHeadersPolicies`. Managed `Managed-SimpleCORS`, `Managed-CORS-With-Preflight`, `Managed-SecurityHeadersPolicy` pre-seeded.
 - **Continuous Deployment Policy** — `CreateContinuousDeploymentPolicy`, `GetContinuousDeploymentPolicy`, `GetContinuousDeploymentPolicyConfig`, `UpdateContinuousDeploymentPolicy`, `DeleteContinuousDeploymentPolicy`, `ListContinuousDeploymentPolicies`.
+- **CloudFront Functions** — `CreateFunction`, `DescribeFunction`, `GetFunction` (returns raw source bytes), `UpdateFunction`, `DeleteFunction`, `ListFunctions`, `PublishFunction` (DEVELOPMENT -> LIVE), `TestFunction` (no-op execution returning the supplied event verbatim).
+- **Public Keys + Key Groups** — full CRUD with `CallerReference` immutability on update.
+- **Key Value Stores** — `CreateKeyValueStore` (with optional `ImportSource`), `DescribeKeyValueStore`, `UpdateKeyValueStore`, `DeleteKeyValueStore`, `ListKeyValueStores`.
+- **Legacy Origin Access Identities** — `CreateCloudFrontOriginAccessIdentity`, `Get`, `GetConfig`, `Update`, `Delete`, `List`.
+- **Monitoring Subscriptions** — `CreateMonitoringSubscription`, `GetMonitoringSubscription`, `DeleteMonitoringSubscription` keyed by distribution id.
 
 ### Concurrency semantics
 
@@ -73,11 +78,8 @@ aws --endpoint-url http://localhost:4566 cloudfront list-invalidations --distrib
 
 | Surface                                | Status                  |
 |----------------------------------------|-------------------------|
-| Origin Access Identity (legacy OAI)    | Batch 3                 |
-| CloudFront Functions + Key Value Stores | Batch 3                |
-| Public Keys + Key Groups               | Batch 3                 |
 | Field-Level Encryption                 | Batch 4                 |
-| Real-time Log Config + Monitoring      | Batch 4                 |
+| Real-time Log Config                   | Batch 4                 |
 | Streaming Distributions (legacy RTMP)  | Batch 4                 |
 | VPC Origins + Anycast IP Lists         | Batch 5                 |
 | Trust Stores + Distribution Tenants    | Batch 5                 |

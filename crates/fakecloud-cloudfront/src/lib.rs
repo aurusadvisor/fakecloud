@@ -5,6 +5,8 @@
 //! `cloudfront`; the service is global so callers always sign for
 //! `us-east-1`.
 
+pub mod functions;
+pub mod functions_service;
 pub mod model;
 pub mod policies;
 pub mod policies_service;

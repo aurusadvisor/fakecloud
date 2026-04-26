@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 28 AWS services with 2,107 total operations, all at 100% Smithy conformance. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 28 AWS services with 2,141 total operations, all at 100% Smithy conformance. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -38,6 +38,6 @@ fakecloud implements 28 AWS services with 2,107 total operations, all at 100% Sm
 | ECR                    |  58 | Full API — OCI v2 push/pull, lifecycle eval, scanning, pull-through cache, registry templates, real cosign signature verification |
 | ECS                    |  60 | Full API — clusters, real Fargate-style task execution via Docker, services + rolling deployments, task sets, container instances, ECS Exec, awslogs -> Logs, secrets injection, task role credentials |
 | Elastic Load Balancing v2 |  51 | Full control plane — ALB/NLB/GWLB CRUD, target groups + targets + real health probes, listeners + rules + certificates, attributes, capacity reservations, **mTLS trust stores + revocations**, resource policies, SSL policies, tags. **In-process HTTP data plane for ALBs** — per-LB TCP bind, rule matching, forward / fixed-response / redirect, sticky sessions |
-| CloudFront                |  59 | Distributions (full CRUD + ETag/If-Match concurrency + WithTags + copy + by-X listings), invalidations, web ACL associate/disassociate, alias associate, tags. **Origin Access Controls + Cache, Origin Request, Response Headers, Continuous Deployment policies** — full CRUD with AWS-managed policies pre-seeded by well-known IDs. Full `DistributionConfig` round-trip incl. origins, cache behaviors, custom error responses, viewer certificates, geo restrictions |
+| CloudFront                |  93 | Distributions (full CRUD + ETag/If-Match concurrency + WithTags + copy + by-X listings), invalidations, web ACL associate/disassociate, alias associate, tags. Origin Access Controls + Cache/Origin Request/Response Headers/Continuous Deployment policies. **CloudFront Functions (incl. Publish/Test), Public Keys, Key Groups, Key Value Stores, Origin Access Identities (legacy)** — full CRUD; per-distribution **Monitoring Subscriptions** (Create/Get/Delete; AWS has no Update for this resource). Full `DistributionConfig` round-trip incl. origins, cache behaviors, custom error responses, viewer certificates, geo restrictions |
 
 Detailed per-service pages are coming. If you need specifics on a service today, the conformance baseline at [`conformance-baseline.json`](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json) lists every operation fakecloud handles, and the AWS Smithy models in [`aws-models/`](https://github.com/faiscadev/fakecloud/tree/main/aws-models) are the authoritative source of truth.
