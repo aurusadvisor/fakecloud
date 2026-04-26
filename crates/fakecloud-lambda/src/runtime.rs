@@ -637,21 +637,25 @@ impl ContainerRuntime {
 /// Map AWS runtime identifier to a Docker image tag.
 pub fn runtime_to_image(runtime: &str) -> Option<String> {
     let (base, tag) = match runtime {
+        "python3.14" => ("python", "3.14"),
         "python3.13" => ("python", "3.13"),
         "python3.12" => ("python", "3.12"),
         "python3.11" => ("python", "3.11"),
         "python3.10" => ("python", "3.10"),
         "python3.9" => ("python", "3.9"),
         "python3.8" => ("python", "3.8"),
+        "nodejs24.x" => ("nodejs", "24"),
         "nodejs22.x" => ("nodejs", "22"),
         "nodejs20.x" => ("nodejs", "20"),
         "nodejs18.x" => ("nodejs", "18"),
         "nodejs16.x" => ("nodejs", "16"),
         "ruby3.4" => ("ruby", "3.4"),
         "ruby3.3" => ("ruby", "3.3"),
+        "java25" => ("java", "25"),
         "java21" => ("java", "21"),
         "java17" => ("java", "17"),
         "java11" => ("java", "11"),
+        "dotnet10" => ("dotnet", "10"),
         "dotnet8" => ("dotnet", "8"),
         "go1.x" => ("go", "1"),
         "provided.al2023" => ("provided", "al2023"),
@@ -807,6 +811,22 @@ mod tests {
         assert_eq!(
             runtime_to_image("go1.x"),
             Some("public.ecr.aws/lambda/go:1".to_string())
+        );
+        assert_eq!(
+            runtime_to_image("nodejs24.x"),
+            Some("public.ecr.aws/lambda/nodejs:24".to_string())
+        );
+        assert_eq!(
+            runtime_to_image("python3.14"),
+            Some("public.ecr.aws/lambda/python:3.14".to_string())
+        );
+        assert_eq!(
+            runtime_to_image("java25"),
+            Some("public.ecr.aws/lambda/java:25".to_string())
+        );
+        assert_eq!(
+            runtime_to_image("dotnet10"),
+            Some("public.ecr.aws/lambda/dotnet:10".to_string())
         );
         assert_eq!(runtime_to_image("unknown"), None);
     }
