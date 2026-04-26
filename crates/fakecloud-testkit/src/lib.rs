@@ -640,6 +640,10 @@ impl TestServer {
         aws_sdk_elasticloadbalancingv2::Client::new(&self.aws_config().await)
     }
 
+    pub async fn cloudfront_client(&self) -> aws_sdk_cloudfront::Client {
+        aws_sdk_cloudfront::Client::new(&self.aws_config().await)
+    }
+
     /// S3 always uses path-style addressing against fakecloud so bucket
     /// names don't have to be DNS-legal subdomains of `localhost`.
     pub async fn s3_client(&self) -> aws_sdk_s3::Client {

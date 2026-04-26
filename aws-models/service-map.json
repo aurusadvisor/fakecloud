@@ -106,5 +106,9 @@
   "elasticloadbalancingv2": {
     "repo_dir": "elastic-load-balancing-v2",
     "service_name": "elasticloadbalancing"
+  },
+  "cloudfront": {
+    "repo_dir": "cloudfront",
+    "service_name": "cloudfront"
   }
 }

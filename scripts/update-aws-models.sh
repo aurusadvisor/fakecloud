@@ -47,6 +47,7 @@ SERVICES=(
     "ecr:ecr"
     "ecs:ecs"
     "elasticloadbalancingv2:elastic-load-balancing-v2"
+    "cloudfront:cloudfront"
 )
 
 # Sparse checkout only the models we need

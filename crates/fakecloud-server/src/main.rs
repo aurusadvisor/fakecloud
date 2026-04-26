@@ -38,6 +38,7 @@ use fakecloud_apigateway::{ApiGatewayFacade, ApiGatewayService};
 use fakecloud_apigatewayv2::service::ApiGatewayV2Service;
 use fakecloud_bedrock::service::BedrockService;
 use fakecloud_cloudformation::service::CloudFormationService;
+use fakecloud_cloudfront::CloudFrontService;
 use fakecloud_cognito::service::CognitoService;
 use fakecloud_dynamodb::service::DynamoDbService;
 use fakecloud_ecr::service::EcrService;
@@ -319,6 +320,15 @@ async fn main() {
         ),
     ));
 
+    // CloudFront is a global REST-XML service. Constructed up-front (rather
+    // than next to its `registry.register` call further down) so it can
+    // join `ResetState` and have its in-memory state cleared by the
+    // `/_fakecloud/reset` introspection endpoint alongside every other
+    // service.
+    let cloudfront_state: fakecloud_cloudfront::SharedCloudFrontState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_cloudfront::CloudFrontAccounts::new()),
+    );
+
     let bedrock_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -569,6 +579,7 @@ async fn main() {
         elasticache: elasticache_state.clone(),
         ecr: ecr_state.clone(),
         ecs: ecs_state.clone(),
+        cloudfront: cloudfront_state.clone(),
         stepfunctions: stepfunctions_state.clone(),
         scheduler: scheduler_state.clone(),
         apigatewayv1: apigatewayv1_state.clone(),
@@ -1948,6 +1959,9 @@ async fn main() {
     let elbv2_introspection_state = elbv2_state.clone();
     let elbv2_service = Elbv2Service::new(elbv2_state);
     registry.register(Arc::new(elbv2_service));
+
+    let cloudfront_service = CloudFrontService::new(cloudfront_state.clone());
+    registry.register(Arc::new(cloudfront_service));
 
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {
