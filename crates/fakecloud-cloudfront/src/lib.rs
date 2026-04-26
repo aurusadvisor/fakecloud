@@ -6,6 +6,8 @@
 //! `us-east-1`.
 
 pub mod model;
+pub mod policies;
+pub mod policies_service;
 pub mod router;
 pub mod service;
 pub mod state;

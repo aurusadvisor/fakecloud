@@ -8,6 +8,10 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{DistributionConfig, InvalidationBatch};
+use crate::policies::{
+    StoredCachePolicy, StoredContinuousDeploymentPolicy, StoredOriginAccessControl,
+    StoredOriginRequestPolicy, StoredResponseHeadersPolicy,
+};
 
 pub type SharedCloudFrontState = Arc<RwLock<CloudFrontAccounts>>;
 
@@ -40,6 +44,24 @@ pub struct AccountState {
     pub invalidations: HashMap<String, StoredInvalidation>,
     /// Tags keyed by ARN.
     pub tags: HashMap<String, Vec<Tag>>,
+    pub origin_access_controls: HashMap<String, StoredOriginAccessControl>,
+    pub cache_policies: HashMap<String, StoredCachePolicy>,
+    pub origin_request_policies: HashMap<String, StoredOriginRequestPolicy>,
+    pub response_headers_policies: HashMap<String, StoredResponseHeadersPolicy>,
+    pub continuous_deployment_policies: HashMap<String, StoredContinuousDeploymentPolicy>,
+}
+
+impl CloudFrontAccounts {
+    /// Pre-seed the AWS-managed Cache, Origin Request, and Response
+    /// Headers policies into the default account so callers that look
+    /// them up by their well-known IDs (Terraform, CDK) get the same
+    /// shape they get against AWS. The IDs and names mirror the AWS
+    /// console output verbatim — the easiest way to keep tests source
+    /// of truth.
+    pub fn seed_managed_policies(&mut self, account_id: &str) {
+        let account = self.entry(account_id);
+        crate::policies::seed_managed(account);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
