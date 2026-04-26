@@ -28,8 +28,7 @@ pub struct VpcOriginEndpointConfig {
 #[serde(rename_all = "PascalCase")]
 pub struct OriginSslProtocols {
     pub quantity: i32,
-    #[serde(default, skip_serializing_if = "skip_if_none")]
-    pub items: Option<SslProtocolItems>,
+    pub items: SslProtocolItems,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -63,6 +62,15 @@ pub struct StoredVpcOrigin {
 pub struct CreateAnycastIpListRequest {
     pub name: String,
     pub ip_count: i32,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub ip_address_type: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub ipam_cidr_configs: Option<IpamCidrConfigList>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateAnycastIpListRequest {
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub ip_address_type: Option<String>,
     #[serde(default, skip_serializing_if = "skip_if_none")]

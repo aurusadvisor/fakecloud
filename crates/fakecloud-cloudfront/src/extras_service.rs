@@ -9,7 +9,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::extras::{
     CaCertificatesBundleSource, CreateAnycastIpListRequest, CreateTrustStoreRequest,
     CreateVpcOriginRequest, ResourcePolicyRequest, StoredAnycastIpList, StoredResourcePolicy,
-    StoredTrustStore, StoredVpcOrigin, VpcOriginEndpointConfig,
+    StoredTrustStore, StoredVpcOrigin, UpdateAnycastIpListRequest, VpcOriginEndpointConfig,
 };
 use crate::policies::{
     not_found, precondition_failed, require_if_match, rfc3339, route_id, xml_with_etag,
@@ -109,6 +109,12 @@ impl CloudFrontService {
         if v.etag != if_match {
             return Err(precondition_failed());
         }
+        if cfg.name.is_empty() {
+            return Err(invalid_argument("Name is required"));
+        }
+        if cfg.arn.is_empty() {
+            return Err(invalid_argument("Arn is required"));
+        }
         v.config = cfg;
         v.etag = generate_id_with_prefix("E");
         v.last_modified_time = Utc::now();
@@ -180,7 +186,7 @@ impl CloudFrontService {
                 "<LastModifiedTime>{}</LastModifiedTime>",
                 rfc3339(&v.last_modified_time)
             ));
-            body.push_str(&format!("<Arn>{}</Arn>", esc(&v.config.arn)));
+            body.push_str(&format!("<Arn>{}</Arn>", esc(&v.arn)));
             body.push_str(&format!(
                 "<OriginEndpointArn>{}</OriginEndpointArn>",
                 esc(&v.config.arn)
@@ -275,8 +281,9 @@ impl CloudFrontService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = route_id(route, "AnycastIpList")?;
         let if_match = require_if_match(req)?;
-        let cfg: CreateAnycastIpListRequest = xml_io::from_xml_root(&req.body)
-            .map_err(|e| invalid_argument(format!("invalid AnycastIpList XML: {e}")))?;
+        let cfg: UpdateAnycastIpListRequest = xml_io::from_xml_root(&req.body).map_err(|e| {
+            invalid_argument(format!("invalid UpdateAnycastIpListRequest XML: {e}"))
+        })?;
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -289,9 +296,9 @@ impl CloudFrontService {
         if a.etag != if_match {
             return Err(precondition_failed());
         }
-        a.name = cfg.name;
-        a.ip_count = cfg.ip_count;
-        a.ip_address_type = cfg.ip_address_type;
+        if let Some(t) = cfg.ip_address_type {
+            a.ip_address_type = Some(t);
+        }
         a.last_modified_time = Utc::now();
         a.etag = generate_id_with_prefix("E");
         let snap = a.clone();
@@ -370,6 +377,15 @@ impl CloudFrontService {
         if cfg.name.is_empty() {
             return Err(invalid_argument("Name is required"));
         }
+        if cfg
+            .ca_certificates_bundle_source
+            .ca_certificates_bundle_s3_location
+            .is_none()
+        {
+            return Err(invalid_argument(
+                "CaCertificatesBundleSource must specify a non-empty member",
+            ));
+        }
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -422,6 +438,11 @@ impl CloudFrontService {
         let bundle: CaCertificatesBundleSource = xml_io::from_xml_root(&req.body).map_err(|e| {
             invalid_argument(format!("invalid CaCertificatesBundleSource XML: {e}"))
         })?;
+        if bundle.ca_certificates_bundle_s3_location.is_none() {
+            return Err(invalid_argument(
+                "CaCertificatesBundleSource must specify a non-empty member",
+            ));
+        }
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -631,13 +652,11 @@ fn render_vpc_origin_endpoint_config(c: &VpcOriginEndpointConfig) -> String {
     if let Some(ssl) = &c.origin_ssl_protocols {
         out.push_str("<OriginSslProtocols>");
         out.push_str(&format!("<Quantity>{}</Quantity>", ssl.quantity));
-        if let Some(items) = &ssl.items {
-            out.push_str("<Items>");
-            for p in &items.ssl_protocol {
-                out.push_str(&format!("<SslProtocol>{}</SslProtocol>", esc(p)));
-            }
-            out.push_str("</Items>");
+        out.push_str("<Items>");
+        for p in &ssl.items.ssl_protocol {
+            out.push_str(&format!("<SslProtocol>{}</SslProtocol>", esc(p)));
         }
+        out.push_str("</Items>");
         out.push_str("</OriginSslProtocols>");
     }
     out.push_str("</VpcOriginEndpointConfig>");

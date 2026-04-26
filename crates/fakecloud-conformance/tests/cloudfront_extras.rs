@@ -165,12 +165,13 @@ async fn cf_update_anycast_ip_list() {
         .unwrap();
     let id = c.anycast_ip_list().unwrap().id().to_string();
     let etag = c.e_tag().unwrap().to_string();
-    let _ = cf
-        .update_anycast_ip_list()
+    cf.update_anycast_ip_list()
         .id(&id)
         .if_match(&etag)
+        .ip_address_type(IpAddressType::Ipv4)
         .send()
-        .await;
+        .await
+        .unwrap();
 }
 
 #[test_action("cloudfront", "DeleteAnycastIpList", checksum = "9632bd0e")]
