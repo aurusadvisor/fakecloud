@@ -7,6 +7,9 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use crate::fle::{
+    StoredFieldLevelEncryption, StoredFieldLevelEncryptionProfile, StoredRealtimeLogConfig,
+};
 use crate::functions::{
     StoredFunction, StoredKeyGroup, StoredKeyValueStore, StoredMonitoringSubscription,
     StoredOriginAccessIdentity, StoredPublicKey,
@@ -62,6 +65,10 @@ pub struct AccountState {
     /// Per-distribution monitoring subscription, keyed by distribution id.
     pub monitoring_subscriptions: HashMap<String, StoredMonitoringSubscription>,
     pub streaming_distributions: HashMap<String, StoredStreamingDistribution>,
+    pub field_level_encryptions: HashMap<String, StoredFieldLevelEncryption>,
+    pub field_level_encryption_profiles: HashMap<String, StoredFieldLevelEncryptionProfile>,
+    /// Realtime log configs keyed by ARN.
+    pub realtime_log_configs: HashMap<String, StoredRealtimeLogConfig>,
 }
 
 impl CloudFrontAccounts {
