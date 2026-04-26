@@ -39,6 +39,7 @@ fakecloud-ecr = { workspace = true }
 fakecloud-ecs = { workspace = true }
 fakecloud-stepfunctions = { workspace = true }
 fakecloud-scheduler = { workspace = true }
+fakecloud-apigateway = { workspace = true }
 fakecloud-apigatewayv2 = { workspace = true }
 fakecloud-bedrock = { workspace = true }
 fakecloud-sdk = { workspace = true }

@@ -265,6 +265,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-apigateway"
+version = "1.103.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95ab72c0e9ce9e06294922cab517a70d11141d53518951e78c1abc82284c4576"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-apigatewayv2"
 version = "1.101.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2158,6 +2182,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "fakecloud-apigateway",
  "fakecloud-apigatewayv2",
  "fakecloud-aws",
  "fakecloud-bedrock",
@@ -2196,6 +2221,27 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-apigateway"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "fakecloud-core",
+ "fakecloud-persistence",
+ "http 1.4.0",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -2316,6 +2362,7 @@ version = "0.12.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockruntime",
@@ -2414,6 +2461,7 @@ version = "0.12.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockruntime",
@@ -2956,6 +3004,7 @@ version = "0.12.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockruntime",

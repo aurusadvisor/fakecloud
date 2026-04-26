@@ -34,6 +34,7 @@ use kinesis_lambda_poller::KinesisLambdaPoller;
 use reset::ResetState;
 use sqs_lambda_poller::SqsLambdaPoller;
 
+use fakecloud_apigateway::{ApiGatewayFacade, ApiGatewayService};
 use fakecloud_apigatewayv2::service::ApiGatewayV2Service;
 use fakecloud_bedrock::service::BedrockService;
 use fakecloud_cloudformation::service::CloudFormationService;
@@ -287,6 +288,14 @@ async fn main() {
     ));
 
     let apigatewayv2_state = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            &cli.account_id,
+            &cli.region,
+            &endpoint_url,
+        ),
+    ));
+
+    let apigatewayv1_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
             &cli.region,
@@ -2108,7 +2117,18 @@ async fn main() {
     if let Some(store) = apigw_snapshot_store {
         apigw_service = apigw_service.with_snapshot_store(store);
     }
-    registry.register(Arc::new(apigw_service));
+    let v2_arc: Arc<dyn fakecloud_core::service::AwsService> = Arc::new(apigw_service);
+
+    // v1 (REST APIs) shares the SigV4 service identifier `apigateway`
+    // with v2; the registry is keyed by that identifier so we wrap
+    // both behind a facade that routes by URL prefix.
+    let mut apigw_v1_service = ApiGatewayService::new(apigatewayv1_state.clone());
+    if let Some(ref ld) = lambda_delivery {
+        let delivery_for_v1 = Arc::new(DeliveryBus::new().with_lambda(ld.clone()));
+        apigw_v1_service = apigw_v1_service.with_delivery(delivery_for_v1);
+    }
+    let v1_arc = Arc::new(apigw_v1_service);
+    registry.register(Arc::new(ApiGatewayFacade::new(v1_arc, v2_arc)));
     let bedrock_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

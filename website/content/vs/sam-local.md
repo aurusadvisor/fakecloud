@@ -1,6 +1,6 @@
 +++
 title = "fakecloud vs SAM Local"
-description = "How fakecloud compares to AWS SAM Local. Scope difference: SAM Local runs Lambda + limited API Gateway; fakecloud runs 26 services with real cross-service wiring."
+description = "How fakecloud compares to AWS SAM Local. Scope difference: SAM Local runs Lambda + limited API Gateway; fakecloud runs 27 services with real cross-service wiring."
 template = "page.html"
 +++
 

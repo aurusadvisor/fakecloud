@@ -87,6 +87,10 @@
     "repo_dir": "scheduler",
     "service_name": "scheduler"
   },
+  "apigateway": {
+    "repo_dir": "api-gateway",
+    "service_name": "apigateway"
+  },
   "apigatewayv2": {
     "repo_dir": "apigatewayv2",
     "service_name": "apigateway"

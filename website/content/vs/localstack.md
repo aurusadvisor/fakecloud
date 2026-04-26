@@ -27,6 +27,7 @@ Since LocalStack replaced its open-source Community Edition with a proprietary i
 | SES inbound email | Real receipt rule action execution | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) | Stored but never executed |
 | RDS | 163 ops, real PostgreSQL/MySQL/MariaDB | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
 | ElastiCache | 75 ops, real Redis/Valkey/Memcached | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
+| API Gateway v1 | 118 ops | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
 | API Gateway v2 | 103 ops | [Paid only](https://docs.localstack.cloud/references/licensing/) | Yes |
 | ECR | 58 ops + real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/) (and push is [flaky](https://github.com/localstack/localstack/issues/8128) when paid) | Yes |
 | Bedrock | 111 ops (control plane + runtime) | Not available | Not available |
