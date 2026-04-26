@@ -25,3 +25,5 @@ uuid = { workspace = true }
 bytes = { workspace = true }
 reqwest = { workspace = true }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"] }
+tar = "0.4"
+tempfile = { workspace = true }

@@ -13,7 +13,7 @@ fakecloud implements Amazon Elastic Container Registry (ECR) with full API cover
 - **Repositories** — `CreateRepository`, `DescribeRepositories`, `DeleteRepository`, `GetRepositoryPolicy`, `SetRepositoryPolicy`, `DeleteRepositoryPolicy`, `PutImageTagMutability`, `PutImageScanningConfiguration`
 - **Images** — `BatchGetImage`, `DescribeImages`, `ListImages`, `BatchDeleteImage`, `PutImage`, `BatchCheckLayerAvailability`, `InitiateLayerUpload`, `UploadLayerPart`, `CompleteLayerUpload`, `GetDownloadUrlForLayer`
 - **Lifecycle policies** — `PutLifecyclePolicy`, `GetLifecyclePolicy`, `DeleteLifecyclePolicy`, `StartLifecyclePolicyPreview`, `GetLifecyclePolicyPreview`
-- **Image scanning** — `StartImageScan`, `DescribeImageScanFindings`, `GetRegistryScanningConfiguration`, `PutRegistryScanningConfiguration`
+- **Image scanning** — `StartImageScan`, `DescribeImageScanFindings`, `GetRegistryScanningConfiguration`, `PutRegistryScanningConfiguration`. When the optional [Trivy](https://github.com/aquasecurity/trivy) CLI is on `PATH` (or `FAKECLOUD_TRIVY_BIN` is set), fakecloud reconstructs the pushed layers as a docker-format tar, invokes `trivy image --input <tar> --format json`, and exposes the parsed CVE findings via `DescribeImageScanFindings`. Without Trivy, scans complete with an empty findings list so client plumbing still works.
 - **Registry policy** — `GetRegistryPolicy`, `PutRegistryPolicy`, `DeleteRegistryPolicy`
 - **Replication** — `DescribeRegistry`, `PutReplicationConfiguration`
 - **Pull-through cache** — `CreatePullThroughCacheRule`, `DeletePullThroughCacheRule`, `DescribePullThroughCacheRules`, `UpdatePullThroughCacheRule`, `BatchGetRepositoryScanningConfiguration`, `ValidatePullThroughCacheRule`

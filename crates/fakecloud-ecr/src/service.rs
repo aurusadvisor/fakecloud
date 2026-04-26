@@ -1918,29 +1918,59 @@ impl EcrService {
             .cloned()
             .ok_or_else(|| invalid_parameter("Missing imageId"))?;
         let account = target_account_id(request, &body);
-        let mut accounts = self.state.write();
-        let state = accounts
-            .get_mut(&account)
-            .ok_or_else(|| repository_not_found(&name))?;
-        let repo = state
-            .repositories
-            .get_mut(&name)
-            .ok_or_else(|| repository_not_found(&name))?;
-        let digest = resolve_image_digest(repo, &image_id)
-            .ok_or_else(|| image_not_found(&name, &image_id))?;
-        // Synthetic-but-schema-complete findings. Real scanner integration
-        // lives out of scope for a mock; a deterministic non-empty shape
-        // lets callers exercise their findings plumbing.
-        let findings = ImageScanFindings {
-            image_digest: digest.clone(),
-            scan_status: "COMPLETE".to_string(),
-            scan_completed_at: Some(Utc::now()),
-            vulnerability_source_updated_at: Some(Utc::now()),
-            finding_severity_counts: BTreeMap::new(),
-            findings: Vec::new(),
+        let (digest, layers, registry_id) = {
+            let mut accounts = self.state.write();
+            let state = accounts
+                .get_mut(&account)
+                .ok_or_else(|| repository_not_found(&name))?;
+            let repo = state
+                .repositories
+                .get_mut(&name)
+                .ok_or_else(|| repository_not_found(&name))?;
+            let digest = resolve_image_digest(repo, &image_id)
+                .ok_or_else(|| image_not_found(&name, &image_id))?;
+            // Mark scan IN_PROGRESS; real findings written by the
+            // background scanner task. Caller polls
+            // DescribeImageScanFindings to observe completion.
+            repo.scan_findings.insert(
+                digest.clone(),
+                ImageScanFindings {
+                    image_digest: digest.clone(),
+                    scan_status: "IN_PROGRESS".to_string(),
+                    scan_completed_at: None,
+                    vulnerability_source_updated_at: None,
+                    finding_severity_counts: BTreeMap::new(),
+                    findings: Vec::new(),
+                },
+            );
+            let layers = repo.layers.values().cloned().collect::<Vec<_>>();
+            (digest, layers, repo.registry_id.clone())
         };
-        repo.scan_findings.insert(digest.clone(), findings);
-        let registry_id = repo.registry_id.clone();
+
+        let shared = self.state.clone();
+        let account_for_task = account.clone();
+        let name_for_task = name.clone();
+        let digest_for_task = digest.clone();
+        tokio::spawn(async move {
+            let result = crate::scanner::scan_layers(&digest_for_task, &layers).await;
+            let mut accounts = shared.write();
+            let Some(state) = accounts.get_mut(&account_for_task) else {
+                return;
+            };
+            let Some(repo) = state.repositories.get_mut(&name_for_task) else {
+                return;
+            };
+            let findings = result.unwrap_or_else(|| ImageScanFindings {
+                image_digest: digest_for_task.clone(),
+                scan_status: "COMPLETE".to_string(),
+                scan_completed_at: Some(Utc::now()),
+                vulnerability_source_updated_at: Some(Utc::now()),
+                finding_severity_counts: BTreeMap::new(),
+                findings: Vec::new(),
+            });
+            repo.scan_findings.insert(digest_for_task.clone(), findings);
+        });
+
         Ok(AwsResponse::ok_json(json!({
             "registryId": registry_id,
             "repositoryName": name,
@@ -1990,13 +2020,6 @@ impl EcrService {
                 "vulnerabilitySourceUpdatedAt": findings.vulnerability_source_updated_at.map(|t| t.timestamp()),
                 "findings": findings.findings,
                 "findingSeverityCounts": findings.finding_severity_counts,
-                // fakecloud-specific marker: these findings are synthetic
-                // and do not reflect real CVE data. AWS SDKs using Smithy
-                // codegen ignore unknown fields, so this is purely a
-                // signal for introspection callers and security-tooling
-                // integration tests that want to assert they're running
-                // against fakecloud rather than real Inspector output.
-                "isSynthetic": true,
             },
         })))
     }
