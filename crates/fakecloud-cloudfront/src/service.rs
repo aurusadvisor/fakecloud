@@ -21,7 +21,7 @@ use crate::state::{
 };
 use crate::xml_io;
 
-const DEFAULT_ACCOUNT: &str = "000000000000";
+pub(crate) const DEFAULT_ACCOUNT: &str = "000000000000";
 
 const SUPPORTED_ACTIONS: &[&str] = &[
     "CreateDistribution",
@@ -54,10 +54,40 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListDistributionsByRealtimeLogConfig",
     "AssociateDistributionWebACL",
     "DisassociateDistributionWebACL",
+    "CreateOriginAccessControl",
+    "GetOriginAccessControl",
+    "GetOriginAccessControlConfig",
+    "UpdateOriginAccessControl",
+    "DeleteOriginAccessControl",
+    "ListOriginAccessControls",
+    "CreateCachePolicy",
+    "GetCachePolicy",
+    "GetCachePolicyConfig",
+    "UpdateCachePolicy",
+    "DeleteCachePolicy",
+    "ListCachePolicies",
+    "CreateOriginRequestPolicy",
+    "GetOriginRequestPolicy",
+    "GetOriginRequestPolicyConfig",
+    "UpdateOriginRequestPolicy",
+    "DeleteOriginRequestPolicy",
+    "ListOriginRequestPolicies",
+    "CreateResponseHeadersPolicy",
+    "GetResponseHeadersPolicy",
+    "GetResponseHeadersPolicyConfig",
+    "UpdateResponseHeadersPolicy",
+    "DeleteResponseHeadersPolicy",
+    "ListResponseHeadersPolicies",
+    "CreateContinuousDeploymentPolicy",
+    "GetContinuousDeploymentPolicy",
+    "GetContinuousDeploymentPolicyConfig",
+    "UpdateContinuousDeploymentPolicy",
+    "DeleteContinuousDeploymentPolicy",
+    "ListContinuousDeploymentPolicies",
 ];
 
 pub struct CloudFrontService {
-    state: SharedCloudFrontState,
+    pub(crate) state: SharedCloudFrontState,
 }
 
 impl CloudFrontService {
@@ -129,6 +159,42 @@ impl AwsService for CloudFrontService {
             | "ListDistributionsByOwnedResource"
             | "ListDistributionsByTrustStore"
             | "ListDistributionsByRealtimeLogConfig" => self.list_distributions_by(resolved.action),
+            "CreateOriginAccessControl" => self.create_origin_access_control(&req),
+            "GetOriginAccessControl" => self.get_origin_access_control(&resolved),
+            "GetOriginAccessControlConfig" => self.get_origin_access_control_config(&resolved),
+            "UpdateOriginAccessControl" => self.update_origin_access_control(&req, &resolved),
+            "DeleteOriginAccessControl" => self.delete_origin_access_control(&req, &resolved),
+            "ListOriginAccessControls" => self.list_origin_access_controls(&req),
+            "CreateCachePolicy" => self.create_cache_policy(&req),
+            "GetCachePolicy" => self.get_cache_policy(&resolved),
+            "GetCachePolicyConfig" => self.get_cache_policy_config(&resolved),
+            "UpdateCachePolicy" => self.update_cache_policy(&req, &resolved),
+            "DeleteCachePolicy" => self.delete_cache_policy(&req, &resolved),
+            "ListCachePolicies" => self.list_cache_policies(&req),
+            "CreateOriginRequestPolicy" => self.create_origin_request_policy(&req),
+            "GetOriginRequestPolicy" => self.get_origin_request_policy(&resolved),
+            "GetOriginRequestPolicyConfig" => self.get_origin_request_policy_config(&resolved),
+            "UpdateOriginRequestPolicy" => self.update_origin_request_policy(&req, &resolved),
+            "DeleteOriginRequestPolicy" => self.delete_origin_request_policy(&req, &resolved),
+            "ListOriginRequestPolicies" => self.list_origin_request_policies(&req),
+            "CreateResponseHeadersPolicy" => self.create_response_headers_policy(&req),
+            "GetResponseHeadersPolicy" => self.get_response_headers_policy(&resolved),
+            "GetResponseHeadersPolicyConfig" => self.get_response_headers_policy_config(&resolved),
+            "UpdateResponseHeadersPolicy" => self.update_response_headers_policy(&req, &resolved),
+            "DeleteResponseHeadersPolicy" => self.delete_response_headers_policy(&req, &resolved),
+            "ListResponseHeadersPolicies" => self.list_response_headers_policies(&req),
+            "CreateContinuousDeploymentPolicy" => self.create_continuous_deployment_policy(&req),
+            "GetContinuousDeploymentPolicy" => self.get_continuous_deployment_policy(&resolved),
+            "GetContinuousDeploymentPolicyConfig" => {
+                self.get_continuous_deployment_policy_config(&resolved)
+            }
+            "UpdateContinuousDeploymentPolicy" => {
+                self.update_continuous_deployment_policy(&req, &resolved)
+            }
+            "DeleteContinuousDeploymentPolicy" => {
+                self.delete_continuous_deployment_policy(&req, &resolved)
+            }
+            "ListContinuousDeploymentPolicies" => self.list_continuous_deployment_policies(&req),
             other => Err(aws_error(
                 StatusCode::NOT_IMPLEMENTED,
                 "InvalidAction",
@@ -396,14 +462,8 @@ impl CloudFrontService {
             | "ListDistributionsByOriginRequestPolicyId"
             | "ListDistributionsByResponseHeadersPolicyId"
             | "ListDistributionsByKeyGroup"
-            | "ListDistributionsByWebACLId"
-            | "ListDistributionsByVpcOriginId"
-            | "ListDistributionsByAnycastIpListId"
-            | "ListDistributionsByRealtimeLogConfig"
-            | "ListDistributionsByTrustStore"
-            | "ListDistributionsByConnectionMode"
-            | "ListDistributionsByConnectionFunction" => "DistributionIdList",
-            "ListDistributionsByOwnedResource" => "DistributionList",
+            | "ListDistributionsByVpcOriginId" => "DistributionIdList",
+            "ListDistributionsByOwnedResource" => "DistributionIdOwnerList",
             _ => "DistributionList",
         };
         let body = build_empty_distribution_id_list(root);
@@ -821,7 +881,7 @@ struct AssociateAliasRequest {
 /// everything else passes through unchanged. Keep this in sync with
 /// `quick_xml`'s entity table — using their own primitive would mean a
 /// `Writer` per call and we serialize directly into a `String`.
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -1060,16 +1120,26 @@ fn generate_invalidation_id() -> String {
     format!("I{}", &raw[..13])
 }
 
-fn generate_etag() -> String {
+pub(crate) fn generate_etag() -> String {
     let raw = Uuid::new_v4().simple().to_string().to_uppercase();
     format!("E{}", &raw[..13])
+}
+
+/// Generate an AWS-shaped CloudFront resource ID with the given prefix.
+/// Used by Batch 2 policy resources (cache, origin request, response
+/// headers, continuous deployment, OAC) so each gets a recognizable
+/// alphabetic prefix in addition to the random suffix.
+pub(crate) fn generate_id_with_prefix(prefix: &str) -> String {
+    let raw = Uuid::new_v4().simple().to_string().to_uppercase();
+    let suffix_len = 14usize.saturating_sub(prefix.len()).min(raw.len());
+    format!("{prefix}{}", &raw[..suffix_len])
 }
 
 fn rfc3339(t: &chrono::DateTime<chrono::Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn invalid_argument(msg: impl Into<String>) -> AwsServiceError {
+pub(crate) fn invalid_argument(msg: impl Into<String>) -> AwsServiceError {
     aws_error(StatusCode::BAD_REQUEST, "InvalidArgument", msg)
 }
 
@@ -1093,8 +1163,12 @@ fn internal_error(msg: impl Into<String>) -> AwsServiceError {
     aws_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", msg)
 }
 
-fn aws_error(status: StatusCode, code: &str, msg: impl Into<String>) -> AwsServiceError {
-    AwsServiceError::aws_error(status, code, msg)
+pub(crate) fn aws_error(
+    status: StatusCode,
+    code: impl Into<String>,
+    msg: impl Into<String>,
+) -> AwsServiceError {
+    AwsServiceError::aws_error(status, code.into(), msg)
 }
 
 fn set_header(headers: &mut HeaderMap, name: HeaderName, value: &str) {
@@ -1103,7 +1177,7 @@ fn set_header(headers: &mut HeaderMap, name: HeaderName, value: &str) {
     }
 }
 
-fn xml_response(status: StatusCode, body: String, headers: HeaderMap) -> AwsResponse {
+pub(crate) fn xml_response(status: StatusCode, body: String, headers: HeaderMap) -> AwsResponse {
     AwsResponse {
         status,
         content_type: "text/xml".to_string(),

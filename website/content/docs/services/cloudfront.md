@@ -4,9 +4,9 @@ description = "CloudFront control plane — distributions, invalidations, web AC
 weight = 24
 +++
 
-fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, and read-only "by predicate" listings. 29 operations in this batch.
+fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, and the full Origin Access Control + policy resource surface. 59 operations.
 
-**Status: Batch 1 — distributions, invalidations, tagging, alias/web-ACL associations.** Origin Access Control, cache policies, origin request policies, response headers policies, CloudFront Functions, key groups, OAIs, streaming distributions, and the rest of the surface ship in subsequent batches.
+**Status: Batches 1-2 shipped.** CloudFront Functions, key groups, OAIs (legacy), public keys, streaming distributions, field-level encryption, real-time log config, VPC origins, anycast IP lists, trust stores, distribution tenants, and connection functions/groups are still pending across subsequent batches.
 
 ## Supported today
 
@@ -15,6 +15,11 @@ fakecloud implements CloudFront's REST-XML control plane focused on the operatio
 - **Invalidations** — `CreateInvalidation` (returns `Completed` immediately for deterministic tests), `GetInvalidation`, `ListInvalidations`.
 - **Tags** — `TagResource`, `UntagResource`, `ListTagsForResource` keyed by distribution ARN.
 - **Aliases / Web ACL** — `AssociateAlias`, `ListConflictingAliases`, `AssociateDistributionWebACL`, `DisassociateDistributionWebACL`.
+- **Origin Access Control** — `CreateOriginAccessControl`, `GetOriginAccessControl`, `GetOriginAccessControlConfig`, `UpdateOriginAccessControl`, `DeleteOriginAccessControl`, `ListOriginAccessControls`. Full ETag/If-Match concurrency.
+- **Cache Policy** — `CreateCachePolicy`, `GetCachePolicy`, `GetCachePolicyConfig`, `UpdateCachePolicy`, `DeleteCachePolicy`, `ListCachePolicies` with `?Type=managed|custom`. AWS-managed `Managed-CachingOptimized`, `Managed-CachingDisabled`, `Managed-CachingOptimizedForUncompressedObjects`, `Managed-Elemental*` are pre-seeded by their well-known IDs and reject `Update`/`Delete`.
+- **Origin Request Policy** — `CreateOriginRequestPolicy`, `GetOriginRequestPolicy`, `GetOriginRequestPolicyConfig`, `UpdateOriginRequestPolicy`, `DeleteOriginRequestPolicy`, `ListOriginRequestPolicies`. Managed `Managed-CORS-S3Origin`, `Managed-CORS-CustomOrigin`, `Managed-AllViewer`, `Managed-UserAgentRefererHeaders`, `Managed-AllViewerExceptHostHeader` pre-seeded.
+- **Response Headers Policy** — `CreateResponseHeadersPolicy`, `GetResponseHeadersPolicy`, `GetResponseHeadersPolicyConfig`, `UpdateResponseHeadersPolicy`, `DeleteResponseHeadersPolicy`, `ListResponseHeadersPolicies`. Managed `Managed-SimpleCORS`, `Managed-CORS-With-Preflight`, `Managed-SecurityHeadersPolicy` pre-seeded.
+- **Continuous Deployment Policy** — `CreateContinuousDeploymentPolicy`, `GetContinuousDeploymentPolicy`, `GetContinuousDeploymentPolicyConfig`, `UpdateContinuousDeploymentPolicy`, `DeleteContinuousDeploymentPolicy`, `ListContinuousDeploymentPolicies`.
 
 ### Concurrency semantics
 
@@ -68,9 +73,7 @@ aws --endpoint-url http://localhost:4566 cloudfront list-invalidations --distrib
 
 | Surface                                | Status                  |
 |----------------------------------------|-------------------------|
-| Origin Access Control + OAI (legacy)   | Batch 2 / 3             |
-| Cache / Origin Request / Response Headers policies | Batch 2     |
-| Continuous Deployment Policy           | Batch 2                 |
+| Origin Access Identity (legacy OAI)    | Batch 3                 |
 | CloudFront Functions + Key Value Stores | Batch 3                |
 | Public Keys + Key Groups               | Batch 3                 |
 | Field-Level Encryption                 | Batch 4                 |
