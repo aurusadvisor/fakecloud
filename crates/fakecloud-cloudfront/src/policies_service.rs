@@ -121,6 +121,11 @@ impl CloudFrontService {
         let if_match = require_if_match(req)?;
         let cfg: OriginAccessControlConfig = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid OriginAccessControlConfig XML: {e}")))?;
+        if cfg.name.is_empty() {
+            return Err(invalid_argument(
+                "OriginAccessControlConfig.Name is required",
+            ));
+        }
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -293,6 +298,9 @@ impl CloudFrontService {
         let if_match = require_if_match(req)?;
         let cfg: CachePolicyConfig = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid CachePolicyConfig XML: {e}")))?;
+        if cfg.name.is_empty() {
+            return Err(invalid_argument("CachePolicyConfig.Name is required"));
+        }
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -482,6 +490,11 @@ impl CloudFrontService {
         let if_match = require_if_match(req)?;
         let cfg: OriginRequestPolicyConfig = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid OriginRequestPolicyConfig XML: {e}")))?;
+        if cfg.name.is_empty() {
+            return Err(invalid_argument(
+                "OriginRequestPolicyConfig.Name is required",
+            ));
+        }
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -673,6 +686,11 @@ impl CloudFrontService {
         let cfg: ResponseHeadersPolicyConfig = xml_io::from_xml_root(&req.body).map_err(|e| {
             invalid_argument(format!("invalid ResponseHeadersPolicyConfig XML: {e}"))
         })?;
+        if cfg.name.is_empty() {
+            return Err(invalid_argument(
+                "ResponseHeadersPolicyConfig.Name is required",
+            ));
+        }
         let mut state = self.state.write();
         let account = state
             .accounts

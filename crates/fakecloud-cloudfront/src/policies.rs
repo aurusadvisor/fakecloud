@@ -589,7 +589,7 @@ const MANAGED_RESPONSE_HEADERS_POLICIES: &[(&str, &str)] = &[
         "Managed-CORS-with-preflight",
     ),
     (
-        "60669652-455b-4ae9-85a4-c4c02393f86c",
+        "e61eb60c-9c35-4d20-a928-2b84e02af89c",
         "Managed-CORS-and-SecurityHeadersPolicy",
     ),
     (
@@ -600,7 +600,7 @@ const MANAGED_RESPONSE_HEADERS_POLICIES: &[(&str, &str)] = &[
         "eaab4381-ed33-4a86-88ca-d9558dc6cd63",
         "Managed-CORS-with-preflight-and-SecurityHeadersPolicy",
     ),
-    ("5cc3b908-e619-4b99-88e5-2cf7f45965bd", "Managed-SimpleCORS"),
+    ("60669652-455b-4ae9-85a4-c4c02393f86c", "Managed-SimpleCORS"),
 ];
 
 // ─── Handlers (impl on CloudFrontService is in service.rs via these
@@ -771,4 +771,49 @@ pub(crate) fn precondition_failed() -> AwsServiceError {
 
 pub(crate) fn rfc3339(t: &DateTime<Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn managed_cache_policy_ids_are_unique() {
+        let mut seen = HashSet::new();
+        for entry in MANAGED_CACHE_POLICIES {
+            let id = entry.0;
+            assert!(seen.insert(id), "duplicate cache policy id: {id}");
+        }
+    }
+
+    #[test]
+    fn managed_origin_request_policy_ids_are_unique() {
+        let mut seen = HashSet::new();
+        for (id, _) in MANAGED_ORIGIN_REQUEST_POLICIES {
+            assert!(seen.insert(*id), "duplicate origin request policy id: {id}");
+        }
+    }
+
+    #[test]
+    fn managed_response_headers_policy_ids_are_unique() {
+        let mut seen = HashSet::new();
+        for (id, _) in MANAGED_RESPONSE_HEADERS_POLICIES {
+            assert!(
+                seen.insert(*id),
+                "duplicate response headers policy id: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_response_headers_count_matches_unique_ids() {
+        let mut acc = AccountState::default();
+        seed_managed(&mut acc);
+        assert_eq!(
+            acc.response_headers_policies.len(),
+            MANAGED_RESPONSE_HEADERS_POLICIES.len(),
+            "duplicate IDs would reduce the seeded count"
+        );
+    }
 }

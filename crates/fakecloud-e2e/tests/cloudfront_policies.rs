@@ -336,3 +336,42 @@ async fn continuous_deployment_policy_lifecycle() {
         .await
         .expect("delete");
 }
+
+#[tokio::test]
+async fn update_oac_with_empty_name_is_rejected() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_origin_access_control()
+        .origin_access_control_config(
+            OriginAccessControlConfig::builder()
+                .name("oac-validate")
+                .origin_access_control_origin_type(OriginAccessControlOriginTypes::S3)
+                .signing_behavior(OriginAccessControlSigningBehaviors::Always)
+                .signing_protocol(OriginAccessControlSigningProtocols::Sigv4)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let id = create.origin_access_control().unwrap().id().to_string();
+    let etag = create.e_tag().unwrap().to_string();
+
+    let bad = OriginAccessControlConfig::builder()
+        .name("")
+        .origin_access_control_origin_type(OriginAccessControlOriginTypes::S3)
+        .signing_behavior(OriginAccessControlSigningBehaviors::Always)
+        .signing_protocol(OriginAccessControlSigningProtocols::Sigv4)
+        .build()
+        .unwrap();
+
+    let res = cf
+        .update_origin_access_control()
+        .id(&id)
+        .if_match(&etag)
+        .origin_access_control_config(bad)
+        .send()
+        .await;
+    assert!(res.is_err(), "empty Name on update must be rejected");
+}
