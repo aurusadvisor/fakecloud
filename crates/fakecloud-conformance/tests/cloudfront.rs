@@ -390,3 +390,262 @@ async fn cloudfront_list_conflicting_aliases() {
         .await
         .unwrap();
 }
+
+// ─── Distribution-by-X listings (gap-fill for audit) ───────────────────
+
+async fn make_dist(server: &TestServer, caller_ref: &str) -> String {
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(minimal_config(caller_ref))
+        .send()
+        .await
+        .unwrap();
+    create.distribution().unwrap().id().to_string()
+}
+
+#[test_action("cloudfront", "CreateDistributionWithTags", checksum = "7c7b9e91")]
+#[tokio::test]
+async fn cloudfront_create_distribution_with_tags() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.create_distribution_with_tags()
+        .distribution_config_with_tags(
+            aws_sdk_cloudfront::types::DistributionConfigWithTags::builder()
+                .distribution_config(minimal_config("conf-cdwt"))
+                .tags(
+                    Tags::builder()
+                        .items(Tag::builder().key("env").value("test").build().unwrap())
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cloudfront", "CopyDistribution", checksum = "bfdbe0c0")]
+#[tokio::test]
+async fn cloudfront_copy_distribution() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let create = cf
+        .create_distribution()
+        .distribution_config(minimal_config("conf-copy-src"))
+        .send()
+        .await
+        .unwrap();
+    let id = create.distribution().unwrap().id().to_string();
+    let etag = create.e_tag().unwrap().to_string();
+    cf.copy_distribution()
+        .primary_distribution_id(&id)
+        .if_match(&etag)
+        .caller_reference("conf-copy-1")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cloudfront", "AssociateDistributionWebACL", checksum = "b3ceaafe")]
+#[tokio::test]
+async fn cloudfront_associate_web_acl() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let id = make_dist(&server, "conf-webacl").await;
+    cf.associate_distribution_web_acl()
+        .id(&id)
+        .web_acl_arn("arn:aws:wafv2:us-east-1:000000000000:global/webacl/conf/abc")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cloudfront", "DisassociateDistributionWebACL", checksum = "f95fc84d")]
+#[tokio::test]
+async fn cloudfront_disassociate_web_acl() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    let id = make_dist(&server, "conf-webacl-dis").await;
+    cf.disassociate_distribution_web_acl()
+        .id(&id)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "cloudfront",
+    "ListDistributionsByCachePolicyId",
+    checksum = "12e1b4fd"
+)]
+#[tokio::test]
+async fn cloudfront_list_dist_by_cache_policy_id() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_cache_policy_id()
+        .cache_policy_id("658327ea-f89d-4fab-a63d-7e88639e58f6")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "cloudfront",
+    "ListDistributionsByOriginRequestPolicyId",
+    checksum = "90a0f8fa"
+)]
+#[tokio::test]
+async fn cloudfront_list_dist_by_origin_request_policy_id() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_origin_request_policy_id()
+        .origin_request_policy_id("88a5eaf4-2fd4-4709-b370-b4c650ea3fcf")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "cloudfront",
+    "ListDistributionsByResponseHeadersPolicyId",
+    checksum = "cea636c9"
+)]
+#[tokio::test]
+async fn cloudfront_list_dist_by_response_headers_policy_id() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_response_headers_policy_id()
+        .response_headers_policy_id("60669652-455b-4ae9-85a4-c4c02393f86c")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cloudfront", "ListDistributionsByKeyGroup", checksum = "a1b7c588")]
+#[tokio::test]
+async fn cloudfront_list_dist_by_key_group() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_key_group()
+        .key_group_id("conf-kg")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cloudfront", "ListDistributionsByWebACLId", checksum = "1c6d1942")]
+#[tokio::test]
+async fn cloudfront_list_dist_by_web_acl_id() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_web_acl_id()
+        .web_acl_id("conf-acl")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cloudfront", "ListDistributionsByVpcOriginId", checksum = "39d538d7")]
+#[tokio::test]
+async fn cloudfront_list_dist_by_vpc_origin_id() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_vpc_origin_id()
+        .vpc_origin_id("conf-vpc")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "cloudfront",
+    "ListDistributionsByAnycastIpListId",
+    checksum = "b33414cb"
+)]
+#[tokio::test]
+async fn cloudfront_list_dist_by_anycast_ip_list_id() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_anycast_ip_list_id()
+        .anycast_ip_list_id("conf-anycast")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "cloudfront",
+    "ListDistributionsByConnectionMode",
+    checksum = "81cf0669"
+)]
+#[tokio::test]
+async fn cloudfront_list_dist_by_connection_mode() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_connection_mode()
+        .connection_mode(aws_sdk_cloudfront::types::ConnectionMode::Direct)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "cloudfront",
+    "ListDistributionsByOwnedResource",
+    checksum = "3c795df1"
+)]
+#[tokio::test]
+async fn cloudfront_list_dist_by_owned_resource() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_owned_resource()
+        .resource_arn("arn:aws:wafv2:us-east-1:000000000000:global/webacl/x/y")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cloudfront", "ListDistributionsByTrustStore", checksum = "85eee3eb")]
+#[tokio::test]
+async fn cloudfront_list_dist_by_trust_store() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_trust_store()
+        .trust_store_identifier("conf-trust")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "cloudfront",
+    "ListDistributionsByRealtimeLogConfig",
+    checksum = "e9954bf8"
+)]
+#[tokio::test]
+async fn cloudfront_list_dist_by_realtime_log_config() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_realtime_log_config()
+        .realtime_log_config_arn("arn:aws:cloudfront::000000000000:realtime-log-config/conf-rt")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action(
+    "cloudfront",
+    "ListDistributionsByConnectionFunction",
+    checksum = "40b924ce"
+)]
+#[tokio::test]
+async fn cloudfront_list_dist_by_connection_function() {
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.list_distributions_by_connection_function()
+        .connection_function_identifier("conf-cf")
+        .send()
+        .await
+        .unwrap();
+}

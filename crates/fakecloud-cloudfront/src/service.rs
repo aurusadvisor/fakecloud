@@ -462,14 +462,8 @@ impl CloudFrontService {
             | "ListDistributionsByOriginRequestPolicyId"
             | "ListDistributionsByResponseHeadersPolicyId"
             | "ListDistributionsByKeyGroup"
-            | "ListDistributionsByWebACLId"
-            | "ListDistributionsByVpcOriginId"
-            | "ListDistributionsByAnycastIpListId"
-            | "ListDistributionsByRealtimeLogConfig"
-            | "ListDistributionsByTrustStore"
-            | "ListDistributionsByConnectionMode"
-            | "ListDistributionsByConnectionFunction" => "DistributionIdList",
-            "ListDistributionsByOwnedResource" => "DistributionList",
+            | "ListDistributionsByVpcOriginId" => "DistributionIdList",
+            "ListDistributionsByOwnedResource" => "DistributionIdOwnerList",
             _ => "DistributionList",
         };
         let body = build_empty_distribution_id_list(root);
