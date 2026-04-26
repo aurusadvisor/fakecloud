@@ -739,6 +739,7 @@ async fn execute_task_state(
 
     let retriers = state_def["Retry"].as_array().cloned().unwrap_or_default();
     let timeout_seconds = state_def["TimeoutSeconds"].as_u64();
+    let heartbeat_seconds = state_def["HeartbeatSeconds"].as_u64();
     let mut attempt = 0u32;
 
     loop {
@@ -768,6 +769,8 @@ async fn execute_task_state(
             delivery,
             dynamodb_state,
             timeout_seconds,
+            heartbeat_seconds,
+            shared_state,
         )
         .await;
 
@@ -1056,13 +1059,28 @@ async fn execute_map_state(
 }
 
 /// Invoke a resource (Lambda function or SDK integration).
+#[allow(clippy::too_many_arguments)]
 async fn invoke_resource(
     resource: &str,
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
     timeout_seconds: Option<u64>,
+    heartbeat_seconds: Option<u64>,
+    shared_state: &SharedStepFunctionsState,
 ) -> Result<Value, (String, String)> {
+    // Direct activity ARN: arn:aws:states:<region>:<account>:activity:<name>
+    if resource.contains(":states:") && resource.contains(":activity:") {
+        return invoke_activity(
+            resource,
+            input,
+            shared_state,
+            timeout_seconds,
+            heartbeat_seconds,
+        )
+        .await;
+    }
+
     // Direct Lambda ARN: arn:aws:lambda:<region>:<account>:function:<name>
     if resource.contains(":lambda:") && resource.contains(":function:") {
         return invoke_lambda_direct(resource, input, delivery, timeout_seconds).await;
@@ -1815,6 +1833,132 @@ async fn invoke_lambda_direct(
             // No runtime available — return empty result
             Ok(json!({}))
         }
+    }
+}
+
+/// Invoke an activity worker. Inserts a `PENDING` token into shared state
+/// so a worker can claim it via `GetActivityTask`, then polls until the
+/// worker calls `SendTaskSuccess` / `SendTaskFailure` or the heartbeat /
+/// timeout windows expire.
+async fn invoke_activity(
+    activity_arn: &str,
+    input: &Value,
+    shared_state: &SharedStepFunctionsState,
+    timeout_seconds: Option<u64>,
+    heartbeat_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    use crate::state::TaskTokenState;
+
+    // Activity must exist (look up across accounts via ARN segment).
+    let activity_account = activity_arn.split(':').nth(4).unwrap_or("").to_string();
+    {
+        let accounts = shared_state.read();
+        let exists = accounts
+            .get(&activity_account)
+            .map(|s| s.activities.contains_key(activity_arn))
+            .unwrap_or(false);
+        if !exists {
+            return Err((
+                "States.TaskFailed".to_string(),
+                format!("Activity does not exist: {activity_arn}"),
+            ));
+        }
+    }
+
+    let token = format!(
+        "FCToken-{}-{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+        uuid::Uuid::new_v4().simple(),
+    );
+    let now = chrono::Utc::now();
+    let input_str = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+    {
+        let mut accounts = shared_state.write();
+        let state = accounts.get_or_create(&activity_account);
+        state.task_tokens.insert(
+            token.clone(),
+            TaskTokenState {
+                activity_arn: activity_arn.to_string(),
+                status: "PENDING".to_string(),
+                output: None,
+                error: None,
+                cause: None,
+                input: Some(input_str),
+                created_at: now,
+                last_heartbeat_at: None,
+                heartbeat_seconds: heartbeat_seconds.map(|s| s as i64),
+                timeout_seconds: timeout_seconds.map(|s| s as i64),
+            },
+        );
+    }
+
+    // Poll for completion. Default poll cadence 200ms; 1 hour absolute
+    // ceiling so a stuck activity can't block the interpreter forever
+    // when no TimeoutSeconds is set on the Task state.
+    let absolute_deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds.unwrap_or(3600));
+    loop {
+        let now_ts = chrono::Utc::now();
+        let snapshot = {
+            let accounts = shared_state.read();
+            accounts
+                .get(&activity_account)
+                .and_then(|s| s.task_tokens.get(&token).cloned())
+        };
+        let Some(entry) = snapshot else {
+            return Err((
+                "States.TaskFailed".to_string(),
+                "Activity task token disappeared".to_string(),
+            ));
+        };
+        match entry.status.as_str() {
+            "SUCCEEDED" => {
+                cleanup_token(shared_state, &activity_account, &token);
+                let output = entry.output.unwrap_or_else(|| "{}".to_string());
+                let value: Value = serde_json::from_str(&output).unwrap_or(Value::String(output));
+                return Ok(value);
+            }
+            "FAILED" => {
+                cleanup_token(shared_state, &activity_account, &token);
+                return Err((
+                    entry
+                        .error
+                        .unwrap_or_else(|| "States.TaskFailed".to_string()),
+                    entry.cause.unwrap_or_default(),
+                ));
+            }
+            _ => {}
+        }
+        // Heartbeat timeout: only enforced once a worker has picked up the
+        // task (status == IN_PROGRESS) and a heartbeat window is set.
+        if entry.status == "IN_PROGRESS" {
+            if let Some(hb) = entry.heartbeat_seconds {
+                let last = entry.last_heartbeat_at.unwrap_or(entry.created_at);
+                if (now_ts - last).num_seconds() > hb {
+                    cleanup_token(shared_state, &activity_account, &token);
+                    return Err((
+                        "States.HeartbeatTimeout".to_string(),
+                        format!("Activity worker missed heartbeat ({hb}s window)"),
+                    ));
+                }
+            }
+        }
+        if std::time::Instant::now() >= absolute_deadline {
+            cleanup_token(shared_state, &activity_account, &token);
+            let secs = timeout_seconds.unwrap_or(3600);
+            return Err((
+                "States.Timeout".to_string(),
+                format!("Activity timed out after {secs} seconds"),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+fn cleanup_token(shared_state: &SharedStepFunctionsState, account_id: &str, token: &str) {
+    let mut accounts = shared_state.write();
+    if let Some(state) = accounts.get_mut(account_id) {
+        state.task_tokens.remove(token);
     }
 }
 

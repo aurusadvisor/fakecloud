@@ -16,7 +16,7 @@ fakecloud implements **37 of 37** Step Functions operations at 100% Smithy confo
 - **Task integrations** — Lambda (invoke, invoke.waitForTaskToken), SQS (sendMessage), SNS (publish), EventBridge (putEvents), DynamoDB (getItem/putItem/updateItem/deleteItem)
 - **Map state** — parallel item processing with concurrency control
 - **Parallel state** — concurrent branch execution
-- **Activities** — task workers, GetActivityTask, SendTaskSuccess/Failure
+- **Activities** — real worker pool. A `Task` state with an activity ARN inserts a pending task; `GetActivityTask` long-polls (up to `FAKECLOUD_SFN_GET_ACTIVITY_TIMEOUT_SECS`, default 5s) for the next pending task; `SendTaskSuccess` / `SendTaskFailure` resolve the workflow. `HeartbeatSeconds` and `TimeoutSeconds` are enforced.
 - **State machine execution history** — full event log per execution
 - **Error handling** — states.ALL, states.TaskFailed, custom error names
 
@@ -27,6 +27,7 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 ## Introspection
 
 - `GET /_fakecloud/stepfunctions/executions` — list all executions with status, input, output, and timestamps
+- `POST /_fakecloud/stepfunctions/enqueue-activity-task` — directly insert a pending activity task (skipping a state-machine execution). Body: `{"activityArn": "...", "input": "{}", "heartbeatSeconds": 60, "timeoutSeconds": 300}`. Returns `{"taskToken": "..."}`. Useful for testing worker pool clients without authoring a full ASL workflow.
 
 ## Cross-service delivery
 

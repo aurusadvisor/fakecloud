@@ -530,6 +530,32 @@ async fn sfn_task_token_round_trip() {
         .unwrap()
         .activity_arn()
         .to_string();
+
+    // GetActivityTask is a long-poll worker API: it returns a real token
+    // only when an activity execution is waiting. Inject pending tasks
+    // via the introspection endpoint so this test exercises SendTask*
+    // without spinning up a state-machine execution.
+    let http = reqwest::Client::new();
+    let enqueue = |arn: &str| {
+        let url = format!(
+            "{}/_fakecloud/stepfunctions/enqueue-activity-task",
+            server.endpoint()
+        );
+        let arn = arn.to_string();
+        let http = http.clone();
+        async move {
+            http.post(&url)
+                .json(&serde_json::json!({"activityArn": arn, "input": "{}"}))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    enqueue(&act).await;
     let token = client
         .get_activity_task()
         .activity_arn(&act)
@@ -539,6 +565,11 @@ async fn sfn_task_token_round_trip() {
         .task_token()
         .unwrap()
         .to_string();
+    assert!(
+        !token.is_empty(),
+        "expected non-empty token for pending task"
+    );
+
     client
         .send_task_heartbeat()
         .task_token(&token)
@@ -552,7 +583,8 @@ async fn sfn_task_token_round_trip() {
         .send()
         .await
         .unwrap();
-    // Same token can also be failed (test second token).
+
+    enqueue(&act).await;
     let token2 = client
         .get_activity_task()
         .activity_arn(&act)

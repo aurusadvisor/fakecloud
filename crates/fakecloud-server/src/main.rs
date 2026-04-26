@@ -3862,6 +3862,59 @@ async fn main() {
             }),
         )
         .route(
+            // Direct injection of an activity task (skipping a state-machine
+            // execution). Used by tests that want to exercise the worker
+            // pool API surface without spinning up an ASL workflow.
+            "/_fakecloud/stepfunctions/enqueue-activity-task",
+            axum::routing::post({
+                let ss = stepfunctions_state.clone();
+                move |axum::Json(req): axum::Json<types::SfnEnqueueActivityTaskRequest>| {
+                    let ss = ss.clone();
+                    async move {
+                        let activity_arn = req.activity_arn;
+                        let token = format!(
+                            "FCToken-injected-{}-{}",
+                            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                            uuid::Uuid::new_v4().simple(),
+                        );
+                        let mut accounts = ss.write();
+                        // Default-account namespace keeps the introspection
+                        // endpoint simple. Multi-account callers can switch
+                        // FAKECLOUD's default account before calling, or
+                        // create the activity in the default account.
+                        let state = accounts.default_mut();
+                        if !state.activities.contains_key(&activity_arn) {
+                            return (
+                                axum::http::StatusCode::NOT_FOUND,
+                                axum::Json(serde_json::json!({
+                                    "error": "ActivityDoesNotExist"
+                                })),
+                            );
+                        }
+                        state.task_tokens.insert(
+                            token.clone(),
+                            fakecloud_stepfunctions::state::TaskTokenState {
+                                activity_arn: activity_arn.clone(),
+                                status: "PENDING".to_string(),
+                                output: None,
+                                error: None,
+                                cause: None,
+                                input: Some(req.input.unwrap_or_else(|| "{}".to_string())),
+                                created_at: chrono::Utc::now(),
+                                last_heartbeat_at: None,
+                                heartbeat_seconds: req.heartbeat_seconds,
+                                timeout_seconds: req.timeout_seconds,
+                            },
+                        );
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({ "taskToken": token })),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/lambda/{function_name}/evict-container",
             axum::routing::post({
                 let rt = lambda_sim_evict_runtime;

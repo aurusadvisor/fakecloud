@@ -3555,3 +3555,175 @@ async fn sfn_interpreter_panic_does_not_kill_server() {
         .unwrap();
     assert_eq!(describe.name(), "panic-check-sm");
 }
+
+#[tokio::test]
+async fn sfn_activity_worker_pool_round_trip() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let activity_arn = client
+        .create_activity()
+        .name("real-activity")
+        .send()
+        .await
+        .unwrap()
+        .activity_arn()
+        .to_string();
+
+    let definition = serde_json::json!({
+        "Comment": "Single activity Task",
+        "StartAt": "DoIt",
+        "States": {
+            "DoIt": {
+                "Type": "Task",
+                "Resource": activity_arn,
+                "End": true
+            }
+        }
+    })
+    .to_string();
+    let sm_arn = client
+        .create_state_machine()
+        .name("activity-sm")
+        .definition(&definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap()
+        .state_machine_arn()
+        .to_string();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(&sm_arn)
+        .input(r#"{"hello":"world"}"#)
+        .send()
+        .await
+        .unwrap();
+    let exec_arn = start.execution_arn().to_string();
+
+    // Worker side: long-poll for the activity task, send back success.
+    let worker = tokio::spawn({
+        let client = client.clone();
+        let activity_arn = activity_arn.clone();
+        async move {
+            for _ in 0..30 {
+                let resp = client
+                    .get_activity_task()
+                    .activity_arn(&activity_arn)
+                    .send()
+                    .await
+                    .unwrap();
+                let token = resp.task_token().unwrap_or("").to_string();
+                if !token.is_empty() {
+                    let input = resp.input().unwrap_or("{}").to_string();
+                    assert!(input.contains("\"hello\""));
+                    client
+                        .send_task_success()
+                        .task_token(&token)
+                        .output(r#"{"done":true}"#)
+                        .send()
+                        .await
+                        .unwrap();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            panic!("worker never received activity task");
+        }
+    });
+
+    let status = wait_for_execution(&client, &exec_arn).await;
+    worker.await.unwrap();
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(&exec_arn)
+        .send()
+        .await
+        .unwrap();
+    let output = desc.output().unwrap_or("");
+    assert!(
+        output.contains("\"done\":true") || output.contains("\"done\": true"),
+        "expected worker output, got {output}"
+    );
+}
+
+#[tokio::test]
+async fn sfn_activity_failure_propagates_to_execution() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let activity_arn = client
+        .create_activity()
+        .name("fail-activity")
+        .send()
+        .await
+        .unwrap()
+        .activity_arn()
+        .to_string();
+
+    let definition = serde_json::json!({
+        "StartAt": "F",
+        "States": {
+            "F": {
+                "Type": "Task",
+                "Resource": activity_arn,
+                "End": true
+            }
+        }
+    })
+    .to_string();
+    let sm_arn = client
+        .create_state_machine()
+        .name("fail-sm")
+        .definition(&definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap()
+        .state_machine_arn()
+        .to_string();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(&sm_arn)
+        .send()
+        .await
+        .unwrap();
+    let exec_arn = start.execution_arn().to_string();
+
+    let worker = tokio::spawn({
+        let client = client.clone();
+        let activity_arn = activity_arn.clone();
+        async move {
+            for _ in 0..30 {
+                let resp = client
+                    .get_activity_task()
+                    .activity_arn(&activity_arn)
+                    .send()
+                    .await
+                    .unwrap();
+                let token = resp.task_token().unwrap_or("").to_string();
+                if !token.is_empty() {
+                    client
+                        .send_task_failure()
+                        .task_token(&token)
+                        .error("HandlerCrashed")
+                        .cause("simulated worker crash")
+                        .send()
+                        .await
+                        .unwrap();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            panic!("worker never received activity task");
+        }
+    });
+
+    let status = wait_for_execution(&client, &exec_arn).await;
+    worker.await.unwrap();
+    assert_eq!(status, "FAILED");
+}
