@@ -686,7 +686,15 @@ fn streaming_route(
     // URL (AWSAccessKeyId + Signature + Expires query parameters).
     if method == http::Method::PUT {
         let after = path.trim_start_matches('/');
-        if !after.contains('/') {
+        // Path-style PutObject is `PUT /<bucket>/<key>` (path contains a
+        // slash); virtual-hosted-style is `PUT /<key>` with the bucket
+        // in the Host header. For virtual-hosted, accept any non-empty
+        // path so the key flows through the streaming dispatch — the
+        // Host parser already routed this request to S3.
+        let virtual_hosted_s3 = protocol::parse_routing_host_from_headers(headers)
+            .filter(|h| h.service == "s3" && h.bucket.is_some())
+            .is_some();
+        if after.is_empty() || (!virtual_hosted_s3 && !after.contains('/')) {
             return None;
         }
         let header_s3 = headers
