@@ -1252,12 +1252,7 @@ mod tests {
         // hit the streaming path.
         let headers = s3_sigv4_headers();
         assert_eq!(
-            streaming_route(
-                &http::Method::PUT,
-                "/my-bucket",
-                &headers,
-                &HashMap::new(),
-            ),
+            streaming_route(&http::Method::PUT, "/my-bucket", &headers, &HashMap::new(),),
             None,
         );
     }
@@ -1276,12 +1271,7 @@ mod tests {
         // Host parser confirms this is virtual-hosted S3 and the key
         // flows through the streaming dispatch.
         assert_eq!(
-            streaming_route(
-                &http::Method::PUT,
-                "/hello.txt",
-                &headers,
-                &HashMap::new(),
-            ),
+            streaming_route(&http::Method::PUT, "/hello.txt", &headers, &HashMap::new(),),
             Some(("s3", "")),
         );
     }
