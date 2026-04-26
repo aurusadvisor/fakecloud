@@ -78,7 +78,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | Bedrock Runtime        |  10 | InvokeModel, Converse, streaming, configurable responses, fault inject |
 | ECR                    |  58 | Full API — OCI v2 push/pull, lifecycle, scanning, registry, pull-through |
 | ECS                    |  60 | **Full API** — clusters, task definitions, real task execution, services + rolling deployments, container instances, capacity providers, task sets, ECS Exec |
-| Elastic Load Balancing v2 |  51 | ALB/NLB/GWLB CRUD: load balancers, target groups + targets + health, **listeners + rules + certificates**, LB/listener/target-group attributes, capacity reservations, **mTLS trust stores + revocations**, SSL policies, resource policies, tags |
+| Elastic Load Balancing v2 |  51 | ALB/NLB/GWLB CRUD: load balancers, target groups + targets + real health probes, **listeners + rules + certificates**, LB/listener/target-group attributes, capacity reservations, **mTLS trust stores + revocations**, SSL policies, resource policies, tags. **In-process HTTP data plane** for ALBs — per-LB TCP bind, rule matching, forward / fixed-response / redirect, sticky sessions, X-Forwarded-* headers |
 
 Per-service docs and feature matrices: [fakecloud.dev/docs/services](https://fakecloud.dev/docs/services).
 
@@ -120,7 +120,7 @@ Full guides: [fakecloud.dev/docs/guides](https://fakecloud.dev/docs/guides).
 | Bedrock             | 111 operations (control plane + runtime)           | Not available                                                                  |
 | ECR                 | 58 operations, real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/)              |
 | ECS                 | **60 operations — full API** incl. real task execution, services, task sets, capacity providers | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
-| Elastic Load Balancing v2 | **51 operations** ALB/NLB/GWLB incl. mTLS trust stores, capacity reservations, attributes, resource policies | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| Elastic Load Balancing v2 | **51 operations** ALB/NLB/GWLB incl. mTLS trust stores, capacity reservations, attributes, resource policies, plus an in-process HTTP data plane (rule matching + forward/fixed-response/redirect + sticky sessions) | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 
 > Performance numbers measured on Apple M1 via `time fakecloud`, `ps -o rss`, `ls -lh`.
 

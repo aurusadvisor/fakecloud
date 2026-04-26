@@ -82,6 +82,7 @@ pub struct Elbv2Service {
 impl Elbv2Service {
     pub fn new(state: SharedElbv2State) -> Self {
         crate::prober::spawn_prober(Arc::clone(&state));
+        crate::dataplane::spawn_dataplane(Arc::clone(&state));
         Self {
             state,
             region: "us-east-1".to_string(),
@@ -622,6 +623,7 @@ impl Elbv2Service {
                 "MinimumLoadBalancerCapacity.CapacityUnits",
             )
             .and_then(|s| s.parse().ok()),
+            bound_port: None,
         };
         let lb_xml = render_lb_xml(&lb);
         st.load_balancers.insert(arn, lb);

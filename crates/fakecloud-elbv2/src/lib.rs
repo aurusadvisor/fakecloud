@@ -1,4 +1,6 @@
+pub mod dataplane;
 pub mod prober;
+pub mod router;
 pub mod service;
 pub mod state;
 

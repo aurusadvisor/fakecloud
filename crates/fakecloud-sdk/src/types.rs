@@ -864,6 +864,11 @@ pub struct Elbv2LoadBalancer {
     pub security_groups: Vec<String>,
     pub created_time: String,
     pub tags: Vec<Elbv2Tag>,
+    /// In-process data plane TCP port for ALBs. `None` for NLB/GWLB
+    /// or when the data plane is disabled. Tests connect to
+    /// `127.0.0.1:<bound_port>` to reach the routed targets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

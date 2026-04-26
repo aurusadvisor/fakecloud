@@ -247,6 +247,7 @@ pub(crate) fn elbv2_load_balancer_response(
                 value: t.value.clone(),
             })
             .collect(),
+        bound_port: lb.bound_port,
     }
 }
 
