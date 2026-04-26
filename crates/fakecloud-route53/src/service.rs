@@ -12,12 +12,14 @@ use uuid::Uuid;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError, ResponseBody};
 
 use crate::model::{
-    ChangeResourceRecordSetsRequest, CreateHostedZoneRequest, ResourceRecordSet,
-    UpdateHostedZoneCommentRequest, UpdateHostedZoneFeaturesRequest,
+    ChangeResourceRecordSetsRequest, CreateHealthCheckRequest, CreateHostedZoneRequest,
+    HealthCheckConfig, ResourceRecordSet, UpdateHealthCheckRequest, UpdateHostedZoneCommentRequest,
+    UpdateHostedZoneFeaturesRequest,
 };
 use crate::router::{route, Route};
 use crate::state::{
-    AccountState, Route53Accounts, SharedRoute53State, StoredChange, StoredHostedZone,
+    AccountState, Route53Accounts, SharedRoute53State, StoredChange, StoredHealthCheck,
+    StoredHostedZone,
 };
 use crate::xml_io;
 
@@ -39,6 +41,15 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListResourceRecordSets",
     "GetChange",
     "TestDNSAnswer",
+    "CreateHealthCheck",
+    "GetHealthCheck",
+    "UpdateHealthCheck",
+    "DeleteHealthCheck",
+    "ListHealthChecks",
+    "GetHealthCheckCount",
+    "GetHealthCheckStatus",
+    "GetHealthCheckLastFailureReason",
+    "GetCheckerIpRanges",
 ];
 
 pub struct Route53Service {
@@ -97,6 +108,17 @@ impl AwsService for Route53Service {
             "ListResourceRecordSets" => self.list_resource_record_sets(&req, &resolved),
             "GetChange" => self.get_change(&resolved),
             "TestDNSAnswer" => self.test_dns_answer(&req),
+            "CreateHealthCheck" => self.create_health_check(&req),
+            "GetHealthCheck" => self.get_health_check(&resolved),
+            "UpdateHealthCheck" => self.update_health_check(&req, &resolved),
+            "DeleteHealthCheck" => self.delete_health_check(&resolved),
+            "ListHealthChecks" => self.list_health_checks(&req),
+            "GetHealthCheckCount" => self.get_health_check_count(),
+            "GetHealthCheckStatus" => self.get_health_check_status(&resolved),
+            "GetHealthCheckLastFailureReason" => {
+                self.get_health_check_last_failure_reason(&resolved)
+            }
+            "GetCheckerIpRanges" => self.get_checker_ip_ranges(),
             other => Err(aws_error(
                 StatusCode::NOT_IMPLEMENTED,
                 "InvalidAction",
@@ -687,6 +709,347 @@ impl Route53Service {
     }
 }
 
+// ─── Health Check handlers ───────────────────────────────────────────
+
+impl Route53Service {
+    fn create_health_check(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let cfg: CreateHealthCheckRequest = xml_io::from_xml_root(&req.body)
+            .map_err(|e| invalid_argument(format!("invalid CreateHealthCheckRequest XML: {e}")))?;
+        if cfg.caller_reference.is_empty() {
+            return Err(invalid_argument("CallerReference is required"));
+        }
+        if cfg.health_check_config.health_check_type.is_empty() {
+            return Err(invalid_argument("HealthCheckConfig.Type is required"));
+        }
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .entry(DEFAULT_ACCOUNT.to_string())
+            .or_default();
+        if let Some(existing) = account
+            .health_checks
+            .values()
+            .find(|h| h.caller_reference == cfg.caller_reference)
+        {
+            return Err(aws_error(
+                StatusCode::CONFLICT,
+                "HealthCheckAlreadyExists",
+                format!(
+                    "A health check with the same CallerReference already exists: {} (id={})",
+                    cfg.caller_reference, existing.id
+                ),
+            ));
+        }
+        let id = generate_health_check_id();
+        let stored = StoredHealthCheck {
+            id: id.clone(),
+            caller_reference: cfg.caller_reference,
+            version: 1,
+            config: cfg.health_check_config,
+            created_time: Utc::now(),
+        };
+        account.health_checks.insert(id.clone(), stored.clone());
+        drop(state);
+        let mut body = String::with_capacity(1024);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<CreateHealthCheckResponse xmlns=\"{NS}\">"));
+        push_health_check(&mut body, &stored);
+        body.push_str("</CreateHealthCheckResponse>");
+        let mut headers = HeaderMap::new();
+        if let Ok(loc) =
+            http::HeaderValue::from_str(&format!("/2013-04-01/healthcheck/{}", stored.id))
+        {
+            headers.insert(http::header::LOCATION, loc);
+        }
+        Ok(xml_response(StatusCode::CREATED, body, headers))
+    }
+
+    fn get_health_check(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let state = self.state.read();
+        let hc = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .and_then(|a| a.health_checks.get(&id).cloned())
+            .ok_or_else(|| no_such_health_check(&id))?;
+        drop(state);
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<GetHealthCheckResponse xmlns=\"{NS}\">"));
+        push_health_check(&mut body, &hc);
+        body.push_str("</GetHealthCheckResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn update_health_check(
+        &self,
+        req: &AwsRequest,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let cfg: UpdateHealthCheckRequest = xml_io::from_xml_root(&req.body)
+            .map_err(|e| invalid_argument(format!("invalid UpdateHealthCheckRequest XML: {e}")))?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_health_check(&id))?;
+        let hc = account
+            .health_checks
+            .get_mut(&id)
+            .ok_or_else(|| no_such_health_check(&id))?;
+        if let Some(client_version) = cfg.health_check_version {
+            if client_version != hc.version {
+                return Err(aws_error(
+                    StatusCode::CONFLICT,
+                    "HealthCheckVersionMismatch",
+                    format!(
+                        "Provided HealthCheckVersion ({}) does not match the current version ({})",
+                        client_version, hc.version
+                    ),
+                ));
+            }
+        }
+        if let Some(v) = cfg.ip_address {
+            hc.config.ip_address = Some(v);
+        }
+        if let Some(v) = cfg.port {
+            hc.config.port = Some(v);
+        }
+        if let Some(v) = cfg.resource_path {
+            hc.config.resource_path = Some(v);
+        }
+        if let Some(v) = cfg.fully_qualified_domain_name {
+            hc.config.fully_qualified_domain_name = Some(v);
+        }
+        if let Some(v) = cfg.search_string {
+            hc.config.search_string = Some(v);
+        }
+        if let Some(v) = cfg.failure_threshold {
+            hc.config.failure_threshold = Some(v);
+        }
+        if let Some(v) = cfg.inverted {
+            hc.config.inverted = Some(v);
+        }
+        if let Some(v) = cfg.disabled {
+            hc.config.disabled = Some(v);
+        }
+        if let Some(v) = cfg.health_threshold {
+            hc.config.health_threshold = Some(v);
+        }
+        if let Some(v) = cfg.child_health_checks {
+            hc.config.child_health_checks = Some(v);
+        }
+        if let Some(v) = cfg.enable_sni {
+            hc.config.enable_sni = Some(v);
+        }
+        if let Some(v) = cfg.regions {
+            hc.config.regions = Some(v);
+        }
+        if let Some(v) = cfg.alarm_identifier {
+            hc.config.alarm_identifier = Some(v);
+        }
+        if let Some(v) = cfg.insufficient_data_health_status {
+            hc.config.insufficient_data_health_status = Some(v);
+        }
+        if let Some(reset) = cfg.reset_elements {
+            for name in reset.resettable_element_name {
+                match name.as_str() {
+                    "ChildHealthChecks" => hc.config.child_health_checks = None,
+                    "FullyQualifiedDomainName" => hc.config.fully_qualified_domain_name = None,
+                    "Regions" => hc.config.regions = None,
+                    "ResourcePath" => hc.config.resource_path = None,
+                    _ => {}
+                }
+            }
+        }
+        hc.version += 1;
+        let snap = hc.clone();
+        drop(state);
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<UpdateHealthCheckResponse xmlns=\"{NS}\">"));
+        push_health_check(&mut body, &snap);
+        body.push_str("</UpdateHealthCheckResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn delete_health_check(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_health_check(&id))?;
+        if !account.health_checks.contains_key(&id) {
+            return Err(no_such_health_check(&id));
+        }
+        // Real Route 53 returns HealthCheckInUse if any record set still
+        // references the health check. Mirror that across all hosted zones.
+        for zone in account.hosted_zones.values() {
+            for rrset in &zone.resource_record_sets {
+                if rrset.health_check_id.as_deref() == Some(id.as_str()) {
+                    return Err(aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "HealthCheckInUse",
+                        format!(
+                            "Health check {} is in use by record set {} ({}) in zone {}",
+                            id, rrset.name, rrset.record_type, zone.id
+                        ),
+                    ));
+                }
+            }
+        }
+        account.health_checks.remove(&id);
+        drop(state);
+        let mut body = String::with_capacity(128);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<DeleteHealthCheckResponse xmlns=\"{NS}\"/>"));
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn list_health_checks(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let marker = req.query_params.get("marker").cloned();
+        let max_items: usize = req
+            .query_params
+            .get("maxitems")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+        let state = self.state.read();
+        let mut hcs: Vec<StoredHealthCheck> = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .map(|a| a.health_checks.values().cloned().collect())
+            .unwrap_or_default();
+        drop(state);
+        hcs.sort_by(|a, b| a.id.cmp(&b.id));
+        let start = match &marker {
+            Some(m) => hcs
+                .iter()
+                .position(|h| h.id.as_str() >= m.as_str())
+                .unwrap_or(hcs.len()),
+            None => 0,
+        };
+        let slice: Vec<StoredHealthCheck> =
+            hcs.iter().skip(start).take(max_items).cloned().collect();
+        let next_marker = if start + slice.len() < hcs.len() {
+            Some(hcs[start + slice.len()].id.clone())
+        } else {
+            None
+        };
+        let mut body = String::with_capacity(1024);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<ListHealthChecksResponse xmlns=\"{NS}\">"));
+        body.push_str("<HealthChecks>");
+        for hc in &slice {
+            push_health_check(&mut body, hc);
+        }
+        body.push_str("</HealthChecks>");
+        if let Some(m) = &marker {
+            body.push_str(&format!("<Marker>{}</Marker>", esc(m)));
+        } else {
+            body.push_str("<Marker></Marker>");
+        }
+        body.push_str(&format!("<MaxItems>{}</MaxItems>", max_items));
+        body.push_str(&format!(
+            "<IsTruncated>{}</IsTruncated>",
+            next_marker.is_some()
+        ));
+        if let Some(nm) = &next_marker {
+            body.push_str(&format!("<NextMarker>{}</NextMarker>", esc(nm)));
+        }
+        body.push_str("</ListHealthChecksResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn get_health_check_count(&self) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let count = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .map(|a| a.health_checks.len())
+            .unwrap_or(0);
+        drop(state);
+        let mut body = String::with_capacity(128);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<GetHealthCheckCountResponse xmlns=\"{NS}\">"));
+        body.push_str(&format!("<HealthCheckCount>{}</HealthCheckCount>", count));
+        body.push_str("</GetHealthCheckCountResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn get_health_check_status(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let state = self.state.read();
+        let hc = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .and_then(|a| a.health_checks.get(&id).cloned())
+            .ok_or_else(|| no_such_health_check(&id))?;
+        drop(state);
+        let now = rfc3339(&Utc::now());
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<GetHealthCheckStatusResponse xmlns=\"{NS}\">"));
+        body.push_str("<HealthCheckObservations>");
+        for region in checker_regions() {
+            body.push_str("<HealthCheckObservation>");
+            body.push_str(&format!("<Region>{}</Region>", esc(region)));
+            body.push_str(&format!(
+                "<IPAddress>{}</IPAddress>",
+                esc(&checker_ip_for_region(region))
+            ));
+            body.push_str("<StatusReport>");
+            body.push_str("<Status>Success: HTTP Status Code 200, OK.</Status>");
+            body.push_str(&format!("<CheckedTime>{}</CheckedTime>", now));
+            body.push_str("</StatusReport>");
+            body.push_str("</HealthCheckObservation>");
+        }
+        body.push_str("</HealthCheckObservations>");
+        body.push_str("</GetHealthCheckStatusResponse>");
+        let _ = hc;
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn get_health_check_last_failure_reason(
+        &self,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let state = self.state.read();
+        let _hc = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .and_then(|a| a.health_checks.get(&id).cloned())
+            .ok_or_else(|| no_such_health_check(&id))?;
+        drop(state);
+        // Real Route 53 returns an empty observations list when the
+        // checker has not seen a failure yet. fakecloud has no live
+        // checker, so the list is always empty.
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<GetHealthCheckLastFailureReasonResponse xmlns=\"{NS}\">"
+        ));
+        body.push_str("<HealthCheckObservations></HealthCheckObservations>");
+        body.push_str("</GetHealthCheckLastFailureReasonResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn get_checker_ip_ranges(&self) -> Result<AwsResponse, AwsServiceError> {
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<GetCheckerIpRangesResponse xmlns=\"{NS}\">"));
+        body.push_str("<CheckerIpRanges>");
+        for cidr in CHECKER_IP_RANGES {
+            body.push_str(&format!("<member>{}</member>", esc(cidr)));
+        }
+        body.push_str("</CheckerIpRanges>");
+        body.push_str("</GetCheckerIpRangesResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 fn _account_helper(_state: &mut Route53Accounts) -> &mut AccountState {
@@ -932,6 +1295,161 @@ fn generate_zone_id() -> String {
 fn generate_change_id() -> String {
     let raw = Uuid::new_v4().simple().to_string().to_uppercase();
     format!("C{}", &raw[..14])
+}
+
+fn generate_health_check_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn push_health_check(out: &mut String, hc: &StoredHealthCheck) {
+    out.push_str("<HealthCheck>");
+    out.push_str(&format!("<Id>{}</Id>", esc(&hc.id)));
+    out.push_str(&format!(
+        "<CallerReference>{}</CallerReference>",
+        esc(&hc.caller_reference)
+    ));
+    push_health_check_config(out, &hc.config);
+    out.push_str(&format!(
+        "<HealthCheckVersion>{}</HealthCheckVersion>",
+        hc.version
+    ));
+    out.push_str("</HealthCheck>");
+}
+
+fn push_health_check_config(out: &mut String, c: &HealthCheckConfig) {
+    out.push_str("<HealthCheckConfig>");
+    if let Some(v) = &c.ip_address {
+        out.push_str(&format!("<IPAddress>{}</IPAddress>", esc(v)));
+    }
+    if let Some(v) = c.port {
+        out.push_str(&format!("<Port>{}</Port>", v));
+    }
+    out.push_str(&format!("<Type>{}</Type>", esc(&c.health_check_type)));
+    if let Some(v) = &c.resource_path {
+        out.push_str(&format!("<ResourcePath>{}</ResourcePath>", esc(v)));
+    }
+    if let Some(v) = &c.fully_qualified_domain_name {
+        out.push_str(&format!(
+            "<FullyQualifiedDomainName>{}</FullyQualifiedDomainName>",
+            esc(v)
+        ));
+    }
+    if let Some(v) = &c.search_string {
+        out.push_str(&format!("<SearchString>{}</SearchString>", esc(v)));
+    }
+    if let Some(v) = c.request_interval {
+        out.push_str(&format!("<RequestInterval>{}</RequestInterval>", v));
+    }
+    if let Some(v) = c.failure_threshold {
+        out.push_str(&format!("<FailureThreshold>{}</FailureThreshold>", v));
+    }
+    if let Some(v) = c.measure_latency {
+        out.push_str(&format!("<MeasureLatency>{}</MeasureLatency>", v));
+    }
+    if let Some(v) = c.inverted {
+        out.push_str(&format!("<Inverted>{}</Inverted>", v));
+    }
+    if let Some(v) = c.disabled {
+        out.push_str(&format!("<Disabled>{}</Disabled>", v));
+    }
+    if let Some(v) = c.health_threshold {
+        out.push_str(&format!("<HealthThreshold>{}</HealthThreshold>", v));
+    }
+    if let Some(child) = &c.child_health_checks {
+        out.push_str("<ChildHealthChecks>");
+        for id in &child.child_health_check {
+            out.push_str(&format!("<ChildHealthCheck>{}</ChildHealthCheck>", esc(id)));
+        }
+        out.push_str("</ChildHealthChecks>");
+    }
+    if let Some(v) = c.enable_sni {
+        out.push_str(&format!("<EnableSNI>{}</EnableSNI>", v));
+    }
+    if let Some(regs) = &c.regions {
+        out.push_str("<Regions>");
+        for r in &regs.region {
+            out.push_str(&format!("<Region>{}</Region>", esc(r)));
+        }
+        out.push_str("</Regions>");
+    }
+    if let Some(a) = &c.alarm_identifier {
+        out.push_str("<AlarmIdentifier>");
+        out.push_str(&format!("<Region>{}</Region>", esc(&a.region)));
+        out.push_str(&format!("<Name>{}</Name>", esc(&a.name)));
+        out.push_str("</AlarmIdentifier>");
+    }
+    if let Some(v) = &c.insufficient_data_health_status {
+        out.push_str(&format!(
+            "<InsufficientDataHealthStatus>{}</InsufficientDataHealthStatus>",
+            esc(v)
+        ));
+    }
+    if let Some(v) = &c.routing_control_arn {
+        out.push_str(&format!(
+            "<RoutingControlArn>{}</RoutingControlArn>",
+            esc(v)
+        ));
+    }
+    out.push_str("</HealthCheckConfig>");
+}
+
+fn no_such_health_check(id: &str) -> AwsServiceError {
+    aws_error(
+        StatusCode::NOT_FOUND,
+        "NoSuchHealthCheck",
+        format!("No health check found with ID: {id}"),
+    )
+}
+
+// Public Route 53 health checker IP ranges (subset of the published list).
+// fakecloud is offline so the exact set doesn't matter; SDKs only check
+// the structure of the response.
+const CHECKER_IP_RANGES: &[&str] = &[
+    "15.177.0.0/18",
+    "15.177.64.0/18",
+    "15.177.128.0/18",
+    "15.177.192.0/18",
+    "54.183.255.128/26",
+    "54.228.16.0/26",
+    "54.232.40.64/26",
+    "54.241.32.64/26",
+    "54.243.31.192/26",
+    "54.244.52.192/26",
+    "54.245.168.0/26",
+    "54.248.220.0/26",
+    "54.250.253.192/26",
+    "54.251.31.128/26",
+    "54.252.79.128/26",
+    "54.252.254.192/26",
+    "54.255.254.192/26",
+    "107.23.255.0/26",
+    "176.34.159.192/26",
+    "177.71.207.128/26",
+];
+
+fn checker_regions() -> &'static [&'static str] {
+    &[
+        "us-east-1",
+        "us-west-1",
+        "us-west-2",
+        "eu-west-1",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ap-northeast-1",
+        "sa-east-1",
+    ]
+}
+
+fn checker_ip_for_region(region: &str) -> String {
+    // Route 53 reports a per-region checker IP. The exact value isn't
+    // observable to clients in any way that matters for fakecloud, so use
+    // a deterministic offset into the documented ranges.
+    let idx = region.bytes().fold(0usize, |a, b| a + b as usize) % CHECKER_IP_RANGES.len();
+    CHECKER_IP_RANGES[idx]
+        .split('/')
+        .next()
+        .unwrap_or("0.0.0.0")
+        .to_string()
 }
 
 fn rfc3339(t: &chrono::DateTime<chrono::Utc>) -> String {

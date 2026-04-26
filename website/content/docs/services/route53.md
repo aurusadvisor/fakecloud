@@ -1,12 +1,12 @@
 +++
 title = "Route 53"
-description = "Route 53 control plane — hosted zones, resource record sets, change tracking, TestDNSAnswer synthesis."
+description = "Route 53 control plane — hosted zones, resource record sets, change tracking, TestDNSAnswer synthesis, health checks."
 weight = 25
 +++
 
-fakecloud implements Amazon Route 53's REST-XML control plane focused on the operations real applications and Terraform stacks rely on for DNS management: hosted zone lifecycle, resource record sets with the full `ChangeResourceRecordSets` semantics (CREATE/UPSERT/DELETE), change tracking, hosted zone limits, list-by-name pagination, and `TestDNSAnswer` synthesis. 13 operations.
+fakecloud implements Amazon Route 53's REST-XML control plane focused on the operations real applications and Terraform stacks rely on for DNS management: hosted zone lifecycle, resource record sets with the full `ChangeResourceRecordSets` semantics (CREATE/UPSERT/DELETE), change tracking, hosted zone limits, list-by-name pagination, `TestDNSAnswer` synthesis, and the full health-check lifecycle. 22 operations.
 
-**Status: Batch 1 shipped.** Health checks, traffic policies, DNSSEC + key signing keys, query logging configs, CIDR collections, VPC associations + delegation sets, geo location lookups, account limits, and tags land in subsequent batches.
+**Status: Batches 1–2 shipped.** Traffic policies, DNSSEC + key signing keys, query logging configs, CIDR collections, VPC associations + delegation sets, geo location lookups, account limits, and tags land in subsequent batches.
 
 ## Supported today
 
@@ -14,6 +14,7 @@ fakecloud implements Amazon Route 53's REST-XML control plane focused on the ope
 - **Resource Record Sets** — `ChangeResourceRecordSets` accepts the full `ChangeBatch` shape with multiple `Change` entries and supports `CREATE` (rejects existing), `UPSERT` (replace-or-insert), and `DELETE` (errors on the default SOA/NS apex records). `ListResourceRecordSets` returns all record types with optional `SetIdentifier` for weighted/latency/failover routing. Each successful change emits a tracked `ChangeInfo` whose status is reported as `INSYNC` immediately for deterministic tests.
 - **Change tracking** — `GetChange` returns per-batch `ChangeInfo` with the `INSYNC` status, submitted timestamp, and the comment from the originating batch.
 - **DNS test** — `TestDNSAnswer` synthesizes an answer from the in-memory record set: it looks up the named record/type in the supplied hosted zone and returns the recorded values inside `<RecordData>` with `ResponseCode = NOERROR`. Resolver IP and EDNS0 client subnet IP are echoed back into the response.
+- **Health Checks** — `CreateHealthCheck`, `GetHealthCheck`, `UpdateHealthCheck`, `DeleteHealthCheck`, `ListHealthChecks`, `GetHealthCheckCount`, `GetHealthCheckStatus`, `GetHealthCheckLastFailureReason`, `GetCheckerIpRanges`. Full lifecycle for HTTP/HTTPS/TCP/HTTP_STR_MATCH/HTTPS_STR_MATCH/CALCULATED/CLOUDWATCH_METRIC/RECOVERY_CONTROL types with the documented `HealthCheckConfig` shape (port, path, FQDN, search string, request interval, failure threshold, regions, alarm identifier, child checks, routing-control ARN, etc.). `CreateHealthCheck` rejects duplicate `CallerReference` with `HealthCheckAlreadyExists`. `UpdateHealthCheck` enforces optimistic concurrency via `HealthCheckVersion` (mismatch -> `HealthCheckVersionMismatch`), bumps the version on success, and honors the `ResetElements` list to clear `ChildHealthChecks` / `FullyQualifiedDomainName` / `Regions` / `ResourcePath`. `DeleteHealthCheck` rejects with `HealthCheckInUse` while any record set still references the check via `HealthCheckId`. `GetHealthCheckStatus` returns synthetic per-region observations (no real prober runs). `GetHealthCheckLastFailureReason` returns an empty observations list (fakecloud has no live checker). `GetCheckerIpRanges` returns the documented Route 53 health checker CIDRs.
 
 ### Concurrency semantics
 
@@ -76,7 +77,6 @@ aws --endpoint-url http://localhost:4566 route53 test-dns-answer \
 
 | Surface                                | Status                  |
 |----------------------------------------|-------------------------|
-| Health Checks                          | next batch              |
 | Traffic Policies + Instances           | next batch              |
 | DNSSEC + Key Signing Keys              | next batch              |
 | Query Logging Configs                  | next batch              |
@@ -85,4 +85,4 @@ aws --endpoint-url http://localhost:4566 route53 test-dns-answer \
 | Geo Location lookups                   | next batch              |
 | Tags                                   | next batch              |
 
-There is no actual DNS server: requests against the synthesized name servers don't return live responses. `TestDNSAnswer` looks up records from the in-memory state and returns them; treat it as a record-set lookup, not a real DNS resolver.
+There is no actual DNS server: requests against the synthesized name servers don't return live responses. `TestDNSAnswer` looks up records from the in-memory state and returns them; treat it as a record-set lookup, not a real DNS resolver. Likewise, fakecloud does not run real health probes: `GetHealthCheckStatus` returns synthesized observations and `GetHealthCheckLastFailureReason` is always empty. The data is structurally valid but never reflects a real endpoint outage.

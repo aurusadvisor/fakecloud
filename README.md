@@ -48,7 +48,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 
 ## Supported services
 
-29 services, 2,208 operations, 100% conformance per implemented service.
+29 services, 2,217 operations, 100% conformance per implemented service.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -80,7 +80,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | ECS                    |  60 | **Full API** — clusters, task definitions, real task execution, services + rolling deployments, container instances, capacity providers, task sets, ECS Exec |
 | Elastic Load Balancing v2 |  51 | ALB/NLB/GWLB CRUD: load balancers, target groups + targets + real health probes, **listeners + rules + certificates**, LB/listener/target-group attributes, capacity reservations, **mTLS trust stores + revocations**, SSL policies, resource policies, tags. **In-process HTTP data plane** for ALBs — per-LB TCP bind, rule matching, forward / fixed-response / redirect, sticky sessions, X-Forwarded-* headers |
 | CloudFront                | 147 | Distributions + invalidations + tagging + by-X listings + web ACL/alias association. OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment policies. CloudFront Functions, Public Keys, Key Groups, Key Value Stores, OAIs (legacy), Monitoring Subscriptions. Streaming Distributions (legacy RTMP). Field-Level Encryption configs + profiles + Realtime Log Configs. VPC Origins, Anycast IP Lists, Trust Stores, Resource Policies. **Connection Groups + Domain Association/DNS Verification + Managed Certificate Details + Promote-Staging Distribution** — full CRUD with ETag/If-Match concurrency. REST-XML protocol, full `DistributionConfig` round-trip incl. origins, cache behaviors, custom error responses, viewer certificates, geo restrictions |
-| Route 53                  |  13 | **Hosted zones + resource record sets** — CRUD, default SOA/NS seeding, change tracking with `INSYNC` deterministic propagation, comment/features updates, hosted zone limits, list-by-name, `TestDNSAnswer` synthesis. REST-XML protocol with HTTP method + URI routing under `/2013-04-01/`. Health checks, traffic policies, DNSSEC, query logging, CIDR collections, VPC associations, reusable delegation sets land in subsequent batches |
+| Route 53                  |  22 | **Hosted zones + resource record sets + health checks** — CRUD, default SOA/NS seeding, change tracking with `INSYNC` deterministic propagation, comment/features updates, hosted zone limits, list-by-name, `TestDNSAnswer` synthesis. **Health checks**: full lifecycle with `HealthCheckVersion` optimistic concurrency, `ResetElements` semantics, `HealthCheckInUse` rejection on delete, status + last-failure observations, checker IP ranges. REST-XML protocol with HTTP method + URI routing under `/2013-04-01/`. Traffic policies, DNSSEC, query logging, CIDR collections, VPC associations, reusable delegation sets land in subsequent batches |
 
 Per-service docs and feature matrices: [fakecloud.dev/docs/services](https://fakecloud.dev/docs/services).
 

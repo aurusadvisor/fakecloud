@@ -187,3 +187,118 @@ pub struct Coordinates {
     pub latitude: String,
     pub longitude: String,
 }
+
+// ─── Health Checks ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CreateHealthCheckRequest {
+    pub caller_reference: String,
+    pub health_check_config: HealthCheckConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct HealthCheckConfig {
+    #[serde(default, skip_serializing_if = "skip_if_none", rename = "IPAddress")]
+    pub ip_address: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub port: Option<i32>,
+    #[serde(rename = "Type")]
+    pub health_check_type: String,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub resource_path: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub fully_qualified_domain_name: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub search_string: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub request_interval: Option<i32>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub failure_threshold: Option<i32>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub measure_latency: Option<bool>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub inverted: Option<bool>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub disabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub health_threshold: Option<i32>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub child_health_checks: Option<ChildHealthChecks>,
+    #[serde(default, skip_serializing_if = "skip_if_none", rename = "EnableSNI")]
+    pub enable_sni: Option<bool>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub regions: Option<HealthCheckRegions>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub alarm_identifier: Option<AlarmIdentifier>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub insufficient_data_health_status: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub routing_control_arn: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct ChildHealthChecks {
+    #[serde(default, rename = "ChildHealthCheck")]
+    pub child_health_check: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct HealthCheckRegions {
+    #[serde(default, rename = "Region")]
+    pub region: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct AlarmIdentifier {
+    pub region: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateHealthCheckRequest {
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub health_check_version: Option<i64>,
+    #[serde(default, skip_serializing_if = "skip_if_none", rename = "IPAddress")]
+    pub ip_address: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub port: Option<i32>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub resource_path: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub fully_qualified_domain_name: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub search_string: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub failure_threshold: Option<i32>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub inverted: Option<bool>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub disabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub health_threshold: Option<i32>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub child_health_checks: Option<ChildHealthChecks>,
+    #[serde(default, skip_serializing_if = "skip_if_none", rename = "EnableSNI")]
+    pub enable_sni: Option<bool>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub regions: Option<HealthCheckRegions>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub alarm_identifier: Option<AlarmIdentifier>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub insufficient_data_health_status: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub reset_elements: Option<ResetElements>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct ResetElements {
+    #[serde(default, rename = "ResettableElementName")]
+    pub resettable_element_name: Vec<String>,
+}

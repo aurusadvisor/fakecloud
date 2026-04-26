@@ -80,6 +80,21 @@ pub fn route(method: &Method, path: &str, _raw_query: &str) -> Option<Route> {
         // ─── DNS Test ────────────────────────────────────────────────
         (&Method::GET, ["testdnsanswer"]) => Some(Route::just("TestDNSAnswer")),
 
+        // ─── Health Checks ───────────────────────────────────────────
+        (&Method::POST, ["healthcheck"]) => Some(Route::just("CreateHealthCheck")),
+        (&Method::GET, ["healthcheck"]) => Some(Route::just("ListHealthChecks")),
+        (&Method::GET, ["healthcheckcount"]) => Some(Route::just("GetHealthCheckCount")),
+        (&Method::GET, ["healthcheck", id]) => Some(Route::with_id("GetHealthCheck", id)),
+        (&Method::POST, ["healthcheck", id]) => Some(Route::with_id("UpdateHealthCheck", id)),
+        (&Method::DELETE, ["healthcheck", id]) => Some(Route::with_id("DeleteHealthCheck", id)),
+        (&Method::GET, ["healthcheck", id, "status"]) => {
+            Some(Route::with_id("GetHealthCheckStatus", id))
+        }
+        (&Method::GET, ["healthcheck", id, "lastfailurereason"]) => {
+            Some(Route::with_id("GetHealthCheckLastFailureReason", id))
+        }
+        (&Method::GET, ["checkeripranges"]) => Some(Route::just("GetCheckerIpRanges")),
+
         _ => None,
     }
 }
