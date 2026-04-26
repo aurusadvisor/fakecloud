@@ -4,9 +4,9 @@ description = "CloudFront control plane — distributions, invalidations, web AC
 weight = 24
 +++
 
-fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, the full policy resource surface (OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment), CloudFront Functions, public keys + key groups, key value stores, legacy origin access identities, per-distribution monitoring subscriptions, and the legacy RTMP streaming distributions. 100 operations.
+fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, the full policy resource surface (OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment), CloudFront Functions, public keys + key groups, key value stores, legacy origin access identities, per-distribution monitoring subscriptions, the legacy RTMP streaming distributions, field-level encryption configs + profiles, and realtime log configs. 117 operations.
 
-**Status: Batches 1-4 shipped.** Field-level encryption, real-time log config, VPC origins, anycast IP lists, trust stores, distribution tenants, and connection functions/groups are still pending across subsequent batches.
+**Status: Batches 1-5 shipped.** VPC origins, anycast IP lists, trust stores, distribution tenants, and connection functions/groups are still pending in batch 6.
 
 ## Supported today
 
@@ -26,6 +26,9 @@ fakecloud implements CloudFront's REST-XML control plane focused on the operatio
 - **Legacy Origin Access Identities** — `CreateCloudFrontOriginAccessIdentity`, `Get`, `GetConfig`, `Update`, `Delete`, `List`.
 - **Monitoring Subscriptions** — `CreateMonitoringSubscription`, `GetMonitoringSubscription`, `DeleteMonitoringSubscription` keyed by distribution id.
 - **Streaming Distributions (legacy RTMP)** — `CreateStreamingDistribution`, `CreateStreamingDistributionWithTags`, `GetStreamingDistribution`, `GetStreamingDistributionConfig`, `UpdateStreamingDistribution`, `DeleteStreamingDistribution`, `ListStreamingDistributions`. ETag/If-Match concurrency. `DeleteStreamingDistribution` enforces the AWS rule that the distribution must be `Enabled = false` before deletion (`StreamingDistributionNotDisabled`).
+- **Field-Level Encryption** — `CreateFieldLevelEncryptionConfig`, `GetFieldLevelEncryption`, `GetFieldLevelEncryptionConfig`, `UpdateFieldLevelEncryptionConfig`, `DeleteFieldLevelEncryptionConfig`, `ListFieldLevelEncryptionConfigs`. ETag/If-Match concurrency, `CallerReference` immutability on update, duplicate `CallerReference` rejected with `FieldLevelEncryptionConfigAlreadyExists`.
+- **Field-Level Encryption Profiles** — `CreateFieldLevelEncryptionProfile`, `GetFieldLevelEncryptionProfile`, `GetFieldLevelEncryptionProfileConfig`, `UpdateFieldLevelEncryptionProfile`, `DeleteFieldLevelEncryptionProfile`, `ListFieldLevelEncryptionProfiles`. Same concurrency + idempotency model as FLE configs.
+- **Realtime Log Configs** — `CreateRealtimeLogConfig`, `GetRealtimeLogConfig` (by `Name` or `ARN`), `UpdateRealtimeLogConfig`, `DeleteRealtimeLogConfig` (by `Name` or `ARN`), `ListRealtimeLogConfigs`. Endpoint round-trip preserves `KinesisStreamConfig` `RoleARN`/`StreamARN` exactly.
 
 ### Concurrency semantics
 
@@ -79,8 +82,6 @@ aws --endpoint-url http://localhost:4566 cloudfront list-invalidations --distrib
 
 | Surface                                | Status                  |
 |----------------------------------------|-------------------------|
-| Field-Level Encryption                 | Batch 5                 |
-| Real-time Log Config                   | Batch 5                 |
 | VPC Origins + Anycast IP Lists         | Batch 6                 |
 | Trust Stores + Distribution Tenants    | Batch 6                 |
 | Connection Functions / Groups          | Batch 6                 |

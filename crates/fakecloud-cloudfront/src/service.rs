@@ -125,6 +125,23 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "UpdateStreamingDistribution",
     "DeleteStreamingDistribution",
     "ListStreamingDistributions",
+    "CreateFieldLevelEncryptionConfig",
+    "GetFieldLevelEncryption",
+    "GetFieldLevelEncryptionConfig",
+    "UpdateFieldLevelEncryptionConfig",
+    "DeleteFieldLevelEncryptionConfig",
+    "ListFieldLevelEncryptionConfigs",
+    "CreateFieldLevelEncryptionProfile",
+    "GetFieldLevelEncryptionProfile",
+    "GetFieldLevelEncryptionProfileConfig",
+    "UpdateFieldLevelEncryptionProfile",
+    "DeleteFieldLevelEncryptionProfile",
+    "ListFieldLevelEncryptionProfiles",
+    "CreateRealtimeLogConfig",
+    "GetRealtimeLogConfig",
+    "UpdateRealtimeLogConfig",
+    "DeleteRealtimeLogConfig",
+    "ListRealtimeLogConfigs",
 ];
 
 pub struct CloudFrontService {
@@ -277,6 +294,33 @@ impl AwsService for CloudFrontService {
             "UpdateStreamingDistribution" => self.update_streaming_distribution(&req, &resolved),
             "DeleteStreamingDistribution" => self.delete_streaming_distribution(&req, &resolved),
             "ListStreamingDistributions" => self.list_streaming_distributions(&req),
+            "CreateFieldLevelEncryptionConfig" => self.create_field_level_encryption_config(&req),
+            "GetFieldLevelEncryption" => self.get_field_level_encryption(&resolved),
+            "GetFieldLevelEncryptionConfig" => self.get_field_level_encryption_config(&resolved),
+            "UpdateFieldLevelEncryptionConfig" => {
+                self.update_field_level_encryption_config(&req, &resolved)
+            }
+            "DeleteFieldLevelEncryptionConfig" => {
+                self.delete_field_level_encryption_config(&req, &resolved)
+            }
+            "ListFieldLevelEncryptionConfigs" => self.list_field_level_encryption_configs(&req),
+            "CreateFieldLevelEncryptionProfile" => self.create_field_level_encryption_profile(&req),
+            "GetFieldLevelEncryptionProfile" => self.get_field_level_encryption_profile(&resolved),
+            "GetFieldLevelEncryptionProfileConfig" => {
+                self.get_field_level_encryption_profile_config(&resolved)
+            }
+            "UpdateFieldLevelEncryptionProfile" => {
+                self.update_field_level_encryption_profile(&req, &resolved)
+            }
+            "DeleteFieldLevelEncryptionProfile" => {
+                self.delete_field_level_encryption_profile(&req, &resolved)
+            }
+            "ListFieldLevelEncryptionProfiles" => self.list_field_level_encryption_profiles(&req),
+            "CreateRealtimeLogConfig" => self.create_realtime_log_config(&req),
+            "GetRealtimeLogConfig" => self.get_realtime_log_config(&req),
+            "UpdateRealtimeLogConfig" => self.update_realtime_log_config(&req),
+            "DeleteRealtimeLogConfig" => self.delete_realtime_log_config(&req),
+            "ListRealtimeLogConfigs" => self.list_realtime_log_configs(&req),
             other => Err(aws_error(
                 StatusCode::NOT_IMPLEMENTED,
                 "InvalidAction",
