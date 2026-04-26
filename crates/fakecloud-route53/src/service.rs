@@ -495,51 +495,45 @@ impl Route53Service {
             .hosted_zones
             .get_mut(&id)
             .ok_or_else(|| no_such_hosted_zone(&id))?;
+        // AWS applies a ChangeBatch atomically: either every change succeeds
+        // or none do. Stage the mutations against a clone first; only swap
+        // the live record set in once every action validates.
+        let mut working = zone.resource_record_sets.clone();
         for ch in &cfg.change_batch.changes.change {
             let action = ch.action.to_uppercase();
             let rec = normalize_rrset(&ch.resource_record_set);
             match action.as_str() {
                 "CREATE" => {
-                    if zone
-                        .resource_record_sets
-                        .iter()
-                        .any(|r| rrset_matches(r, &rec))
-                    {
+                    if working.iter().any(|r| rrset_matches(r, &rec)) {
                         return Err(invalid_change_batch(format!(
                             "Tried to create resource record set [name='{}', type='{}'] but it already exists",
                             rec.name, rec.record_type
                         )));
                     }
-                    zone.resource_record_sets.push(rec);
+                    working.push(rec);
                 }
                 "UPSERT" => {
-                    let pos = zone
-                        .resource_record_sets
-                        .iter()
-                        .position(|r| rrset_matches(r, &rec));
+                    let pos = working.iter().position(|r| rrset_matches(r, &rec));
                     if let Some(p) = pos {
-                        zone.resource_record_sets[p] = rec;
+                        working[p] = rec;
                     } else {
-                        zone.resource_record_sets.push(rec);
+                        working.push(rec);
                     }
                 }
                 "DELETE" => {
-                    let pos = zone
-                        .resource_record_sets
-                        .iter()
-                        .position(|r| rrset_matches(r, &rec));
+                    let pos = working.iter().position(|r| rrset_matches(r, &rec));
                     let p = pos.ok_or_else(|| {
                         invalid_change_batch(format!(
                             "Tried to delete resource record set [name='{}', type='{}'] but it was not found",
                             rec.name, rec.record_type
                         ))
                     })?;
-                    if is_default_record(&zone.resource_record_sets[p], &zone.name) {
+                    if is_default_record(&working[p], &zone.name) {
                         return Err(invalid_change_batch(
                             "Cannot delete default SOA or NS record",
                         ));
                     }
-                    zone.resource_record_sets.remove(p);
+                    working.remove(p);
                 }
                 other => {
                     return Err(invalid_change_batch(format!(
@@ -548,6 +542,7 @@ impl Route53Service {
                 }
             }
         }
+        zone.resource_record_sets = working;
         let change_id = generate_change_id();
         let change = StoredChange {
             id: change_id.clone(),

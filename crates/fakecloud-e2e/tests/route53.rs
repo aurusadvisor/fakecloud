@@ -207,6 +207,87 @@ async fn delete_rrset_via_change_batch() {
 }
 
 #[tokio::test]
+async fn change_batch_is_atomic_on_invalid_change() {
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+
+    let create = r53
+        .create_hosted_zone()
+        .name("atomic.example.com")
+        .caller_reference("e2e-atomic")
+        .send()
+        .await
+        .expect("create");
+    let zone_id = create.hosted_zone().unwrap().id().to_string();
+
+    let valid = ResourceRecordSet::builder()
+        .name("ok.atomic.example.com.")
+        .r#type(RrType::A)
+        .ttl(60)
+        .resource_records(
+            ResourceRecord::builder()
+                .value("203.0.113.10")
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    let invalid = ResourceRecordSet::builder()
+        .name("missing.atomic.example.com.")
+        .r#type(RrType::A)
+        .ttl(60)
+        .resource_records(
+            ResourceRecord::builder()
+                .value("203.0.113.20")
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    let result = r53
+        .change_resource_record_sets()
+        .hosted_zone_id(&zone_id)
+        .change_batch(
+            ChangeBatch::builder()
+                .changes(
+                    Change::builder()
+                        .action(ChangeAction::Create)
+                        .resource_record_set(valid)
+                        .build()
+                        .unwrap(),
+                )
+                .changes(
+                    Change::builder()
+                        .action(ChangeAction::Delete)
+                        .resource_record_set(invalid)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await;
+    assert!(result.is_err(), "expected the batch to be rejected");
+
+    // Atomicity: even though the first change was valid, the failure of
+    // the second change must roll back the create so the zone still has
+    // only its default SOA + NS records.
+    let list = r53
+        .list_resource_record_sets()
+        .hosted_zone_id(&zone_id)
+        .send()
+        .await
+        .expect("list after rejected batch");
+    let names: Vec<&str> = list
+        .resource_record_sets()
+        .iter()
+        .map(|r| r.name())
+        .collect();
+    assert!(!names.contains(&"ok.atomic.example.com."));
+}
+
+#[tokio::test]
 async fn list_hosted_zones_by_name_works() {
     let server = TestServer::start().await;
     let r53 = server.route53_client().await;

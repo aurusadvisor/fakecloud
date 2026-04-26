@@ -36,7 +36,13 @@ impl Route {
 }
 
 pub fn route(method: &Method, path: &str, _raw_query: &str) -> Option<Route> {
-    let path = path.strip_prefix("/2013-04-01").unwrap_or(path);
+    // Real Route 53 only serves operations beneath `/2013-04-01/`. Refuse
+    // anything else outright instead of permissively trimming a missing
+    // prefix and possibly matching a malformed path against a route.
+    let path = path.strip_prefix(crate::API_PREFIX)?;
+    if !path.is_empty() && !path.starts_with('/') {
+        return None;
+    }
     let path = path.trim_start_matches('/');
     let segs: Vec<&str> = if path.is_empty() {
         Vec::new()
