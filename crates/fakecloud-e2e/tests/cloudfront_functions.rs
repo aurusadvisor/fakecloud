@@ -276,3 +276,32 @@ async fn monitoring_subscription_lifecycle() {
         .await
         .expect("delete_monsub");
 }
+
+#[tokio::test]
+async fn test_function_rejects_stale_etag() {
+    use aws_sdk_cloudfront::types::FunctionStage;
+    let server = TestServer::start().await;
+    let cf = server.cloudfront_client().await;
+    cf.create_function()
+        .name("e2e-fn-stale")
+        .function_config(
+            FunctionConfig::builder()
+                .comment("stale-test")
+                .runtime(FunctionRuntime::CloudfrontJs20)
+                .build()
+                .unwrap(),
+        )
+        .function_code(Blob::new(b"function handler(e){return e.request;}"))
+        .send()
+        .await
+        .unwrap();
+    let res = cf
+        .test_function()
+        .name("e2e-fn-stale")
+        .if_match("E_NOT_MATCHING")
+        .stage(FunctionStage::Development)
+        .event_object(Blob::new(b"{}"))
+        .send()
+        .await;
+    assert!(res.is_err(), "stale If-Match must be rejected");
+}

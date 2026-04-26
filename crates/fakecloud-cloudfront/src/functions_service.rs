@@ -250,7 +250,7 @@ impl CloudFrontService {
         route: &Route,
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = route_id(route, "Function")?;
-        let _if_match = require_if_match(req)?;
+        let if_match = require_if_match(req)?;
         let state = self.state.read();
         let f = state
             .accounts
@@ -258,6 +258,9 @@ impl CloudFrontService {
             .and_then(|a| a.functions.get(&name).cloned())
             .ok_or_else(|| not_found("Function", &name))?;
         drop(state);
+        if f.etag != if_match {
+            return Err(precondition_failed());
+        }
 
         let mut body = String::with_capacity(512);
         body.push_str(XML_DECL);
