@@ -1106,10 +1106,14 @@ impl Route53Service {
             .accounts
             .entry(DEFAULT_ACCOUNT.to_string())
             .or_default();
+        // Match real Route 53: name uniqueness applies across all versions
+        // of every existing policy. Checking only version == 1 would let a
+        // duplicate name slip through whenever the v1 row had been deleted
+        // but later versions remained.
         if account
             .traffic_policies
             .values()
-            .any(|p| p.name == cfg.name && p.version == 1)
+            .any(|p| p.name == cfg.name)
         {
             return Err(aws_error(
                 StatusCode::CONFLICT,
@@ -1687,6 +1691,7 @@ impl Route53Service {
         drop(state);
         instances.sort_by(|a, b| a.id.cmp(&b.id));
         let slice: Vec<&StoredTrafficPolicyInstance> = instances.iter().take(max_items).collect();
+        let truncated = slice.len() < instances.len();
         let mut body = String::with_capacity(1024);
         body.push_str(XML_DECL);
         body.push_str(&format!(
@@ -1697,8 +1702,14 @@ impl Route53Service {
             push_traffic_policy_instance(&mut body, i);
         }
         body.push_str("</TrafficPolicyInstances>");
-        body.push_str("<IsTruncated>false</IsTruncated>");
+        body.push_str(&format!("<IsTruncated>{}</IsTruncated>", truncated));
         body.push_str(&format!("<MaxItems>{}</MaxItems>", max_items));
+        if truncated {
+            body.push_str(&format!(
+                "<TrafficPolicyInstanceNameMarker>{}</TrafficPolicyInstanceNameMarker>",
+                esc(&instances[slice.len()].id)
+            ));
+        }
         body.push_str("</ListTrafficPolicyInstancesByHostedZoneResponse>");
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }
@@ -1738,6 +1749,7 @@ impl Route53Service {
         drop(state);
         instances.sort_by(|a, b| a.id.cmp(&b.id));
         let slice: Vec<&StoredTrafficPolicyInstance> = instances.iter().take(max_items).collect();
+        let truncated = slice.len() < instances.len();
         let mut body = String::with_capacity(1024);
         body.push_str(XML_DECL);
         body.push_str(&format!(
@@ -1748,8 +1760,14 @@ impl Route53Service {
             push_traffic_policy_instance(&mut body, i);
         }
         body.push_str("</TrafficPolicyInstances>");
-        body.push_str("<IsTruncated>false</IsTruncated>");
+        body.push_str(&format!("<IsTruncated>{}</IsTruncated>", truncated));
         body.push_str(&format!("<MaxItems>{}</MaxItems>", max_items));
+        if truncated {
+            body.push_str(&format!(
+                "<TrafficPolicyInstanceNameMarker>{}</TrafficPolicyInstanceNameMarker>",
+                esc(&instances[slice.len()].id)
+            ));
+        }
         body.push_str("</ListTrafficPolicyInstancesByPolicyResponse>");
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }
