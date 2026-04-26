@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use crate::extras::{StoredAnycastIpList, StoredResourcePolicy, StoredTrustStore, StoredVpcOrigin};
 use crate::fle::{
     StoredFieldLevelEncryption, StoredFieldLevelEncryptionProfile, StoredRealtimeLogConfig,
 };
@@ -69,6 +70,11 @@ pub struct AccountState {
     pub field_level_encryption_profiles: HashMap<String, StoredFieldLevelEncryptionProfile>,
     /// Realtime log configs keyed by ARN.
     pub realtime_log_configs: HashMap<String, StoredRealtimeLogConfig>,
+    pub vpc_origins: HashMap<String, StoredVpcOrigin>,
+    pub anycast_ip_lists: HashMap<String, StoredAnycastIpList>,
+    pub trust_stores: HashMap<String, StoredTrustStore>,
+    /// Resource policies keyed by resource ARN.
+    pub resource_policies: HashMap<String, StoredResourcePolicy>,
 }
 
 impl CloudFrontAccounts {
