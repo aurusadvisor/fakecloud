@@ -18,6 +18,13 @@
 use http::Method;
 use std::collections::HashMap;
 
+/// Returns true when the request's `mode` query parameter equals `import`.
+/// `POST /restapis?mode=import` is the AWS REST shape for `ImportRestApi`,
+/// distinguished from `CreateRestApi` only by this query parameter.
+fn is_import_mode(query_params: &HashMap<String, String>) -> bool {
+    query_params.get("mode").map(String::as_str) == Some("import")
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedAction {
     pub action: &'static str,
@@ -41,7 +48,13 @@ impl ResolvedAction {
 /// Resolve `(method, path)` to an action and path-parameter map. The
 /// segments slice should already exclude any leading `/`; e.g.
 /// `/restapis/abc/resources` -> `["restapis", "abc", "resources"]`.
-pub fn resolve(method: &Method, segs: &[String]) -> Option<ResolvedAction> {
+/// Query parameters disambiguate routes that share a path+method
+/// (`POST /restapis` vs `POST /restapis?mode=import`).
+pub fn resolve(
+    method: &Method,
+    segs: &[String],
+    query_params: &HashMap<String, String>,
+) -> Option<ResolvedAction> {
     let s: Vec<&str> = segs.iter().map(|s| s.as_str()).collect();
     match (method.clone(), s.as_slice()) {
         // Account
@@ -49,6 +62,9 @@ pub fn resolve(method: &Method, segs: &[String]) -> Option<ResolvedAction> {
         (Method::PATCH, ["account"]) => Some(ResolvedAction::new("UpdateAccount")),
 
         // REST APIs
+        (Method::POST, ["restapis"]) if is_import_mode(query_params) => {
+            Some(ResolvedAction::new("ImportRestApi"))
+        }
         (Method::POST, ["restapis"]) => Some(ResolvedAction::new("CreateRestApi")),
         (Method::GET, ["restapis"]) => Some(ResolvedAction::new("GetRestApis")),
         (Method::GET, ["restapis", id]) => {
@@ -67,10 +83,6 @@ pub fn resolve(method: &Method, segs: &[String]) -> Option<ResolvedAction> {
             // here.
             Some(ResolvedAction::new("PutRestApi").with("restApiId", id))
         }
-        (Method::POST, ["restapis", "?mode=import"]) | (Method::POST, ["restapis?mode=import"]) => {
-            Some(ResolvedAction::new("ImportRestApi"))
-        }
-
         // Resources
         (Method::GET, ["restapis", api, "resources"]) => {
             Some(ResolvedAction::new("GetResources").with("restApiId", api))

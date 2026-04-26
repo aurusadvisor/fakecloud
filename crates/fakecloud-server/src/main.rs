@@ -571,6 +571,7 @@ async fn main() {
         ecs: ecs_state.clone(),
         stepfunctions: stepfunctions_state.clone(),
         scheduler: scheduler_state.clone(),
+        apigatewayv1: apigatewayv1_state.clone(),
         apigatewayv2: apigatewayv2_state.clone(),
         bedrock: bedrock_state.clone(),
         organizations: organizations_state.clone(),
@@ -2122,10 +2123,61 @@ async fn main() {
     // v1 (REST APIs) shares the SigV4 service identifier `apigateway`
     // with v2; the registry is keyed by that identifier so we wrap
     // both behind a facade that routes by URL prefix.
+    let apigw_v1_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("apigatewayv1").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_apigateway::ApiGatewaySnapshot>(&bytes)
+                    {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_apigateway::APIGATEWAY_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "apigatewayv1 persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_apigateway::APIGATEWAY_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *apigatewayv1_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded apigatewayv1 persistence snapshot",
+                                );
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse apigatewayv1 persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no apigatewayv1 persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read apigatewayv1 persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
     let mut apigw_v1_service = ApiGatewayService::new(apigatewayv1_state.clone());
     if let Some(ref ld) = lambda_delivery {
         let delivery_for_v1 = Arc::new(DeliveryBus::new().with_lambda(ld.clone()));
         apigw_v1_service = apigw_v1_service.with_delivery(delivery_for_v1);
+    }
+    if let Some(store) = apigw_v1_snapshot_store {
+        apigw_v1_service = apigw_v1_service.with_snapshot_store(store);
     }
     let v1_arc = Arc::new(apigw_v1_service);
     registry.register(Arc::new(ApiGatewayFacade::new(v1_arc, v2_arc)));

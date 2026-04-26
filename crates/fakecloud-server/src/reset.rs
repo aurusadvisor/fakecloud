@@ -26,6 +26,7 @@ pub(crate) struct ResetState {
     pub ecs: fakecloud_ecs::state::SharedEcsState,
     pub stepfunctions: fakecloud_stepfunctions::state::SharedStepFunctionsState,
     pub scheduler: fakecloud_scheduler::state::SharedSchedulerState,
+    pub apigatewayv1: fakecloud_apigateway::SharedApiGatewayState,
     pub apigatewayv2: fakecloud_apigatewayv2::state::SharedApiGatewayV2State,
     pub bedrock: fakecloud_bedrock::state::SharedBedrockState,
     pub organizations: fakecloud_organizations::state::SharedOrganizationsState,
@@ -130,7 +131,17 @@ impl ResetState {
             "scheduler" => {
                 self.scheduler.write().reset();
             }
-            "apigateway" | "apigatewayv2" => {
+            "apigateway" => {
+                // Both v1 (REST) and v2 (HTTP) share the SigV4 service
+                // identifier `apigateway`; resetting the service clears
+                // both crates' state.
+                self.apigatewayv1.write().reset();
+                self.apigatewayv2.write().reset();
+            }
+            "apigatewayv1" | "apigatewayrest" => {
+                self.apigatewayv1.write().reset();
+            }
+            "apigatewayv2" => {
                 self.apigatewayv2.write().reset();
             }
             "bedrock" | "bedrock-runtime" => {
@@ -281,7 +292,23 @@ impl ResetState {
                     state.reset();
                 }
             }
-            "apigateway" | "apigatewayv2" => {
+            "apigateway" => {
+                let mut v1 = self.apigatewayv1.write();
+                if let Some(state) = v1.get_mut(account_id) {
+                    state.reset();
+                }
+                let mut v2 = self.apigatewayv2.write();
+                if let Some(state) = v2.get_mut(account_id) {
+                    state.reset();
+                }
+            }
+            "apigatewayv1" | "apigatewayrest" => {
+                let mut mas = self.apigatewayv1.write();
+                if let Some(state) = mas.get_mut(account_id) {
+                    state.reset();
+                }
+            }
+            "apigatewayv2" => {
                 let mut mas = self.apigatewayv2.write();
                 if let Some(state) = mas.get_mut(account_id) {
                     state.reset();
@@ -357,6 +384,7 @@ impl ResetState {
         }
         self.stepfunctions.write().reset();
         self.scheduler.write().reset();
+        self.apigatewayv1.write().reset();
         self.apigatewayv2.write().reset();
         self.bedrock.write().reset();
         // Organizations is a cross-account singleton (not MultiAccountState);
@@ -636,6 +664,13 @@ mod tests {
                 ),
             )),
             scheduler: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            apigatewayv1: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",
                     "us-east-1",

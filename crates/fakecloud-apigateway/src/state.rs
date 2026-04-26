@@ -144,12 +144,7 @@ impl ApiGatewayState {
             documentation_parts: HashMap::new(),
             documentation_versions: HashMap::new(),
             gateway_responses: HashMap::new(),
-            account_settings: serde_json::json!({
-                "cloudwatchRoleArn": null,
-                "throttleSettings": {"burstLimit": 5000, "rateLimit": 10000.0},
-                "features": [],
-                "apiKeyVersion": "4",
-            }),
+            account_settings: default_account_settings(),
             tags: HashMap::new(),
             request_history: Vec::new(),
         }
@@ -177,9 +172,19 @@ impl ApiGatewayState {
         self.documentation_parts.clear();
         self.documentation_versions.clear();
         self.gateway_responses.clear();
+        self.account_settings = default_account_settings();
         self.tags.clear();
         self.request_history.clear();
     }
+}
+
+fn default_account_settings() -> serde_json::Value {
+    serde_json::json!({
+        "cloudwatchRoleArn": null,
+        "throttleSettings": {"burstLimit": 5000, "rateLimit": 10000.0},
+        "features": [],
+        "apiKeyVersion": "4",
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

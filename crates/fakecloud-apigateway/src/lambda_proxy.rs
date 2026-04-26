@@ -204,16 +204,12 @@ fn parse_lambda_response(response: serde_json::Value) -> Result<AwsResponse, Aws
         )
     })?;
 
+    // AWS docs: when both `headers` and `multiValueHeaders` contain the
+    // same key, `multiValueHeaders` wins. Process multi-value first and
+    // skip duplicates from `headers` so we never emit the same key/value
+    // pair twice.
     let mut headers = HeaderMap::new();
-    if let Some(h) = response["headers"].as_object() {
-        for (k, v) in h {
-            if let (Ok(name), Some(s)) = (http::HeaderName::from_bytes(k.as_bytes()), v.as_str()) {
-                if let Ok(val) = http::HeaderValue::from_str(s) {
-                    headers.insert(name, val);
-                }
-            }
-        }
-    }
+    let mut multi_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(mvh) = response["multiValueHeaders"].as_object() {
         for (k, v_arr) in mvh {
             let Ok(name) = http::HeaderName::from_bytes(k.as_bytes()) else {
@@ -222,11 +218,24 @@ fn parse_lambda_response(response: serde_json::Value) -> Result<AwsResponse, Aws
             let Some(arr) = v_arr.as_array() else {
                 continue;
             };
+            multi_keys.insert(name.as_str().to_lowercase());
             for v in arr {
                 if let Some(s) = v.as_str() {
                     if let Ok(val) = http::HeaderValue::from_str(s) {
                         headers.append(name.clone(), val);
                     }
+                }
+            }
+        }
+    }
+    if let Some(h) = response["headers"].as_object() {
+        for (k, v) in h {
+            if let (Ok(name), Some(s)) = (http::HeaderName::from_bytes(k.as_bytes()), v.as_str()) {
+                if multi_keys.contains(&name.as_str().to_lowercase()) {
+                    continue;
+                }
+                if let Ok(val) = http::HeaderValue::from_str(s) {
+                    headers.insert(name, val);
                 }
             }
         }

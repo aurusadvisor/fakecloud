@@ -8,9 +8,11 @@
 //!
 //! Resource matching uses AWS's path-parameter syntax: `{var}` matches
 //! a single segment, `{var+}` greedily matches the rest of the path.
-//! Method matching is exact (`POST`, `GET`, …) — `ANY` is not a v1
-//! concept (that's API Gateway v2). Methods configured for `OPTIONS`
-//! handle CORS preflights.
+//! Method matching tries the exact verb first (`POST`, `GET`, …); if no
+//! method-specific integration is configured, falls back to `ANY`
+//! (registered via `x-amazon-apigateway-any-method`), matching real
+//! REST API behavior. Methods configured for `OPTIONS` handle CORS
+//! preflights.
 
 use http::{Method, StatusCode};
 use serde_json::json;
@@ -76,12 +78,18 @@ pub async fn handle(
             };
             for resource in resources.values() {
                 if let Some(params) = match_resource_path(&resource.path, &remaining) {
-                    let key = format!(
+                    let method_key = format!(
                         "{api_id}/{}/{}",
                         resource.id,
                         req.method.as_str().to_uppercase()
                     );
-                    if let Some(integration) = state.integrations.get(&key).cloned() {
+                    let any_key = format!("{api_id}/{}/ANY", resource.id);
+                    let integration = state
+                        .integrations
+                        .get(&method_key)
+                        .or_else(|| state.integrations.get(&any_key))
+                        .cloned();
+                    if let Some(integration) = integration {
                         let stage_vars = api_stages
                             .get(&stage_name)
                             .map(|s| s.variables.clone())
@@ -112,10 +120,7 @@ pub async fn handle(
         }
     };
 
-    // Record for introspection.
-    service.record_request(&req.account_id, &api_id, &stage_name, req, StatusCode::OK);
-
-    match integration.integration_type.as_str() {
+    let result: Result<AwsResponse, AwsServiceError> = match integration.integration_type.as_str() {
         "AWS_PROXY" => {
             let function_arn = match integration.uri.as_deref() {
                 Some(uri) => extract_lambda_arn(uri).ok_or_else(|| {
@@ -143,7 +148,17 @@ pub async fn handle(
         other => Err(bad_gateway(format!(
             "Integration type '{other}' not supported in fakecloud's data plane",
         ))),
-    }
+    };
+
+    // Record after the integration runs so introspection sees the real
+    // outcome (e.g. 502 from a failed Lambda invoke or HTTP backend).
+    let recorded_status = match &result {
+        Ok(r) => r.status,
+        Err(e) => e.status(),
+    };
+    service.record_request(&req.account_id, &api_id, &stage_name, req, recorded_status);
+
+    result
 }
 
 fn not_found(msg: impl Into<String>) -> AwsServiceError {
@@ -255,7 +270,9 @@ async fn http_proxy(
             http::HeaderName::from_bytes(k.as_str().as_bytes()),
             http::HeaderValue::from_bytes(v.as_bytes()),
         ) {
-            headers.insert(name, val);
+            // `append` preserves multi-value headers like multiple
+            // `Set-Cookie` lines that the backend may emit.
+            headers.append(name, val);
         }
     }
     let content_type = headers

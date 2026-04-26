@@ -73,20 +73,26 @@ impl ApiGatewayFacade {
             .unwrap_or(false)
     }
 
+    /// Returns true when the data-plane request targets an API ID that
+    /// exists in v1 state. AWS keys the execute-api host on the API ID
+    /// (`{api-id}.execute-api.<region>.amazonaws.com`); fakecloud
+    /// surfaces it via the `Host` header. Stage-name lookups would
+    /// misroute traffic when v1 and v2 share a stage name.
     fn data_plane_owned_by_v1(&self, req: &AwsRequest) -> bool {
-        let Some(stage) = req.path_segments.first() else {
+        let Some(host) = req.headers.get("host").and_then(|v| v.to_str().ok()) else {
             return false;
         };
+        let Some(api_id) = host.split('.').next() else {
+            return false;
+        };
+        if api_id.is_empty() {
+            return false;
+        }
         let accounts = self.v1.state_handle().read();
         let Some(state) = accounts.get(&req.account_id) else {
             return false;
         };
-        // If any REST API in v1 state has a stage with this name, route
-        // to v1. Otherwise fall through to v2.
-        state
-            .stages
-            .values()
-            .any(|stages| stages.contains_key(stage))
+        state.apis.contains_key(api_id)
     }
 }
 

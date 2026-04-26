@@ -234,14 +234,35 @@ fn conflict(msg: impl Into<String>) -> AwsServiceError {
 }
 
 fn ok(value: Value) -> Result<AwsResponse, AwsServiceError> {
-    Ok(AwsResponse::ok_json(value))
+    Ok(AwsResponse::ok_json(strip_nulls_deep(value)))
 }
 
 fn ok_status(status: StatusCode, value: Value) -> Result<AwsResponse, AwsServiceError> {
     Ok(AwsResponse::json(
         status,
-        serde_json::to_vec(&value).unwrap(),
+        serde_json::to_vec(&strip_nulls_deep(value)).unwrap(),
     ))
+}
+
+/// Recursively strip null fields from objects (and from objects nested in
+/// arrays/maps). AWS clients typed-decode optional members and reject
+/// `null` for non-nullable types, so it's safer to omit absent fields
+/// than to send them as `null`.
+fn strip_nulls_deep(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if v.is_null() {
+                    continue;
+                }
+                out.insert(k, strip_nulls_deep(v));
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(strip_nulls_deep).collect()),
+        other => other,
+    }
 }
 
 fn ok_no_content() -> Result<AwsResponse, AwsServiceError> {
@@ -265,8 +286,25 @@ fn request_account(req: &AwsRequest) -> String {
     req.account_id.clone()
 }
 
+/// AWS REST-JSON omits optional fields whose runtime value is unset.
+/// Smithy clients reject `null` for typed members (string, integer, …).
+/// Strip null members from a JSON object before serializing it.
+fn strip_nulls(mut value: Value) -> Value {
+    if let Some(map) = value.as_object_mut() {
+        let keys: Vec<String> = map
+            .iter()
+            .filter(|(_, v)| v.is_null())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in keys {
+            map.remove(&k);
+        }
+    }
+    value
+}
+
 fn rest_api_to_json(api: &RestApi) -> Value {
-    json!({
+    strip_nulls(json!({
         "id": api.id,
         "name": api.name,
         "description": api.description,
@@ -280,16 +318,16 @@ fn rest_api_to_json(api: &RestApi) -> Value {
         "disableExecuteApiEndpoint": api.disable_execute_api_endpoint,
         "rootResourceId": api.root_resource_id,
         "tags": api.tags,
-    })
+    }))
 }
 
 fn resource_to_json(r: &Resource, methods: HashMap<String, Value>) -> Value {
-    let mut v = json!({
+    let mut v = strip_nulls(json!({
         "id": r.id,
         "parentId": r.parent_id,
         "pathPart": r.path_part,
         "path": r.path,
-    });
+    }));
     if !methods.is_empty() {
         v["resourceMethods"] = json!(methods);
     }
@@ -297,7 +335,7 @@ fn resource_to_json(r: &Resource, methods: HashMap<String, Value>) -> Value {
 }
 
 fn method_to_json(m: &ApiMethod) -> Value {
-    json!({
+    strip_nulls(json!({
         "httpMethod": m.http_method,
         "authorizationType": m.authorization_type,
         "authorizerId": m.authorizer_id,
@@ -307,11 +345,11 @@ fn method_to_json(m: &ApiMethod) -> Value {
         "requestModels": m.request_models,
         "requestValidatorId": m.request_validator_id,
         "authorizationScopes": m.authorization_scopes,
-    })
+    }))
 }
 
 fn integration_to_json(i: &Integration) -> Value {
-    json!({
+    strip_nulls(json!({
         "type": i.integration_type,
         "httpMethod": i.integration_http_method,
         "uri": i.uri,
@@ -326,20 +364,20 @@ fn integration_to_json(i: &Integration) -> Value {
         "connectionType": i.connection_type,
         "connectionId": i.connection_id,
         "tlsConfig": i.tls_config,
-    })
+    }))
 }
 
 fn deployment_to_json(d: &Deployment) -> Value {
-    json!({
+    strip_nulls(json!({
         "id": d.id,
         "description": d.description,
         "createdDate": d.created_date.timestamp(),
         "apiSummary": d.api_summary,
-    })
+    }))
 }
 
 fn stage_to_json(s: &Stage) -> Value {
-    json!({
+    strip_nulls(json!({
         "stageName": s.stage_name,
         "deploymentId": s.deployment_id,
         "description": s.description,
@@ -354,21 +392,21 @@ fn stage_to_json(s: &Stage) -> Value {
         "canarySettings": s.canary_settings,
         "accessLogSettings": s.access_log_settings,
         "tags": s.tags,
-    })
+    }))
 }
 
 fn model_to_json(m: &Model) -> Value {
-    json!({
+    strip_nulls(json!({
         "id": m.id,
         "name": m.name,
         "description": m.description,
         "schema": m.schema,
         "contentType": m.content_type,
-    })
+    }))
 }
 
 fn authorizer_to_json(a: &Authorizer) -> Value {
-    json!({
+    strip_nulls(json!({
         "id": a.id,
         "name": a.name,
         "type": a.authorizer_type,
@@ -379,11 +417,11 @@ fn authorizer_to_json(a: &Authorizer) -> Value {
         "identitySource": a.identity_source,
         "identityValidationExpression": a.identity_validation_expression,
         "authorizerResultTtlInSeconds": a.authorizer_result_ttl_in_seconds,
-    })
+    }))
 }
 
 fn api_key_to_json(k: &ApiKey, include_value: bool) -> Value {
-    json!({
+    let mut v = strip_nulls(json!({
         "id": k.id,
         "name": k.name,
         "description": k.description,
@@ -393,12 +431,15 @@ fn api_key_to_json(k: &ApiKey, include_value: bool) -> Value {
         "stageKeys": k.stage_keys,
         "tags": k.tags,
         "customerId": k.customer_id,
-        "value": if include_value { Value::String(k.value.clone()) } else { Value::Null },
-    })
+    }));
+    if include_value {
+        v["value"] = Value::String(k.value.clone());
+    }
+    v
 }
 
 fn usage_plan_to_json(p: &UsagePlan) -> Value {
-    json!({
+    strip_nulls(json!({
         "id": p.id,
         "name": p.name,
         "description": p.description,
@@ -407,7 +448,7 @@ fn usage_plan_to_json(p: &UsagePlan) -> Value {
         "quota": p.quota,
         "productCode": p.product_code,
         "tags": p.tags,
-    })
+    }))
 }
 
 #[async_trait]
@@ -423,7 +464,7 @@ impl fakecloud_core::service::AwsService for ApiGatewayService {
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         // Identify whether this is a control-plane request (matches one
         // of the known REST routes) or a data-plane execute call.
-        if let Some(resolved) = resolve(&req.method, &req.path_segments) {
+        if let Some(resolved) = resolve(&req.method, &req.path_segments, &req.query_params) {
             let res = self.handle_control(&req, resolved).await;
             if res.is_ok() && is_mutating_method(&req.method) {
                 self.save_snapshot().await;
@@ -1553,10 +1594,13 @@ impl ApiGatewayService {
             .to_string();
 
         let started = std::time::Instant::now();
+        // The synthetic request must use the method passed in `httpMethod`,
+        // not POST (which is the wire method of TestInvokeMethod itself).
+        let synthetic_method = test_method.parse::<Method>().unwrap_or(Method::GET);
         let synthetic = AwsRequest {
             service: "apigateway".to_string(),
             action: String::new(),
-            method: req.method.as_str().parse::<Method>().unwrap_or(Method::GET),
+            method: synthetic_method,
             raw_path: format!("/{stage}{path_with_query}"),
             raw_query: String::new(),
             path_segments: build_path_segments(&stage, &path_with_query),
@@ -1570,7 +1614,6 @@ impl ApiGatewayService {
             access_key_id: req.access_key_id.clone(),
             principal: req.principal.clone(),
         };
-        let _ = test_method;
         let _ = api_id;
         let response = match crate::data_plane::handle(self, &synthetic).await {
             Ok(r) => r,

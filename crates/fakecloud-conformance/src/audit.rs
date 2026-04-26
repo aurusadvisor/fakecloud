@@ -92,16 +92,16 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
         ),
         // API Gateway v1 (REST APIs) and v2 (HTTP APIs) are separate AWS
         // services with different Smithy models but share one SigV4 service
-        // name (`apigateway`). fakecloud routes both behind a single facade
-        // but each crate owns its own `supported_actions()` list. Tests are
-        // tagged either by the service-map key (`apigateway`/`apigatewayv2`)
-        // or by the AWS SDK crate name; either counts.
+        // name (`apigateway`). Each crate owns its own
+        // `supported_actions()` list; tag tests strictly so v1 coverage
+        // never double-counts as v2 coverage when an action name happens
+        // to exist in both models.
         ("apigateway", "apigateway", &["service.rs"], &["apigateway"]),
         (
             "apigatewayv2",
             "apigatewayv2",
             &["service.rs"],
-            &["apigateway", "apigatewayv2"],
+            &["apigatewayv2"],
         ),
         ("ecr", "ecr", &["service.rs"], &["ecr"]),
         ("ecs", "ecs", &["service.rs"], &["ecs"]),

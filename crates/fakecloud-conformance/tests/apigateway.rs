@@ -965,9 +965,14 @@ async fn apigateway_v1_documentation_lifecycle() {
     let client = server.apigateway_client().await;
     let (api_id, _) = create_api(&client, "conf-docs").await;
 
+    let location = aws_sdk_apigateway::types::DocumentationPartLocation::builder()
+        .r#type(aws_sdk_apigateway::types::DocumentationPartType::Api)
+        .build()
+        .unwrap();
     let part = client
         .create_documentation_part()
         .rest_api_id(&api_id)
+        .location(location)
         .properties("{}")
         .send()
         .await
