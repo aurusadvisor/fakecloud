@@ -212,26 +212,30 @@ impl AwsService for EcrService {
     }
 
     async fn handle(&self, mut request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        // OCI blob upload PATCH/PUT routes through the dispatch-level
-        // streaming path (no body cap). Materialize the stream here
-        // with no upper bound so the existing per-method handlers see
-        // a `Bytes` payload. Future work: have the blob upload state
-        // accept streamed chunks straight to a per-upload spool file
-        // instead of base64-in-memory.
-        if let Some(stream) = request.take_body_stream() {
-            request.body = fakecloud_core::service::drain_request_stream(stream).await?;
-        }
-
         // OCI v2 Distribution requests come in as path-only REST
         // (`/v2/...` with no `X-Amz-Target`). Dispatch them before the
-        // JSON control plane. Most OCI paths mutate state too (uploads,
-        // manifest PUT, blob/manifest DELETE) so snapshot after.
+        // JSON control plane. Blob upload PATCH/PUT consume the raw
+        // body stream directly via a per-upload spool file — they
+        // never call `drain_request_stream`, so a 1 GiB layer push
+        // moves through fakecloud in constant memory. Other OCI routes
+        // (manifest PUT, blob HEAD/GET, …) keep using `request.body`
+        // so we drain the stream conditionally.
         if request
             .path_segments
             .first()
             .map(|s| s == "v2")
             .unwrap_or(false)
         {
+            // Drain unless this is a blob-upload PATCH/PUT — those
+            // routes own the streaming consumer.
+            let is_blob_upload = matches!(request.method, http::Method::PATCH | http::Method::PUT)
+                && request.path_segments.len() >= 5
+                && request.path_segments[request.path_segments.len() - 2] == "uploads";
+            if !is_blob_upload {
+                if let Some(stream) = request.take_body_stream() {
+                    request.body = fakecloud_core::service::drain_request_stream(stream).await?;
+                }
+            }
             let result = crate::oci::dispatch(self, &request).await;
             let mutates_oci = matches!(
                 request.method,
@@ -241,6 +245,11 @@ impl AwsService for EcrService {
                 self.save_snapshot().await;
             }
             return result;
+        }
+
+        // JSON control plane: actions read `request.body`, so drain.
+        if let Some(stream) = request.take_body_stream() {
+            request.body = fakecloud_core::service::drain_request_stream(stream).await?;
         }
 
         let mutates = is_mutating(request.action.as_str());
@@ -1416,13 +1425,20 @@ impl EcrService {
             return Err(repository_not_found(&name));
         }
         let upload_id = Uuid::new_v4().to_string();
+        let spool = crate::oci::create_upload_spool(&upload_id).map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                format!("failed to create upload spool: {e}"),
+            )
+        })?;
         state.layer_uploads.insert(
             upload_id.clone(),
             LayerUpload {
                 upload_id: upload_id.clone(),
                 repository_name: name,
                 created_at: Utc::now(),
-                blob_b64: String::new(),
+                spool_path: spool.to_string_lossy().to_string(),
                 last_byte_received: 0,
             },
         );
@@ -1477,10 +1493,14 @@ impl EcrService {
                 part_bytes.len()
             )));
         }
-        let existing = B64.decode(upload.blob_b64.as_bytes()).unwrap_or_default();
-        let mut combined = existing;
-        combined.extend_from_slice(&part_bytes);
-        upload.blob_b64 = B64.encode(&combined);
+        let spool = std::path::PathBuf::from(&upload.spool_path);
+        crate::oci::append_bytes_sync(&spool, &part_bytes).map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                format!("failed to append upload chunk: {e}"),
+            )
+        })?;
         upload.last_byte_received = last_byte + 1;
         Ok(AwsResponse::ok_json(json!({
             "registryId": state.registry_id(),
@@ -1563,9 +1583,18 @@ impl EcrService {
         if upload.repository_name != name {
             return Err(upload_not_found(&upload_id));
         }
-        let blob_bytes = B64.decode(upload.blob_b64.as_bytes()).unwrap_or_default();
+        let spool = std::path::PathBuf::from(&upload.spool_path);
+        let blob_bytes = crate::oci::read_spool(&spool).map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                format!("failed to read upload spool: {e}"),
+            )
+        })?;
         let computed = sha256_digest(&blob_bytes);
         if !digests.iter().any(|d| d == &computed) {
+            // Spool stays — caller can retry with the correct digest
+            // without re-uploading every UploadLayerPart chunk.
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "LayerDigestMismatchException",
@@ -1576,6 +1605,7 @@ impl EcrService {
             ));
         }
         let _upload = state.layer_uploads.remove(&upload_id).unwrap();
+        crate::oci::unlink_spool(&spool);
         let size = blob_bytes.len() as u64;
         // Drop the write guard before the KMS encrypt call (which takes
         // its own lock). Re-acquire to insert.

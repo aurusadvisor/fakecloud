@@ -147,7 +147,7 @@ impl S3Service {
         })
     }
 
-    pub(super) fn upload_part(
+    pub(super) async fn upload_part(
         &self,
         account_id: &str,
         req: &AwsRequest,
@@ -173,8 +173,65 @@ impl S3Service {
         }
         let pn = part_number as u32;
 
-        let data = req.body.clone();
-        let etag = compute_md5(&data);
+        // Pre-validate the bucket/upload/key under a short read guard
+        // so a bogus request doesn't cause us to spool the whole body
+        // to disk before returning the error.
+        {
+            let accts = self.state.read();
+            let __empty = crate::state::S3State::new(account_id, "us-east-1");
+            let state = accts.get(account_id).unwrap_or(&__empty);
+            let b = state
+                .buckets
+                .get(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            let upload = b
+                .multipart_uploads
+                .get(upload_id)
+                .ok_or_else(|| no_such_upload(upload_id))?;
+            if upload.key != key {
+                return Err(no_such_upload(upload_id));
+            }
+        }
+
+        // Streaming part body: spool chunks to a tempfile while computing
+        // MD5 + size in constant memory. Buffered callers (tests, the
+        // legacy buffered code path) fall through with the existing
+        // `req.body` flow.
+        let spooled: Option<fakecloud_core::service::SpooledBody> =
+            if let Some(stream) = req.take_body_stream() {
+                Some(
+                    fakecloud_core::service::spool_request_stream(
+                        stream,
+                        self.store.spool_dir().as_deref(),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+        let buffered_body: Option<Bytes> = if spooled.is_none() {
+            Some(req.body.clone())
+        } else {
+            None
+        };
+        let part_size: u64 = match (&spooled, &buffered_body) {
+            (Some(s), _) => s.size,
+            (None, Some(b)) => b.len() as u64,
+            (None, None) => 0,
+        };
+        let etag: String = match (&spooled, &buffered_body) {
+            (Some(s), _) => s.md5_hex.clone(),
+            (None, Some(b)) => compute_md5(b),
+            (None, None) => compute_md5(&Bytes::new()),
+        };
+
+        let body_source: BodySource = if let Some(b) = &buffered_body {
+            BodySource::Bytes(b.clone())
+        } else if let Some(spool) = spooled {
+            BodySource::File(spool.path)
+        } else {
+            BodySource::Bytes(Bytes::new())
+        };
 
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
@@ -191,20 +248,18 @@ impl S3Service {
         }
 
         // Store-first: durably write the part body before mutating memory.
-        self.store
-            .mpu_put_part(
-                bucket,
-                upload_id,
-                pn,
-                BodySource::Bytes(data.clone()),
-                &etag,
-            )
+        // The store returns the BodyRef the runtime should keep — `Disk`
+        // for disk-mode (so the part body never lands in RAM beyond the
+        // hyper frame buffer), `Memory` for memory-mode.
+        let body_ref = self
+            .store
+            .mpu_put_part(bucket, upload_id, pn, body_source, &etag)
             .map_err(super::persistence_error)?;
         let part = UploadPart {
             part_number: pn,
-            body: crate::state::memory_body(data.clone()),
+            body: body_ref,
             etag: etag.clone(),
-            size: data.len() as u64,
+            size: part_size,
             last_modified: Utc::now(),
         };
         upload.parts.insert(pn, part);

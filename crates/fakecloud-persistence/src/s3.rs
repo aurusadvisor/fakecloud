@@ -289,6 +289,28 @@ pub enum BodySource {
     FileCopy(PathBuf),
 }
 
+/// Materialize a [`BodySource`] into [`Bytes`]. The `File` variant is
+/// consumed (file is unlinked after read); `FileCopy` is left in place.
+/// Memory-mode stores call this to absorb tempfiles produced by the
+/// streaming dispatch path so streaming and non-streaming services share
+/// the same wire-shape regardless of `--storage-mode`.
+fn read_body_source(body: BodySource) -> StoreResult<Bytes> {
+    match body {
+        BodySource::Bytes(b) => Ok(b),
+        BodySource::File(p) => {
+            let bytes = std::fs::read(&p)?;
+            // Best-effort: a leftover tempfile is not a correctness
+            // problem so the read result wins over the unlink result.
+            let _ = std::fs::remove_file(&p);
+            Ok(Bytes::from(bytes))
+        }
+        BodySource::FileCopy(p) => {
+            let bytes = std::fs::read(&p)?;
+            Ok(Bytes::from(bytes))
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("io error: {0}")]
@@ -335,6 +357,11 @@ pub trait S3Store: Send + Sync {
     fn open_object_body(&self, body: &BodyRef) -> StoreResult<Bytes>;
 
     fn mpu_create(&self, bucket: &str, upload_id: &str, init: &MpuInit) -> StoreResult<()>;
+    /// Persist a multipart-upload part body. Returns the [`BodyRef`] the
+    /// service should keep in its in-memory part map: `BodyRef::Disk`
+    /// for disk-backed stores (so subsequent reads stream from the
+    /// `.bin` file instead of holding the part in RAM), or
+    /// `BodyRef::Memory` for memory-mode stores.
     fn mpu_put_part(
         &self,
         bucket: &str,
@@ -342,7 +369,16 @@ pub trait S3Store: Send + Sync {
         part_number: u32,
         body: BodySource,
         etag: &str,
-    ) -> StoreResult<()>;
+    ) -> StoreResult<BodyRef>;
+    /// Where the streaming dispatch path should spool large request
+    /// bodies to disk before handing them to [`Self::put_object`] /
+    /// [`Self::mpu_put_part`]. Returning `Some` keeps the spool file on
+    /// the same filesystem as the final destination so `rename(2)` is a
+    /// metadata-only move; returning `None` means "use the system temp
+    /// dir, the store will read the file back into RAM and unlink it".
+    fn spool_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
     fn mpu_abort(&self, bucket: &str, upload_id: &str) -> StoreResult<()>;
     fn mpu_complete(
         &self,
@@ -403,12 +439,7 @@ impl S3Store for MemoryS3Store {
         body: BodySource,
         _meta: &ObjectMeta,
     ) -> StoreResult<BodyRef> {
-        match body {
-            BodySource::Bytes(b) => Ok(BodyRef::Memory(b)),
-            BodySource::File(_) | BodySource::FileCopy(_) => Err(StoreError::Other(
-                "file-backed put not supported in memory mode".to_string(),
-            )),
-        }
+        Ok(BodyRef::Memory(read_body_source(body)?))
     }
     fn put_object_meta(
         &self,
@@ -439,10 +470,12 @@ impl S3Store for MemoryS3Store {
         _bucket: &str,
         _upload_id: &str,
         _part_number: u32,
-        _body: BodySource,
+        body: BodySource,
         _etag: &str,
-    ) -> StoreResult<()> {
-        Ok(())
+    ) -> StoreResult<BodyRef> {
+        // Memory mode keeps all part bodies in RAM. Absorb any tempfile
+        // produced by the streaming dispatch path here.
+        Ok(BodyRef::Memory(read_body_source(body)?))
     }
     fn mpu_abort(&self, _bucket: &str, _upload_id: &str) -> StoreResult<()> {
         Ok(())
@@ -949,7 +982,7 @@ impl S3Store for DiskS3Store {
         part_number: u32,
         body: BodySource,
         etag: &str,
-    ) -> StoreResult<()> {
+    ) -> StoreResult<BodyRef> {
         let parts_dir = self.mpu_parts_dir(bucket, upload_id);
         std::fs::create_dir_all(&parts_dir)?;
         let bin_path = self.mpu_part_bin(bucket, upload_id, part_number);
@@ -986,7 +1019,24 @@ impl S3Store for DiskS3Store {
             last_modified: Utc::now(),
         };
         crate::atomic::write_atomic_toml(&toml_path, &meta)?;
-        Ok(())
+        // Disk-mode parts live on disk; expose them as BodyRef::Disk so
+        // the runtime state never holds the part body in RAM.
+        Ok(BodyRef::Disk {
+            bucket: bucket.to_string(),
+            key: format!("__mpu__/{upload_id}/part-{part_number:05}"),
+            version: None,
+            path: bin_path,
+            size,
+        })
+    }
+
+    fn spool_dir(&self) -> Option<std::path::PathBuf> {
+        let dir = self.root.join(".spool");
+        // Best-effort: create lazily; the spool helper also creates if
+        // missing. Returning the path even when create fails is safe —
+        // the helper handles both create and the actual file open.
+        let _ = std::fs::create_dir_all(&dir);
+        Some(dir)
     }
 
     fn mpu_abort(&self, bucket: &str, upload_id: &str) -> StoreResult<()> {

@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode};
+use md5::{Digest, Md5};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 use crate::auth::Principal;
 
@@ -92,40 +94,179 @@ impl AwsRequest {
 }
 
 /// Drain a streaming request body into a single [`Bytes`] buffer with no
-/// upper bound. Service handlers that need the whole payload in memory
-/// for now (e.g. S3 PutObject pre-disk-spool refactor, ECR blob upload
-/// while the upload state still uses base64-in-memory) call this from
-/// inside `handle()` after [`AwsRequest::take_body_stream`] yields the
-/// stream. The dispatch-level cap (`FAKECLOUD_MAX_REQUEST_BODY_BYTES`)
-/// does NOT apply to streaming routes; this helper exists so the
-/// transitional buffered consumer doesn't have to depend on `axum`.
+/// upper bound. Used by handlers that legitimately need the whole payload
+/// in memory (small JSON-shaped requests that happened to land on a
+/// streaming route, e.g. ECR `mount` PUT with no body). Heavy uploads
+/// (S3 PutObject / UploadPart, ECR blob PATCH/PUT) take the streaming
+/// spool path via [`spool_request_stream`] instead. The dispatch-level
+/// cap (`FAKECLOUD_MAX_REQUEST_BODY_BYTES`) does not apply to streaming
+/// routes; this helper exists so a service handler that knows the
+/// payload is small can buffer without dragging in `axum` itself.
 pub async fn drain_request_stream(stream: RequestBodyStream) -> Result<Bytes, AwsServiceError> {
     use http_body_util::BodyExt;
     match stream.collect().await {
         Ok(c) => Ok(c.to_bytes()),
-        Err(e) => {
-            let msg = e.to_string();
-            // Hyper / axum surface `body limit exceeded` with a
-            // payload-too-large variant. Everything else (connection
-            // reset, malformed chunked encoding, premature EOF) maps
-            // to a 400 BadRequest so callers can distinguish.
-            let too_large = msg.to_ascii_lowercase().contains("limit");
-            let (status, code, message) = if too_large {
-                (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "RequestEntityTooLarge",
-                    "Streaming request body exceeded the configured limit",
-                )
-            } else {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "MalformedRequestBody",
-                    "Failed to read streaming request body",
-                )
-            };
-            Err(AwsServiceError::aws_error(status, code, message))
+        Err(e) => Err(stream_error_to_aws(&e.to_string())),
+    }
+}
+
+fn stream_error_to_aws(msg: &str) -> AwsServiceError {
+    // Hyper / axum surface `body limit exceeded` with a
+    // payload-too-large variant. Everything else (connection
+    // reset, malformed chunked encoding, premature EOF) maps
+    // to a 400 BadRequest so callers can distinguish.
+    let too_large = msg.to_ascii_lowercase().contains("limit");
+    let (status, code, message) = if too_large {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "RequestEntityTooLarge",
+            "Streaming request body exceeded the configured limit",
+        )
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            "MalformedRequestBody",
+            "Failed to read streaming request body",
+        )
+    };
+    AwsServiceError::aws_error(status, code, message)
+}
+
+/// Outcome of spooling a streaming request body to disk: the path of the
+/// freshly created tempfile, the total byte count, and the MD5 hash of
+/// the bytes (lowercase hex, the form S3 uses for `ETag`).
+///
+/// The caller owns the file and is responsible for either consuming it
+/// (passing the [`PathBuf`] into a `BodySource::File` handed to a store)
+/// or unlinking it. Returning the file path instead of a handle lets the
+/// downstream store rename the file directly, which is the whole point —
+/// in disk-mode S3 a 1 GiB upload performs zero in-RAM copies of the
+/// payload.
+#[derive(Debug)]
+pub struct SpooledBody {
+    pub path: PathBuf,
+    pub size: u64,
+    pub md5_hex: String,
+}
+
+/// Stream a request body to a tempfile on disk while computing its MD5
+/// and length on the fly. The body is **never** materialized into a
+/// single `Bytes` buffer; chunks flow from hyper -> Tokio file in
+/// constant memory. A 1 GiB PutObject moves through this function with
+/// peak resident memory bounded by hyper's per-frame buffer.
+///
+/// `dir` controls where the tempfile lands. S3 callers point this at
+/// the S3 object root so the eventual rename into the final storage
+/// path stays on the same filesystem and is a metadata-only move.
+/// Memory-mode callers can pass `None` for the system temp dir; the
+/// memory store reads the file back into bytes and unlinks it.
+pub async fn spool_request_stream(
+    stream: RequestBodyStream,
+    dir: Option<&std::path::Path>,
+) -> Result<SpooledBody, AwsServiceError> {
+    use http_body_util::BodyExt;
+    use tokio::io::AsyncWriteExt;
+
+    let dir = dir.map(|d| d.to_path_buf());
+    if let Some(d) = dir.as_ref() {
+        // Best-effort create; an existing dir is fine.
+        let _ = tokio::fs::create_dir_all(d).await;
+    }
+
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("fc-spool-");
+    let named = match dir.as_ref() {
+        Some(d) => builder.tempfile_in(d),
+        None => builder.tempfile(),
+    }
+    .map_err(|e| {
+        AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalError",
+            format!("failed to create spool tempfile: {e}"),
+        )
+    })?;
+
+    // `into_temp_path` would auto-delete on drop. We keep the path and
+    // assume responsibility for either persisting or unlinking it.
+    let (std_file, temp_path) = named.into_parts();
+    // Persist to a stable PathBuf — `keep()` releases the
+    // delete-on-drop guard so the file outlives this function.
+    let path: PathBuf = temp_path.keep().map_err(|e| {
+        AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalError",
+            format!("failed to persist spool tempfile: {e}"),
+        )
+    })?;
+
+    let mut file = tokio::fs::File::from_std(std_file);
+    let mut hasher = Md5::new();
+    let mut size: u64 = 0;
+    let mut body = stream;
+
+    // Cleanup helper: drop the file handle before unlinking so
+    // platforms that disallow removing an open file (Windows) still
+    // collect the partial spool. `drop(file)` closes the underlying
+    // OS handle synchronously.
+    async fn cleanup(file: tokio::fs::File, path: &std::path::Path) {
+        drop(file);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    loop {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                if let Ok(chunk) = frame.into_data() {
+                    if !chunk.is_empty() {
+                        hasher.update(&chunk);
+                        size += chunk.len() as u64;
+                        if let Err(e) = file.write_all(&chunk).await {
+                            cleanup(file, &path).await;
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "InternalError",
+                                format!("failed to spool request body: {e}"),
+                            ));
+                        }
+                    }
+                }
+                // Trailers are ignored — not meaningful for raw payloads.
+            }
+            Some(Err(e)) => {
+                cleanup(file, &path).await;
+                return Err(stream_error_to_aws(&e.to_string()));
+            }
+            None => break,
         }
     }
+
+    if let Err(e) = file.flush().await {
+        cleanup(file, &path).await;
+        return Err(AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalError",
+            format!("failed to flush spool tempfile: {e}"),
+        ));
+    }
+    drop(file);
+
+    let md5_hex = hex_lower(&hasher.finalize());
+    Ok(SpooledBody {
+        path,
+        size,
+        md5_hex,
+    })
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 /// A response body. Most handlers return [`ResponseBody::Bytes`] built from

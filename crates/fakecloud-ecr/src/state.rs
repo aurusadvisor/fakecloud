@@ -264,9 +264,15 @@ pub struct LayerUpload {
     pub upload_id: String,
     pub repository_name: String,
     pub created_at: DateTime<Utc>,
-    /// Accumulated blob bytes (base64). Each `UploadLayerPart` call
-    /// appends to this and updates `last_byte_received`.
-    pub blob_b64: String,
+    /// Filesystem path to the in-progress upload's spool file. Each
+    /// `UploadLayerPart` (JSON control plane) and OCI blob `PATCH`
+    /// appends raw bytes to this file; the OCI `PUT` finish step
+    /// streams the final chunk in, computes SHA-256 over the file in
+    /// constant memory, and then promotes the bytes into a `Layer`.
+    /// Storing the path means a 1 GiB push never holds the partial
+    /// upload in RAM.
+    #[serde(default)]
+    pub spool_path: String,
     pub last_byte_received: u64,
 }
 

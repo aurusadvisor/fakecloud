@@ -15,6 +15,7 @@ async-trait = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }
+http-body-util = "0.1"
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
