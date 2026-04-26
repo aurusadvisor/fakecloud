@@ -640,14 +640,20 @@ pub fn runtime_to_image(runtime: &str) -> Option<String> {
         "python3.13" => ("python", "3.13"),
         "python3.12" => ("python", "3.12"),
         "python3.11" => ("python", "3.11"),
+        "python3.10" => ("python", "3.10"),
+        "python3.9" => ("python", "3.9"),
+        "python3.8" => ("python", "3.8"),
         "nodejs22.x" => ("nodejs", "22"),
         "nodejs20.x" => ("nodejs", "20"),
         "nodejs18.x" => ("nodejs", "18"),
+        "nodejs16.x" => ("nodejs", "16"),
         "ruby3.4" => ("ruby", "3.4"),
         "ruby3.3" => ("ruby", "3.3"),
         "java21" => ("java", "21"),
         "java17" => ("java", "17"),
+        "java11" => ("java", "11"),
         "dotnet8" => ("dotnet", "8"),
+        "go1.x" => ("go", "1"),
         "provided.al2023" => ("provided", "al2023"),
         "provided.al2" => ("provided", "al2"),
         _ => return None,
@@ -777,6 +783,30 @@ mod tests {
         assert_eq!(
             runtime_to_image("dotnet8"),
             Some("public.ecr.aws/lambda/dotnet:8".to_string())
+        );
+        assert_eq!(
+            runtime_to_image("nodejs16.x"),
+            Some("public.ecr.aws/lambda/nodejs:16".to_string())
+        );
+        assert_eq!(
+            runtime_to_image("python3.10"),
+            Some("public.ecr.aws/lambda/python:3.10".to_string())
+        );
+        assert_eq!(
+            runtime_to_image("python3.9"),
+            Some("public.ecr.aws/lambda/python:3.9".to_string())
+        );
+        assert_eq!(
+            runtime_to_image("python3.8"),
+            Some("public.ecr.aws/lambda/python:3.8".to_string())
+        );
+        assert_eq!(
+            runtime_to_image("java11"),
+            Some("public.ecr.aws/lambda/java:11".to_string())
+        );
+        assert_eq!(
+            runtime_to_image("go1.x"),
+            Some("public.ecr.aws/lambda/go:1".to_string())
         );
         assert_eq!(runtime_to_image("unknown"), None);
     }
