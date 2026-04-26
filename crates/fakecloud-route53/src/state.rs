@@ -43,6 +43,13 @@ pub struct AccountState {
     /// inserts a new entry alongside the existing versions.
     pub traffic_policies: HashMap<(String, i64), StoredTrafficPolicy>,
     pub traffic_policy_instances: HashMap<String, StoredTrafficPolicyInstance>,
+    /// Per-zone DNSSEC `ServeSignature` status (SIGNING / NOT_SIGNING). Absent
+    /// entries are treated as NOT_SIGNING.
+    pub dnssec_status: HashMap<String, String>,
+    /// Keyed by `(hosted_zone_id, ksk_name)`.
+    pub key_signing_keys: HashMap<(String, String), StoredKeySigningKey>,
+    pub query_logging_configs: HashMap<String, StoredQueryLoggingConfig>,
+    pub cidr_collections: HashMap<String, StoredCidrCollection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,4 +107,34 @@ pub struct StoredTrafficPolicyInstance {
     pub traffic_policy_version: i64,
     pub traffic_policy_type: String,
     pub created_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredKeySigningKey {
+    pub hosted_zone_id: String,
+    pub name: String,
+    pub kms_arn: String,
+    pub status: String,
+    pub caller_reference: String,
+    pub created_date: DateTime<Utc>,
+    pub last_modified_date: DateTime<Utc>,
+    pub key_tag: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredQueryLoggingConfig {
+    pub id: String,
+    pub hosted_zone_id: String,
+    pub cloud_watch_logs_log_group_arn: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredCidrCollection {
+    pub id: String,
+    pub name: String,
+    pub arn: String,
+    pub version: i64,
+    pub caller_reference: String,
+    /// Maps location name -> sorted list of CIDR blocks.
+    pub locations: HashMap<String, Vec<String>>,
 }

@@ -13,16 +13,19 @@ use uuid::Uuid;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError, ResponseBody};
 
 use crate::model::{
-    ChangeResourceRecordSetsRequest, CreateHealthCheckRequest, CreateHostedZoneRequest,
-    CreateTrafficPolicyInstanceRequest, CreateTrafficPolicyRequest,
-    CreateTrafficPolicyVersionRequest, HealthCheckConfig, ResourceRecordSet,
-    UpdateHealthCheckRequest, UpdateHostedZoneCommentRequest, UpdateHostedZoneFeaturesRequest,
-    UpdateTrafficPolicyCommentRequest, UpdateTrafficPolicyInstanceRequest,
+    ChangeCidrCollectionRequest, ChangeResourceRecordSetsRequest, CreateCidrCollectionRequest,
+    CreateHealthCheckRequest, CreateHostedZoneRequest, CreateKeySigningKeyRequest,
+    CreateQueryLoggingConfigRequest, CreateTrafficPolicyInstanceRequest,
+    CreateTrafficPolicyRequest, CreateTrafficPolicyVersionRequest, HealthCheckConfig,
+    ResourceRecordSet, UpdateHealthCheckRequest, UpdateHostedZoneCommentRequest,
+    UpdateHostedZoneFeaturesRequest, UpdateTrafficPolicyCommentRequest,
+    UpdateTrafficPolicyInstanceRequest,
 };
 use crate::router::{route, Route};
 use crate::state::{
-    AccountState, Route53Accounts, SharedRoute53State, StoredChange, StoredHealthCheck,
-    StoredHostedZone, StoredTrafficPolicy, StoredTrafficPolicyInstance,
+    AccountState, Route53Accounts, SharedRoute53State, StoredChange, StoredCidrCollection,
+    StoredHealthCheck, StoredHostedZone, StoredKeySigningKey, StoredQueryLoggingConfig,
+    StoredTrafficPolicy, StoredTrafficPolicyInstance,
 };
 use crate::xml_io;
 
@@ -68,6 +71,23 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListTrafficPolicyInstancesByHostedZone",
     "ListTrafficPolicyInstancesByPolicy",
     "GetTrafficPolicyInstanceCount",
+    "GetDNSSEC",
+    "EnableHostedZoneDNSSEC",
+    "DisableHostedZoneDNSSEC",
+    "CreateKeySigningKey",
+    "DeleteKeySigningKey",
+    "ActivateKeySigningKey",
+    "DeactivateKeySigningKey",
+    "CreateQueryLoggingConfig",
+    "GetQueryLoggingConfig",
+    "DeleteQueryLoggingConfig",
+    "ListQueryLoggingConfigs",
+    "CreateCidrCollection",
+    "ChangeCidrCollection",
+    "DeleteCidrCollection",
+    "ListCidrCollections",
+    "ListCidrLocations",
+    "ListCidrBlocks",
 ];
 
 pub struct Route53Service {
@@ -156,6 +176,23 @@ impl AwsService for Route53Service {
                 self.list_traffic_policy_instances_by_policy(&req)
             }
             "GetTrafficPolicyInstanceCount" => self.get_traffic_policy_instance_count(),
+            "GetDNSSEC" => self.get_dnssec(&resolved),
+            "EnableHostedZoneDNSSEC" => self.enable_hosted_zone_dnssec(&resolved),
+            "DisableHostedZoneDNSSEC" => self.disable_hosted_zone_dnssec(&resolved),
+            "CreateKeySigningKey" => self.create_key_signing_key(&req),
+            "DeleteKeySigningKey" => self.delete_key_signing_key(&resolved),
+            "ActivateKeySigningKey" => self.activate_key_signing_key(&resolved),
+            "DeactivateKeySigningKey" => self.deactivate_key_signing_key(&resolved),
+            "CreateQueryLoggingConfig" => self.create_query_logging_config(&req),
+            "GetQueryLoggingConfig" => self.get_query_logging_config(&resolved),
+            "DeleteQueryLoggingConfig" => self.delete_query_logging_config(&resolved),
+            "ListQueryLoggingConfigs" => self.list_query_logging_configs(&req),
+            "CreateCidrCollection" => self.create_cidr_collection(&req),
+            "ChangeCidrCollection" => self.change_cidr_collection(&req, &resolved),
+            "DeleteCidrCollection" => self.delete_cidr_collection(&resolved),
+            "ListCidrCollections" => self.list_cidr_collections(&req),
+            "ListCidrLocations" => self.list_cidr_locations(&req, &resolved),
+            "ListCidrBlocks" => self.list_cidr_blocks(&req, &resolved),
             other => Err(aws_error(
                 StatusCode::NOT_IMPLEMENTED,
                 "InvalidAction",
@@ -1794,6 +1831,711 @@ impl Route53Service {
     }
 }
 
+// ─── DNSSEC + KSK handlers ───────────────────────────────────────────
+
+impl Route53Service {
+    fn get_dnssec(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let zone_id = strip_zone_prefix(&require_id(route)?);
+        let state = self.state.read();
+        let account = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_hosted_zone(&zone_id))?;
+        if !account.hosted_zones.contains_key(&zone_id) {
+            return Err(no_such_hosted_zone(&zone_id));
+        }
+        let status = account
+            .dnssec_status
+            .get(&zone_id)
+            .cloned()
+            .unwrap_or_else(|| "NOT_SIGNING".to_string());
+        let ksks: Vec<StoredKeySigningKey> = account
+            .key_signing_keys
+            .values()
+            .filter(|k| k.hosted_zone_id == zone_id)
+            .cloned()
+            .collect();
+        drop(state);
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<GetDNSSECResponse xmlns=\"{NS}\">"));
+        body.push_str("<Status>");
+        body.push_str(&format!(
+            "<ServeSignature>{}</ServeSignature>",
+            esc(&status)
+        ));
+        body.push_str("</Status>");
+        body.push_str("<KeySigningKeys>");
+        for k in &ksks {
+            // KeySigningKeys list members lack `xmlName`, so the AWS SDK
+            // expects the default `<member>` element name.
+            body.push_str("<member>");
+            push_key_signing_key_inner(&mut body, k);
+            body.push_str("</member>");
+        }
+        body.push_str("</KeySigningKeys>");
+        body.push_str("</GetDNSSECResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn enable_hosted_zone_dnssec(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let zone_id = strip_zone_prefix(&require_id(route)?);
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_hosted_zone(&zone_id))?;
+        if !account.hosted_zones.contains_key(&zone_id) {
+            return Err(no_such_hosted_zone(&zone_id));
+        }
+        account
+            .dnssec_status
+            .insert(zone_id.clone(), "SIGNING".to_string());
+        let change = StoredChange {
+            id: generate_change_id(),
+            status: "INSYNC".to_string(),
+            submitted_at: Utc::now(),
+            comment: Some(format!("EnableHostedZoneDNSSEC {}", zone_id)),
+        };
+        account.changes.insert(change.id.clone(), change.clone());
+        drop(state);
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<EnableHostedZoneDNSSECResponse xmlns=\"{NS}\">"));
+        push_change_info(&mut body, &change);
+        body.push_str("</EnableHostedZoneDNSSECResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn disable_hosted_zone_dnssec(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let zone_id = strip_zone_prefix(&require_id(route)?);
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_hosted_zone(&zone_id))?;
+        if !account.hosted_zones.contains_key(&zone_id) {
+            return Err(no_such_hosted_zone(&zone_id));
+        }
+        account
+            .dnssec_status
+            .insert(zone_id.clone(), "NOT_SIGNING".to_string());
+        let change = StoredChange {
+            id: generate_change_id(),
+            status: "INSYNC".to_string(),
+            submitted_at: Utc::now(),
+            comment: Some(format!("DisableHostedZoneDNSSEC {}", zone_id)),
+        };
+        account.changes.insert(change.id.clone(), change.clone());
+        drop(state);
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<DisableHostedZoneDNSSECResponse xmlns=\"{NS}\">"));
+        push_change_info(&mut body, &change);
+        body.push_str("</DisableHostedZoneDNSSECResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn create_key_signing_key(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let cfg: CreateKeySigningKeyRequest = xml_io::from_xml_root(&req.body).map_err(|e| {
+            invalid_argument(format!("invalid CreateKeySigningKeyRequest XML: {e}"))
+        })?;
+        if cfg.caller_reference.is_empty()
+            || cfg.hosted_zone_id.is_empty()
+            || cfg.key_management_service_arn.is_empty()
+            || cfg.name.is_empty()
+            || cfg.status.is_empty()
+        {
+            return Err(invalid_argument(
+                "CallerReference, HostedZoneId, KeyManagementServiceArn, Name, Status all required",
+            ));
+        }
+        let zone_id = strip_zone_prefix(&cfg.hosted_zone_id);
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .entry(DEFAULT_ACCOUNT.to_string())
+            .or_default();
+        if !account.hosted_zones.contains_key(&zone_id) {
+            return Err(no_such_hosted_zone(&zone_id));
+        }
+        // Real Route 53 enforces unique KSK Name per zone and unique KMS ARN per zone.
+        if account
+            .key_signing_keys
+            .contains_key(&(zone_id.clone(), cfg.name.clone()))
+        {
+            return Err(aws_error(
+                StatusCode::CONFLICT,
+                "KeySigningKeyAlreadyExists",
+                format!(
+                    "A key-signing key named '{}' already exists in zone {}",
+                    cfg.name, zone_id
+                ),
+            ));
+        }
+        let now = Utc::now();
+        let ksk = StoredKeySigningKey {
+            hosted_zone_id: zone_id.clone(),
+            name: cfg.name.clone(),
+            kms_arn: cfg.key_management_service_arn,
+            status: cfg.status,
+            caller_reference: cfg.caller_reference,
+            created_date: now,
+            last_modified_date: now,
+            key_tag: deterministic_key_tag(&zone_id, &cfg.name),
+        };
+        account
+            .key_signing_keys
+            .insert((zone_id.clone(), cfg.name.clone()), ksk.clone());
+        let change = StoredChange {
+            id: generate_change_id(),
+            status: "INSYNC".to_string(),
+            submitted_at: now,
+            comment: Some(format!("CreateKeySigningKey {}/{}", zone_id, cfg.name)),
+        };
+        account.changes.insert(change.id.clone(), change.clone());
+        drop(state);
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<CreateKeySigningKeyResponse xmlns=\"{NS}\">"));
+        push_change_info(&mut body, &change);
+        body.push_str("<KeySigningKey>");
+        push_key_signing_key_inner(&mut body, &ksk);
+        body.push_str("</KeySigningKey>");
+        body.push_str("</CreateKeySigningKeyResponse>");
+        let mut headers = HeaderMap::new();
+        if let Ok(loc) = http::HeaderValue::from_str(&format!(
+            "/2013-04-01/keysigningkey/{}/{}",
+            zone_id, ksk.name
+        )) {
+            headers.insert(http::header::LOCATION, loc);
+        }
+        Ok(xml_response(StatusCode::CREATED, body, headers))
+    }
+
+    fn delete_key_signing_key(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let (zone_id, name) = require_zone_and_name(route)?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_key_signing_key(&zone_id, &name))?;
+        let ksk = account
+            .key_signing_keys
+            .get(&(zone_id.clone(), name.clone()))
+            .ok_or_else(|| no_such_key_signing_key(&zone_id, &name))?;
+        // Real Route 53 requires Status == INACTIVE before delete.
+        if ksk.status.eq_ignore_ascii_case("ACTIVE") {
+            return Err(aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidKeySigningKeyStatus",
+                format!(
+                    "KeySigningKey {}/{} must be deactivated before deletion",
+                    zone_id, name
+                ),
+            ));
+        }
+        account
+            .key_signing_keys
+            .remove(&(zone_id.clone(), name.clone()));
+        let change = StoredChange {
+            id: generate_change_id(),
+            status: "INSYNC".to_string(),
+            submitted_at: Utc::now(),
+            comment: Some(format!("DeleteKeySigningKey {}/{}", zone_id, name)),
+        };
+        account.changes.insert(change.id.clone(), change.clone());
+        drop(state);
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<DeleteKeySigningKeyResponse xmlns=\"{NS}\">"));
+        push_change_info(&mut body, &change);
+        body.push_str("</DeleteKeySigningKeyResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn activate_key_signing_key(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        self.set_ksk_status(route, "ACTIVE", "ActivateKeySigningKey")
+    }
+
+    fn deactivate_key_signing_key(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        self.set_ksk_status(route, "INACTIVE", "DeactivateKeySigningKey")
+    }
+
+    fn set_ksk_status(
+        &self,
+        route: &Route,
+        status: &str,
+        op: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let (zone_id, name) = require_zone_and_name(route)?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_key_signing_key(&zone_id, &name))?;
+        let ksk = account
+            .key_signing_keys
+            .get_mut(&(zone_id.clone(), name.clone()))
+            .ok_or_else(|| no_such_key_signing_key(&zone_id, &name))?;
+        ksk.status = status.to_string();
+        ksk.last_modified_date = Utc::now();
+        let change = StoredChange {
+            id: generate_change_id(),
+            status: "INSYNC".to_string(),
+            submitted_at: Utc::now(),
+            comment: Some(format!("{} {}/{}", op, zone_id, name)),
+        };
+        account.changes.insert(change.id.clone(), change.clone());
+        drop(state);
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<{op}Response xmlns=\"{NS}\">"));
+        push_change_info(&mut body, &change);
+        body.push_str(&format!("</{op}Response>"));
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+}
+
+// ─── Query Logging handlers ──────────────────────────────────────────
+
+impl Route53Service {
+    fn create_query_logging_config(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let cfg: CreateQueryLoggingConfigRequest =
+            xml_io::from_xml_root(&req.body).map_err(|e| {
+                invalid_argument(format!("invalid CreateQueryLoggingConfigRequest XML: {e}"))
+            })?;
+        if cfg.hosted_zone_id.is_empty() || cfg.cloud_watch_logs_log_group_arn.is_empty() {
+            return Err(invalid_argument(
+                "HostedZoneId and CloudWatchLogsLogGroupArn are required",
+            ));
+        }
+        let zone_id = strip_zone_prefix(&cfg.hosted_zone_id);
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .entry(DEFAULT_ACCOUNT.to_string())
+            .or_default();
+        if let Some(zone) = account.hosted_zones.get(&zone_id) {
+            if zone.private_zone {
+                return Err(invalid_argument(
+                    "Query logging is only supported for public hosted zones",
+                ));
+            }
+        } else {
+            return Err(no_such_hosted_zone(&zone_id));
+        }
+        // One config per zone.
+        if account
+            .query_logging_configs
+            .values()
+            .any(|c| c.hosted_zone_id == zone_id)
+        {
+            return Err(aws_error(
+                StatusCode::CONFLICT,
+                "QueryLoggingConfigAlreadyExists",
+                format!("A query logging config already exists for zone {}", zone_id),
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        let stored = StoredQueryLoggingConfig {
+            id: id.clone(),
+            hosted_zone_id: zone_id,
+            cloud_watch_logs_log_group_arn: cfg.cloud_watch_logs_log_group_arn,
+        };
+        account
+            .query_logging_configs
+            .insert(id.clone(), stored.clone());
+        drop(state);
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<CreateQueryLoggingConfigResponse xmlns=\"{NS}\">"
+        ));
+        push_query_logging_config(&mut body, &stored);
+        body.push_str("</CreateQueryLoggingConfigResponse>");
+        let mut headers = HeaderMap::new();
+        if let Ok(loc) =
+            http::HeaderValue::from_str(&format!("/2013-04-01/queryloggingconfig/{}", stored.id))
+        {
+            headers.insert(http::header::LOCATION, loc);
+        }
+        Ok(xml_response(StatusCode::CREATED, body, headers))
+    }
+
+    fn get_query_logging_config(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let state = self.state.read();
+        let cfg = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .and_then(|a| a.query_logging_configs.get(&id).cloned())
+            .ok_or_else(|| no_such_query_logging_config(&id))?;
+        drop(state);
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<GetQueryLoggingConfigResponse xmlns=\"{NS}\">"));
+        push_query_logging_config(&mut body, &cfg);
+        body.push_str("</GetQueryLoggingConfigResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn delete_query_logging_config(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_query_logging_config(&id))?;
+        if account.query_logging_configs.remove(&id).is_none() {
+            return Err(no_such_query_logging_config(&id));
+        }
+        drop(state);
+        let mut body = String::with_capacity(128);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<DeleteQueryLoggingConfigResponse xmlns=\"{NS}\"/>"
+        ));
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn list_query_logging_configs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let zone_filter = req.query_params.get("hostedzoneid").cloned();
+        let max_items: usize = req
+            .query_params
+            .get("maxresults")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+        let state = self.state.read();
+        let mut configs: Vec<StoredQueryLoggingConfig> = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .map(|a| a.query_logging_configs.values().cloned().collect())
+            .unwrap_or_default();
+        drop(state);
+        if let Some(zid) = zone_filter {
+            let z = strip_zone_prefix(&zid);
+            configs.retain(|c| c.hosted_zone_id == z);
+        }
+        configs.sort_by(|a, b| a.id.cmp(&b.id));
+        let slice: Vec<&StoredQueryLoggingConfig> = configs.iter().take(max_items).collect();
+        let next = if slice.len() < configs.len() {
+            Some(configs[slice.len()].id.clone())
+        } else {
+            None
+        };
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<ListQueryLoggingConfigsResponse xmlns=\"{NS}\">"));
+        body.push_str("<QueryLoggingConfigs>");
+        for c in &slice {
+            push_query_logging_config(&mut body, c);
+        }
+        body.push_str("</QueryLoggingConfigs>");
+        if let Some(n) = &next {
+            body.push_str(&format!("<NextToken>{}</NextToken>", esc(n)));
+        }
+        body.push_str("</ListQueryLoggingConfigsResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+}
+
+// ─── CIDR Collection handlers ────────────────────────────────────────
+
+impl Route53Service {
+    fn create_cidr_collection(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let cfg: CreateCidrCollectionRequest = xml_io::from_xml_root(&req.body).map_err(|e| {
+            invalid_argument(format!("invalid CreateCidrCollectionRequest XML: {e}"))
+        })?;
+        if cfg.name.is_empty() || cfg.caller_reference.is_empty() {
+            return Err(invalid_argument("Name and CallerReference are required"));
+        }
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .entry(DEFAULT_ACCOUNT.to_string())
+            .or_default();
+        if account
+            .cidr_collections
+            .values()
+            .any(|c| c.name == cfg.name)
+        {
+            return Err(aws_error(
+                StatusCode::CONFLICT,
+                "CidrCollectionAlreadyExistsException",
+                format!("A CIDR collection named '{}' already exists", cfg.name),
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        let arn = format!("arn:aws:route53::{}:cidrcollection/{}", DEFAULT_ACCOUNT, id);
+        let stored = StoredCidrCollection {
+            id: id.clone(),
+            name: cfg.name,
+            arn: arn.clone(),
+            version: 1,
+            caller_reference: cfg.caller_reference,
+            locations: HashMap::new(),
+        };
+        account.cidr_collections.insert(id.clone(), stored.clone());
+        drop(state);
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<CreateCidrCollectionResponse xmlns=\"{NS}\">"));
+        push_cidr_collection_full(&mut body, &stored);
+        body.push_str("<Location>");
+        body.push_str(&format!("<Arn>{}</Arn>", esc(&arn)));
+        body.push_str("</Location>");
+        body.push_str("</CreateCidrCollectionResponse>");
+        let mut headers = HeaderMap::new();
+        if let Ok(loc) =
+            http::HeaderValue::from_str(&format!("/2013-04-01/cidrcollection/{}", stored.id))
+        {
+            headers.insert(http::header::LOCATION, loc);
+        }
+        Ok(xml_response(StatusCode::CREATED, body, headers))
+    }
+
+    fn change_cidr_collection(
+        &self,
+        req: &AwsRequest,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let cfg: ChangeCidrCollectionRequest = xml_io::from_xml_root(&req.body).map_err(|e| {
+            invalid_argument(format!("invalid ChangeCidrCollectionRequest XML: {e}"))
+        })?;
+        if cfg.changes.change.is_empty() {
+            return Err(invalid_argument("Changes must contain at least one entry"));
+        }
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_cidr_collection(&id))?;
+        let coll = account
+            .cidr_collections
+            .get_mut(&id)
+            .ok_or_else(|| no_such_cidr_collection(&id))?;
+        if let Some(client_v) = cfg.collection_version {
+            if client_v != coll.version {
+                return Err(aws_error(
+                    StatusCode::CONFLICT,
+                    "CidrCollectionVersionMismatchException",
+                    format!(
+                        "CollectionVersion ({}) does not match the current ({})",
+                        client_v, coll.version
+                    ),
+                ));
+            }
+        }
+        // Stage changes against a clone so a later invalid change rolls
+        // everything back atomically.
+        let mut working = coll.locations.clone();
+        for ch in &cfg.changes.change {
+            match ch.action.to_uppercase().as_str() {
+                "PUT" => {
+                    let entry = working.entry(ch.location_name.clone()).or_default();
+                    for cidr in &ch.cidr_list.cidr {
+                        if !entry.contains(cidr) {
+                            entry.push(cidr.clone());
+                        }
+                    }
+                    entry.sort();
+                }
+                "DELETE_IF_EXISTS" => {
+                    if let Some(entry) = working.get_mut(&ch.location_name) {
+                        entry.retain(|c| !ch.cidr_list.cidr.contains(c));
+                        if entry.is_empty() {
+                            working.remove(&ch.location_name);
+                        }
+                    }
+                }
+                other => {
+                    return Err(invalid_argument(format!(
+                        "Unknown CIDR change action: {other}"
+                    )));
+                }
+            }
+        }
+        coll.locations = working;
+        coll.version += 1;
+        drop(state);
+        let mut body = String::with_capacity(128);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<ChangeCidrCollectionResponse xmlns=\"{NS}\">"));
+        body.push_str(&format!("<Id>{}</Id>", esc(&id)));
+        body.push_str("</ChangeCidrCollectionResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn delete_cidr_collection(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_cidr_collection(&id))?;
+        let coll = account
+            .cidr_collections
+            .get(&id)
+            .ok_or_else(|| no_such_cidr_collection(&id))?;
+        if !coll.locations.is_empty() {
+            return Err(aws_error(
+                StatusCode::BAD_REQUEST,
+                "CidrCollectionInUseException",
+                format!(
+                    "CIDR collection {} still contains {} location(s)",
+                    id,
+                    coll.locations.len()
+                ),
+            ));
+        }
+        account.cidr_collections.remove(&id);
+        drop(state);
+        let mut body = String::with_capacity(128);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<DeleteCidrCollectionResponse xmlns=\"{NS}\"/>"));
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn list_cidr_collections(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let max_items: usize = req
+            .query_params
+            .get("maxresults")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+        let state = self.state.read();
+        let mut colls: Vec<StoredCidrCollection> = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .map(|a| a.cidr_collections.values().cloned().collect())
+            .unwrap_or_default();
+        drop(state);
+        colls.sort_by(|a, b| a.id.cmp(&b.id));
+        let slice: Vec<&StoredCidrCollection> = colls.iter().take(max_items).collect();
+        let next = if slice.len() < colls.len() {
+            Some(colls[slice.len()].id.clone())
+        } else {
+            None
+        };
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<ListCidrCollectionsResponse xmlns=\"{NS}\">"));
+        body.push_str("<CidrCollections>");
+        for c in &slice {
+            // CollectionSummaries.member has no xmlName trait, so AWS
+            // SDKs deserialize members from the default `<member>` element.
+            body.push_str("<member>");
+            body.push_str(&format!("<Arn>{}</Arn>", esc(&c.arn)));
+            body.push_str(&format!("<Id>{}</Id>", esc(&c.id)));
+            body.push_str(&format!("<Name>{}</Name>", esc(&c.name)));
+            body.push_str(&format!("<Version>{}</Version>", c.version));
+            body.push_str("</member>");
+        }
+        body.push_str("</CidrCollections>");
+        if let Some(n) = &next {
+            body.push_str(&format!("<NextToken>{}</NextToken>", esc(n)));
+        }
+        body.push_str("</ListCidrCollectionsResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn list_cidr_locations(
+        &self,
+        req: &AwsRequest,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let max_items: usize = req
+            .query_params
+            .get("maxresults")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+        let state = self.state.read();
+        let coll = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .and_then(|a| a.cidr_collections.get(&id).cloned())
+            .ok_or_else(|| no_such_cidr_collection(&id))?;
+        drop(state);
+        let mut names: Vec<String> = coll.locations.keys().cloned().collect();
+        names.sort();
+        let slice: Vec<&String> = names.iter().take(max_items).collect();
+        let next = if slice.len() < names.len() {
+            Some(names[slice.len()].clone())
+        } else {
+            None
+        };
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<ListCidrLocationsResponse xmlns=\"{NS}\">"));
+        body.push_str("<CidrLocations>");
+        for n in &slice {
+            body.push_str("<member>");
+            body.push_str(&format!("<LocationName>{}</LocationName>", esc(n)));
+            body.push_str("</member>");
+        }
+        body.push_str("</CidrLocations>");
+        if let Some(n) = &next {
+            body.push_str(&format!("<NextToken>{}</NextToken>", esc(n)));
+        }
+        body.push_str("</ListCidrLocationsResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn list_cidr_blocks(
+        &self,
+        req: &AwsRequest,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let location_name = req.query_params.get("location").cloned();
+        let max_items: usize = req
+            .query_params
+            .get("maxresults")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+        let state = self.state.read();
+        let coll = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .and_then(|a| a.cidr_collections.get(&id).cloned())
+            .ok_or_else(|| no_such_cidr_collection(&id))?;
+        drop(state);
+        let blocks: Vec<(String, String)> = coll
+            .locations
+            .iter()
+            .filter(|(n, _)| location_name.as_ref().is_none_or(|name| name == *n))
+            .flat_map(|(n, blocks)| blocks.iter().map(move |b| (n.clone(), b.clone())))
+            .collect();
+        let slice: Vec<&(String, String)> = blocks.iter().take(max_items).collect();
+        let next = if slice.len() < blocks.len() {
+            Some(blocks[slice.len()].1.clone())
+        } else {
+            None
+        };
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<ListCidrBlocksResponse xmlns=\"{NS}\">"));
+        body.push_str("<CidrBlocks>");
+        for (loc, cidr) in &slice {
+            body.push_str("<member>");
+            body.push_str(&format!("<CidrBlock>{}</CidrBlock>", esc(cidr)));
+            body.push_str(&format!("<LocationName>{}</LocationName>", esc(loc)));
+            body.push_str("</member>");
+        }
+        body.push_str("</CidrBlocks>");
+        if let Some(n) = &next {
+            body.push_str(&format!("<NextToken>{}</NextToken>", esc(n)));
+        }
+        body.push_str("</ListCidrBlocksResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 fn _account_helper(_state: &mut Route53Accounts) -> &mut AccountState {
@@ -2336,4 +3078,95 @@ fn push_traffic_policy_instance(out: &mut String, i: &StoredTrafficPolicyInstanc
         esc(&i.traffic_policy_type)
     ));
     out.push_str("</TrafficPolicyInstance>");
+}
+
+// ─── DNSSEC + Query Logging + CIDR helpers ───────────────────────────
+
+fn require_zone_and_name(route: &Route) -> Result<(String, String), AwsServiceError> {
+    let zone = require_id(route)?;
+    let name = route
+        .second_id
+        .clone()
+        .ok_or_else(|| invalid_argument("missing name in URI"))?;
+    Ok((strip_zone_prefix(&zone), name))
+}
+
+/// Pick a deterministic 16-bit key tag from the (zone, name) pair so
+/// repeated test runs see a stable value without ever creating real
+/// crypto material.
+fn deterministic_key_tag(zone_id: &str, name: &str) -> i32 {
+    let mut acc: u32 = 0;
+    for b in zone_id.bytes().chain(name.bytes()) {
+        acc = acc.wrapping_mul(31).wrapping_add(b as u32);
+    }
+    (acc & 0xFFFF) as i32
+}
+
+fn no_such_key_signing_key(zone_id: &str, name: &str) -> AwsServiceError {
+    aws_error(
+        StatusCode::NOT_FOUND,
+        "NoSuchKeySigningKey",
+        format!("No key-signing key {}/{} found", zone_id, name),
+    )
+}
+
+fn no_such_query_logging_config(id: &str) -> AwsServiceError {
+    aws_error(
+        StatusCode::NOT_FOUND,
+        "NoSuchQueryLoggingConfig",
+        format!("No query logging config found with ID: {id}"),
+    )
+}
+
+fn no_such_cidr_collection(id: &str) -> AwsServiceError {
+    aws_error(
+        StatusCode::NOT_FOUND,
+        "NoSuchCidrCollectionException",
+        format!("No CIDR collection found with ID: {id}"),
+    )
+}
+
+fn push_key_signing_key_inner(out: &mut String, k: &StoredKeySigningKey) {
+    out.push_str(&format!("<Name>{}</Name>", esc(&k.name)));
+    out.push_str(&format!("<KmsArn>{}</KmsArn>", esc(&k.kms_arn)));
+    out.push_str("<Flag>257</Flag>");
+    out.push_str(
+        "<SigningAlgorithmMnemonic>ECDSAP256SHA256</SigningAlgorithmMnemonic>\
+         <SigningAlgorithmType>13</SigningAlgorithmType>\
+         <DigestAlgorithmMnemonic>SHA-256</DigestAlgorithmMnemonic>\
+         <DigestAlgorithmType>2</DigestAlgorithmType>",
+    );
+    out.push_str(&format!("<KeyTag>{}</KeyTag>", k.key_tag));
+    out.push_str(&format!("<Status>{}</Status>", esc(&k.status)));
+    out.push_str(&format!(
+        "<CreatedDate>{}</CreatedDate>",
+        rfc3339(&k.created_date)
+    ));
+    out.push_str(&format!(
+        "<LastModifiedDate>{}</LastModifiedDate>",
+        rfc3339(&k.last_modified_date)
+    ));
+}
+
+fn push_query_logging_config(out: &mut String, c: &StoredQueryLoggingConfig) {
+    out.push_str("<QueryLoggingConfig>");
+    out.push_str(&format!("<Id>{}</Id>", esc(&c.id)));
+    out.push_str(&format!(
+        "<HostedZoneId>{}</HostedZoneId>",
+        esc(&c.hosted_zone_id)
+    ));
+    out.push_str(&format!(
+        "<CloudWatchLogsLogGroupArn>{}</CloudWatchLogsLogGroupArn>",
+        esc(&c.cloud_watch_logs_log_group_arn)
+    ));
+    out.push_str("</QueryLoggingConfig>");
+}
+
+fn push_cidr_collection_full(out: &mut String, c: &StoredCidrCollection) {
+    out.push_str("<Collection>");
+    out.push_str(&format!("<Arn>{}</Arn>", esc(&c.arn)));
+    out.push_str(&format!("<Id>{}</Id>", esc(&c.id)));
+    out.push_str(&format!("<Name>{}</Name>", esc(&c.name)));
+    out.push_str(&format!("<Version>{}</Version>", c.version));
+    out.push_str("</Collection>");
 }

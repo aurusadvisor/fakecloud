@@ -347,3 +347,68 @@ pub struct UpdateTrafficPolicyInstanceRequest {
     pub traffic_policy_id: String,
     pub traffic_policy_version: i64,
 }
+
+// ─── DNSSEC + KSK ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CreateKeySigningKeyRequest {
+    pub caller_reference: String,
+    pub hosted_zone_id: String,
+    pub key_management_service_arn: String,
+    pub name: String,
+    pub status: String,
+}
+
+// ─── Query Logging ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CreateQueryLoggingConfigRequest {
+    pub hosted_zone_id: String,
+    #[serde(rename = "CloudWatchLogsLogGroupArn")]
+    pub cloud_watch_logs_log_group_arn: String,
+}
+
+// ─── CIDR Collections ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CreateCidrCollectionRequest {
+    pub name: String,
+    pub caller_reference: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct ChangeCidrCollectionRequest {
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub collection_version: Option<i64>,
+    pub changes: CidrCollectionChanges,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CidrCollectionChanges {
+    // The Smithy `CidrCollectionChanges` list has no `xmlName` trait on
+    // its member, so the on-wire element name is the restXml default:
+    // `<member>`, not `<CidrCollectionChange>`. The Rust SDK does send
+    // `<member>` — verified against `cidr_collection_lifecycle` E2E.
+    #[serde(default, rename = "member")]
+    pub change: Vec<CidrCollectionChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CidrCollectionChange {
+    pub location_name: String,
+    pub action: String,
+    pub cidr_list: CidrList,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CidrList {
+    #[serde(default, rename = "Cidr")]
+    pub cidr: Vec<String>,
+}
