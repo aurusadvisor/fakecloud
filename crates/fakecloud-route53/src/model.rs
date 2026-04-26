@@ -302,3 +302,48 @@ pub struct ResetElements {
     #[serde(default, rename = "ResettableElementName")]
     pub resettable_element_name: Vec<String>,
 }
+
+// ─── Traffic Policies ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CreateTrafficPolicyRequest {
+    pub name: String,
+    pub document: String,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CreateTrafficPolicyVersionRequest {
+    pub document: String,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateTrafficPolicyCommentRequest {
+    pub comment: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CreateTrafficPolicyInstanceRequest {
+    pub hosted_zone_id: String,
+    pub name: String,
+    #[serde(rename = "TTL")]
+    pub ttl: i64,
+    pub traffic_policy_id: String,
+    pub traffic_policy_version: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateTrafficPolicyInstanceRequest {
+    #[serde(rename = "TTL")]
+    pub ttl: i64,
+    pub traffic_policy_id: String,
+    pub traffic_policy_version: i64,
+}

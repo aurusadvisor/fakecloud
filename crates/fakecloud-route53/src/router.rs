@@ -95,6 +95,51 @@ pub fn route(method: &Method, path: &str, _raw_query: &str) -> Option<Route> {
         }
         (&Method::GET, ["checkeripranges"]) => Some(Route::just("GetCheckerIpRanges")),
 
+        // ─── Traffic Policies ────────────────────────────────────────
+        (&Method::POST, ["trafficpolicy"]) => Some(Route::just("CreateTrafficPolicy")),
+        (&Method::POST, ["trafficpolicy", id]) => {
+            Some(Route::with_id("CreateTrafficPolicyVersion", id))
+        }
+        (&Method::GET, ["trafficpolicy", id, version]) => {
+            Some(Route::with_two("GetTrafficPolicy", id, version))
+        }
+        (&Method::POST, ["trafficpolicy", id, version]) => {
+            Some(Route::with_two("UpdateTrafficPolicyComment", id, version))
+        }
+        (&Method::DELETE, ["trafficpolicy", id, version]) => {
+            Some(Route::with_two("DeleteTrafficPolicy", id, version))
+        }
+        (&Method::GET, ["trafficpolicies"]) => Some(Route::just("ListTrafficPolicies")),
+        (&Method::GET, ["trafficpolicies", id, "versions"]) => {
+            Some(Route::with_id("ListTrafficPolicyVersions", id))
+        }
+
+        // ─── Traffic Policy Instances ────────────────────────────────
+        (&Method::POST, ["trafficpolicyinstance"]) => {
+            Some(Route::just("CreateTrafficPolicyInstance"))
+        }
+        (&Method::GET, ["trafficpolicyinstance", id]) => {
+            Some(Route::with_id("GetTrafficPolicyInstance", id))
+        }
+        (&Method::POST, ["trafficpolicyinstance", id]) => {
+            Some(Route::with_id("UpdateTrafficPolicyInstance", id))
+        }
+        (&Method::DELETE, ["trafficpolicyinstance", id]) => {
+            Some(Route::with_id("DeleteTrafficPolicyInstance", id))
+        }
+        (&Method::GET, ["trafficpolicyinstances"]) => {
+            Some(Route::just("ListTrafficPolicyInstances"))
+        }
+        (&Method::GET, ["trafficpolicyinstances", "hostedzone"]) => {
+            Some(Route::just("ListTrafficPolicyInstancesByHostedZone"))
+        }
+        (&Method::GET, ["trafficpolicyinstances", "trafficpolicy"]) => {
+            Some(Route::just("ListTrafficPolicyInstancesByPolicy"))
+        }
+        (&Method::GET, ["trafficpolicyinstancecount"]) => {
+            Some(Route::just("GetTrafficPolicyInstanceCount"))
+        }
+
         _ => None,
     }
 }
