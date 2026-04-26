@@ -218,13 +218,21 @@ fn parse_lambda_response(response: serde_json::Value) -> Result<AwsResponse, Aws
             let Some(arr) = v_arr.as_array() else {
                 continue;
             };
-            multi_keys.insert(name.as_str().to_lowercase());
+            // Only treat the key as overridden once we successfully
+            // accept at least one valid value — otherwise an empty or
+            // entirely-invalid multi-value list would silently swallow
+            // the corresponding `headers` entry.
+            let mut accepted_any = false;
             for v in arr {
                 if let Some(s) = v.as_str() {
                     if let Ok(val) = http::HeaderValue::from_str(s) {
                         headers.append(name.clone(), val);
+                        accepted_any = true;
                     }
                 }
+            }
+            if accepted_any {
+                multi_keys.insert(name.as_str().to_lowercase());
             }
         }
     }

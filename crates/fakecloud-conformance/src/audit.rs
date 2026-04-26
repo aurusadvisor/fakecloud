@@ -95,8 +95,15 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
         // name (`apigateway`). Each crate owns its own
         // `supported_actions()` list; tag tests strictly so v1 coverage
         // never double-counts as v2 coverage when an action name happens
-        // to exist in both models.
-        ("apigateway", "apigateway", &["service.rs"], &["apigateway"]),
+        // to exist in both models. The v1 tag list also includes the
+        // Smithy `service_name` (`apigatewayv1`) so the auto-probe runner
+        // matches it to the v1 crate's `supported_actions()` for gating.
+        (
+            "apigateway",
+            "apigateway",
+            &["service.rs"],
+            &["apigateway", "apigatewayv1"],
+        ),
         (
             "apigatewayv2",
             "apigatewayv2",
