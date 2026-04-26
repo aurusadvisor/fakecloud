@@ -824,6 +824,7 @@ mod tests {
             query_params: HashMap::new(),
             headers: http::HeaderMap::new(),
             body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),
             request_id: "req-id".to_string(),

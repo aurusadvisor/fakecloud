@@ -189,7 +189,19 @@ impl AwsService for S3Service {
         "s3"
     }
 
-    async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn handle(&self, mut req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // PutObject / UploadPart / UploadPartCopy enter dispatch via the
+        // streaming path with `body = Bytes::new()` and the raw HTTP body
+        // available through `take_body_stream`. Materialize it here with
+        // no upper bound — the dispatch-level body cap intentionally
+        // doesn't gate streaming routes. The per-service handlers that
+        // need to spill to disk (PutObject in persistent mode) can call
+        // `take_body_stream` themselves before this point in a future
+        // refactor; today they read `req.body` like any other handler.
+        if let Some(stream) = req.take_body_stream() {
+            req.body = fakecloud_core::service::drain_request_stream(stream).await?;
+        }
+
         // S3 REST routing: method + path segments + query params
         let bucket = req.path_segments.first().map(|s| s.as_str());
         // Extract key from the raw path to preserve leading slashes and empty segments.
@@ -3126,6 +3138,7 @@ mod tests {
             headers: HeaderMap::new(),
             query_params,
             body: Bytes::copy_from_slice(body),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: segments,
             raw_path: path.to_string(),
             raw_query,

@@ -1,12 +1,20 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode};
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::auth::Principal;
 
+/// Streaming request body kept alongside the buffered `body: Bytes`. Set
+/// by dispatch only for routes that opt into streaming (S3 PutObject /
+/// UploadPart, ECR OCI blob upload PATCH/PUT). Service handlers call
+/// [`AwsRequest::take_body_stream`] to consume the raw stream without
+/// buffering the entire payload into memory; non-streaming services
+/// keep using `req.body` (which is empty `Bytes` for streaming routes).
+pub type RequestBodyStream = axum::body::Body;
+
 /// A parsed AWS request.
-#[derive(Debug)]
 pub struct AwsRequest {
     pub service: String,
     pub action: String,
@@ -15,7 +23,14 @@ pub struct AwsRequest {
     pub request_id: String,
     pub headers: HeaderMap,
     pub query_params: HashMap<String, String>,
+    /// Buffered request body. For streaming routes this is `Bytes::new()`
+    /// and the raw body is available via [`AwsRequest::take_body_stream`].
     pub body: Bytes,
+    /// Raw streaming body, populated only for streaming routes. Wrapped
+    /// in a Mutex so the per-service handler can `.take()` ownership
+    /// behind the shared `&AwsRequest` reference threaded through the
+    /// call chain.
+    pub body_stream: Mutex<Option<RequestBodyStream>>,
     pub path_segments: Vec<String>,
     /// The raw URI path, before splitting into segments.
     pub raw_path: String,
@@ -35,10 +50,81 @@ pub struct AwsRequest {
     pub principal: Option<Principal>,
 }
 
+impl std::fmt::Debug for AwsRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsRequest")
+            .field("service", &self.service)
+            .field("action", &self.action)
+            .field("region", &self.region)
+            .field("account_id", &self.account_id)
+            .field("request_id", &self.request_id)
+            .field("headers", &self.headers)
+            .field("query_params", &self.query_params)
+            .field("body_len", &self.body.len())
+            .field(
+                "body_stream",
+                &self.body_stream.lock().as_ref().map(|_| "<stream>"),
+            )
+            .field("path_segments", &self.path_segments)
+            .field("raw_path", &self.raw_path)
+            .field("raw_query", &self.raw_query)
+            .field("method", &self.method)
+            .field("is_query_protocol", &self.is_query_protocol)
+            .field("access_key_id", &self.access_key_id)
+            .field("principal", &self.principal)
+            .finish()
+    }
+}
+
 impl AwsRequest {
     /// Parse the request body as JSON, returning `Value::Null` on failure.
     pub fn json_body(&self) -> serde_json::Value {
         serde_json::from_slice(&self.body).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Consume the streaming body if this request was dispatched as
+    /// streaming. Returns `None` for buffered requests; the buffered
+    /// body is available via [`AwsRequest::body`]. Calling this twice
+    /// returns `None` on the second call.
+    pub fn take_body_stream(&self) -> Option<RequestBodyStream> {
+        self.body_stream.lock().take()
+    }
+}
+
+/// Drain a streaming request body into a single [`Bytes`] buffer with no
+/// upper bound. Service handlers that need the whole payload in memory
+/// for now (e.g. S3 PutObject pre-disk-spool refactor, ECR blob upload
+/// while the upload state still uses base64-in-memory) call this from
+/// inside `handle()` after [`AwsRequest::take_body_stream`] yields the
+/// stream. The dispatch-level cap (`FAKECLOUD_MAX_REQUEST_BODY_BYTES`)
+/// does NOT apply to streaming routes; this helper exists so the
+/// transitional buffered consumer doesn't have to depend on `axum`.
+pub async fn drain_request_stream(stream: RequestBodyStream) -> Result<Bytes, AwsServiceError> {
+    use http_body_util::BodyExt;
+    match stream.collect().await {
+        Ok(c) => Ok(c.to_bytes()),
+        Err(e) => {
+            let msg = e.to_string();
+            // Hyper / axum surface `body limit exceeded` with a
+            // payload-too-large variant. Everything else (connection
+            // reset, malformed chunked encoding, premature EOF) maps
+            // to a 400 BadRequest so callers can distinguish.
+            let too_large = msg.to_ascii_lowercase().contains("limit");
+            let (status, code, message) = if too_large {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "RequestEntityTooLarge",
+                    "Streaming request body exceeded the configured limit",
+                )
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "MalformedRequestBody",
+                    "Failed to read streaming request body",
+                )
+            };
+            Err(AwsServiceError::aws_error(status, code, message))
+        }
     }
 }
 
@@ -437,6 +523,7 @@ mod tests {
             headers: HeaderMap::new(),
             query_params: HashMap::new(),
             body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".into(),
             raw_query: String::new(),

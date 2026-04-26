@@ -1667,6 +1667,7 @@ mod tests {
             query_params: qp,
             headers: http::HeaderMap::new(),
             body: bytes::Bytes::from(body.to_string()),
+            body_stream: parking_lot::Mutex::new(None),
             account_id: "000000000000".to_string(),
             region: "us-east-1".to_string(),
             request_id: "rid".to_string(),

@@ -1764,6 +1764,7 @@ mod tests {
             headers: HeaderMap::new(),
             query_params: HashMap::new(),
             body: body.as_bytes().to_vec().into(),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),

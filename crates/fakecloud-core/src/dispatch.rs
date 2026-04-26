@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::extract::{ConnectInfo, Extension, Query};
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -26,68 +27,104 @@ pub async fn dispatch(
     let request_id = uuid::Uuid::new_v4().to_string();
 
     let (parts, body) = request.into_parts();
-    // The dispatch path materializes request bodies into memory so each
-    // service handler sees a `Bytes` payload it can parse synchronously.
-    // The cap is configurable via `FAKECLOUD_MAX_REQUEST_BODY_BYTES`
-    // (default 1 GiB) — enough to absorb the largest legitimate single
-    // S3 PutObject (5 GiB cap on multipart parts; AWS recommends
-    // multipart above ~100 MiB) without OOM risk in tests.
-    let max_body_bytes = max_request_body_bytes();
-    let body_bytes = match axum::body::to_bytes(body, max_body_bytes).await {
-        Ok(b) => b,
-        Err(_) => {
-            return build_error_response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "RequestEntityTooLarge",
-                "Request body too large",
-                &request_id,
-                AwsProtocol::Query,
-            );
+
+    // Streaming opt-in: if the route is a known large-body S3 / ECR
+    // upload, we skip the buffered `to_bytes` step entirely and hand
+    // the raw body to the service handler. The handler spills it to
+    // disk on the fly. Header-only detection covers every streaming
+    // candidate (none of them rely on form-body sniffing).
+    let stream_route = streaming_route(
+        &parts.method,
+        parts.uri.path(),
+        &parts.headers,
+        &query_params,
+    );
+    let header_only = protocol::detect_service_headers_only(&parts.headers, &query_params);
+    let stream_dispatch = match (&stream_route, &header_only) {
+        // Header-only detection agrees with the URL match — covers S3
+        // PUT object (SigV4 service=s3 in Authorization).
+        (Some(sr), Some(detected)) if sr.0 == detected.service => Some(detected.clone()),
+        // ECR OCI v2 blob upload has no AWS auth header; the path
+        // alone (`/v2/.../blobs/uploads/...`) tells us the route is
+        // ECR. Synthesize a DetectedRequest so dispatch picks the
+        // streaming path. Same special-case the buffered branch
+        // applies on detect_service None (see below).
+        (Some((service, _)), None) if *service == "ecr" => Some(protocol::DetectedRequest {
+            service: "ecr".to_string(),
+            action: String::new(),
+            protocol: AwsProtocol::Rest,
+        }),
+        _ => None,
+    };
+
+    let (body_bytes, body_stream) = if stream_dispatch.is_some() {
+        (Bytes::new(), Some(body))
+    } else {
+        // Buffered path: materialize the body into memory under the
+        // configured cap. `FAKECLOUD_MAX_REQUEST_BODY_BYTES` (default
+        // 1 GiB) caps non-streaming requests; streaming routes have no
+        // cap because nothing materializes the entire body in RAM.
+        let max_body_bytes = max_request_body_bytes();
+        match axum::body::to_bytes(body, max_body_bytes).await {
+            Ok(b) => (b, None),
+            Err(_) => {
+                return build_error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "RequestEntityTooLarge",
+                    "Request body too large",
+                    &request_id,
+                    AwsProtocol::Query,
+                );
+            }
         }
     };
 
     // Detect service and action
-    let detected = match protocol::detect_service(&parts.headers, &query_params, &body_bytes) {
-        Some(d) => d,
-        None => {
-            // OPTIONS requests (CORS preflight) don't carry Authorization headers.
-            // Route them to S3 since S3 is the only REST service that handles CORS.
-            // Note: API Gateway CORS preflight is not fully supported in this emulator
-            // because we can't distinguish between S3 and API Gateway OPTIONS requests
-            // without additional context (in real AWS, they have different domains).
-            if parts.method == http::Method::OPTIONS {
-                protocol::DetectedRequest {
-                    service: "s3".to_string(),
-                    action: String::new(),
-                    protocol: AwsProtocol::Rest,
+    let detected = if let Some(d) = stream_dispatch {
+        d
+    } else {
+        match protocol::detect_service(&parts.headers, &query_params, &body_bytes) {
+            Some(d) => d,
+            None => {
+                // OPTIONS requests (CORS preflight) don't carry Authorization headers.
+                // Route them to S3 since S3 is the only REST service that handles CORS.
+                // Note: API Gateway CORS preflight is not fully supported in this emulator
+                // because we can't distinguish between S3 and API Gateway OPTIONS requests
+                // without additional context (in real AWS, they have different domains).
+                if parts.method == http::Method::OPTIONS {
+                    protocol::DetectedRequest {
+                        service: "s3".to_string(),
+                        action: String::new(),
+                        protocol: AwsProtocol::Rest,
+                    }
+                } else if parts.uri.path() == "/v2" || parts.uri.path().starts_with("/v2/") {
+                    // OCI Distribution v2 protocol. Docker CLI / OCI clients
+                    // use Basic auth (not SigV4) and GET /v2/ with no body,
+                    // so this must be matched before the apigateway fallback.
+                    protocol::DetectedRequest {
+                        service: "ecr".to_string(),
+                        action: String::new(),
+                        protocol: AwsProtocol::Rest,
+                    }
+                } else if !parts.uri.path().starts_with("/_") {
+                    // Requests without AWS auth that don't match any service might be
+                    // API Gateway execute API calls (plain HTTP without signatures).
+                    // Route them to apigateway service which will validate if a matching
+                    // API/stage exists. Skip special FakeCloud endpoints (/_*).
+                    protocol::DetectedRequest {
+                        service: "apigateway".to_string(),
+                        action: String::new(),
+                        protocol: AwsProtocol::RestJson,
+                    }
+                } else {
+                    return build_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "MissingAction",
+                        "Could not determine target service or action from request",
+                        &request_id,
+                        AwsProtocol::Query,
+                    );
                 }
-            } else if parts.uri.path() == "/v2" || parts.uri.path().starts_with("/v2/") {
-                // OCI Distribution v2 protocol. Docker CLI / OCI clients
-                // use Basic auth (not SigV4) and GET /v2/ with no body,
-                // so this must be matched before the apigateway fallback.
-                protocol::DetectedRequest {
-                    service: "ecr".to_string(),
-                    action: String::new(),
-                    protocol: AwsProtocol::Rest,
-                }
-            } else if !parts.uri.path().starts_with("/_") {
-                // Requests without AWS auth that don't match any service might be
-                // API Gateway execute API calls (plain HTTP without signatures).
-                // Route them to apigateway service which will validate if a matching
-                // API/stage exists. Skip special FakeCloud endpoints (/_*).
-                protocol::DetectedRequest {
-                    service: "apigateway".to_string(),
-                    action: String::new(),
-                    protocol: AwsProtocol::RestJson,
-                }
-            } else {
-                return build_error_response(
-                    StatusCode::BAD_REQUEST,
-                    "MissingAction",
-                    "Could not determine target service or action from request",
-                    &request_id,
-                    AwsProtocol::Query,
-                );
             }
         }
     };
@@ -309,6 +346,7 @@ pub async fn dispatch(
         headers: parts.headers,
         query_params: all_params,
         body: body_bytes,
+        body_stream: parking_lot::Mutex::new(body_stream),
         path_segments,
         raw_path: path,
         raw_query,
@@ -612,6 +650,67 @@ impl DispatchConfig {
 /// Extract the 12-digit account ID segment from an AWS ARN.
 ///
 /// ARNs follow `arn:<partition>:<service>:<region>:<account>:<resource>`.
+/// Identifies routes that opt into streaming request bodies. Returns
+/// `Some((service, action_hint))` when the dispatch path should hand
+/// the raw body to the service handler unbuffered, otherwise `None`
+/// for the default buffered path. The handler reads the stream via
+/// [`crate::service::AwsRequest::take_body_stream`].
+///
+/// Streaming-eligible routes today:
+///
+/// * `s3` PUT object — `PUT /<bucket>/<key>` with a SigV4 (or
+///   presigned) auth header. Covers PutObject, UploadPart, and
+///   UploadPartCopy. The S3 service spills to disk via
+///   [`fakecloud_persistence::BodySource::File`] when the stream is
+///   present.
+/// * `ecr` OCI Distribution v2 blob upload — `PATCH` and `PUT` on
+///   `/v2/{name}/blobs/uploads/{uuid}`. The ECR service spools the
+///   stream into a per-upload temp file before computing the digest.
+fn streaming_route(
+    method: &http::Method,
+    path: &str,
+    headers: &http::HeaderMap,
+    query_params: &HashMap<String, String>,
+) -> Option<(&'static str, &'static str)> {
+    // ECR OCI v2 blob upload (PATCH chunk + final PUT).
+    if (method == http::Method::PATCH || method == http::Method::PUT)
+        && path.starts_with("/v2/")
+        && path.contains("/blobs/uploads/")
+    {
+        return Some(("ecr", ""));
+    }
+
+    // S3 PutObject / UploadPart / UploadPartCopy. Detect either via
+    // SigV4 service field in the Authorization header OR via a SigV4
+    // presigned URL (X-Amz-Credential .../s3/...) OR a SigV2 presigned
+    // URL (AWSAccessKeyId + Signature + Expires query parameters).
+    if method == http::Method::PUT {
+        let after = path.trim_start_matches('/');
+        if !after.contains('/') {
+            return None;
+        }
+        let header_s3 = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(fakecloud_aws::sigv4::parse_sigv4)
+            .map(|info| info.service == "s3")
+            .unwrap_or(false);
+        let presigned_v4_s3 = query_params
+            .get("X-Amz-Credential")
+            .and_then(|c| c.split('/').nth(3).map(|s| s.to_string()))
+            .map(|service| service == "s3")
+            .unwrap_or(false);
+        let presigned_v2 = query_params.contains_key("AWSAccessKeyId")
+            && query_params.contains_key("Signature")
+            && query_params.contains_key("Expires");
+        if header_s3 || presigned_v4_s3 || presigned_v2 {
+            return Some(("s3", ""));
+        }
+    }
+
+    None
+}
+
 /// Default request-body buffering cap. fakecloud reads the entire
 /// request body into memory before handing it to a service handler,
 /// so this ceiling caps RAM usage per in-flight request.

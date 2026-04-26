@@ -1019,6 +1019,7 @@ mod tests {
             headers: HeaderMap::new(),
             query_params: params,
             body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".to_string(),
             raw_query: String::new(),

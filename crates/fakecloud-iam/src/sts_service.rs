@@ -1366,6 +1366,7 @@ mod tests {
             headers: http::HeaderMap::new(),
             query_params: params,
             body: Default::default(),
+            body_stream: parking_lot::Mutex::new(None),
             path_segments: vec![],
             raw_path: "/".into(),
             raw_query: String::new(),
