@@ -48,7 +48,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 
 ## Supported services
 
-28 services, 2,148 operations, 100% conformance per implemented service.
+28 services, 2,184 operations, 100% conformance per implemented service.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -79,7 +79,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | ECR                    |  58 | Full API — OCI v2 push/pull, lifecycle, scanning, registry, pull-through |
 | ECS                    |  60 | **Full API** — clusters, task definitions, real task execution, services + rolling deployments, container instances, capacity providers, task sets, ECS Exec |
 | Elastic Load Balancing v2 |  51 | ALB/NLB/GWLB CRUD: load balancers, target groups + targets + real health probes, **listeners + rules + certificates**, LB/listener/target-group attributes, capacity reservations, **mTLS trust stores + revocations**, SSL policies, resource policies, tags. **In-process HTTP data plane** for ALBs — per-LB TCP bind, rule matching, forward / fixed-response / redirect, sticky sessions, X-Forwarded-* headers |
-| CloudFront                | 117 | Distributions + invalidations + tagging + by-X listings + web ACL/alias association. OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment policies. CloudFront Functions, Public Keys, Key Groups, Key Value Stores, OAIs (legacy), Monitoring Subscriptions. Streaming Distributions (legacy RTMP) — full CRUD + WithTags, ETag/If-Match concurrency, `StreamingDistributionNotDisabled` enforced before Delete. **Field-Level Encryption configs + profiles + Realtime Log Configs** — full CRUD, ETag/If-Match concurrency, ARN-or-Name lookup. REST-XML protocol, full `DistributionConfig` round-trip incl. origins, cache behaviors, custom error responses, viewer certificates, geo restrictions |
+| CloudFront                | 136 | Distributions + invalidations + tagging + by-X listings + web ACL/alias association. OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment policies. CloudFront Functions, Public Keys, Key Groups, Key Value Stores, OAIs (legacy), Monitoring Subscriptions. Streaming Distributions (legacy RTMP). Field-Level Encryption configs + profiles + Realtime Log Configs. **VPC Origins, Anycast IP Lists, Trust Stores, Resource Policies** — full CRUD with ETag/If-Match concurrency. REST-XML protocol, full `DistributionConfig` round-trip incl. origins, cache behaviors, custom error responses, viewer certificates, geo restrictions |
 
 Per-service docs and feature matrices: [fakecloud.dev/docs/services](https://fakecloud.dev/docs/services).
 
@@ -122,7 +122,7 @@ Full guides: [fakecloud.dev/docs/guides](https://fakecloud.dev/docs/guides).
 | ECR                 | 58 operations, real `docker push`/`pull` via OCI v2 | [Paid only](https://docs.localstack.cloud/references/licensing/)              |
 | ECS                 | **60 operations — full API** incl. real task execution, services, task sets, capacity providers | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | Elastic Load Balancing v2 | **51 operations** ALB/NLB/GWLB incl. mTLS trust stores, capacity reservations, attributes, resource policies, plus an in-process HTTP data plane (rule matching + forward/fixed-response/redirect + sticky sessions) | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
-| CloudFront                | **117 operations** — distributions, invalidations, tagging, by-X listings, web ACL/alias association. OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment policies. CloudFront Functions, Public Keys, Key Groups, Key Value Stores, Origin Access Identities (legacy), Monitoring Subscriptions. Streaming Distributions (legacy RTMP) — full CRUD + WithTags + ETag/If-Match concurrency, `StreamingDistributionNotDisabled` rule enforced before delete. **Field-Level Encryption configs + profiles + Realtime Log Configs** — full CRUD, ETag/If-Match concurrency, ARN-or-Name lookup. Full `DistributionConfig` round-trip (origins, cache behaviors, custom error responses, viewer certificates, geo restrictions) | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| CloudFront                | **136 operations** — distributions, invalidations, tagging, by-X listings, web ACL/alias association. OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment policies. CloudFront Functions, Public Keys, Key Groups, Key Value Stores, Origin Access Identities (legacy), Monitoring Subscriptions. Streaming Distributions (legacy RTMP). Field-Level Encryption configs + profiles + Realtime Log Configs. **VPC Origins, Anycast IP Lists, Trust Stores, Resource Policies** — full CRUD with ETag/If-Match concurrency. Full `DistributionConfig` round-trip (origins, cache behaviors, custom error responses, viewer certificates, geo restrictions) | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 
 > Performance numbers measured on Apple M1 via `time fakecloud`, `ps -o rss`, `ls -lh`.
 

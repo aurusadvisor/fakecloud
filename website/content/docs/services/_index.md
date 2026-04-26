@@ -7,7 +7,7 @@ template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud implements 28 AWS services with 2,113 total operations, all at 100% Smithy conformance. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
+fakecloud implements 28 AWS services with 2,184 total operations, all at 100% Smithy conformance. Per-service feature matrices and gotchas live on individual service pages — use the sidebar to navigate.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
@@ -38,6 +38,6 @@ fakecloud implements 28 AWS services with 2,113 total operations, all at 100% Sm
 | ECR                    |  58 | Full API — OCI v2 push/pull, lifecycle eval, scanning, pull-through cache, registry templates, real cosign signature verification |
 | ECS                    |  60 | Full API — clusters, real Fargate-style task execution via Docker, services + rolling deployments, task sets, container instances, ECS Exec, awslogs -> Logs, secrets injection, task role credentials |
 | Elastic Load Balancing v2 |  51 | Full control plane — ALB/NLB/GWLB CRUD, target groups + targets + real health probes, listeners + rules + certificates, attributes, capacity reservations, **mTLS trust stores + revocations**, resource policies, SSL policies, tags. **In-process HTTP data plane for ALBs** — per-LB TCP bind, rule matching, forward / fixed-response / redirect, sticky sessions |
-| CloudFront                | 117 | Distributions, invalidations, tagging, by-X listings, web ACL/alias association. OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment policies. CloudFront Functions, Public Keys, Key Groups, Key Value Stores, Origin Access Identities (legacy), Monitoring Subscriptions. Streaming Distributions (legacy RTMP) — full CRUD + WithTags + ETag/If-Match concurrency, `StreamingDistributionNotDisabled` enforced before delete. **Field-Level Encryption configs + profiles + Realtime Log Configs** — full CRUD, ETag/If-Match concurrency, ARN-or-Name lookup. Full `DistributionConfig` round-trip incl. origins, cache behaviors, custom error responses, viewer certificates, geo restrictions |
+| CloudFront                | 136 | Distributions, invalidations, tagging, by-X listings, web ACL/alias association. OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment policies. CloudFront Functions, Public Keys, Key Groups, Key Value Stores, Origin Access Identities (legacy), Monitoring Subscriptions. Streaming Distributions (legacy RTMP). Field-Level Encryption configs + profiles + Realtime Log Configs. **VPC Origins, Anycast IP Lists, Trust Stores, Resource Policies** — full CRUD with ETag/If-Match concurrency. Full `DistributionConfig` round-trip incl. origins, cache behaviors, custom error responses, viewer certificates, geo restrictions |
 
 Detailed per-service pages are coming. If you need specifics on a service today, the conformance baseline at [`conformance-baseline.json`](https://github.com/faiscadev/fakecloud/blob/main/conformance-baseline.json) lists every operation fakecloud handles, and the AWS Smithy models in [`aws-models/`](https://github.com/faiscadev/fakecloud/tree/main/aws-models) are the authoritative source of truth.

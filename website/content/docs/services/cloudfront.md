@@ -4,9 +4,9 @@ description = "CloudFront control plane — distributions, invalidations, web AC
 weight = 24
 +++
 
-fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, the full policy resource surface (OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment), CloudFront Functions, public keys + key groups, key value stores, legacy origin access identities, per-distribution monitoring subscriptions, the legacy RTMP streaming distributions, field-level encryption configs + profiles, and realtime log configs. 117 operations.
+fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, the full policy resource surface (OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment), CloudFront Functions, public keys + key groups, key value stores, legacy origin access identities, per-distribution monitoring subscriptions, the legacy RTMP streaming distributions, field-level encryption configs + profiles, realtime log configs, VPC origins, anycast IP lists, trust stores, and resource policies. 136 operations.
 
-**Status: Batches 1-5 shipped.** VPC origins, anycast IP lists, trust stores, distribution tenants, and connection functions/groups are still pending in batch 6.
+**Status: Batches 1-6a shipped.** Distribution tenants, connection groups, connection functions, domain ops, and managed certificate details are still pending in subsequent batches.
 
 ## Supported today
 
@@ -29,6 +29,10 @@ fakecloud implements CloudFront's REST-XML control plane focused on the operatio
 - **Field-Level Encryption** — `CreateFieldLevelEncryptionConfig`, `GetFieldLevelEncryption`, `GetFieldLevelEncryptionConfig`, `UpdateFieldLevelEncryptionConfig`, `DeleteFieldLevelEncryptionConfig`, `ListFieldLevelEncryptionConfigs`. ETag/If-Match concurrency, `CallerReference` immutability on update, duplicate `CallerReference` rejected with `FieldLevelEncryptionConfigAlreadyExists`.
 - **Field-Level Encryption Profiles** — `CreateFieldLevelEncryptionProfile`, `GetFieldLevelEncryptionProfile`, `GetFieldLevelEncryptionProfileConfig`, `UpdateFieldLevelEncryptionProfile`, `DeleteFieldLevelEncryptionProfile`, `ListFieldLevelEncryptionProfiles`. Same concurrency + idempotency model as FLE configs.
 - **Realtime Log Configs** — `CreateRealtimeLogConfig`, `GetRealtimeLogConfig` (by `Name` or `ARN`), `UpdateRealtimeLogConfig`, `DeleteRealtimeLogConfig` (by `Name` or `ARN`), `ListRealtimeLogConfigs`. Endpoint round-trip preserves `KinesisStreamConfig` `RoleARN`/`StreamARN` exactly.
+- **VPC Origins** — `CreateVpcOrigin`, `GetVpcOrigin`, `UpdateVpcOrigin`, `DeleteVpcOrigin`, `ListVpcOrigins`. ETag/If-Match concurrency, duplicate `Name` rejected with `EntityAlreadyExists`. `DeleteVpcOrigin` returns the deleted resource and `ETag`. Status seeded as `Deployed` immediately for deterministic tests.
+- **Anycast IP Lists** — `CreateAnycastIpList`, `GetAnycastIpList`, `UpdateAnycastIpList`, `DeleteAnycastIpList`, `ListAnycastIpLists`. `IpCount` validated to AWS allowed values (3 or 21). Synthesized deterministic `AnycastIps` payload returned on every read.
+- **Trust Stores** — `CreateTrustStore`, `GetTrustStore` (by `identifier`), `UpdateTrustStore`, `DeleteTrustStore`, `ListTrustStores`. ETag/If-Match concurrency. `UpdateTrustStore` accepts the `httpPayload` `CaCertificatesBundleSource` body shape AWS uses (no name).
+- **Resource Policies** — `PutResourcePolicy`, `GetResourcePolicy`, `DeleteResourcePolicy`. Policy documents are stored verbatim per resource ARN and round-tripped on get.
 
 ### Concurrency semantics
 
@@ -82,8 +86,8 @@ aws --endpoint-url http://localhost:4566 cloudfront list-invalidations --distrib
 
 | Surface                                | Status                  |
 |----------------------------------------|-------------------------|
-| VPC Origins + Anycast IP Lists         | Batch 6                 |
-| Trust Stores + Distribution Tenants    | Batch 6                 |
-| Connection Functions / Groups          | Batch 6                 |
+| Distribution Tenants                   | Batch 6b                |
+| Connection Functions / Groups          | Batch 6b                |
+| Domain ops + Managed Certificate       | Batch 6b                |
 
 There is no edge data plane: requests against a CloudFront distribution domain are not actually proxied to origins. Use ELBv2's in-process data plane for HTTP request matching tests today.
