@@ -48,7 +48,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 
 ## Supported services
 
-28 services, 2,131 operations, 100% conformance per implemented service.
+28 services, 2,184 operations, 100% conformance per implemented service.
 
 | Service                | Ops | Notes                                                                  |
 | ---------------------- | --- | ---------------------------------------------------------------------- |
