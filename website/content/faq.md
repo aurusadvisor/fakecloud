@@ -32,7 +32,7 @@ Yes. fakecloud pulls real AWS Lambda runtime containers and executes your handle
 
 ### Does fakecloud run real databases for RDS?
 
-Yes. RDS emulation pulls real PostgreSQL / MySQL / MariaDB Docker images and runs them as the DB instance. Your SQL schema, indexes, triggers, and extensions work because the engine is real. See [Local RDS for tests](/local-rds/).
+Yes. RDS emulation pulls real PostgreSQL / MySQL / MariaDB / Oracle / SQL Server / Db2 Docker images and runs them as the DB instance. Your SQL schema, indexes, triggers, and extensions work because the engine is real. See [Local RDS for tests](/local-rds/).
 
 ### Does fakecloud run real Redis for ElastiCache?
 
@@ -112,7 +112,7 @@ GitHub issues: [github.com/faiscadev/fakecloud/issues](https://github.com/faisca
     {"@type": "Question", "name": "How many AWS services does fakecloud support?", "acceptedAnswer": {"@type": "Answer", "text": "26 services and 1,924 API operations at 100% conformance per implemented service today, with more on the roadmap. The goal is 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations."}},
     {"@type": "Question", "name": "Which AWS services are supported?", "acceptedAnswer": {"@type": "Answer", "text": "S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager, SSM, CloudWatch Logs, CloudFormation, EventBridge, EventBridge Scheduler, SES, Cognito User Pools, Kinesis, RDS, ElastiCache, Step Functions, API Gateway v2, Bedrock, Bedrock Runtime."}},
     {"@type": "Question", "name": "Does fakecloud execute Lambda code for real?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. fakecloud pulls real AWS Lambda runtime containers and executes your handler against them. All 13 official runtimes are supported."}},
-    {"@type": "Question", "name": "Does fakecloud run real databases for RDS?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. RDS emulation pulls real PostgreSQL, MySQL, and MariaDB Docker images and runs them as the DB instance."}},
+    {"@type": "Question", "name": "Does fakecloud run real databases for RDS?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. RDS emulation pulls real PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, and Db2 Docker images and runs them as the DB instance."}},
     {"@type": "Question", "name": "Does fakecloud run real Redis for ElastiCache?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. ElastiCache runs real Redis, Valkey, and Memcached Docker images, so all Redis commands including streams, pub/sub, and Lua scripts work, and the full memcached text protocol works."}},
     {"@type": "Question", "name": "Do S3 notifications fire Lambda?", "acceptedAnswer": {"@type": "Answer", "text": "Yes, end-to-end. When an object is created in S3, any Lambda subscribed via bucket notification fires for real in a runtime container. Same for SNS and SQS subscriptions."}},
     {"@type": "Question", "name": "How do I install fakecloud?", "acceptedAnswer": {"@type": "Answer", "text": "One-line install script: curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh | bash. Or Docker: docker run --rm -p 4566:4566 ghcr.io/faiscadev/fakecloud. Or cargo install fakecloud."}},

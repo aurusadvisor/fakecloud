@@ -456,6 +456,58 @@ pub fn default_parameter_groups(
         ("mysql5.7", "Default parameter group for mysql5.7"),
         ("mariadb10.11", "Default parameter group for mariadb10.11"),
         ("mariadb10.6", "Default parameter group for mariadb10.6"),
+        // Heavy-engine families. The names match what
+        // `service::default_parameter_group` returns so callers that
+        // omit `DBParameterGroupName` get a hit instead of a
+        // `DBParameterGroupNotFound`.
+        ("oracle-ee-23", "Default parameter group for oracle-ee-23"),
+        ("oracle-ee-21", "Default parameter group for oracle-ee-21"),
+        ("oracle-ee-19", "Default parameter group for oracle-ee-19"),
+        ("oracle-se2-23", "Default parameter group for oracle-se2-23"),
+        ("oracle-se2-21", "Default parameter group for oracle-se2-21"),
+        ("oracle-se2-19", "Default parameter group for oracle-se2-19"),
+        (
+            "oracle-ee-cdb-23",
+            "Default parameter group for oracle-ee-cdb-23",
+        ),
+        (
+            "oracle-se2-cdb-23",
+            "Default parameter group for oracle-se2-cdb-23",
+        ),
+        (
+            "sqlserver-ee-16",
+            "Default parameter group for sqlserver-ee-16",
+        ),
+        (
+            "sqlserver-ee-15",
+            "Default parameter group for sqlserver-ee-15",
+        ),
+        (
+            "sqlserver-se-16",
+            "Default parameter group for sqlserver-se-16",
+        ),
+        (
+            "sqlserver-se-15",
+            "Default parameter group for sqlserver-se-15",
+        ),
+        (
+            "sqlserver-ex-16",
+            "Default parameter group for sqlserver-ex-16",
+        ),
+        (
+            "sqlserver-ex-15",
+            "Default parameter group for sqlserver-ex-15",
+        ),
+        (
+            "sqlserver-web-16",
+            "Default parameter group for sqlserver-web-16",
+        ),
+        (
+            "sqlserver-web-15",
+            "Default parameter group for sqlserver-web-15",
+        ),
+        ("db2-se-11.5", "Default parameter group for db2-se-11.5"),
+        ("db2-ae-11.5", "Default parameter group for db2-ae-11.5"),
     ];
 
     for (family, description) in families {

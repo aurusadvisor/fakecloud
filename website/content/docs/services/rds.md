@@ -1,6 +1,6 @@
 +++
 title = "RDS"
-description = "Real PostgreSQL, MySQL, and MariaDB instances via Docker. Snapshots, read replicas, parameter groups."
+description = "Real PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, and Db2 instances via Docker. Snapshots, read replicas, parameter groups."
 weight = 17
 +++
 
@@ -9,7 +9,7 @@ fakecloud implements **163 of 163** RDS operations at 100% Smithy conformance. D
 ## Supported features
 
 - **DB instances** — CreateDBInstance, ModifyDBInstance, DeleteDBInstance, DescribeDBInstances, RebootDBInstance
-- **Real engines via Docker** — PostgreSQL, MySQL, MariaDB
+- **Real engines via Docker** — PostgreSQL, MySQL, MariaDB, Oracle (gvenzl/oracle-free), SQL Server (mssql/server Express), Db2 (db2_community)
 - **Snapshots** — automated and manual, CreateDBSnapshot, RestoreDBInstanceFromDBSnapshot, CopyDBSnapshot, DeleteDBSnapshot
 - **Read replicas** — CreateDBInstanceReadReplica, PromoteReadReplica
 - **Parameter groups** — DBParameterGroup and DBClusterParameterGroup CRUD, parameter management
@@ -56,16 +56,30 @@ Query protocol. Form-encoded body, `Action` parameter, XML responses.
 
 ## How the Docker integration works
 
-When you call `CreateDBInstance` for PostgreSQL/MySQL/MariaDB, fakecloud starts a real Docker container running the official image for that engine and version, waits for it to be ready, and reports the mapped host port. Your application connects to that port like it would connect to any database.
+When you call `CreateDBInstance` for PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2, fakecloud starts a real Docker container running the upstream image for that engine and version, waits for it to be ready, and reports the mapped host port. Your application connects to that port like it would connect to any database.
 
 `DeleteDBInstance` stops and removes the container. `RebootDBInstance` restarts it. Snapshots serialize the DB state so it can be restored into a fresh container.
+
+### Engine -> image map
+
+| Engine | Image | Port | Wait probe |
+|--------|-------|------|------------|
+| `postgres` | `postgres:<major>-alpine` | 5432 | `tokio-postgres` ping |
+| `mysql` | `mysql:<major>` | 3306 | `mysql_async` ping |
+| `mariadb` | `mariadb:<major>` | 3306 | `mysql_async` ping |
+| `oracle-ee` / `oracle-se2` (+`-cdb`) | `gvenzl/oracle-free:23-slim` | 1521 | log marker `DATABASE IS READY TO USE!` + TCP probe |
+| `sqlserver-ee` / `-se` / `-ex` / `-web` | `mcr.microsoft.com/mssql/server:2022-latest` | 1433 | log marker `SQL Server is now ready for client connections` + TCP probe |
+| `db2-se` / `db2-ae` | `icr.io/db2_community/db2:latest` | 50000 | log marker `Setup has completed` + TCP probe |
+
+The Oracle / SQL Server / Db2 images are large (1-3 GB) and take 30-300 s to first-boot. fakecloud passes the engine-specific license-acceptance environment variables (`ACCEPT_EULA`, `LICENSE`) automatically. Db2 launches with `--privileged` because the container needs it to set kernel parameters during startup.
 
 ## Gotchas
 
 - **Requires a Docker socket.** RDS needs access to `/var/run/docker.sock` to start and stop containers.
-- **First use pulls the image.** Expect a slower first run while the database image downloads.
+- **First use pulls the image.** Expect a slower first run while the database image downloads. Heavy engines (Oracle/SQL Server/Db2) can pull 1-3 GB on first use.
 - **Aurora is partially supported.** Aurora-specific features (Global Database, Serverless v2, I/O-optimized) are recorded but don't affect the real container.
-- **Some engines not supported via Docker.** Oracle, SQL Server, and Db2 are recorded in state (CRUD operations work) but don't run real databases.
+- **Db2 needs `--privileged`.** fakecloud sets it automatically; the host must allow privileged containers.
+- **Heavy-engine boot is slow.** Oracle takes 30-90 s to first-boot, Db2 30-60 s, SQL Server ~30 s. Factor this into test budgets.
 
 ## Source
 

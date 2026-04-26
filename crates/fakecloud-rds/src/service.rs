@@ -2406,7 +2406,21 @@ fn validate_create_request(
         ));
     }
     // Validate engine
-    let supported_engines = ["postgres", "mysql", "mariadb"];
+    let supported_engines = [
+        "postgres",
+        "mysql",
+        "mariadb",
+        "oracle-ee",
+        "oracle-se2",
+        "oracle-ee-cdb",
+        "oracle-se2-cdb",
+        "sqlserver-ee",
+        "sqlserver-se",
+        "sqlserver-ex",
+        "sqlserver-web",
+        "db2-se",
+        "db2-ae",
+    ];
     if !supported_engines.contains(&engine) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
@@ -2415,11 +2429,22 @@ fn validate_create_request(
         ));
     }
 
-    // Validate engine version
+    // Validate engine version. The Oracle/SQL Server/Db2 lists track
+    // the major-minor versions actually shipped by the upstream
+    // dev-edition images (gvenzl/oracle-free 23, mssql-server 2022,
+    // db2_community 11.5). Adding a new version here also requires
+    // wiring the image tag in `RdsRuntime::ensure_postgres`.
     let supported_versions = match engine {
         "postgres" => vec!["16.3", "15.5", "14.10", "13.13"],
         "mysql" => vec!["8.0.35", "8.0.28", "5.7.44"],
         "mariadb" => vec!["10.11.6", "10.6.16"],
+        "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => {
+            vec!["23.0.0", "21.0.0", "19.0.0"]
+        }
+        "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" => {
+            vec!["16.00.4085.2.v1", "15.00.4322.2.v1"]
+        }
+        "db2-se" | "db2-ae" => vec!["11.5.9.0.sb00000000.r1", "11.5.8.0.sb00000000.r1"],
         _ => vec![],
     };
 
@@ -3001,8 +3026,16 @@ fn merge_tags(existing: &mut Vec<RdsTag>, incoming: &[RdsTag]) {
 }
 
 fn license_model_for_engine(engine: &str) -> &'static str {
+    // Match AWS's reported license model exactly. Oracle and SQL Server
+    // both use the BYOL/license-included split; fakecloud reports
+    // license-included since the upstream dev-edition images are
+    // free-to-use. Db2 is reported as bring-your-own-license to mirror
+    // AWS's RDS for Db2 default.
     match engine {
         "mysql" | "mariadb" => "general-public-license",
+        "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => "license-included",
+        "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" => "license-included",
+        "db2-se" | "db2-ae" => "bring-your-own-license",
         _ => "postgresql-license",
     }
 }
@@ -3010,16 +3043,30 @@ fn license_model_for_engine(engine: &str) -> &'static str {
 fn default_db_name(engine: &str) -> &'static str {
     match engine {
         "mysql" | "mariadb" => "mysql",
+        // Oracle's gvenzl image creates an `ORACLE_DATABASE` alongside
+        // the built-in FREEPDB1 — keep `ORCL` as the default name to
+        // match what AWS RDS for Oracle returns when you don't pass
+        // `DBName`.
+        "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => "ORCL",
+        // SQL Server installs system DBs by default; AWS doesn't
+        // create a user DB unless `DBName` is supplied. Use `master`
+        // as the default the SDK can connect to.
+        "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" => "master",
+        "db2-se" | "db2-ae" => "BLUDB",
         _ => "postgres",
     }
 }
 
 /// Pick the port AWS defaults to for a freshly-created instance of
-/// `engine`. PostgreSQL lives on 5432; MySQL and MariaDB share 3306.
+/// `engine`. Mirrors the AWS RDS defaults so client SDKs that connect
+/// without an explicit `--port` flag hit the right listener.
 fn default_port_for_engine(engine: &str) -> i32 {
     match engine {
         "postgres" => 5432,
         "mysql" | "mariadb" => 3306,
+        "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => 1521,
+        "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" => 1433,
+        "db2-se" | "db2-ae" => 50000,
         _ => 5432,
     }
 }
@@ -3027,7 +3074,8 @@ fn default_port_for_engine(engine: &str) -> i32 {
 /// Pick the built-in parameter group name AWS assigns to a new
 /// instance when the caller doesn't override it. The name encodes the
 /// engine family plus its major version (e.g. `default.postgres16`,
-/// `default.mysql8.0`).
+/// `default.mysql8.0`, `default.oracle-ee-23`, `default.sqlserver-ex-16`,
+/// `default.db2-se-11.5`).
 fn default_parameter_group(engine: &str, engine_version: &str) -> String {
     match engine {
         "postgres" => {
@@ -3049,6 +3097,24 @@ fn default_parameter_group(engine: &str, engine_version: &str) -> String {
                 "10.6"
             };
             format!("default.mariadb{}", major)
+        }
+        "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => {
+            let major = engine_version.split('.').next().unwrap_or("23");
+            format!("default.{engine}-{major}")
+        }
+        "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" => {
+            // AWS uses the SQL Server major-version number ("16" for
+            // 2022, "15" for 2019) in the default parameter group.
+            let major = engine_version.split('.').next().unwrap_or("16");
+            format!("default.{engine}-{major}")
+        }
+        "db2-se" | "db2-ae" => {
+            // Db2 ships major.minor as the parameter-group key
+            // (e.g. `default.db2-se-11.5`).
+            let mut parts = engine_version.split('.');
+            let major = parts.next().unwrap_or("11");
+            let minor = parts.next().unwrap_or("5");
+            format!("default.{engine}-{major}.{minor}")
         }
         _ => "default.postgres16".to_string(),
     }
@@ -3081,13 +3147,90 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        db_instance_xml, filter_engine_versions, filter_orderable_options, merge_tags,
+        db_instance_xml, default_db_name, default_parameter_group, default_port_for_engine,
+        filter_engine_versions, filter_orderable_options, license_model_for_engine, merge_tags,
         optional_i32_param, parse_tag_keys, parse_tags, validate_create_request, RdsService,
         RdsSourceType,
     };
     use crate::state::{default_engine_versions, default_orderable_options, DbInstance, RdsTag};
     use fakecloud_core::delivery::DeliveryBus;
     use fakecloud_core::service::{AwsRequest, AwsService, AwsServiceError};
+
+    #[test]
+    fn default_port_matches_aws_for_each_engine() {
+        assert_eq!(default_port_for_engine("postgres"), 5432);
+        assert_eq!(default_port_for_engine("mysql"), 3306);
+        assert_eq!(default_port_for_engine("mariadb"), 3306);
+        assert_eq!(default_port_for_engine("oracle-ee"), 1521);
+        assert_eq!(default_port_for_engine("oracle-se2"), 1521);
+        assert_eq!(default_port_for_engine("sqlserver-ee"), 1433);
+        assert_eq!(default_port_for_engine("sqlserver-ex"), 1433);
+        assert_eq!(default_port_for_engine("db2-se"), 50000);
+        assert_eq!(default_port_for_engine("db2-ae"), 50000);
+    }
+
+    #[test]
+    fn default_parameter_group_uses_engine_major_version() {
+        assert_eq!(
+            default_parameter_group("postgres", "16.3"),
+            "default.postgres16"
+        );
+        assert_eq!(
+            default_parameter_group("mysql", "8.0.35"),
+            "default.mysql8.0"
+        );
+        assert_eq!(
+            default_parameter_group("oracle-ee", "23.0.0"),
+            "default.oracle-ee-23"
+        );
+        assert_eq!(
+            default_parameter_group("sqlserver-ex", "16.00.4085.2.v1"),
+            "default.sqlserver-ex-16"
+        );
+        assert_eq!(
+            default_parameter_group("db2-se", "11.5.9.0.sb00000000.r1"),
+            "default.db2-se-11.5"
+        );
+    }
+
+    #[test]
+    fn license_model_reflects_engine_class() {
+        assert_eq!(license_model_for_engine("postgres"), "postgresql-license");
+        assert_eq!(license_model_for_engine("mysql"), "general-public-license");
+        assert_eq!(license_model_for_engine("oracle-ee"), "license-included");
+        assert_eq!(license_model_for_engine("sqlserver-se"), "license-included");
+        assert_eq!(license_model_for_engine("db2-ae"), "bring-your-own-license");
+    }
+
+    #[test]
+    fn default_db_name_picks_per_engine_default() {
+        assert_eq!(default_db_name("postgres"), "postgres");
+        assert_eq!(default_db_name("mysql"), "mysql");
+        assert_eq!(default_db_name("oracle-ee"), "ORCL");
+        assert_eq!(default_db_name("sqlserver-ex"), "master");
+        assert_eq!(default_db_name("db2-se"), "BLUDB");
+    }
+
+    #[test]
+    fn validate_create_request_accepts_new_engines() {
+        for (engine, version, port) in [
+            ("oracle-ee", "23.0.0", 1521),
+            ("sqlserver-ex", "16.00.4085.2.v1", 1433),
+            ("db2-se", "11.5.9.0.sb00000000.r1", 50000),
+        ] {
+            validate_create_request("test-db", 20, "db.t3.micro", engine, version, port)
+                .expect("engine should be accepted");
+        }
+    }
+
+    #[test]
+    fn validate_create_request_rejects_unsupported_engine_version() {
+        let err =
+            validate_create_request("test-db", 20, "db.t3.micro", "oracle-ee", "12.0.0", 1521)
+                .expect_err("12.x is not in the supported list");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("EngineVersion"), "unexpected: {msg}");
+    }
 
     #[test]
     fn filter_engine_versions_matches_requested_engine() {

@@ -1,6 +1,6 @@
 +++
 title = "Local RDS for integration tests"
-description = "Run local RDS for integration tests with fakecloud. 163 RDS operations, real PostgreSQL/MySQL/MariaDB engines via Docker, snapshots, read replicas. Free, AGPL-3.0."
+description = "Run local RDS for integration tests with fakecloud. 163 RDS operations, real PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2 engines via Docker, snapshots, read replicas. Free, AGPL-3.0."
 template = "page.html"
 +++
 
@@ -11,13 +11,13 @@ curl -fsSL https://raw.githubusercontent.com/faiscadev/fakecloud/main/install.sh
 fakecloud
 ```
 
-Point your AWS SDK at `http://localhost:4566`. Docker required because fakecloud runs **real** PostgreSQL/MySQL/MariaDB engines.
+Point your AWS SDK at `http://localhost:4566`. Docker required because fakecloud runs **real** PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2 engines.
 
 ## Why fakecloud for RDS
 
 - **163 RDS operations** at 100% conformance — DB instances, snapshots, read replicas, parameter groups, subnet groups, engine/version discovery, tagging, upgrades.
-- **Real database engines.** fakecloud pulls real PostgreSQL / MySQL / MariaDB Docker images and runs them as the RDS instance. Your SQL schema, indexes, triggers, and extensions all work because they are real Postgres/MySQL/MariaDB.
-- **Endpoint works.** `DescribeDBInstances` returns a real connectable host. Your application connects with the usual PostgreSQL / MySQL / MariaDB driver.
+- **Real database engines.** fakecloud pulls real PostgreSQL / MySQL / MariaDB / Oracle / SQL Server / Db2 Docker images and runs them as the RDS instance. Your SQL schema, indexes, triggers, and extensions all work because they are real engines.
+- **Endpoint works.** `DescribeDBInstances` returns a real connectable host. Your application connects with the usual PostgreSQL / MySQL / Oracle / SQL Server / Db2 driver.
 - **Paid on LocalStack; free here.** RDS has always been LocalStack Pro-only.
 - **No account, no auth token, no paid tier.** AGPL-3.0.
 
@@ -68,6 +68,18 @@ aws --endpoint-url http://localhost:4566 rds create-db-instance \
 ```
 
 `--engine mariadb` for MariaDB.
+
+## Oracle / SQL Server / Db2
+
+The same `create-db-instance` flow works for Oracle (`oracle-ee`, `oracle-se2`), SQL Server (`sqlserver-ee`/`-se`/`-ex`/`-web`), and Db2 (`db2-se`, `db2-ae`). fakecloud pulls the upstream free-tier images (`gvenzl/oracle-free`, `mcr.microsoft.com/mssql/server`, `icr.io/db2_community/db2`), accepts their licenses on your behalf, and reports back the mapped host port. First-run image pulls are large (1-3 GB) and engine boot takes 30-300 s, so plan test budgets accordingly.
+
+```sh
+aws --endpoint-url http://localhost:4566 rds create-db-instance \
+  --db-instance-identifier oracle-test \
+  --engine oracle-ee --engine-version 23.0.0 \
+  --db-instance-class db.t3.micro --allocated-storage 20 \
+  --master-username admin --master-user-password 'Aa1234567'
+```
 
 ## Snapshots
 
