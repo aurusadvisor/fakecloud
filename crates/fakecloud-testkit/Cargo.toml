@@ -40,6 +40,7 @@ sdk-clients = [
     "dep:aws-sdk-ecr",
     "dep:aws-sdk-ecs",
     "dep:aws-sdk-elasticloadbalancingv2",
+    "dep:aws-sdk-cloudfront",
 ]
 
 [dependencies]
@@ -79,6 +80,7 @@ aws-sdk-scheduler = { version = "1", optional = true }
 aws-sdk-ecr = { version = "1", optional = true }
 aws-sdk-ecs = { version = "1", optional = true }
 aws-sdk-elasticloadbalancingv2 = { version = "1", optional = true }
+aws-sdk-cloudfront = { version = "1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

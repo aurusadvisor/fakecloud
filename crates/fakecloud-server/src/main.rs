@@ -38,6 +38,7 @@ use fakecloud_apigateway::{ApiGatewayFacade, ApiGatewayService};
 use fakecloud_apigatewayv2::service::ApiGatewayV2Service;
 use fakecloud_bedrock::service::BedrockService;
 use fakecloud_cloudformation::service::CloudFormationService;
+use fakecloud_cloudfront::CloudFrontService;
 use fakecloud_cognito::service::CognitoService;
 use fakecloud_dynamodb::service::DynamoDbService;
 use fakecloud_ecr::service::EcrService;
@@ -1948,6 +1949,12 @@ async fn main() {
     let elbv2_introspection_state = elbv2_state.clone();
     let elbv2_service = Elbv2Service::new(elbv2_state);
     registry.register(Arc::new(elbv2_service));
+
+    let cloudfront_state: fakecloud_cloudfront::SharedCloudFrontState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_cloudfront::CloudFrontAccounts::new()),
+    );
+    let cloudfront_service = CloudFrontService::new(cloudfront_state);
+    registry.register(Arc::new(cloudfront_service));
 
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {
