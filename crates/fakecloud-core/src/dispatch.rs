@@ -1219,4 +1219,166 @@ mod tests {
         assert!(cfg.resource_policy_provider.is_none());
         assert!(cfg.scp_resolver.is_none());
     }
+
+    fn s3_sigv4_headers() -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/s3/aws4_request, \
+             SignedHeaders=host, Signature=fake"
+                .parse()
+                .unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn streaming_route_path_style_s3_put_object() {
+        let headers = s3_sigv4_headers();
+        assert_eq!(
+            streaming_route(
+                &http::Method::PUT,
+                "/my-bucket/key.txt",
+                &headers,
+                &HashMap::new(),
+            ),
+            Some(("s3", "")),
+        );
+    }
+
+    #[test]
+    fn streaming_route_path_style_create_bucket_skipped() {
+        // `PUT /bucket` (no trailing key) is CreateBucket — must NOT
+        // hit the streaming path.
+        let headers = s3_sigv4_headers();
+        assert_eq!(
+            streaming_route(
+                &http::Method::PUT,
+                "/my-bucket",
+                &headers,
+                &HashMap::new(),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn streaming_route_virtual_hosted_s3_put_object() {
+        let mut headers = s3_sigv4_headers();
+        headers.insert(
+            "host",
+            "vhost-bucket.s3.us-east-1.localhost.localstack.cloud:4566"
+                .parse()
+                .unwrap(),
+        );
+        // Virtual-hosted PUT has no bucket in the URL path (`/<key>`),
+        // so the slash check used for path-style would reject it. The
+        // Host parser confirms this is virtual-hosted S3 and the key
+        // flows through the streaming dispatch.
+        assert_eq!(
+            streaming_route(
+                &http::Method::PUT,
+                "/hello.txt",
+                &headers,
+                &HashMap::new(),
+            ),
+            Some(("s3", "")),
+        );
+    }
+
+    #[test]
+    fn streaming_route_virtual_hosted_s3_root_skipped() {
+        // `PUT /` against a virtual-hosted Host = CreateBucket, which
+        // is handled buffered. Empty path-after-slash must short-circuit.
+        let mut headers = s3_sigv4_headers();
+        headers.insert(
+            "host",
+            "vhost-bucket.s3.us-east-1.localhost.localstack.cloud:4566"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            streaming_route(&http::Method::PUT, "/", &headers, &HashMap::new()),
+            None,
+        );
+    }
+
+    #[test]
+    fn streaming_route_ecr_blob_upload() {
+        let headers = http::HeaderMap::new();
+        assert_eq!(
+            streaming_route(
+                &http::Method::PATCH,
+                "/v2/my-repo/blobs/uploads/abcd1234",
+                &headers,
+                &HashMap::new(),
+            ),
+            Some(("ecr", "")),
+        );
+        assert_eq!(
+            streaming_route(
+                &http::Method::PUT,
+                "/v2/my-repo/blobs/uploads/abcd1234",
+                &headers,
+                &HashMap::new(),
+            ),
+            Some(("ecr", "")),
+        );
+    }
+
+    #[test]
+    fn streaming_route_presigned_v4_s3_put() {
+        let headers = http::HeaderMap::new();
+        let mut query_params = HashMap::new();
+        query_params.insert(
+            "X-Amz-Credential".to_string(),
+            "test/20240101/us-east-1/s3/aws4_request".to_string(),
+        );
+        assert_eq!(
+            streaming_route(
+                &http::Method::PUT,
+                "/my-bucket/key.txt",
+                &headers,
+                &query_params,
+            ),
+            Some(("s3", "")),
+        );
+    }
+
+    #[test]
+    fn streaming_route_non_s3_auth_header_skipped() {
+        // Same path shape but the SigV4 service is lambda — must not
+        // wire the streaming dispatch (Lambda has its own buffered path).
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/lambda/aws4_request, \
+             SignedHeaders=host, Signature=fake"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            streaming_route(
+                &http::Method::PUT,
+                "/my-bucket/key.txt",
+                &headers,
+                &HashMap::new(),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn streaming_route_get_skipped() {
+        let headers = s3_sigv4_headers();
+        assert_eq!(
+            streaming_route(
+                &http::Method::GET,
+                "/my-bucket/key.txt",
+                &headers,
+                &HashMap::new(),
+            ),
+            None,
+        );
+    }
 }
