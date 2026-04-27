@@ -109,6 +109,41 @@ async fn primary_workgroup_cannot_be_deleted() {
 }
 
 #[tokio::test]
+async fn workgroup_with_prepared_statements_blocks_non_recursive_delete() {
+    let server = TestServer::start().await;
+    let athena = server.athena_client().await;
+    athena
+        .create_work_group()
+        .name("wg-with-ps")
+        .send()
+        .await
+        .expect("create wg");
+    athena
+        .create_prepared_statement()
+        .statement_name("ps1")
+        .work_group("wg-with-ps")
+        .query_statement("SELECT ?")
+        .send()
+        .await
+        .expect("create prepared statement");
+    let err = athena
+        .delete_work_group()
+        .work_group("wg-with-ps")
+        .send()
+        .await
+        .expect_err("non-recursive delete should refuse non-empty workgroup");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("still has resources"), "unexpected err: {msg}");
+    athena
+        .delete_work_group()
+        .work_group("wg-with-ps")
+        .recursive_delete_option(true)
+        .send()
+        .await
+        .expect("recursive delete should succeed");
+}
+
+#[tokio::test]
 async fn data_catalog_create_get_delete_lifecycle() {
     let server = TestServer::start().await;
     let athena = server.athena_client().await;

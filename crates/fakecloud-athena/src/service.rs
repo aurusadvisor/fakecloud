@@ -329,7 +329,11 @@ impl AthenaService {
             .values()
             .any(|q| q.work_group == name);
         let used_by_named = account.named_queries.values().any(|q| q.work_group == name);
-        if !recursive && (used_by_query || used_by_named) {
+        let used_by_prepared = account
+            .prepared_statements
+            .keys()
+            .any(|(wg, _)| wg == &name);
+        if !recursive && (used_by_query || used_by_named || used_by_prepared) {
             return Err(invalid_request(format!(
                 "Workgroup {name} still has resources; pass RecursiveDeleteOption=true"
             )));
