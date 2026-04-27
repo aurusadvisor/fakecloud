@@ -32,6 +32,8 @@ pub(crate) struct ResetState {
     pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
     pub route53: fakecloud_route53::SharedRoute53State,
     pub acm: fakecloud_acm::SharedAcmState,
+    pub application_autoscaling:
+        fakecloud_application_autoscaling::SharedApplicationAutoScalingState,
     pub organizations: fakecloud_organizations::state::SharedOrganizationsState,
     pub container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     pub rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
@@ -158,6 +160,10 @@ impl ResetState {
             }
             "acm" => {
                 *self.acm.write() = fakecloud_acm::AcmAccounts::new();
+            }
+            "application-autoscaling" => {
+                *self.application_autoscaling.write() =
+                    fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new();
             }
             "organizations" => {
                 *self.organizations.write() = None;
@@ -348,6 +354,10 @@ impl ResetState {
                 let mut state = self.acm.write();
                 state.accounts.remove(account_id);
             }
+            "application-autoscaling" => {
+                let mut state = self.application_autoscaling.write();
+                state.accounts.remove(account_id);
+            }
             _ => {
                 return Err(format!("Unknown service: {service}"));
             }
@@ -418,6 +428,8 @@ impl ResetState {
         *self.cloudfront.write() = fakecloud_cloudfront::CloudFrontAccounts::new();
         *self.route53.write() = fakecloud_route53::Route53Accounts::new();
         *self.acm.write() = fakecloud_acm::AcmAccounts::new();
+        *self.application_autoscaling.write() =
+            fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new();
         // Organizations is a cross-account singleton (not MultiAccountState);
         // a full reset drops the org entirely so subsequent runs start
         // with no org, matching the no-in-use default state.
@@ -729,6 +741,9 @@ mod tests {
                 fakecloud_route53::Route53Accounts::new(),
             )),
             acm: Arc::new(parking_lot::RwLock::new(fakecloud_acm::AcmAccounts::new())),
+            application_autoscaling: Arc::new(parking_lot::RwLock::new(
+                fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
+            )),
             organizations: Arc::new(parking_lot::RwLock::new(None)),
             container_runtime: None,
             rds_runtime: None,

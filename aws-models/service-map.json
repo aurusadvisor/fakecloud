@@ -118,5 +118,9 @@
   "acm": {
     "repo_dir": "acm",
     "service_name": "acm"
+  },
+  "application-autoscaling": {
+    "repo_dir": "application-auto-scaling",
+    "service_name": "application-autoscaling"
   }
 }
