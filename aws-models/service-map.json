@@ -114,5 +114,9 @@
   "route53": {
     "repo_dir": "route-53",
     "service_name": "route53"
+  },
+  "acm": {
+    "repo_dir": "acm",
+    "service_name": "acm"
   }
 }

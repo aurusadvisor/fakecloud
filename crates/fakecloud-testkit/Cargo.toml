@@ -42,6 +42,7 @@ sdk-clients = [
     "dep:aws-sdk-elasticloadbalancingv2",
     "dep:aws-sdk-cloudfront",
     "dep:aws-sdk-route53",
+    "dep:aws-sdk-acm",
 ]
 
 [dependencies]
@@ -83,6 +84,7 @@ aws-sdk-ecs = { version = "1", optional = true }
 aws-sdk-elasticloadbalancingv2 = { version = "1", optional = true }
 aws-sdk-cloudfront = { version = "1", optional = true }
 aws-sdk-route53 = { version = "1", optional = true }
+aws-sdk-acm = { version = "1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

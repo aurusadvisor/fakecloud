@@ -48,6 +48,8 @@ SERVICES=(
     "ecs:ecs"
     "elasticloadbalancingv2:elastic-load-balancing-v2"
     "cloudfront:cloudfront"
+    "route53:route-53"
+    "acm:acm"
 )
 
 # Sparse checkout only the models we need

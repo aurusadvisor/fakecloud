@@ -648,6 +648,10 @@ impl TestServer {
         aws_sdk_route53::Client::new(&self.aws_config().await)
     }
 
+    pub async fn acm_client(&self) -> aws_sdk_acm::Client {
+        aws_sdk_acm::Client::new(&self.aws_config().await)
+    }
+
     /// S3 always uses path-style addressing against fakecloud so bucket
     /// names don't have to be DNS-legal subdomains of `localhost`.
     pub async fn s3_client(&self) -> aws_sdk_s3::Client {

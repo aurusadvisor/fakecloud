@@ -372,6 +372,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         s if s.starts_with("AmazonEC2ContainerServiceV") => "ecs",
         s if s.starts_with("AWSStepFunctions") => "states",
         s if s.starts_with("AWSOrganizationsV") => "organizations",
+        "CertificateManager" => "acm",
         _ => return None,
     };
 

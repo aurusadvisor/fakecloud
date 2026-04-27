@@ -31,6 +31,7 @@ pub(crate) struct ResetState {
     pub bedrock: fakecloud_bedrock::state::SharedBedrockState,
     pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
     pub route53: fakecloud_route53::SharedRoute53State,
+    pub acm: fakecloud_acm::SharedAcmState,
     pub organizations: fakecloud_organizations::state::SharedOrganizationsState,
     pub container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     pub rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
@@ -154,6 +155,9 @@ impl ResetState {
             }
             "route53" => {
                 *self.route53.write() = fakecloud_route53::Route53Accounts::new();
+            }
+            "acm" => {
+                *self.acm.write() = fakecloud_acm::AcmAccounts::new();
             }
             "organizations" => {
                 *self.organizations.write() = None;
@@ -340,6 +344,10 @@ impl ResetState {
                 let mut state = self.route53.write();
                 state.accounts.remove(account_id);
             }
+            "acm" => {
+                let mut state = self.acm.write();
+                state.accounts.remove(account_id);
+            }
             _ => {
                 return Err(format!("Unknown service: {service}"));
             }
@@ -409,6 +417,7 @@ impl ResetState {
         self.bedrock.write().reset();
         *self.cloudfront.write() = fakecloud_cloudfront::CloudFrontAccounts::new();
         *self.route53.write() = fakecloud_route53::Route53Accounts::new();
+        *self.acm.write() = fakecloud_acm::AcmAccounts::new();
         // Organizations is a cross-account singleton (not MultiAccountState);
         // a full reset drops the org entirely so subsequent runs start
         // with no org, matching the no-in-use default state.
@@ -719,6 +728,7 @@ mod tests {
             route53: Arc::new(parking_lot::RwLock::new(
                 fakecloud_route53::Route53Accounts::new(),
             )),
+            acm: Arc::new(parking_lot::RwLock::new(fakecloud_acm::AcmAccounts::new())),
             organizations: Arc::new(parking_lot::RwLock::new(None)),
             container_runtime: None,
             rds_runtime: None,
