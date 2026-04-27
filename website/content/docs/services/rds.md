@@ -22,7 +22,7 @@ fakecloud implements **163 of 163** RDS operations at 100% Smithy conformance. D
 - **Dump and restore** — MySQL and MariaDB database dumps for snapshot/restore flows
 - **License models** — tracking
 - **EventBridge events** — lifecycle ops emit `aws.rds` events on the `default` bus, deliverable to SQS, SNS, Lambda, etc. via standard EB rules
-- **PostgreSQL `aws_lambda` extension** — call fakecloud Lambda functions from inside RDS PostgreSQL via `CREATE EXTENSION aws_lambda CASCADE` and `aws_lambda.invoke(...)` (matches the AWS RDS API)
+- **PostgreSQL `aws_lambda` extension** — call fakecloud Lambda functions from inside RDS PostgreSQL via `CREATE EXTENSION aws_lambda CASCADE` and `aws_lambda.invoke(...)` (subset of the AWS RDS extension surface; see below)
 
 ## EventBridge integration
 
@@ -71,11 +71,11 @@ SELECT * FROM aws_lambda.invoke(
 );
 ```
 
-Function signatures match AWS:
+Implemented function signatures (subset of the AWS RDS Lambda API):
 
 - `aws_lambda.invoke(function_name text, payload json, region text DEFAULT NULL, invocation_type text DEFAULT 'RequestResponse')` -> returns `(status_code int, payload json, executed_version text, log_result text)`
 - `aws_lambda.invoke(function_name aws_commons._lambda_function_arn_1, payload json, region text DEFAULT NULL, invocation_type text DEFAULT 'RequestResponse')` (composite-typed overload)
-- `aws_commons.create_lambda_function_arn(function_name text, qualifier text DEFAULT NULL)` -> composite of `(function_name, qualifier)`
+- `aws_commons.create_lambda_function_arn(function_name text, region text DEFAULT NULL)` -> composite of `(function_name, region)`
 
 `invocation_type = 'Event'` returns `(202, NULL, '$LATEST', NULL)` immediately and runs the Lambda asynchronously.
 

@@ -45,21 +45,31 @@ req = urllib.request.Request(
     method='POST',
 )
 
+http_status = None
 try:
     with urllib.request.urlopen(req, timeout=300) as resp:
         raw = resp.read()
+        http_status = resp.status
 except urllib.error.HTTPError as e:
     raw = e.read()
+    http_status = e.code
 except Exception as e:
     plpy.error('aws_lambda: bridge call failed: {}'.format(e))
 
 try:
     parsed = json.loads(raw)
 except ValueError:
-    plpy.error('aws_lambda: invalid bridge response: {!r}'.format(raw))
+    parsed = {
+        'status_code': http_status,
+        'payload': {'errorMessage': raw.decode('utf-8', errors='replace')},
+    }
+
+status_code = parsed.get('status_code')
+if status_code is None:
+    status_code = http_status if http_status is not None else 0
 
 return [(
-    int(parsed.get('status_code', 0)),
+    int(status_code),
     json.dumps(parsed.get('payload')) if parsed.get('payload') is not None else None,
     parsed.get('executed_version'),
     parsed.get('log_result'),
@@ -79,13 +89,12 @@ CREATE FUNCTION aws_lambda.invoke(
 )
 LANGUAGE plpgsql
 AS $$
-DECLARE
-    name text;
 BEGIN
-    name := (function_name).function_name;
-    IF (function_name).qualifier IS NOT NULL THEN
-        name := name || ':' || (function_name).qualifier;
-    END IF;
-    RETURN QUERY SELECT * FROM aws_lambda.invoke(name, payload, region, invocation_type);
+    RETURN QUERY SELECT * FROM aws_lambda.invoke(
+        (function_name).function_name,
+        payload,
+        COALESCE(region, (function_name).region),
+        invocation_type
+    );
 END;
 $$;
