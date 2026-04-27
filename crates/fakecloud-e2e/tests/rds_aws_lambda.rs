@@ -112,13 +112,17 @@ async fn aws_lambda_extension_invoke_round_trip() {
         .await
         .expect("load aws_lambda extension");
 
+    // tokio-postgres in this workspace doesn't ship the with-serde_json-1
+    // feature, so we can't bind a Rust `&str` to a postgres `json`
+    // parameter. Embed payloads as SQL literals (test fixtures, no
+    // injection concern) and cast result `payload` to text on the wire.
+
     // 4. Sync invoke by function name + json payload — payload round-trips.
-    //    Cast payload to text on the wire because tokio-postgres in this
-    //    workspace doesn't ship the with-serde_json-1 feature.
     let row = client
         .query_one(
-            "SELECT status_code, payload::text FROM aws_lambda.invoke('echo', $1::json)",
-            &[&r#"{"hello":"world"}"#],
+            "SELECT status_code, payload::text \
+             FROM aws_lambda.invoke('echo', '{\"hello\":\"world\"}'::json)",
+            &[],
         )
         .await
         .expect("invoke by name");
@@ -143,8 +147,8 @@ async fn aws_lambda_extension_invoke_round_trip() {
     let row = client
         .query_one(
             "SELECT status_code, payload::text FROM aws_lambda.invoke(\
-                aws_commons.create_lambda_function_arn('echo'), $1::json)",
-            &[&r#"{"k":1}"#],
+                aws_commons.create_lambda_function_arn('echo'), '{\"k\":1}'::json)",
+            &[],
         )
         .await
         .expect("invoke via composite arn");
@@ -158,8 +162,8 @@ async fn aws_lambda_extension_invoke_round_trip() {
     let row = client
         .query_one(
             "SELECT status_code, payload::text FROM aws_lambda.invoke(\
-                'echo', $1::json, NULL, 'Event')",
-            &[&r#"{"async":true}"#],
+                'echo', '{\"async\":true}'::json, NULL, 'Event')",
+            &[],
         )
         .await
         .expect("invoke async");
