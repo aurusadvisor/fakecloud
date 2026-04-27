@@ -334,6 +334,11 @@ impl AcmService {
                 cert.not_before = now;
                 cert.not_after = now + Duration::days(395);
                 cert.subject = format!("CN={domain_name}");
+                // Reimport must overwrite the domain identity too —
+                // otherwise Describe / List / Search keep returning the
+                // previous DomainName + SANs after a successful import.
+                cert.domain_name = domain_name.clone();
+                cert.subject_alternative_names = vec![domain_name.clone()];
                 if !tags.is_empty() {
                     for (k, v) in tags {
                         cert.tags.insert(k, v);

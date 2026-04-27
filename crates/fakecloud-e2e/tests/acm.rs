@@ -97,6 +97,55 @@ async fn request_certificate_idempotency_returns_existing_arn() {
 }
 
 #[tokio::test]
+async fn reimporting_certificate_overwrites_domain_metadata() {
+    let server = TestServer::start().await;
+    let acm = server.acm_client().await;
+    let initial_pem =
+        "-----BEGIN CERTIFICATE-----\nCN=initial.example.com\n-----END CERTIFICATE-----\n";
+    let arn = acm
+        .import_certificate()
+        .certificate(Blob::new(initial_pem.as_bytes().to_vec()))
+        .private_key(Blob::new(SAMPLE_KEY_PEM.as_bytes().to_vec()))
+        .send()
+        .await
+        .expect("first import")
+        .certificate_arn()
+        .unwrap()
+        .to_string();
+    let before = acm
+        .describe_certificate()
+        .certificate_arn(&arn)
+        .send()
+        .await
+        .expect("describe")
+        .certificate()
+        .unwrap()
+        .clone();
+    assert_eq!(before.domain_name(), Some("initial.example.com"));
+
+    let new_pem =
+        "-----BEGIN CERTIFICATE-----\nCN=replaced.example.com\n-----END CERTIFICATE-----\n";
+    acm.import_certificate()
+        .certificate_arn(&arn)
+        .certificate(Blob::new(new_pem.as_bytes().to_vec()))
+        .private_key(Blob::new(SAMPLE_KEY_PEM.as_bytes().to_vec()))
+        .send()
+        .await
+        .expect("re-import");
+    let after = acm
+        .describe_certificate()
+        .certificate_arn(&arn)
+        .send()
+        .await
+        .expect("describe")
+        .certificate()
+        .unwrap()
+        .clone();
+    assert_eq!(after.domain_name(), Some("replaced.example.com"));
+    assert_eq!(after.subject_alternative_names(), &["replaced.example.com"]);
+}
+
+#[tokio::test]
 async fn import_then_export_certificate_roundtrips_pem() {
     let server = TestServer::start().await;
     let acm = server.acm_client().await;
