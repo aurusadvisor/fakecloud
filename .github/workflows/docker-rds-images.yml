@@ -1,19 +1,33 @@
 name: RDS support images
 
-# Publishes ghcr.io/<owner>/fakecloud-postgres:<major>-<version> for every
-# supported postgres major (13/14/15/16) on each release tag, plus a
-# rolling :<major> tag pointing at the latest release. Image content =
-# postgres:<major> + plpython3u + the aws_lambda / aws_commons extension
-# files in `crates/fakecloud-rds/assets/postgres`.
+# Builds and (on tag pushes) publishes the prebuilt postgres image used
+# by RdsRuntime. Runtime side: `RdsRuntime::ensure_postgres_image` tries
+# to pull `ghcr.io/<owner>/fakecloud-postgres:<major>-<fakecloud-version>`
+# before falling back to a local build.
 #
-# Mirrors the structure of docker.yml: per-arch build with
-# `push-by-digest`, then a per-major merge job that creates the manifest
-# list with the human-readable tags. Manual `workflow_dispatch` exists so
-# we can backfill released tags after this workflow first lands.
+# Triggers:
+# - `push: tags: ["v*"]` — full release path: builds 4 majors × 2 arches,
+#   pushes per-arch by digest, merges into `<major>-<version>` and a
+#   rolling `<major>` tag.
+# - `pull_request` (paths-filtered) — dry-run that exercises the build
+#   for both arches without pushing. Catches Dockerfile typos and
+#   workflow syntax regressions before we ever cut a release.
+# - `workflow_dispatch` — pushes images tagged `<major>-dev-<sha>` so we
+#   can validate the full publish + manifest-merge path against ghcr.io
+#   end-to-end without polluting release tags. Rolling `<major>` is NOT
+#   updated in this mode.
+#
+# Mirrors the structure of docker.yml: per-arch build with `push-by-digest`,
+# then a per-major merge job that creates the manifest list with the
+# human-readable tags.
 
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/docker-rds-images.yml
+      - crates/fakecloud-rds/assets/postgres/**
   workflow_dispatch:
 
 env:
@@ -29,10 +43,6 @@ jobs:
         platform:
           - linux/amd64
           - linux/arm64
-        # `include` here matches each existing platform value and adds
-        # the `runner` key — together with the two-axis matrix above this
-        # produces 4×2 = 8 jobs each carrying pg_version, platform, and
-        # the right runner label.
         include:
           - platform: linux/amd64
             runner: ubuntu-24.04
@@ -50,13 +60,14 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push by digest
+      - name: Build (and push by digest when not a PR)
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -66,15 +77,18 @@ jobs:
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=postgres-${{ matrix.pg_version }}-${{ matrix.platform }}
           cache-to: type=gha,scope=postgres-${{ matrix.pg_version }}-${{ matrix.platform }},mode=max
-          outputs: type=image,name=${{ env.IMAGE_BASE }},push-by-digest=true,name-canonical=true,push=true
+          outputs: |
+            type=image,name=${{ env.IMAGE_BASE }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
 
       - name: Export digest
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digest-postgres-${{ matrix.pg_version }}-${{ matrix.runner }}
@@ -83,6 +97,7 @@ jobs:
           retention-days: 1
 
   merge:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     needs: build
     permissions:
@@ -111,18 +126,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve short SHA
+        id: sha
+        run: echo "short=$(echo "${{ github.sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE_BASE }}
-          # Pinned tag <major>-<fakecloud-version> on every semver tag,
-          # rolling <major> tag only for tag pushes (so workflow_dispatch
-          # on a non-tag ref is a no-op rather than overwriting :<major>
-          # with a non-release build).
+          # On a real release tag (`v*`): pinned `<major>-<version>` plus
+          # a rolling `<major>` tag.
+          # On `workflow_dispatch`: a one-off `<major>-dev-<short-sha>`
+          # tag so we can validate the full publish + manifest-merge
+          # path end-to-end without overwriting any release tag.
           tags: |
             type=semver,pattern=${{ matrix.pg_version }}-{{version}}
             type=raw,value=${{ matrix.pg_version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ matrix.pg_version }}-dev-${{ steps.sha.outputs.short }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
