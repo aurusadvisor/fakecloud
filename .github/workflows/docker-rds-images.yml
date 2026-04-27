@@ -1,0 +1,135 @@
+name: RDS support images
+
+# Publishes ghcr.io/<owner>/fakecloud-postgres:<major>-<version> for every
+# supported postgres major (13/14/15/16) on each release tag, plus a
+# rolling :<major> tag pointing at the latest release. Image content =
+# postgres:<major> + plpython3u + the aws_lambda / aws_commons extension
+# files in `crates/fakecloud-rds/assets/postgres`.
+#
+# Mirrors the structure of docker.yml: per-arch build with
+# `push-by-digest`, then a per-major merge job that creates the manifest
+# list with the human-readable tags. Manual `workflow_dispatch` exists so
+# we can backfill released tags after this workflow first lands.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/fakecloud-postgres
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: ["13", "14", "15", "16"]
+        platform:
+          - linux/amd64
+          - linux/arm64
+        # `include` here matches each existing platform value and adds
+        # the `runner` key — together with the two-axis matrix above this
+        # produces 4×2 = 8 jobs each carrying pg_version, platform, and
+        # the right runner label.
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: crates/fakecloud-rds/assets/postgres
+          build-args: |
+            PG_VERSION=${{ matrix.pg_version }}
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=postgres-${{ matrix.pg_version }}-${{ matrix.platform }}
+          cache-to: type=gha,scope=postgres-${{ matrix.pg_version }}-${{ matrix.platform }},mode=max
+          outputs: type=image,name=${{ env.IMAGE_BASE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-postgres-${{ matrix.pg_version }}-${{ matrix.runner }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: ["13", "14", "15", "16"]
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: /tmp/digests
+          pattern: digest-postgres-${{ matrix.pg_version }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE_BASE }}
+          # Pinned tag <major>-<fakecloud-version> on every semver tag,
+          # rolling <major> tag only for tag pushes (so workflow_dispatch
+          # on a non-tag ref is a no-op rather than overwriting :<major>
+          # with a non-release build).
+          tags: |
+            type=semver,pattern=${{ matrix.pg_version }}-{{version}}
+            type=raw,value=${{ matrix.pg_version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.IMAGE_BASE }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.IMAGE_BASE }}:${{ steps.meta.outputs.version }}
