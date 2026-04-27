@@ -26,6 +26,13 @@ jobs:
       fail-fast: false
       matrix:
         pg_version: ["13", "14", "15", "16"]
+        platform:
+          - linux/amd64
+          - linux/arm64
+        # `include` here matches each existing platform value and adds
+        # the `runner` key — together with the two-axis matrix above this
+        # produces 4×2 = 8 jobs each carrying pg_version, platform, and
+        # the right runner label.
         include:
           - platform: linux/amd64
             runner: ubuntu-24.04
