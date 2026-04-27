@@ -1,12 +1,12 @@
 +++
 title = "Route 53"
-description = "Route 53 control plane — hosted zones, RRsets, health checks, traffic policies, DNSSEC + KSK, query logging, CIDR collections."
+description = "Route 53 control plane — hosted zones, RRsets, health checks, traffic policies, DNSSEC + KSK, query logging, CIDR collections, VPC associations, reusable delegation sets, geo locations, account limits, tags."
 weight = 25
 +++
 
-fakecloud implements Amazon Route 53's REST-XML control plane focused on the operations real applications and Terraform stacks rely on for DNS management: hosted zone lifecycle, resource record sets with the full `ChangeResourceRecordSets` semantics (CREATE/UPSERT/DELETE), change tracking, hosted zone limits, list-by-name pagination, `TestDNSAnswer` synthesis, the full health-check lifecycle, versioned traffic policies with policy instances, DNSSEC signing + key-signing keys, query logging configs, and CIDR collections. 54 operations.
+fakecloud implements Amazon Route 53's REST-XML control plane end-to-end: hosted zone lifecycle, resource record sets with the full `ChangeResourceRecordSets` semantics (CREATE/UPSERT/DELETE), change tracking, hosted zone limits, list-by-name pagination, `TestDNSAnswer` synthesis, the full health-check lifecycle, versioned traffic policies with policy instances, DNSSEC signing + key-signing keys, query logging configs, CIDR collections, VPC associations + cross-account authorizations, reusable delegation sets, geo locations, account limits, and tags. 71 operations — the entire Route 53 control plane.
 
-**Status: Batches 1–4 shipped.** VPC associations + reusable delegation sets, geo location lookups, account limits, and tags land in subsequent batches.
+**Status: 100% control-plane coverage.** Batches 1–5 shipped.
 
 ## Supported today
 
@@ -20,6 +20,11 @@ fakecloud implements Amazon Route 53's REST-XML control plane focused on the ope
 - **DNSSEC + Key Signing Keys** — `GetDNSSEC`, `EnableHostedZoneDNSSEC`, `DisableHostedZoneDNSSEC`, `CreateKeySigningKey`, `DeleteKeySigningKey`, `ActivateKeySigningKey`, `DeactivateKeySigningKey`. `GetDNSSEC` returns the per-zone `ServeSignature` (`SIGNING`/`NOT_SIGNING`, default `NOT_SIGNING`) plus every KSK attached to the zone. `CreateKeySigningKey` requires `CallerReference`, `HostedZoneId`, `KeyManagementServiceArn`, `Name`, and `Status`; rejects a duplicate `Name` per zone with `KeySigningKeyAlreadyExists`; synthesizes the `KeyTag`/`Flag`/`SigningAlgorithm`/`DigestAlgorithm` fields with the documented `ECDSAP256SHA256`/SHA-256 defaults. `DeleteKeySigningKey` returns `InvalidKeySigningKeyStatus` when the KSK is still `ACTIVE` — flip to `INACTIVE` via `DeactivateKeySigningKey` first. `Enable`/`Disable`/`Activate`/`Deactivate` each emit a tracked `ChangeInfo` (`INSYNC`).
 - **Query Logging** — `CreateQueryLoggingConfig`, `GetQueryLoggingConfig`, `DeleteQueryLoggingConfig`, `ListQueryLoggingConfigs`. One config per zone; private zones are rejected with `InvalidInput`; duplicate per zone returns `QueryLoggingConfigAlreadyExists`. Configs persist the `CloudWatchLogsLogGroupArn` round-trip but fakecloud doesn't actually publish DNS query logs (no real DNS resolver runs).
 - **CIDR Collections** — `CreateCidrCollection`, `ChangeCidrCollection`, `DeleteCidrCollection`, `ListCidrCollections`, `ListCidrLocations`, `ListCidrBlocks`. `CreateCidrCollection` rejects duplicate `Name` with `CidrCollectionAlreadyExistsException` and synthesizes a real Route 53 ARN. `ChangeCidrCollection` honors `PUT` and `DELETE_IF_EXISTS` change actions, applies the entire batch atomically (any unknown action rolls back), and enforces optimistic concurrency via `CollectionVersion` (`CidrCollectionVersionMismatchException`). `DeleteCidrCollection` returns `CidrCollectionInUseException` while any location still has CIDR blocks.
+- **VPC Associations** — `AssociateVPCWithHostedZone`, `DisassociateVPCFromHostedZone`, `CreateVPCAssociationAuthorization`, `DeleteVPCAssociationAuthorization`, `ListVPCAssociationAuthorizations`, `ListHostedZonesByVPC`. Both `Associate`/`Disassociate` validate that the target hosted zone exists and is private; public zones are rejected with `PublicZoneVPCAssociation`, and `Disassociate` refuses to remove the last remaining VPC with `LastVPCAssociation`. `CreateVPCAssociationAuthorization` records the authorized `(VPCId, VPCRegion)` per zone (idempotent on duplicate), and `Delete` removes a single entry — both reject unknown zones with `NoSuchHostedZone` and unknown authorizations with `VPCAssociationAuthorizationNotFound`. `ListHostedZonesByVPC` returns every zone associated with the supplied VPC, with the `/hostedzone/{Id}` prefix and an `Owner.OwningAccount` block.
+- **Reusable Delegation Sets** — `CreateReusableDelegationSet`, `GetReusableDelegationSet`, `DeleteReusableDelegationSet`, `ListReusableDelegationSets`, `GetReusableDelegationSetLimit`. Each create synthesizes 4 NS records (the same `awsdns-*` shape as hosted zones) and rejects duplicate `CallerReference` with `DelegationSetAlreadyCreated`. `Delete` is blocked with `DelegationSetInUse` while any hosted zone still references the set. `GetReusableDelegationSetLimit` returns `MAX_ZONES_BY_REUSABLE_DELEGATION_SET` (value 500) with a live `Count` of zones currently using the set.
+- **Geo Locations** — `ListGeoLocations`, `GetGeoLocation`. fakecloud ships a representative dataset (the 7 continents, the `*` default fallback, a sample of countries — BR, CA, DE, FR, GB, JP, US — and US subdivisions CA/NY/TX/WA) sufficient for `IsTruncated` + `NextContinentCode`/`NextCountryCode`/`NextSubdivisionCode` pagination. `GetGeoLocation` looks up the exact `(continent, country, subdivision)` triple and returns `NoSuchGeoLocation` when no entry matches.
+- **Account Limits** — `GetAccountLimit`. All 5 owner-scoped limit types are honored: `MAX_HEALTH_CHECKS_BY_OWNER` (200), `MAX_HOSTED_ZONES_BY_OWNER` (500), `MAX_REUSABLE_DELEGATION_SETS_BY_OWNER` (100), `MAX_TRAFFIC_POLICIES_BY_OWNER` (50), `MAX_TRAFFIC_POLICY_INSTANCES_BY_OWNER` (5). The `Count` field is computed live from the in-memory state (e.g. `MAX_TRAFFIC_POLICIES_BY_OWNER` reports the distinct policy count, not the version count).
+- **Tags** — `ChangeTagsForResource`, `ListTagsForResource`, `ListTagsForResources`. Both supported `ResourceType` values (`healthcheck`, `hostedzone`) round-trip the same tag bag. `Change` accepts `AddTags` (insert or update on key collision) and `RemoveTagKeys` in the same call; missing zones/health-checks return `NoSuchHostedZone`/`NoSuchHealthCheck`. The list responses sort tags by key for deterministic test output. Tags are independent of the hosted zone tag passed at create time and don't count toward `MAX_RRSETS_BY_ZONE`.
 
 ### Concurrency semantics
 
@@ -78,12 +83,6 @@ aws --endpoint-url http://localhost:4566 route53 test-dns-answer \
   --record-type A
 ```
 
-## Not yet implemented (planned)
+## Caveats
 
-| Surface                                | Status                  |
-|----------------------------------------|-------------------------|
-| VPC Associations + Delegation Sets     | next batch              |
-| Geo Location lookups                   | next batch              |
-| Tags                                   | next batch              |
-
-There is no actual DNS server: requests against the synthesized name servers don't return live responses. `TestDNSAnswer` looks up records from the in-memory state and returns them; treat it as a record-set lookup, not a real DNS resolver. Likewise, fakecloud does not run real health probes: `GetHealthCheckStatus` returns synthesized observations and `GetHealthCheckLastFailureReason` is always empty. The data is structurally valid but never reflects a real endpoint outage.
+There is no actual DNS server: requests against the synthesized name servers don't return live responses. `TestDNSAnswer` looks up records from the in-memory state and returns them; treat it as a record-set lookup, not a real DNS resolver. Likewise, fakecloud does not run real health probes: `GetHealthCheckStatus` returns synthesized observations and `GetHealthCheckLastFailureReason` is always empty. The data is structurally valid but never reflects a real endpoint outage. fakecloud also does not actually publish DNS query logs to CloudWatch Logs (no real DNS resolver runs) and ships a representative geo-location dataset rather than the full 200+-country ISO catalog Route 53 supports — sufficient for code paths that page through the catalog, but not exhaustive for every country lookup.
