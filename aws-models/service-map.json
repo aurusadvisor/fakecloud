@@ -126,5 +126,9 @@
   "wafv2": {
     "repo_dir": "wafv2",
     "service_name": "wafv2"
+  },
+  "athena": {
+    "repo_dir": "athena",
+    "service_name": "athena"
   }
 }

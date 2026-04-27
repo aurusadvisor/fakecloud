@@ -45,6 +45,7 @@ sdk-clients = [
     "dep:aws-sdk-acm",
     "dep:aws-sdk-applicationautoscaling",
     "dep:aws-sdk-wafv2",
+    "dep:aws-sdk-athena",
 ]
 
 [dependencies]
@@ -89,6 +90,7 @@ aws-sdk-route53 = { version = "1", optional = true }
 aws-sdk-acm = { version = "1", optional = true }
 aws-sdk-applicationautoscaling = { version = "1", optional = true }
 aws-sdk-wafv2 = { version = "1", optional = true }
+aws-sdk-athena = { version = "1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

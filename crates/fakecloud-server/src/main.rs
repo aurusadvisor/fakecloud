@@ -345,6 +345,10 @@ async fn main() {
         fakecloud_wafv2::Wafv2Accounts::new(),
     ));
 
+    let athena_state: fakecloud_athena::SharedAthenaState = Arc::new(parking_lot::RwLock::new(
+        fakecloud_athena::AthenaAccounts::new(),
+    ));
+
     let bedrock_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -600,6 +604,7 @@ async fn main() {
         acm: acm_state.clone(),
         application_autoscaling: app_autoscaling_state.clone(),
         wafv2: wafv2_state.clone(),
+        athena: athena_state.clone(),
         stepfunctions: stepfunctions_state.clone(),
         scheduler: scheduler_state.clone(),
         apigatewayv1: apigatewayv1_state.clone(),
@@ -1997,6 +2002,9 @@ async fn main() {
 
     let wafv2_service = fakecloud_wafv2::Wafv2Service::new(wafv2_state.clone());
     registry.register(Arc::new(wafv2_service));
+
+    let athena_service = fakecloud_athena::AthenaService::new(athena_state.clone());
+    registry.register(Arc::new(athena_service));
 
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {

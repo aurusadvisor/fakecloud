@@ -361,6 +361,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-athena"
+version = "1.104.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a7f81f7b1da09e06acddac421a903d921f2614220718658a4a51cc7e4f6c9da"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-bedrock"
 version = "1.140.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2306,6 +2330,7 @@ dependencies = [
  "fakecloud-apigateway",
  "fakecloud-apigatewayv2",
  "fakecloud-application-autoscaling",
+ "fakecloud-athena",
  "fakecloud-aws",
  "fakecloud-bedrock",
  "fakecloud-cloudformation",
@@ -2413,6 +2438,23 @@ dependencies = [
 
 [[package]]
 name = "fakecloud-application-autoscaling"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-athena"
 version = "0.12.0"
 dependencies = [
  "async-trait",
@@ -2550,6 +2592,7 @@ dependencies = [
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-applicationautoscaling",
+ "aws-sdk-athena",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",
@@ -2658,6 +2701,7 @@ dependencies = [
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-applicationautoscaling",
+ "aws-sdk-athena",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",
@@ -3231,6 +3275,7 @@ dependencies = [
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-applicationautoscaling",
+ "aws-sdk-athena",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",

@@ -1,0 +1,2202 @@
+//! Athena JSON 1.1 service.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::Utc;
+use http::StatusCode;
+use parking_lot::RwLock;
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+
+use crate::state::{
+    AccountState, AthenaAccounts, Calculation, CapacityAssignmentConfiguration,
+    CapacityReservation, DataCatalog, NamedQuery, Notebook, PreparedStatement, QueryExecution,
+    Session, SharedAthenaState, WorkGroup,
+};
+
+const SUPPORTED_ACTIONS: &[&str] = &[
+    "BatchGetNamedQuery",
+    "BatchGetPreparedStatement",
+    "BatchGetQueryExecution",
+    "CancelCapacityReservation",
+    "CreateCapacityReservation",
+    "CreateDataCatalog",
+    "CreateNamedQuery",
+    "CreateNotebook",
+    "CreatePreparedStatement",
+    "CreatePresignedNotebookUrl",
+    "CreateWorkGroup",
+    "DeleteCapacityReservation",
+    "DeleteDataCatalog",
+    "DeleteNamedQuery",
+    "DeleteNotebook",
+    "DeletePreparedStatement",
+    "DeleteWorkGroup",
+    "ExportNotebook",
+    "GetCalculationExecution",
+    "GetCalculationExecutionCode",
+    "GetCalculationExecutionStatus",
+    "GetCapacityAssignmentConfiguration",
+    "GetCapacityReservation",
+    "GetDatabase",
+    "GetDataCatalog",
+    "GetNamedQuery",
+    "GetNotebookMetadata",
+    "GetPreparedStatement",
+    "GetQueryExecution",
+    "GetQueryResults",
+    "GetQueryRuntimeStatistics",
+    "GetResourceDashboard",
+    "GetSession",
+    "GetSessionEndpoint",
+    "GetSessionStatus",
+    "GetTableMetadata",
+    "GetWorkGroup",
+    "ImportNotebook",
+    "ListApplicationDPUSizes",
+    "ListCalculationExecutions",
+    "ListCapacityReservations",
+    "ListDatabases",
+    "ListDataCatalogs",
+    "ListEngineVersions",
+    "ListExecutors",
+    "ListNamedQueries",
+    "ListNotebookMetadata",
+    "ListNotebookSessions",
+    "ListPreparedStatements",
+    "ListQueryExecutions",
+    "ListSessions",
+    "ListTableMetadata",
+    "ListTagsForResource",
+    "ListWorkGroups",
+    "PutCapacityAssignmentConfiguration",
+    "StartCalculationExecution",
+    "StartQueryExecution",
+    "StartSession",
+    "StopCalculationExecution",
+    "StopQueryExecution",
+    "TagResource",
+    "TerminateSession",
+    "UntagResource",
+    "UpdateCapacityReservation",
+    "UpdateDataCatalog",
+    "UpdateNamedQuery",
+    "UpdateNotebook",
+    "UpdateNotebookMetadata",
+    "UpdatePreparedStatement",
+    "UpdateWorkGroup",
+];
+
+pub struct AthenaService {
+    state: SharedAthenaState,
+}
+
+impl AthenaService {
+    pub fn new(state: SharedAthenaState) -> Self {
+        Self { state }
+    }
+
+    pub fn shared_state(&self) -> SharedAthenaState {
+        Arc::clone(&self.state)
+    }
+}
+
+impl Default for AthenaService {
+    fn default() -> Self {
+        Self::new(Arc::new(RwLock::new(AthenaAccounts::new())))
+    }
+}
+
+#[async_trait]
+impl AwsService for AthenaService {
+    fn service_name(&self) -> &str {
+        "athena"
+    }
+
+    fn supported_actions(&self) -> &[&str] {
+        SUPPORTED_ACTIONS
+    }
+
+    async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        match req.action.as_str() {
+            // Workgroups
+            "CreateWorkGroup" => self.create_work_group(&req),
+            "GetWorkGroup" => self.get_work_group(&req),
+            "ListWorkGroups" => self.list_work_groups(&req),
+            "UpdateWorkGroup" => self.update_work_group(&req),
+            "DeleteWorkGroup" => self.delete_work_group(&req),
+
+            // Data catalogs
+            "CreateDataCatalog" => self.create_data_catalog(&req),
+            "GetDataCatalog" => self.get_data_catalog(&req),
+            "ListDataCatalogs" => self.list_data_catalogs(&req),
+            "UpdateDataCatalog" => self.update_data_catalog(&req),
+            "DeleteDataCatalog" => self.delete_data_catalog(&req),
+            "GetDatabase" => self.get_database(&req),
+            "ListDatabases" => self.list_databases(&req),
+            "GetTableMetadata" => self.get_table_metadata(&req),
+            "ListTableMetadata" => self.list_table_metadata(&req),
+
+            // Named queries
+            "CreateNamedQuery" => self.create_named_query(&req),
+            "GetNamedQuery" => self.get_named_query(&req),
+            "ListNamedQueries" => self.list_named_queries(&req),
+            "BatchGetNamedQuery" => self.batch_get_named_query(&req),
+            "UpdateNamedQuery" => self.update_named_query(&req),
+            "DeleteNamedQuery" => self.delete_named_query(&req),
+
+            // Prepared statements
+            "CreatePreparedStatement" => self.create_prepared_statement(&req),
+            "GetPreparedStatement" => self.get_prepared_statement(&req),
+            "ListPreparedStatements" => self.list_prepared_statements(&req),
+            "BatchGetPreparedStatement" => self.batch_get_prepared_statement(&req),
+            "UpdatePreparedStatement" => self.update_prepared_statement(&req),
+            "DeletePreparedStatement" => self.delete_prepared_statement(&req),
+
+            // Query executions
+            "StartQueryExecution" => self.start_query_execution(&req),
+            "StopQueryExecution" => self.stop_query_execution(&req),
+            "GetQueryExecution" => self.get_query_execution(&req),
+            "ListQueryExecutions" => self.list_query_executions(&req),
+            "BatchGetQueryExecution" => self.batch_get_query_execution(&req),
+            "GetQueryResults" => self.get_query_results(&req),
+            "GetQueryRuntimeStatistics" => self.get_query_runtime_statistics(&req),
+
+            // Notebooks
+            "CreateNotebook" => self.create_notebook(&req),
+            "ImportNotebook" => self.import_notebook(&req),
+            "ExportNotebook" => self.export_notebook(&req),
+            "GetNotebookMetadata" => self.get_notebook_metadata(&req),
+            "ListNotebookMetadata" => self.list_notebook_metadata(&req),
+            "UpdateNotebook" => self.update_notebook(&req),
+            "UpdateNotebookMetadata" => self.update_notebook_metadata(&req),
+            "DeleteNotebook" => self.delete_notebook(&req),
+            "CreatePresignedNotebookUrl" => self.create_presigned_notebook_url(&req),
+
+            // Sessions / calculations
+            "StartSession" => self.start_session(&req),
+            "GetSession" => self.get_session(&req),
+            "GetSessionStatus" => self.get_session_status(&req),
+            "GetSessionEndpoint" => self.get_session_endpoint(&req),
+            "ListSessions" => self.list_sessions(&req),
+            "ListNotebookSessions" => self.list_notebook_sessions(&req),
+            "TerminateSession" => self.terminate_session(&req),
+            "StartCalculationExecution" => self.start_calculation_execution(&req),
+            "StopCalculationExecution" => self.stop_calculation_execution(&req),
+            "GetCalculationExecution" => self.get_calculation_execution(&req),
+            "GetCalculationExecutionCode" => self.get_calculation_execution_code(&req),
+            "GetCalculationExecutionStatus" => self.get_calculation_execution_status(&req),
+            "ListCalculationExecutions" => self.list_calculation_executions(&req),
+
+            // Capacity reservations
+            "CreateCapacityReservation" => self.create_capacity_reservation(&req),
+            "GetCapacityReservation" => self.get_capacity_reservation(&req),
+            "ListCapacityReservations" => self.list_capacity_reservations(&req),
+            "UpdateCapacityReservation" => self.update_capacity_reservation(&req),
+            "CancelCapacityReservation" => self.cancel_capacity_reservation(&req),
+            "DeleteCapacityReservation" => self.delete_capacity_reservation(&req),
+            "PutCapacityAssignmentConfiguration" => {
+                self.put_capacity_assignment_configuration(&req)
+            }
+            "GetCapacityAssignmentConfiguration" => {
+                self.get_capacity_assignment_configuration(&req)
+            }
+
+            // Tags
+            "TagResource" => self.tag_resource(&req),
+            "UntagResource" => self.untag_resource(&req),
+            "ListTagsForResource" => self.list_tags_for_resource(&req),
+
+            // Misc / read-only catalog
+            "ListEngineVersions" => self.list_engine_versions(&req),
+            "ListApplicationDPUSizes" => self.list_application_dpu_sizes(&req),
+            "ListExecutors" => self.list_executors(&req),
+            "GetResourceDashboard" => self.get_resource_dashboard(&req),
+
+            other => Err(AwsServiceError::action_not_implemented("athena", other)),
+        }
+    }
+}
+
+// ─── Workgroups ────────────────────────────────────────────────────
+
+impl AthenaService {
+    fn create_work_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "Name")?;
+        let description = body
+            .get("Description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let configuration = body.get("Configuration").cloned();
+        let tags = parse_tags(body.get("Tags"))?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if account.work_groups.contains_key(&name) {
+            return Err(invalid_request(format!("Workgroup {name} already exists")));
+        }
+        let wg = WorkGroup {
+            name: name.clone(),
+            state: "ENABLED".to_string(),
+            description,
+            configuration,
+            creation_time: Utc::now(),
+            engine_version: Some("AUTO".to_string()),
+        };
+        let arn = workgroup_arn(&req.account_id, &req.region, &name);
+        account.work_groups.insert(name, wg);
+        if !tags.is_empty() {
+            account.tags.insert(arn, tags);
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn get_work_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "WorkGroup")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let wg = account
+            .work_groups
+            .get(&name)
+            .ok_or_else(|| invalid_request(format!("Workgroup {name} not found")))?;
+        Ok(AwsResponse::ok_json(json!({
+            "WorkGroup": work_group_json(wg),
+        })))
+    }
+
+    fn list_work_groups(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let next_token = body
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut all: Vec<WorkGroup> = account.work_groups.values().cloned().collect();
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let summaries: Vec<Value> = page.iter().map(workgroup_summary_json).collect();
+        let mut response = json!({ "WorkGroups": summaries });
+        if let Some(t) = next {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("NextToken".to_string(), Value::String(t));
+        }
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn update_work_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "WorkGroup")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let wg = account
+            .work_groups
+            .get_mut(&name)
+            .ok_or_else(|| invalid_request(format!("Workgroup {name} not found")))?;
+        if let Some(d) = body.get("Description").and_then(Value::as_str) {
+            wg.description = Some(d.to_string());
+        }
+        if let Some(s) = body.get("State").and_then(Value::as_str) {
+            wg.state = s.to_string();
+        }
+        if let Some(c) = body.get("ConfigurationUpdates") {
+            wg.configuration = Some(c.clone());
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn delete_work_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "WorkGroup")?;
+        let recursive = body
+            .get("RecursiveDeleteOption")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if name == "primary" {
+            return Err(invalid_request("Cannot delete the primary workgroup"));
+        }
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let used_by_query = account
+            .query_executions
+            .values()
+            .any(|q| q.work_group == name);
+        let used_by_named = account.named_queries.values().any(|q| q.work_group == name);
+        if !recursive && (used_by_query || used_by_named) {
+            return Err(invalid_request(format!(
+                "Workgroup {name} still has resources; pass RecursiveDeleteOption=true"
+            )));
+        }
+        if account.work_groups.remove(&name).is_none() {
+            return Err(invalid_request(format!("Workgroup {name} not found")));
+        }
+        if recursive {
+            account.query_executions.retain(|_, q| q.work_group != name);
+            account.named_queries.retain(|_, q| q.work_group != name);
+            account.prepared_statements.retain(|(wg, _), _| wg != &name);
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+}
+
+// ─── Data catalogs ─────────────────────────────────────────────────
+
+impl AthenaService {
+    fn create_data_catalog(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "Name")?;
+        let cat_type = require_str(&body, "Type")?;
+        let description = body
+            .get("Description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let parameters = body
+            .get("Parameters")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let connection_type = body
+            .get("ConnectionType")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let tags = parse_tags(body.get("Tags"))?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if account.data_catalogs.contains_key(&name) {
+            return Err(invalid_request(format!(
+                "DataCatalog {name} already exists"
+            )));
+        }
+        let cat = DataCatalog {
+            name: name.clone(),
+            description,
+            cat_type,
+            parameters,
+            status: "CREATE_COMPLETE".to_string(),
+            connection_type,
+            error: None,
+        };
+        let arn = datacatalog_arn(&req.account_id, &req.region, &name);
+        account.data_catalogs.insert(name, cat);
+        if !tags.is_empty() {
+            account.tags.insert(arn, tags);
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn get_data_catalog(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "Name")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let cat = account
+            .data_catalogs
+            .get(&name)
+            .ok_or_else(|| invalid_request(format!("DataCatalog {name} not found")))?;
+        Ok(AwsResponse::ok_json(json!({
+            "DataCatalog": data_catalog_json(cat),
+        })))
+    }
+
+    fn list_data_catalogs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let next_token = body
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut all: Vec<DataCatalog> = account.data_catalogs.values().cloned().collect();
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let summaries: Vec<Value> = page
+            .iter()
+            .map(|c| {
+                json!({
+                    "CatalogName": c.name,
+                    "Type": c.cat_type,
+                    "Status": c.status,
+                })
+            })
+            .collect();
+        let mut response = json!({ "DataCatalogsSummary": summaries });
+        if let Some(t) = next {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("NextToken".to_string(), Value::String(t));
+        }
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn update_data_catalog(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "Name")?;
+        let cat_type = require_str(&body, "Type")?;
+        let description = body
+            .get("Description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let cat = account
+            .data_catalogs
+            .get_mut(&name)
+            .ok_or_else(|| invalid_request(format!("DataCatalog {name} not found")))?;
+        cat.cat_type = cat_type;
+        if description.is_some() {
+            cat.description = description;
+        }
+        if let Some(p) = body.get("Parameters").and_then(Value::as_object) {
+            cat.parameters = p
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn delete_data_catalog(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "Name")?;
+        if name == "AwsDataCatalog" {
+            return Err(invalid_request("Cannot delete the default AwsDataCatalog"));
+        }
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if account.data_catalogs.remove(&name).is_none() {
+            return Err(invalid_request(format!("DataCatalog {name} not found")));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "DataCatalog": {
+                "Name": "",
+                "Type": "",
+                "Status": "DELETE_COMPLETE",
+            }
+        })))
+    }
+
+    fn get_database(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let catalog = require_str(&body, "CatalogName")?;
+        let database = require_str(&body, "DatabaseName")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.data_catalogs.contains_key(&catalog) {
+            return Err(invalid_request(format!("DataCatalog {catalog} not found")));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "Database": {
+                "Name": database,
+                "Description": format!("synthesized database for {catalog}"),
+                "Parameters": {},
+            }
+        })))
+    }
+
+    fn list_databases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let catalog = require_str(&body, "CatalogName")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.data_catalogs.contains_key(&catalog) {
+            return Err(invalid_request(format!("DataCatalog {catalog} not found")));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "DatabaseList": [{"Name": "default", "Description": "default database"}],
+        })))
+    }
+
+    fn get_table_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let catalog = require_str(&body, "CatalogName")?;
+        let database = require_str(&body, "DatabaseName")?;
+        let table = require_str(&body, "TableName")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.data_catalogs.contains_key(&catalog) {
+            return Err(invalid_request(format!("DataCatalog {catalog} not found")));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "TableMetadata": {
+                "Name": table,
+                "TableType": "EXTERNAL_TABLE",
+                "Parameters": {"database": database},
+                "Columns": [],
+                "PartitionKeys": [],
+            }
+        })))
+    }
+
+    fn list_table_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let catalog = require_str(&body, "CatalogName")?;
+        let database = require_str(&body, "DatabaseName")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.data_catalogs.contains_key(&catalog) {
+            return Err(invalid_request(format!("DataCatalog {catalog} not found")));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "TableMetadataList": [{
+                "Name": "sample",
+                "TableType": "EXTERNAL_TABLE",
+                "Parameters": {"database": database},
+                "Columns": [],
+                "PartitionKeys": [],
+            }]
+        })))
+    }
+}
+
+// ─── Named queries ─────────────────────────────────────────────────
+
+impl AthenaService {
+    fn create_named_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "Name")?;
+        let database = require_str(&body, "Database")?;
+        let query_string = require_str(&body, "QueryString")?;
+        let description = body
+            .get("Description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let work_group = body
+            .get("WorkGroup")
+            .and_then(Value::as_str)
+            .unwrap_or("primary")
+            .to_string();
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.work_groups.contains_key(&work_group) {
+            return Err(invalid_request(format!("Workgroup {work_group} not found")));
+        }
+        let id = synth_uuid();
+        account.named_queries.insert(
+            id.clone(),
+            NamedQuery {
+                named_query_id: id.clone(),
+                name,
+                description,
+                database,
+                query_string,
+                work_group,
+            },
+        );
+        Ok(AwsResponse::ok_json(json!({ "NamedQueryId": id })))
+    }
+
+    fn get_named_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "NamedQueryId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let q = account
+            .named_queries
+            .get(&id)
+            .ok_or_else(|| invalid_request(format!("NamedQuery {id} not found")))?;
+        Ok(AwsResponse::ok_json(json!({
+            "NamedQuery": named_query_json(q),
+        })))
+    }
+
+    fn list_named_queries(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = body
+            .get("WorkGroup")
+            .and_then(Value::as_str)
+            .unwrap_or("primary")
+            .to_string();
+        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let next_token = body
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut ids: Vec<String> = account
+            .named_queries
+            .values()
+            .filter(|q| q.work_group == work_group)
+            .map(|q| q.named_query_id.clone())
+            .collect();
+        ids.sort();
+        let (page, next) = paginate(&ids, next_token.as_deref(), max_results);
+        let mut response = json!({ "NamedQueryIds": page });
+        if let Some(t) = next {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("NextToken".to_string(), Value::String(t));
+        }
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn batch_get_named_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let ids = parse_string_list(body.get("NamedQueryIds"));
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut found = Vec::new();
+        let mut missing = Vec::new();
+        for id in ids {
+            if let Some(q) = account.named_queries.get(&id) {
+                found.push(named_query_json(q));
+            } else {
+                missing.push(json!({ "NamedQueryId": id, "ErrorCode": "NOT_FOUND", "ErrorMessage": "NamedQuery not found" }));
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "NamedQueries": found,
+            "UnprocessedNamedQueryIds": missing,
+        })))
+    }
+
+    fn update_named_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "NamedQueryId")?;
+        let name = require_str(&body, "Name")?;
+        let query_string = require_str(&body, "QueryString")?;
+        let description = body
+            .get("Description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let q = account
+            .named_queries
+            .get_mut(&id)
+            .ok_or_else(|| invalid_request(format!("NamedQuery {id} not found")))?;
+        q.name = name;
+        q.query_string = query_string;
+        q.description = description;
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn delete_named_query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "NamedQueryId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if account.named_queries.remove(&id).is_none() {
+            return Err(invalid_request(format!("NamedQuery {id} not found")));
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+}
+
+// ─── Prepared statements ───────────────────────────────────────────
+
+impl AthenaService {
+    fn create_prepared_statement(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = require_str(&body, "WorkGroup")?;
+        let statement_name = require_str(&body, "StatementName")?;
+        let query_statement = require_str(&body, "QueryStatement")?;
+        let description = body
+            .get("Description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.work_groups.contains_key(&work_group) {
+            return Err(invalid_request(format!("Workgroup {work_group} not found")));
+        }
+        let key = (work_group.clone(), statement_name.clone());
+        if account.prepared_statements.contains_key(&key) {
+            return Err(invalid_request(format!(
+                "PreparedStatement {statement_name} already exists in {work_group}"
+            )));
+        }
+        account.prepared_statements.insert(
+            key,
+            PreparedStatement {
+                statement_name,
+                work_group_name: work_group,
+                query_statement,
+                description,
+                last_modified_time: Utc::now(),
+            },
+        );
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn get_prepared_statement(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = require_str(&body, "WorkGroup")?;
+        let statement_name = require_str(&body, "StatementName")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let ps = account
+            .prepared_statements
+            .get(&(work_group.clone(), statement_name.clone()))
+            .ok_or_else(|| {
+                invalid_request(format!(
+                    "PreparedStatement {statement_name} not found in {work_group}"
+                ))
+            })?;
+        Ok(AwsResponse::ok_json(json!({
+            "PreparedStatement": prepared_statement_json(ps),
+        })))
+    }
+
+    fn list_prepared_statements(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = require_str(&body, "WorkGroup")?;
+        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let next_token = body
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut ps: Vec<PreparedStatement> = account
+            .prepared_statements
+            .iter()
+            .filter(|((wg, _), _)| wg == &work_group)
+            .map(|(_, p)| p.clone())
+            .collect();
+        ps.sort_by(|a, b| a.statement_name.cmp(&b.statement_name));
+        let (page, next) = paginate(&ps, next_token.as_deref(), max_results);
+        let summaries: Vec<Value> = page
+            .iter()
+            .map(|p| {
+                json!({
+                    "StatementName": p.statement_name,
+                    "LastModifiedTime": p.last_modified_time.timestamp() as f64,
+                })
+            })
+            .collect();
+        let mut response = json!({ "PreparedStatements": summaries });
+        if let Some(t) = next {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("NextToken".to_string(), Value::String(t));
+        }
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn batch_get_prepared_statement(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = require_str(&body, "WorkGroup")?;
+        let names = parse_string_list(body.get("PreparedStatementNames"));
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut found = Vec::new();
+        let mut missing = Vec::new();
+        for name in names {
+            if let Some(ps) = account
+                .prepared_statements
+                .get(&(work_group.clone(), name.clone()))
+            {
+                found.push(prepared_statement_json(ps));
+            } else {
+                missing.push(json!({ "StatementName": name, "ErrorCode": "NOT_FOUND", "ErrorMessage": "PreparedStatement not found" }));
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "PreparedStatements": found,
+            "UnprocessedPreparedStatementNames": missing,
+        })))
+    }
+
+    fn update_prepared_statement(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = require_str(&body, "WorkGroup")?;
+        let statement_name = require_str(&body, "StatementName")?;
+        let query_statement = require_str(&body, "QueryStatement")?;
+        let description = body
+            .get("Description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let ps = account
+            .prepared_statements
+            .get_mut(&(work_group.clone(), statement_name.clone()))
+            .ok_or_else(|| {
+                invalid_request(format!(
+                    "PreparedStatement {statement_name} not found in {work_group}"
+                ))
+            })?;
+        ps.query_statement = query_statement;
+        ps.description = description;
+        ps.last_modified_time = Utc::now();
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn delete_prepared_statement(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = require_str(&body, "WorkGroup")?;
+        let statement_name = require_str(&body, "StatementName")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if account
+            .prepared_statements
+            .remove(&(work_group.clone(), statement_name.clone()))
+            .is_none()
+        {
+            return Err(invalid_request(format!(
+                "PreparedStatement {statement_name} not found in {work_group}"
+            )));
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+}
+
+// ─── Query executions ──────────────────────────────────────────────
+
+impl AthenaService {
+    fn start_query_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let query = require_str(&body, "QueryString")?;
+        let work_group = body
+            .get("WorkGroup")
+            .and_then(Value::as_str)
+            .unwrap_or("primary")
+            .to_string();
+        let context = body.get("QueryExecutionContext").cloned();
+        let result_configuration = body.get("ResultConfiguration").cloned();
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.work_groups.contains_key(&work_group) {
+            return Err(invalid_request(format!("Workgroup {work_group} not found")));
+        }
+        let id = synth_uuid();
+        let now = Utc::now();
+        // Synthesize a successful query result instantly so callers can
+        // immediately fetch it via GetQueryResults.
+        let qe = QueryExecution {
+            query_execution_id: id.clone(),
+            query: query.clone(),
+            statement_type: classify_statement(&query),
+            work_group,
+            state: "SUCCEEDED".to_string(),
+            state_change_reason: None,
+            submission_time: now,
+            completion_time: Some(now),
+            query_execution_context: context,
+            result_configuration,
+            engine_version: Some(json!({
+                "SelectedEngineVersion": "AUTO",
+                "EffectiveEngineVersion": "Athena engine version 3",
+            })),
+            data_scanned_bytes: 0,
+            engine_execution_time_ms: 1,
+            query_planning_time_ms: 1,
+            total_execution_time_ms: 2,
+            result_rows: vec![vec!["1".to_string()]],
+            result_columns: vec![("_col0".to_string(), "integer".to_string())],
+        };
+        account.query_executions.insert(id.clone(), qe);
+        Ok(AwsResponse::ok_json(json!({ "QueryExecutionId": id })))
+    }
+
+    fn stop_query_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "QueryExecutionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let q = account
+            .query_executions
+            .get_mut(&id)
+            .ok_or_else(|| invalid_request(format!("QueryExecution {id} not found")))?;
+        q.state = "CANCELLED".to_string();
+        q.state_change_reason = Some("Cancelled by user".to_string());
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn get_query_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "QueryExecutionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let q = account
+            .query_executions
+            .get(&id)
+            .ok_or_else(|| invalid_request(format!("QueryExecution {id} not found")))?;
+        Ok(AwsResponse::ok_json(json!({
+            "QueryExecution": query_execution_json(q),
+        })))
+    }
+
+    fn list_query_executions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = body
+            .get("WorkGroup")
+            .and_then(Value::as_str)
+            .unwrap_or("primary")
+            .to_string();
+        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let next_token = body
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut all: Vec<QueryExecution> = account
+            .query_executions
+            .values()
+            .filter(|q| q.work_group == work_group)
+            .cloned()
+            .collect();
+        all.sort_by_key(|q| std::cmp::Reverse(q.submission_time));
+        let ids: Vec<String> = all.iter().map(|q| q.query_execution_id.clone()).collect();
+        let (page, next) = paginate(&ids, next_token.as_deref(), max_results);
+        let mut response = json!({ "QueryExecutionIds": page });
+        if let Some(t) = next {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("NextToken".to_string(), Value::String(t));
+        }
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn batch_get_query_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let ids = parse_string_list(body.get("QueryExecutionIds"));
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut found = Vec::new();
+        let mut missing = Vec::new();
+        for id in ids {
+            if let Some(q) = account.query_executions.get(&id) {
+                found.push(query_execution_json(q));
+            } else {
+                missing.push(json!({
+                    "QueryExecutionId": id,
+                    "ErrorCode": "NOT_FOUND",
+                    "ErrorMessage": "QueryExecution not found",
+                }));
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "QueryExecutions": found,
+            "UnprocessedQueryExecutionIds": missing,
+        })))
+    }
+
+    fn get_query_results(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "QueryExecutionId")?;
+        let max_results = body
+            .get("MaxResults")
+            .and_then(Value::as_u64)
+            .unwrap_or(1000) as usize;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let q = account
+            .query_executions
+            .get(&id)
+            .ok_or_else(|| invalid_request(format!("QueryExecution {id} not found")))?;
+        if q.state != "SUCCEEDED" {
+            return Err(invalid_request(format!(
+                "Query is in state {} — results unavailable",
+                q.state
+            )));
+        }
+        let column_info: Vec<Value> = q
+            .result_columns
+            .iter()
+            .map(|(name, ty)| {
+                json!({
+                    "CatalogName": "AwsDataCatalog",
+                    "SchemaName": "default",
+                    "TableName": "",
+                    "Name": name,
+                    "Label": name,
+                    "Type": ty,
+                    "Precision": 0,
+                    "Scale": 0,
+                    "Nullable": "NULLABLE",
+                    "CaseSensitive": false,
+                })
+            })
+            .collect();
+        let header_row = json!({
+            "Data": q.result_columns.iter().map(|(n, _)| json!({"VarCharValue": n})).collect::<Vec<_>>(),
+        });
+        let mut rows = vec![header_row];
+        for row in q.result_rows.iter().take(max_results.saturating_sub(1)) {
+            rows.push(json!({
+                "Data": row.iter().map(|v| json!({"VarCharValue": v})).collect::<Vec<_>>(),
+            }));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "ResultSet": {
+                "Rows": rows,
+                "ResultSetMetadata": {"ColumnInfo": column_info},
+            },
+            "UpdateCount": 0,
+        })))
+    }
+
+    fn get_query_runtime_statistics(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "QueryExecutionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let q = account
+            .query_executions
+            .get(&id)
+            .ok_or_else(|| invalid_request(format!("QueryExecution {id} not found")))?;
+        Ok(AwsResponse::ok_json(json!({
+            "QueryRuntimeStatistics": {
+                "Timeline": {
+                    "QueryQueueTimeInMillis": 0,
+                    "QueryPlanningTimeInMillis": q.query_planning_time_ms,
+                    "EngineExecutionTimeInMillis": q.engine_execution_time_ms,
+                    "ServiceProcessingTimeInMillis": 0,
+                    "TotalExecutionTimeInMillis": q.total_execution_time_ms,
+                },
+                "Rows": {
+                    "InputRows": q.result_rows.len() as i64,
+                    "InputBytes": q.data_scanned_bytes,
+                    "OutputRows": q.result_rows.len() as i64,
+                    "OutputBytes": q.data_scanned_bytes,
+                },
+            }
+        })))
+    }
+}
+
+// ─── Notebooks ─────────────────────────────────────────────────────
+
+impl AthenaService {
+    fn create_notebook(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = require_str(&body, "WorkGroup")?;
+        let name = require_str(&body, "Name")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.work_groups.contains_key(&work_group) {
+            return Err(invalid_request(format!("Workgroup {work_group} not found")));
+        }
+        let id = synth_uuid();
+        account.notebooks.insert(
+            id.clone(),
+            Notebook {
+                notebook_id: id.clone(),
+                name,
+                work_group,
+                creation_time: Utc::now(),
+                last_modified_time: Utc::now(),
+                payload: String::new(),
+                notebook_type: "IPYNB".to_string(),
+            },
+        );
+        Ok(AwsResponse::ok_json(json!({ "NotebookId": id })))
+    }
+
+    fn import_notebook(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = require_str(&body, "WorkGroup")?;
+        let name = require_str(&body, "Name")?;
+        let payload = body
+            .get("Payload")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let notebook_type = body
+            .get("Type")
+            .and_then(Value::as_str)
+            .unwrap_or("IPYNB")
+            .to_string();
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.work_groups.contains_key(&work_group) {
+            return Err(invalid_request(format!("Workgroup {work_group} not found")));
+        }
+        let id = synth_uuid();
+        account.notebooks.insert(
+            id.clone(),
+            Notebook {
+                notebook_id: id.clone(),
+                name,
+                work_group,
+                creation_time: Utc::now(),
+                last_modified_time: Utc::now(),
+                payload,
+                notebook_type,
+            },
+        );
+        Ok(AwsResponse::ok_json(json!({ "NotebookId": id })))
+    }
+
+    fn export_notebook(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "NotebookId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let n = account
+            .notebooks
+            .get(&id)
+            .ok_or_else(|| invalid_request(format!("Notebook {id} not found")))?;
+        Ok(AwsResponse::ok_json(json!({
+            "NotebookMetadata": notebook_metadata_json(n),
+            "Payload": n.payload,
+        })))
+    }
+
+    fn get_notebook_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "NotebookId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let n = account
+            .notebooks
+            .get(&id)
+            .ok_or_else(|| invalid_request(format!("Notebook {id} not found")))?;
+        Ok(AwsResponse::ok_json(json!({
+            "NotebookMetadata": notebook_metadata_json(n),
+        })))
+    }
+
+    fn list_notebook_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = require_str(&body, "WorkGroup")?;
+        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let next_token = body
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut all: Vec<Notebook> = account
+            .notebooks
+            .values()
+            .filter(|n| n.work_group == work_group)
+            .cloned()
+            .collect();
+        all.sort_by(|a, b| a.notebook_id.cmp(&b.notebook_id));
+        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let metadatas: Vec<Value> = page.iter().map(notebook_metadata_json).collect();
+        let mut response = json!({ "NotebookMetadataList": metadatas });
+        if let Some(t) = next {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("NextToken".to_string(), Value::String(t));
+        }
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn update_notebook(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "NotebookId")?;
+        let payload = require_str(&body, "Payload")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let n = account
+            .notebooks
+            .get_mut(&id)
+            .ok_or_else(|| invalid_request(format!("Notebook {id} not found")))?;
+        n.payload = payload;
+        n.last_modified_time = Utc::now();
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn update_notebook_metadata(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "NotebookId")?;
+        let name = require_str(&body, "Name")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let n = account
+            .notebooks
+            .get_mut(&id)
+            .ok_or_else(|| invalid_request(format!("Notebook {id} not found")))?;
+        n.name = name;
+        n.last_modified_time = Utc::now();
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn delete_notebook(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "NotebookId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if account.notebooks.remove(&id).is_none() {
+            return Err(invalid_request(format!("Notebook {id} not found")));
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn create_presigned_notebook_url(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let session_id = require_str(&body, "SessionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.sessions.contains_key(&session_id) {
+            return Err(invalid_request(format!("Session {session_id} not found")));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "NotebookUrl": format!("https://athena-notebook.{}.amazonaws.com/{}", req.region, session_id),
+            "AuthToken": synth_uuid(),
+            "AuthTokenExpirationTime": (Utc::now().timestamp() + 3600) as f64,
+        })))
+    }
+}
+
+// ─── Sessions / calculations ──────────────────────────────────────
+
+impl AthenaService {
+    fn start_session(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = require_str(&body, "WorkGroup")?;
+        let description = body
+            .get("Description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let configuration = body.get("EngineConfiguration").cloned();
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.work_groups.contains_key(&work_group) {
+            return Err(invalid_request(format!("Workgroup {work_group} not found")));
+        }
+        let id = synth_uuid();
+        account.sessions.insert(
+            id.clone(),
+            Session {
+                session_id: id.clone(),
+                work_group,
+                description,
+                engine_version: Some("PySpark engine version 3".to_string()),
+                state: "IDLE".to_string(),
+                start_date_time: Utc::now(),
+                end_date_time: None,
+                idle_since_date_time: Some(Utc::now()),
+                configuration,
+                notebook_version: Some("Athena notebook version 1".to_string()),
+            },
+        );
+        Ok(AwsResponse::ok_json(json!({
+            "SessionId": id,
+            "State": "IDLE",
+        })))
+    }
+
+    fn get_session(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "SessionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let s = account
+            .sessions
+            .get(&id)
+            .ok_or_else(|| invalid_request(format!("Session {id} not found")))?;
+        Ok(AwsResponse::ok_json(session_detail_json(s)))
+    }
+
+    fn get_session_status(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "SessionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let s = account
+            .sessions
+            .get(&id)
+            .ok_or_else(|| invalid_request(format!("Session {id} not found")))?;
+        Ok(AwsResponse::ok_json(json!({
+            "SessionId": s.session_id,
+            "Status": session_status_json(s),
+        })))
+    }
+
+    fn get_session_endpoint(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "SessionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.sessions.contains_key(&id) {
+            return Err(invalid_request(format!("Session {id} not found")));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "SessionId": id,
+            "EndpointUrl": format!("https://athena-session.{}.amazonaws.com/{}", req.region, id),
+            "ExpirationDateTime": (Utc::now().timestamp() + 3600) as f64,
+        })))
+    }
+
+    fn list_sessions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let work_group = require_str(&body, "WorkGroup")?;
+        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let next_token = body
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut all: Vec<Session> = account
+            .sessions
+            .values()
+            .filter(|s| s.work_group == work_group)
+            .cloned()
+            .collect();
+        all.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let summaries: Vec<Value> = page.iter().map(session_summary_json).collect();
+        let mut response = json!({ "Sessions": summaries });
+        if let Some(t) = next {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("NextToken".to_string(), Value::String(t));
+        }
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn list_notebook_sessions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let notebook_id = require_str(&body, "NotebookId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.notebooks.contains_key(&notebook_id) {
+            return Err(invalid_request(format!("Notebook {notebook_id} not found")));
+        }
+        let summaries: Vec<Value> = account
+            .sessions
+            .values()
+            .map(session_summary_json)
+            .collect();
+        Ok(AwsResponse::ok_json(json!({
+            "NotebookSessionsList": summaries,
+        })))
+    }
+
+    fn terminate_session(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "SessionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let s = account
+            .sessions
+            .get_mut(&id)
+            .ok_or_else(|| invalid_request(format!("Session {id} not found")))?;
+        s.state = "TERMINATED".to_string();
+        s.end_date_time = Some(Utc::now());
+        Ok(AwsResponse::ok_json(json!({ "State": "TERMINATED" })))
+    }
+
+    fn start_calculation_execution(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let session_id = require_str(&body, "SessionId")?;
+        let description = body
+            .get("Description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let code_block = body
+            .get("CodeBlock")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.sessions.contains_key(&session_id) {
+            return Err(invalid_request(format!("Session {session_id} not found")));
+        }
+        let id = synth_uuid();
+        account.calculations.insert(
+            id.clone(),
+            Calculation {
+                calculation_execution_id: id.clone(),
+                session_id,
+                description,
+                state: "COMPLETED".to_string(),
+                state_change_reason: None,
+                working_directory: Some(format!("s3://athena-calc-results/{}", Uuid::new_v4())),
+                code_block,
+                submission_date_time: Utc::now(),
+                completion_date_time: Some(Utc::now()),
+            },
+        );
+        Ok(AwsResponse::ok_json(json!({
+            "CalculationExecutionId": id,
+            "State": "COMPLETED",
+        })))
+    }
+
+    fn stop_calculation_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "CalculationExecutionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let c = account
+            .calculations
+            .get_mut(&id)
+            .ok_or_else(|| invalid_request(format!("Calculation {id} not found")))?;
+        c.state = "CANCELED".to_string();
+        c.state_change_reason = Some("Cancelled by user".to_string());
+        Ok(AwsResponse::ok_json(json!({ "State": "CANCELED" })))
+    }
+
+    fn get_calculation_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "CalculationExecutionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let c = account
+            .calculations
+            .get(&id)
+            .ok_or_else(|| invalid_request(format!("Calculation {id} not found")))?;
+        Ok(AwsResponse::ok_json(calculation_detail_json(c)))
+    }
+
+    fn get_calculation_execution_code(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "CalculationExecutionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let c = account
+            .calculations
+            .get(&id)
+            .ok_or_else(|| invalid_request(format!("Calculation {id} not found")))?;
+        Ok(AwsResponse::ok_json(json!({
+            "CodeBlock": c.code_block.clone().unwrap_or_default(),
+        })))
+    }
+
+    fn get_calculation_execution_status(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = require_str(&body, "CalculationExecutionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let c = account
+            .calculations
+            .get(&id)
+            .ok_or_else(|| invalid_request(format!("Calculation {id} not found")))?;
+        Ok(AwsResponse::ok_json(json!({
+            "Status": calculation_status_json(c),
+            "Statistics": {
+                "DpuExecutionInMillis": 100,
+                "Progress": "100%",
+            }
+        })))
+    }
+
+    fn list_calculation_executions(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let session_id = require_str(&body, "SessionId")?;
+        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let next_token = body
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut all: Vec<Calculation> = account
+            .calculations
+            .values()
+            .filter(|c| c.session_id == session_id)
+            .cloned()
+            .collect();
+        all.sort_by(|a, b| a.calculation_execution_id.cmp(&b.calculation_execution_id));
+        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let summaries: Vec<Value> = page.iter().map(calculation_summary_json).collect();
+        let mut response = json!({ "Calculations": summaries });
+        if let Some(t) = next {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("NextToken".to_string(), Value::String(t));
+        }
+        Ok(AwsResponse::ok_json(response))
+    }
+}
+
+// ─── Capacity reservations ────────────────────────────────────────
+
+impl AthenaService {
+    fn create_capacity_reservation(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "Name")?;
+        let target_dpus =
+            body.get("TargetDpus")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| invalid_request("TargetDpus is required"))? as i32;
+        let tags = parse_tags(body.get("Tags"))?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if account.capacity_reservations.contains_key(&name) {
+            return Err(invalid_request(format!(
+                "CapacityReservation {name} already exists"
+            )));
+        }
+        let cr = CapacityReservation {
+            name: name.clone(),
+            status: "ACTIVE".to_string(),
+            target_dpus,
+            allocated_dpus: target_dpus,
+            creation_time: Utc::now(),
+            last_allocation: Some(Utc::now()),
+            last_successful_allocation_time: Some(Utc::now()),
+        };
+        let arn = capacity_reservation_arn(&req.account_id, &req.region, &name);
+        account.capacity_reservations.insert(name, cr);
+        if !tags.is_empty() {
+            account.tags.insert(arn, tags);
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn get_capacity_reservation(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "Name")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let cr = account
+            .capacity_reservations
+            .get(&name)
+            .ok_or_else(|| invalid_request(format!("CapacityReservation {name} not found")))?;
+        Ok(AwsResponse::ok_json(json!({
+            "CapacityReservation": capacity_reservation_json(cr),
+        })))
+    }
+
+    fn list_capacity_reservations(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let max_results = body.get("MaxResults").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let next_token = body
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let mut all: Vec<CapacityReservation> =
+            account.capacity_reservations.values().cloned().collect();
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let crs: Vec<Value> = page.iter().map(capacity_reservation_json).collect();
+        let mut response = json!({ "CapacityReservations": crs });
+        if let Some(t) = next {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("NextToken".to_string(), Value::String(t));
+        }
+        Ok(AwsResponse::ok_json(response))
+    }
+
+    fn update_capacity_reservation(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "Name")?;
+        let target_dpus =
+            body.get("TargetDpus")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| invalid_request("TargetDpus is required"))? as i32;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let cr = account
+            .capacity_reservations
+            .get_mut(&name)
+            .ok_or_else(|| invalid_request(format!("CapacityReservation {name} not found")))?;
+        cr.target_dpus = target_dpus;
+        cr.allocated_dpus = target_dpus;
+        cr.last_allocation = Some(Utc::now());
+        cr.last_successful_allocation_time = Some(Utc::now());
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn cancel_capacity_reservation(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "Name")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let cr = account
+            .capacity_reservations
+            .get_mut(&name)
+            .ok_or_else(|| invalid_request(format!("CapacityReservation {name} not found")))?;
+        cr.status = "CANCELLING".to_string();
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn delete_capacity_reservation(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let name = require_str(&body, "Name")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if account.capacity_reservations.remove(&name).is_none() {
+            return Err(invalid_request(format!(
+                "CapacityReservation {name} not found"
+            )));
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn put_capacity_assignment_configuration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let cr_name = require_str(&body, "CapacityReservationName")?;
+        let assignments = body
+            .get("CapacityAssignments")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.capacity_reservations.contains_key(&cr_name) {
+            return Err(invalid_request(format!(
+                "CapacityReservation {cr_name} not found"
+            )));
+        }
+        account.capacity_assignment_config = Some(CapacityAssignmentConfiguration {
+            capacity_reservation_name: cr_name,
+            capacity_assignments: assignments,
+        });
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn get_capacity_assignment_configuration(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let cr_name = require_str(&body, "CapacityReservationName")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let cfg = account
+            .capacity_assignment_config
+            .clone()
+            .filter(|c| c.capacity_reservation_name == cr_name)
+            .ok_or_else(|| {
+                invalid_request(format!("No CapacityAssignmentConfiguration for {cr_name}"))
+            })?;
+        Ok(AwsResponse::ok_json(json!({
+            "CapacityAssignmentConfiguration": {
+                "CapacityReservationName": cfg.capacity_reservation_name,
+                "CapacityAssignments": cfg.capacity_assignments,
+            }
+        })))
+    }
+}
+
+// ─── Tags / misc ──────────────────────────────────────────────────
+
+impl AthenaService {
+    fn tag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = require_str(&body, "ResourceARN")?;
+        let tags = parse_tags(body.get("Tags"))?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let entry = account.tags.entry(arn).or_default();
+        for (k, v) in tags {
+            entry.insert(k, v);
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn untag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = require_str(&body, "ResourceARN")?;
+        let keys = parse_string_list(body.get("TagKeys"));
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if let Some(t) = account.tags.get_mut(&arn) {
+            for k in keys {
+                t.remove(&k);
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_tags_for_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = require_str(&body, "ResourceARN")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let tags = account.tags.get(&arn).cloned().unwrap_or_default();
+        let tag_list: Vec<Value> = tags
+            .into_iter()
+            .map(|(k, v)| json!({ "Key": k, "Value": v }))
+            .collect();
+        Ok(AwsResponse::ok_json(json!({ "Tags": tag_list })))
+    }
+
+    fn list_engine_versions(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        Ok(AwsResponse::ok_json(json!({
+            "EngineVersions": [
+                {"AuthFailureRetryDelayInSeconds": 30, "EffectiveEngineVersion": "Athena engine version 3", "SelectedEngineVersion": "AUTO"},
+                {"AuthFailureRetryDelayInSeconds": 30, "EffectiveEngineVersion": "Athena engine version 3", "SelectedEngineVersion": "Athena engine version 3"},
+            ]
+        })))
+    }
+
+    fn list_application_dpu_sizes(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        Ok(AwsResponse::ok_json(json!({
+            "ApplicationDPUSizes": [
+                {"ApplicationRuntimeId": "Athena-PySpark-3.0", "SupportedDPUSizes": [1, 2, 4, 8, 16, 32]},
+            ]
+        })))
+    }
+
+    fn list_executors(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let session_id = require_str(&body, "SessionId")?;
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if !account.sessions.contains_key(&session_id) {
+            return Err(invalid_request(format!("Session {session_id} not found")));
+        }
+        Ok(AwsResponse::ok_json(json!({
+            "SessionId": session_id,
+            "ExecutorsSummary": [],
+        })))
+    }
+
+    fn get_resource_dashboard(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Not part of the public Athena Smithy in older SDKs; treat as a no-op
+        // shape that callers can poke without crashing.
+        Ok(AwsResponse::ok_json(json!({
+            "ResourceDashboardName": "default",
+            "Resources": [],
+        })))
+    }
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────
+
+fn account_mut<'a>(state: &'a mut AthenaAccounts, account_id: &str) -> &'a mut AccountState {
+    let a = state.accounts.entry(account_id.to_string()).or_default();
+    a.ensure_initialized();
+    a
+}
+
+fn require_str(body: &Value, field: &str) -> Result<String, AwsServiceError> {
+    body.get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| invalid_request(format!("{field} is required")))
+}
+
+fn invalid_request(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidRequestException", msg)
+}
+
+fn synth_uuid() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn workgroup_arn(account_id: &str, region: &str, name: &str) -> String {
+    let region = if region.is_empty() {
+        "us-east-1"
+    } else {
+        region
+    };
+    format!("arn:aws:athena:{region}:{account_id}:workgroup/{name}")
+}
+
+fn datacatalog_arn(account_id: &str, region: &str, name: &str) -> String {
+    let region = if region.is_empty() {
+        "us-east-1"
+    } else {
+        region
+    };
+    format!("arn:aws:athena:{region}:{account_id}:datacatalog/{name}")
+}
+
+fn capacity_reservation_arn(account_id: &str, region: &str, name: &str) -> String {
+    let region = if region.is_empty() {
+        "us-east-1"
+    } else {
+        region
+    };
+    format!("arn:aws:athena:{region}:{account_id}:capacity-reservation/{name}")
+}
+
+fn parse_string_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|v| {
+            v.iter()
+                .filter_map(|s| s.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_tags(
+    value: Option<&Value>,
+) -> Result<std::collections::HashMap<String, String>, AwsServiceError> {
+    let mut out = std::collections::HashMap::new();
+    let Some(arr) = value.and_then(Value::as_array) else {
+        return Ok(out);
+    };
+    for tag in arr {
+        let key = tag
+            .get("Key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_request("Tag.Key is required"))?
+            .to_string();
+        let value = tag
+            .get("Value")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        out.insert(key, value);
+    }
+    Ok(out)
+}
+
+fn paginate<T: Clone>(items: &[T], token: Option<&str>, max: usize) -> (Vec<T>, Option<String>) {
+    let start = token
+        .and_then(|t| t.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(items.len());
+    let end = start.saturating_add(max).min(items.len());
+    let page = items[start..end].to_vec();
+    let next = if end < items.len() {
+        Some(end.to_string())
+    } else {
+        None
+    };
+    (page, next)
+}
+
+/// Map the leading SQL keyword to one of Athena's documented statement types.
+fn classify_statement(query: &str) -> String {
+    let trimmed = query.trim_start();
+    let upper = trimmed.to_uppercase();
+    if upper.starts_with("SELECT")
+        || upper.starts_with("SHOW")
+        || upper.starts_with("DESCRIBE")
+        || upper.starts_with("EXPLAIN")
+    {
+        "DML".to_string()
+    } else if upper.starts_with("CREATE") || upper.starts_with("ALTER") || upper.starts_with("DROP")
+    {
+        "DDL".to_string()
+    } else if upper.starts_with("UPDATE")
+        || upper.starts_with("INSERT")
+        || upper.starts_with("DELETE")
+    {
+        "DML".to_string()
+    } else {
+        "UTILITY".to_string()
+    }
+}
+
+// ─── JSON shaping ──────────────────────────────────────────────────
+
+fn work_group_json(wg: &WorkGroup) -> Value {
+    let mut obj = json!({
+        "Name": wg.name,
+        "State": wg.state,
+        "CreationTime": wg.creation_time.timestamp() as f64,
+    });
+    if let Some(d) = &wg.description {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("Description".to_string(), Value::String(d.clone()));
+    }
+    if let Some(c) = &wg.configuration {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("Configuration".to_string(), c.clone());
+    }
+    obj
+}
+
+fn workgroup_summary_json(wg: &WorkGroup) -> Value {
+    let mut obj = json!({
+        "Name": wg.name,
+        "State": wg.state,
+        "CreationTime": wg.creation_time.timestamp() as f64,
+    });
+    if let Some(d) = &wg.description {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("Description".to_string(), Value::String(d.clone()));
+    }
+    if let Some(v) = &wg.engine_version {
+        obj.as_object_mut().unwrap().insert(
+            "EngineVersion".to_string(),
+            json!({"SelectedEngineVersion": v}),
+        );
+    }
+    obj
+}
+
+fn data_catalog_json(c: &DataCatalog) -> Value {
+    let mut obj = json!({
+        "Name": c.name,
+        "Type": c.cat_type,
+        "Status": c.status,
+        "Parameters": c.parameters,
+    });
+    if let Some(d) = &c.description {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("Description".to_string(), Value::String(d.clone()));
+    }
+    if let Some(t) = &c.connection_type {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("ConnectionType".to_string(), Value::String(t.clone()));
+    }
+    if let Some(e) = &c.error {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("Error".to_string(), Value::String(e.clone()));
+    }
+    obj
+}
+
+fn named_query_json(q: &NamedQuery) -> Value {
+    let mut obj = json!({
+        "Name": q.name,
+        "Database": q.database,
+        "QueryString": q.query_string,
+        "NamedQueryId": q.named_query_id,
+        "WorkGroup": q.work_group,
+    });
+    if let Some(d) = &q.description {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("Description".to_string(), Value::String(d.clone()));
+    }
+    obj
+}
+
+fn prepared_statement_json(p: &PreparedStatement) -> Value {
+    let mut obj = json!({
+        "StatementName": p.statement_name,
+        "QueryStatement": p.query_statement,
+        "WorkGroupName": p.work_group_name,
+        "LastModifiedTime": p.last_modified_time.timestamp() as f64,
+    });
+    if let Some(d) = &p.description {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("Description".to_string(), Value::String(d.clone()));
+    }
+    obj
+}
+
+fn query_execution_json(q: &QueryExecution) -> Value {
+    let mut obj = json!({
+        "QueryExecutionId": q.query_execution_id,
+        "Query": q.query,
+        "StatementType": q.statement_type,
+        "WorkGroup": q.work_group,
+        "Status": {
+            "State": q.state,
+            "SubmissionDateTime": q.submission_time.timestamp() as f64,
+            "CompletionDateTime": q.completion_time.map(|t| t.timestamp() as f64),
+        },
+        "Statistics": {
+            "DataScannedInBytes": q.data_scanned_bytes,
+            "EngineExecutionTimeInMillis": q.engine_execution_time_ms,
+            "QueryPlanningTimeInMillis": q.query_planning_time_ms,
+            "TotalExecutionTimeInMillis": q.total_execution_time_ms,
+        },
+    });
+    if let Some(c) = &q.query_execution_context {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("QueryExecutionContext".to_string(), c.clone());
+    }
+    if let Some(c) = &q.result_configuration {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("ResultConfiguration".to_string(), c.clone());
+    }
+    if let Some(v) = &q.engine_version {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("EngineVersion".to_string(), v.clone());
+    }
+    if let Some(reason) = &q.state_change_reason {
+        obj["Status"].as_object_mut().unwrap().insert(
+            "StateChangeReason".to_string(),
+            Value::String(reason.clone()),
+        );
+    }
+    obj
+}
+
+fn notebook_metadata_json(n: &Notebook) -> Value {
+    json!({
+        "NotebookId": n.notebook_id,
+        "Name": n.name,
+        "WorkGroup": n.work_group,
+        "Type": n.notebook_type,
+        "CreationTime": n.creation_time.timestamp() as f64,
+        "LastModifiedTime": n.last_modified_time.timestamp() as f64,
+    })
+}
+
+fn session_summary_json(s: &Session) -> Value {
+    json!({
+        "SessionId": s.session_id,
+        "Description": s.description,
+        "Status": session_status_json(s),
+        "EngineVersion": s.engine_version,
+        "NotebookVersion": s.notebook_version,
+    })
+}
+
+fn session_detail_json(s: &Session) -> Value {
+    let mut obj = json!({
+        "SessionId": s.session_id,
+        "WorkGroup": s.work_group,
+        "Status": session_status_json(s),
+        "EngineVersion": s.engine_version,
+        "NotebookVersion": s.notebook_version,
+    });
+    if let Some(d) = &s.description {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("Description".to_string(), Value::String(d.clone()));
+    }
+    if let Some(c) = &s.configuration {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("EngineConfiguration".to_string(), c.clone());
+    }
+    obj
+}
+
+fn session_status_json(s: &Session) -> Value {
+    let mut obj = json!({
+        "State": s.state,
+        "StartDateTime": s.start_date_time.timestamp() as f64,
+    });
+    if let Some(t) = s.end_date_time {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("EndDateTime".to_string(), json!(t.timestamp() as f64));
+    }
+    if let Some(t) = s.idle_since_date_time {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("IdleSinceDateTime".to_string(), json!(t.timestamp() as f64));
+    }
+    obj
+}
+
+fn calculation_summary_json(c: &Calculation) -> Value {
+    json!({
+        "CalculationExecutionId": c.calculation_execution_id,
+        "Description": c.description,
+        "Status": calculation_status_json(c),
+    })
+}
+
+fn calculation_detail_json(c: &Calculation) -> Value {
+    let mut obj = json!({
+        "CalculationExecutionId": c.calculation_execution_id,
+        "SessionId": c.session_id,
+        "Status": calculation_status_json(c),
+    });
+    if let Some(d) = &c.description {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("Description".to_string(), Value::String(d.clone()));
+    }
+    if let Some(w) = &c.working_directory {
+        obj.as_object_mut().unwrap().insert(
+            "Result".to_string(),
+            json!({ "ResultS3Uri": w, "ResultType": "JSON" }),
+        );
+    }
+    obj
+}
+
+fn calculation_status_json(c: &Calculation) -> Value {
+    let mut obj = json!({
+        "State": c.state,
+        "SubmissionDateTime": c.submission_date_time.timestamp() as f64,
+    });
+    if let Some(t) = c.completion_date_time {
+        obj.as_object_mut().unwrap().insert(
+            "CompletionDateTime".to_string(),
+            json!(t.timestamp() as f64),
+        );
+    }
+    if let Some(reason) = &c.state_change_reason {
+        obj.as_object_mut().unwrap().insert(
+            "StateChangeReason".to_string(),
+            Value::String(reason.clone()),
+        );
+    }
+    obj
+}
+
+fn capacity_reservation_json(cr: &CapacityReservation) -> Value {
+    let mut obj = json!({
+        "Name": cr.name,
+        "Status": cr.status,
+        "TargetDpus": cr.target_dpus,
+        "AllocatedDpus": cr.allocated_dpus,
+        "CreationTime": cr.creation_time.timestamp() as f64,
+    });
+    if let Some(t) = cr.last_allocation {
+        obj.as_object_mut().unwrap().insert(
+            "LastAllocation".to_string(),
+            json!({
+                "Status": "SUCCEEDED",
+                "RequestTime": t.timestamp() as f64,
+            }),
+        );
+    }
+    if let Some(t) = cr.last_successful_allocation_time {
+        obj.as_object_mut().unwrap().insert(
+            "LastSuccessfulAllocationTime".to_string(),
+            json!(t.timestamp() as f64),
+        );
+    }
+    obj
+}

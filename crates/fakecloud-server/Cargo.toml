@@ -40,6 +40,7 @@ fakecloud-route53 = { workspace = true }
 fakecloud-acm = { workspace = true }
 fakecloud-application-autoscaling = { workspace = true }
 fakecloud-wafv2 = { workspace = true }
+fakecloud-athena = { workspace = true }
 fakecloud-ecr = { workspace = true }
 fakecloud-ecs = { workspace = true }
 fakecloud-stepfunctions = { workspace = true }
