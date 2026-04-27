@@ -183,6 +183,57 @@ pub fn route(method: &Method, path: &str, _raw_query: &str) -> Option<Route> {
             Some(Route::with_id("ListCidrBlocks", id))
         }
 
+        // ─── VPC associations ────────────────────────────────────────
+        (&Method::POST, ["hostedzone", id, "associatevpc"]) => {
+            Some(Route::with_id("AssociateVPCWithHostedZone", id))
+        }
+        (&Method::POST, ["hostedzone", id, "disassociatevpc"]) => {
+            Some(Route::with_id("DisassociateVPCFromHostedZone", id))
+        }
+        (&Method::POST, ["hostedzone", id, "authorizevpcassociation"]) => {
+            Some(Route::with_id("CreateVPCAssociationAuthorization", id))
+        }
+        (&Method::POST, ["hostedzone", id, "deauthorizevpcassociation"]) => {
+            Some(Route::with_id("DeleteVPCAssociationAuthorization", id))
+        }
+        (&Method::GET, ["hostedzone", id, "authorizevpcassociation"]) => {
+            Some(Route::with_id("ListVPCAssociationAuthorizations", id))
+        }
+        (&Method::GET, ["hostedzonesbyvpc"]) => Some(Route::just("ListHostedZonesByVPC")),
+
+        // ─── Reusable Delegation Sets ────────────────────────────────
+        (&Method::POST, ["delegationset"]) => Some(Route::just("CreateReusableDelegationSet")),
+        (&Method::GET, ["delegationset"]) => Some(Route::just("ListReusableDelegationSets")),
+        (&Method::GET, ["delegationset", id]) => {
+            Some(Route::with_id("GetReusableDelegationSet", id))
+        }
+        (&Method::DELETE, ["delegationset", id]) => {
+            Some(Route::with_id("DeleteReusableDelegationSet", id))
+        }
+        (&Method::GET, ["reusabledelegationsetlimit", id, lim_type]) => Some(Route::with_two(
+            "GetReusableDelegationSetLimit",
+            id,
+            lim_type,
+        )),
+
+        // ─── Geo Locations + Account Limits ──────────────────────────
+        (&Method::GET, ["geolocations"]) => Some(Route::just("ListGeoLocations")),
+        (&Method::GET, ["geolocation"]) => Some(Route::just("GetGeoLocation")),
+        (&Method::GET, ["accountlimit", lim_type]) => {
+            Some(Route::with_id("GetAccountLimit", lim_type))
+        }
+
+        // ─── Tags ────────────────────────────────────────────────────
+        (&Method::POST, ["tags", res_type, res_id]) => {
+            Some(Route::with_two("ChangeTagsForResource", res_type, res_id))
+        }
+        (&Method::GET, ["tags", res_type, res_id]) => {
+            Some(Route::with_two("ListTagsForResource", res_type, res_id))
+        }
+        (&Method::POST, ["tags", res_type]) => {
+            Some(Route::with_id("ListTagsForResources", res_type))
+        }
+
         _ => None,
     }
 }

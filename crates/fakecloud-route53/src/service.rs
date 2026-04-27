@@ -13,19 +13,21 @@ use uuid::Uuid;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError, ResponseBody};
 
 use crate::model::{
-    ChangeCidrCollectionRequest, ChangeResourceRecordSetsRequest, CreateCidrCollectionRequest,
-    CreateHealthCheckRequest, CreateHostedZoneRequest, CreateKeySigningKeyRequest,
-    CreateQueryLoggingConfigRequest, CreateTrafficPolicyInstanceRequest,
+    AssociateVpcRequest, ChangeCidrCollectionRequest, ChangeResourceRecordSetsRequest,
+    ChangeTagsForResourceRequest, CreateCidrCollectionRequest, CreateHealthCheckRequest,
+    CreateHostedZoneRequest, CreateKeySigningKeyRequest, CreateQueryLoggingConfigRequest,
+    CreateReusableDelegationSetRequest, CreateTrafficPolicyInstanceRequest,
     CreateTrafficPolicyRequest, CreateTrafficPolicyVersionRequest, HealthCheckConfig,
-    ResourceRecordSet, UpdateHealthCheckRequest, UpdateHostedZoneCommentRequest,
-    UpdateHostedZoneFeaturesRequest, UpdateTrafficPolicyCommentRequest,
-    UpdateTrafficPolicyInstanceRequest,
+    ListTagsForResourcesRequest, ResourceRecordSet, UpdateHealthCheckRequest,
+    UpdateHostedZoneCommentRequest, UpdateHostedZoneFeaturesRequest,
+    UpdateTrafficPolicyCommentRequest, UpdateTrafficPolicyInstanceRequest, VpcAuthorizationRequest,
+    VPC,
 };
 use crate::router::{route, Route};
 use crate::state::{
     AccountState, Route53Accounts, SharedRoute53State, StoredChange, StoredCidrCollection,
     StoredHealthCheck, StoredHostedZone, StoredKeySigningKey, StoredQueryLoggingConfig,
-    StoredTrafficPolicy, StoredTrafficPolicyInstance,
+    StoredReusableDelegationSet, StoredTrafficPolicy, StoredTrafficPolicyInstance,
 };
 use crate::xml_io;
 
@@ -88,6 +90,23 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListCidrCollections",
     "ListCidrLocations",
     "ListCidrBlocks",
+    "AssociateVPCWithHostedZone",
+    "DisassociateVPCFromHostedZone",
+    "CreateVPCAssociationAuthorization",
+    "DeleteVPCAssociationAuthorization",
+    "ListVPCAssociationAuthorizations",
+    "ListHostedZonesByVPC",
+    "CreateReusableDelegationSet",
+    "GetReusableDelegationSet",
+    "DeleteReusableDelegationSet",
+    "ListReusableDelegationSets",
+    "GetReusableDelegationSetLimit",
+    "ListGeoLocations",
+    "GetGeoLocation",
+    "GetAccountLimit",
+    "ChangeTagsForResource",
+    "ListTagsForResource",
+    "ListTagsForResources",
 ];
 
 pub struct Route53Service {
@@ -193,6 +212,31 @@ impl AwsService for Route53Service {
             "ListCidrCollections" => self.list_cidr_collections(&req),
             "ListCidrLocations" => self.list_cidr_locations(&req, &resolved),
             "ListCidrBlocks" => self.list_cidr_blocks(&req, &resolved),
+            "AssociateVPCWithHostedZone" => self.associate_vpc_with_hosted_zone(&req, &resolved),
+            "DisassociateVPCFromHostedZone" => {
+                self.disassociate_vpc_from_hosted_zone(&req, &resolved)
+            }
+            "CreateVPCAssociationAuthorization" => {
+                self.create_vpc_association_authorization(&req, &resolved)
+            }
+            "DeleteVPCAssociationAuthorization" => {
+                self.delete_vpc_association_authorization(&req, &resolved)
+            }
+            "ListVPCAssociationAuthorizations" => {
+                self.list_vpc_association_authorizations(&req, &resolved)
+            }
+            "ListHostedZonesByVPC" => self.list_hosted_zones_by_vpc(&req),
+            "CreateReusableDelegationSet" => self.create_reusable_delegation_set(&req),
+            "GetReusableDelegationSet" => self.get_reusable_delegation_set(&resolved),
+            "DeleteReusableDelegationSet" => self.delete_reusable_delegation_set(&resolved),
+            "ListReusableDelegationSets" => self.list_reusable_delegation_sets(&req),
+            "GetReusableDelegationSetLimit" => self.get_reusable_delegation_set_limit(&resolved),
+            "ListGeoLocations" => self.list_geo_locations(&req),
+            "GetGeoLocation" => self.get_geo_location(&req),
+            "GetAccountLimit" => self.get_account_limit(&resolved),
+            "ChangeTagsForResource" => self.change_tags_for_resource(&req, &resolved),
+            "ListTagsForResource" => self.list_tags_for_resource(&resolved),
+            "ListTagsForResources" => self.list_tags_for_resources(&req, &resolved),
             other => Err(aws_error(
                 StatusCode::NOT_IMPLEMENTED,
                 "InvalidAction",
@@ -3169,4 +3213,1110 @@ fn push_cidr_collection_full(out: &mut String, c: &StoredCidrCollection) {
     out.push_str(&format!("<Name>{}</Name>", esc(&c.name)));
     out.push_str(&format!("<Version>{}</Version>", c.version));
     out.push_str("</Collection>");
+}
+
+// ─── VPC Association handlers ────────────────────────────────────────
+
+impl Route53Service {
+    fn associate_vpc_with_hosted_zone(
+        &self,
+        req: &AwsRequest,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = strip_zone_prefix(&require_id(route)?);
+        let cfg: AssociateVpcRequest = xml_io::from_xml_root(&req.body)
+            .map_err(|e| invalid_argument(format!("invalid AssociateVPCRequest XML: {e}")))?;
+        let vpc = cfg.vpc;
+        require_vpc(&vpc)?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_hosted_zone(&id))?;
+        let zone = account
+            .hosted_zones
+            .get_mut(&id)
+            .ok_or_else(|| no_such_hosted_zone(&id))?;
+        if !zone.private_zone {
+            return Err(aws_error(
+                StatusCode::BAD_REQUEST,
+                "PublicZoneVPCAssociation",
+                format!("HostedZone {id} is a public zone; cannot associate a VPC"),
+            ));
+        }
+        if zone.vpcs.iter().any(|v| same_vpc(v, &vpc)) {
+            return Err(aws_error(
+                StatusCode::CONFLICT,
+                "ConflictingDomainExists",
+                format!(
+                    "VPC {} is already associated with hosted zone {id}",
+                    vpc.vpc_id.clone().unwrap_or_default()
+                ),
+            ));
+        }
+        // For cross-account associations Route 53 requires a prior
+        // CreateVPCAssociationAuthorization. For same-account associations
+        // (the only kind fakecloud has — single DEFAULT_ACCOUNT) the
+        // authorization is implicit, so we don't gate on it. Once we model
+        // multi-account ownership of zones we can wire the authorization
+        // check in.
+        zone.vpcs.push(vpc);
+        let now = Utc::now();
+        let change_id = generate_change_id();
+        let change = StoredChange {
+            id: change_id.clone(),
+            status: "INSYNC".to_string(),
+            submitted_at: now,
+            comment: cfg.comment,
+        };
+        account.changes.insert(change_id.clone(), change.clone());
+        drop(state);
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<AssociateVPCWithHostedZoneResponse xmlns=\"{NS}\">"
+        ));
+        push_change_info(&mut body, &change);
+        body.push_str("</AssociateVPCWithHostedZoneResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn disassociate_vpc_from_hosted_zone(
+        &self,
+        req: &AwsRequest,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = strip_zone_prefix(&require_id(route)?);
+        let cfg: AssociateVpcRequest = xml_io::from_xml_root(&req.body)
+            .map_err(|e| invalid_argument(format!("invalid DisassociateVPCRequest XML: {e}")))?;
+        let vpc = cfg.vpc;
+        require_vpc(&vpc)?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_hosted_zone(&id))?;
+        let zone = account
+            .hosted_zones
+            .get_mut(&id)
+            .ok_or_else(|| no_such_hosted_zone(&id))?;
+        let Some(pos) = zone.vpcs.iter().position(|v| same_vpc(v, &vpc)) else {
+            return Err(aws_error(
+                StatusCode::NOT_FOUND,
+                "VPCAssociationNotFound",
+                format!(
+                    "VPC {} is not associated with hosted zone {id}",
+                    vpc.vpc_id.clone().unwrap_or_default()
+                ),
+            ));
+        };
+        if zone.vpcs.len() == 1 {
+            return Err(aws_error(
+                StatusCode::BAD_REQUEST,
+                "LastVPCAssociation",
+                format!("Cannot remove the last VPC association from private hosted zone {id}"),
+            ));
+        }
+        zone.vpcs.remove(pos);
+        let now = Utc::now();
+        let change_id = generate_change_id();
+        let change = StoredChange {
+            id: change_id.clone(),
+            status: "INSYNC".to_string(),
+            submitted_at: now,
+            comment: cfg.comment,
+        };
+        account.changes.insert(change_id.clone(), change.clone());
+        drop(state);
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<DisassociateVPCFromHostedZoneResponse xmlns=\"{NS}\">"
+        ));
+        push_change_info(&mut body, &change);
+        body.push_str("</DisassociateVPCFromHostedZoneResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn create_vpc_association_authorization(
+        &self,
+        req: &AwsRequest,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = strip_zone_prefix(&require_id(route)?);
+        let cfg: VpcAuthorizationRequest = xml_io::from_xml_root(&req.body).map_err(|e| {
+            invalid_argument(format!(
+                "invalid CreateVPCAssociationAuthorizationRequest XML: {e}"
+            ))
+        })?;
+        let vpc = cfg.vpc;
+        require_vpc(&vpc)?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_hosted_zone(&id))?;
+        let zone = account
+            .hosted_zones
+            .get(&id)
+            .ok_or_else(|| no_such_hosted_zone(&id))?;
+        if !zone.private_zone {
+            return Err(aws_error(
+                StatusCode::BAD_REQUEST,
+                "PublicZoneVPCAssociation",
+                format!("HostedZone {id} is a public zone; cannot authorize a VPC association"),
+            ));
+        }
+        let entry = account.vpc_authorizations.entry(id.clone()).or_default();
+        if !entry.iter().any(|v| same_vpc(v, &vpc)) {
+            entry.push(vpc.clone());
+        }
+        drop(state);
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<CreateVPCAssociationAuthorizationResponse xmlns=\"{NS}\">"
+        ));
+        body.push_str(&format!("<HostedZoneId>{}</HostedZoneId>", esc(&id)));
+        push_vpc_block(&mut body, "VPC", &vpc);
+        body.push_str("</CreateVPCAssociationAuthorizationResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn delete_vpc_association_authorization(
+        &self,
+        req: &AwsRequest,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = strip_zone_prefix(&require_id(route)?);
+        let cfg: VpcAuthorizationRequest = xml_io::from_xml_root(&req.body).map_err(|e| {
+            invalid_argument(format!(
+                "invalid DeleteVPCAssociationAuthorizationRequest XML: {e}"
+            ))
+        })?;
+        let vpc = cfg.vpc;
+        require_vpc(&vpc)?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_hosted_zone(&id))?;
+        if !account.hosted_zones.contains_key(&id) {
+            return Err(no_such_hosted_zone(&id));
+        }
+        let entry = account.vpc_authorizations.entry(id.clone()).or_default();
+        let before = entry.len();
+        entry.retain(|v| !same_vpc(v, &vpc));
+        if entry.len() == before {
+            return Err(aws_error(
+                StatusCode::NOT_FOUND,
+                "VPCAssociationAuthorizationNotFound",
+                format!(
+                    "VPC {} is not authorized for hosted zone {id}",
+                    vpc.vpc_id.clone().unwrap_or_default()
+                ),
+            ));
+        }
+        if entry.is_empty() {
+            account.vpc_authorizations.remove(&id);
+        }
+        drop(state);
+        let mut body = String::with_capacity(128);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<DeleteVPCAssociationAuthorizationResponse xmlns=\"{NS}\"/>"
+        ));
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn list_vpc_association_authorizations(
+        &self,
+        _req: &AwsRequest,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = strip_zone_prefix(&require_id(route)?);
+        let state = self.state.read();
+        let account = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_hosted_zone(&id))?;
+        if !account.hosted_zones.contains_key(&id) {
+            return Err(no_such_hosted_zone(&id));
+        }
+        let vpcs: Vec<VPC> = account
+            .vpc_authorizations
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        drop(state);
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<ListVPCAssociationAuthorizationsResponse xmlns=\"{NS}\">"
+        ));
+        body.push_str(&format!("<HostedZoneId>{}</HostedZoneId>", esc(&id)));
+        body.push_str("<VPCs>");
+        for v in &vpcs {
+            push_vpc_block(&mut body, "VPC", v);
+        }
+        body.push_str("</VPCs>");
+        body.push_str("</ListVPCAssociationAuthorizationsResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn list_hosted_zones_by_vpc(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let vpc_id = req
+            .query_params
+            .get("vpcid")
+            .cloned()
+            .ok_or_else(|| invalid_argument("vpcid query parameter is required"))?;
+        let vpc_region = req
+            .query_params
+            .get("vpcregion")
+            .cloned()
+            .ok_or_else(|| invalid_argument("vpcregion query parameter is required"))?;
+        let state = self.state.read();
+        let mut summaries: Vec<(String, String)> = Vec::new();
+        if let Some(account) = state.accounts.get(DEFAULT_ACCOUNT) {
+            for z in account.hosted_zones.values() {
+                if z.vpcs.iter().any(|v| {
+                    v.vpc_id.as_deref() == Some(vpc_id.as_str())
+                        && v.vpc_region.as_deref() == Some(vpc_region.as_str())
+                }) {
+                    summaries.push((z.id.clone(), z.name.clone()));
+                }
+            }
+        }
+        drop(state);
+        summaries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<ListHostedZonesByVPCResponse xmlns=\"{NS}\">"));
+        body.push_str("<HostedZoneSummaries>");
+        for (id, name) in &summaries {
+            body.push_str("<HostedZoneSummary>");
+            body.push_str(&format!(
+                "<HostedZoneId>/hostedzone/{}</HostedZoneId>",
+                esc(id)
+            ));
+            body.push_str(&format!("<Name>{}</Name>", esc(name)));
+            body.push_str("<Owner>");
+            body.push_str(&format!("<OwningAccount>{DEFAULT_ACCOUNT}</OwningAccount>",));
+            body.push_str("</Owner>");
+            body.push_str("</HostedZoneSummary>");
+        }
+        body.push_str("</HostedZoneSummaries>");
+        body.push_str("<MaxItems>100</MaxItems>");
+        body.push_str("</ListHostedZonesByVPCResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+}
+
+// ─── Reusable Delegation Set handlers ────────────────────────────────
+
+impl Route53Service {
+    fn create_reusable_delegation_set(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let cfg: CreateReusableDelegationSetRequest =
+            xml_io::from_xml_root(&req.body).map_err(|e| {
+                invalid_argument(format!(
+                    "invalid CreateReusableDelegationSetRequest XML: {e}"
+                ))
+            })?;
+        if cfg.caller_reference.is_empty() {
+            return Err(invalid_argument("CallerReference is required"));
+        }
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .entry(DEFAULT_ACCOUNT.to_string())
+            .or_default();
+        if account
+            .reusable_delegation_sets
+            .values()
+            .any(|d| d.caller_reference == cfg.caller_reference)
+        {
+            return Err(aws_error(
+                StatusCode::CONFLICT,
+                "DelegationSetAlreadyCreated",
+                format!(
+                    "A delegation set with caller reference {} already exists",
+                    cfg.caller_reference
+                ),
+            ));
+        }
+        let id = generate_delegation_set_id();
+        // When the caller supplies an existing hosted zone, reuse that
+        // zone's authoritative name servers — that's the documented Route
+        // 53 behavior for "promote a zone's delegation set to a reusable
+        // one." Without that lookup, an unknown HostedZoneId silently
+        // succeeds, which is what Cubic flagged.
+        let name_servers = if let Some(hosted_zone_id) = cfg.hosted_zone_id.as_deref() {
+            let hosted_zone_id = strip_zone_prefix(hosted_zone_id);
+            account
+                .hosted_zones
+                .get(&hosted_zone_id)
+                .ok_or_else(|| no_such_hosted_zone(&hosted_zone_id))?
+                .name_servers
+                .clone()
+        } else {
+            synth_name_servers(&id)
+        };
+        let ds = StoredReusableDelegationSet {
+            id: id.clone(),
+            caller_reference: cfg.caller_reference,
+            name_servers,
+        };
+        account
+            .reusable_delegation_sets
+            .insert(id.clone(), ds.clone());
+        drop(state);
+
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<CreateReusableDelegationSetResponse xmlns=\"{NS}\">"
+        ));
+        push_delegation_set(&mut body, &ds);
+        body.push_str("</CreateReusableDelegationSetResponse>");
+
+        let mut headers = HeaderMap::new();
+        if let Ok(loc) = http::HeaderValue::from_str(&format!("/2013-04-01/delegationset/{id}")) {
+            headers.insert(http::header::LOCATION, loc);
+        }
+        Ok(xml_response(StatusCode::CREATED, body, headers))
+    }
+
+    fn get_reusable_delegation_set(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let state = self.state.read();
+        let ds = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .and_then(|a| a.reusable_delegation_sets.get(&id).cloned())
+            .ok_or_else(|| no_such_delegation_set(&id))?;
+        drop(state);
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<GetReusableDelegationSetResponse xmlns=\"{NS}\">"
+        ));
+        push_delegation_set(&mut body, &ds);
+        body.push_str("</GetReusableDelegationSetResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn delete_reusable_delegation_set(
+        &self,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .get_mut(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_delegation_set(&id))?;
+        if !account.reusable_delegation_sets.contains_key(&id) {
+            return Err(no_such_delegation_set(&id));
+        }
+        if account
+            .hosted_zones
+            .values()
+            .any(|z| z.delegation_set_id.as_deref() == Some(id.as_str()))
+        {
+            return Err(aws_error(
+                StatusCode::BAD_REQUEST,
+                "DelegationSetInUse",
+                format!("Delegation set {id} is in use by one or more hosted zones"),
+            ));
+        }
+        account.reusable_delegation_sets.remove(&id);
+        drop(state);
+        let mut body = String::with_capacity(128);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<DeleteReusableDelegationSetResponse xmlns=\"{NS}\"/>"
+        ));
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn list_reusable_delegation_sets(
+        &self,
+        _req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let state = self.state.read();
+        let mut sets: Vec<StoredReusableDelegationSet> = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .map(|a| a.reusable_delegation_sets.values().cloned().collect())
+            .unwrap_or_default();
+        drop(state);
+        sets.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<ListReusableDelegationSetsResponse xmlns=\"{NS}\">"
+        ));
+        body.push_str("<DelegationSets>");
+        for d in &sets {
+            push_delegation_set(&mut body, d);
+        }
+        body.push_str("</DelegationSets>");
+        body.push_str("<Marker></Marker>");
+        body.push_str("<IsTruncated>false</IsTruncated>");
+        body.push_str("<MaxItems>100</MaxItems>");
+        body.push_str("</ListReusableDelegationSetsResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn get_reusable_delegation_set_limit(
+        &self,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = require_id(route)?;
+        let lim_type = route
+            .second_id
+            .clone()
+            .ok_or_else(|| invalid_argument("limit Type is required"))?;
+        let state = self.state.read();
+        let account = state.accounts.get(DEFAULT_ACCOUNT);
+        if !account
+            .map(|a| a.reusable_delegation_sets.contains_key(&id))
+            .unwrap_or(false)
+        {
+            return Err(no_such_delegation_set(&id));
+        }
+        let count = account
+            .map(|a| {
+                a.hosted_zones
+                    .values()
+                    .filter(|z| z.delegation_set_id.as_deref() == Some(id.as_str()))
+                    .count() as u64
+            })
+            .unwrap_or(0);
+        drop(state);
+        if lim_type != "MAX_ZONES_BY_REUSABLE_DELEGATION_SET" {
+            return Err(invalid_argument(format!(
+                "Unknown reusable delegation set limit type: {lim_type}"
+            )));
+        }
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!(
+            "<GetReusableDelegationSetLimitResponse xmlns=\"{NS}\">"
+        ));
+        body.push_str(&format!(
+            "<Limit><Type>{}</Type><Value>500</Value></Limit>",
+            esc(&lim_type)
+        ));
+        body.push_str(&format!("<Count>{count}</Count>"));
+        body.push_str("</GetReusableDelegationSetLimitResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+}
+
+// ─── Geo Locations + Account Limits ─────────────────────────────────
+
+impl Route53Service {
+    fn list_geo_locations(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let start_continent = req.query_params.get("startcontinentcode").cloned();
+        let start_country = req.query_params.get("startcountrycode").cloned();
+        let start_subdivision = req.query_params.get("startsubdivisioncode").cloned();
+        let max_items: usize = req
+            .query_params
+            .get("maxitems")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+        let mut filtered: Vec<GeoLocationEntry> = geo_locations()
+            .iter()
+            .filter(|g| {
+                if let Some(c) = &start_continent {
+                    if g.continent_code < c.as_str() {
+                        return false;
+                    }
+                }
+                if let Some(c) = &start_country {
+                    if g.country_code < c.as_str() {
+                        return false;
+                    }
+                }
+                if let Some(c) = &start_subdivision {
+                    if g.subdivision_code < c.as_str() {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        // Compute the next-page marker from the *filtered* list, not from
+        // the unfiltered catalogue. With non-empty start parameters the
+        // unfiltered offset would point at the wrong row entirely.
+        let next = if filtered.len() > max_items {
+            filtered.get(max_items).cloned()
+        } else {
+            None
+        };
+        let truncated = next.is_some();
+        if truncated {
+            filtered.truncate(max_items);
+        }
+        let mut body = String::with_capacity(2048);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<ListGeoLocationsResponse xmlns=\"{NS}\">"));
+        body.push_str("<GeoLocationDetailsList>");
+        for g in &filtered {
+            push_geo_location_details(&mut body, g);
+        }
+        body.push_str("</GeoLocationDetailsList>");
+        body.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
+        if let Some(n) = &next {
+            if !n.continent_code.is_empty() {
+                body.push_str(&format!(
+                    "<NextContinentCode>{}</NextContinentCode>",
+                    esc(n.continent_code)
+                ));
+            }
+            if !n.country_code.is_empty() {
+                body.push_str(&format!(
+                    "<NextCountryCode>{}</NextCountryCode>",
+                    esc(n.country_code)
+                ));
+            }
+            if !n.subdivision_code.is_empty() {
+                body.push_str(&format!(
+                    "<NextSubdivisionCode>{}</NextSubdivisionCode>",
+                    esc(n.subdivision_code)
+                ));
+            }
+        }
+        body.push_str(&format!("<MaxItems>{max_items}</MaxItems>"));
+        body.push_str("</ListGeoLocationsResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn get_geo_location(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let continent = req.query_params.get("continentcode").cloned();
+        let country = req.query_params.get("countrycode").cloned();
+        let subdivision = req.query_params.get("subdivisioncode").cloned();
+        if continent.is_none() && country.is_none() {
+            return Err(invalid_argument(
+                "Either continentcode or countrycode must be supplied",
+            ));
+        }
+        let entry = geo_locations().iter().find(|g| {
+            let c = continent.as_deref().unwrap_or("");
+            let co = country.as_deref().unwrap_or("");
+            let sd = subdivision.as_deref().unwrap_or("");
+            g.continent_code == c && g.country_code == co && g.subdivision_code == sd
+        });
+        let g = match entry {
+            Some(g) => g,
+            None => {
+                return Err(aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NoSuchGeoLocation",
+                    "The geo location requested is not supported".to_string(),
+                ));
+            }
+        };
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<GetGeoLocationResponse xmlns=\"{NS}\">"));
+        push_geo_location_details(&mut body, g);
+        body.push_str("</GetGeoLocationResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn get_account_limit(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let lim_type = require_id(route)?;
+        let state = self.state.read();
+        let account = state.accounts.get(DEFAULT_ACCOUNT);
+        let (value, count) = match lim_type.as_str() {
+            "MAX_HEALTH_CHECKS_BY_OWNER" => (
+                200_u64,
+                account.map(|a| a.health_checks.len() as u64).unwrap_or(0),
+            ),
+            "MAX_HOSTED_ZONES_BY_OWNER" => (
+                500_u64,
+                account.map(|a| a.hosted_zones.len() as u64).unwrap_or(0),
+            ),
+            "MAX_REUSABLE_DELEGATION_SETS_BY_OWNER" => (
+                100_u64,
+                account
+                    .map(|a| a.reusable_delegation_sets.len() as u64)
+                    .unwrap_or(0),
+            ),
+            "MAX_TRAFFIC_POLICIES_BY_OWNER" => {
+                let mut policies = std::collections::HashSet::new();
+                if let Some(a) = account {
+                    for (id, _) in a.traffic_policies.keys().map(|k| (k.0.clone(), 0)) {
+                        policies.insert(id);
+                    }
+                }
+                (50_u64, policies.len() as u64)
+            }
+            "MAX_TRAFFIC_POLICY_INSTANCES_BY_OWNER" => (
+                5_u64,
+                account
+                    .map(|a| a.traffic_policy_instances.len() as u64)
+                    .unwrap_or(0),
+            ),
+            other => {
+                return Err(invalid_argument(format!(
+                    "Unknown account limit type: {other}"
+                )));
+            }
+        };
+        drop(state);
+        let mut body = String::with_capacity(256);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<GetAccountLimitResponse xmlns=\"{NS}\">"));
+        body.push_str(&format!(
+            "<Limit><Type>{}</Type><Value>{}</Value></Limit>",
+            esc(&lim_type),
+            value
+        ));
+        body.push_str(&format!("<Count>{count}</Count>"));
+        body.push_str("</GetAccountLimitResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+}
+
+// ─── Tag handlers ────────────────────────────────────────────────────
+
+impl Route53Service {
+    fn change_tags_for_resource(
+        &self,
+        req: &AwsRequest,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let (res_type, res_id) = require_tag_target(route)?;
+        let cfg: ChangeTagsForResourceRequest = xml_io::from_xml_root(&req.body).map_err(|e| {
+            invalid_argument(format!("invalid ChangeTagsForResourceRequest XML: {e}"))
+        })?;
+        let mut state = self.state.write();
+        let account = state
+            .accounts
+            .entry(DEFAULT_ACCOUNT.to_string())
+            .or_default();
+        if !tag_target_exists(account, &res_type, &res_id) {
+            return Err(no_such_tag_target(&res_type, &res_id));
+        }
+        let bag = account
+            .tags
+            .entry((res_type.clone(), res_id.clone()))
+            .or_default();
+        if let Some(adds) = &cfg.add_tags {
+            for tag in &adds.tag {
+                let key = match &tag.key {
+                    Some(k) if !k.is_empty() => k.clone(),
+                    _ => return Err(invalid_argument("Tag.Key is required")),
+                };
+                bag.insert(key, tag.value.clone().unwrap_or_default());
+            }
+        }
+        if let Some(removes) = &cfg.remove_tag_keys {
+            for key in &removes.key {
+                bag.remove(key);
+            }
+        }
+        if bag.is_empty() {
+            account.tags.remove(&(res_type.clone(), res_id.clone()));
+        }
+        drop(state);
+        let mut body = String::with_capacity(128);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<ChangeTagsForResourceResponse xmlns=\"{NS}\"/>"));
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn list_tags_for_resource(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
+        let (res_type, res_id) = require_tag_target(route)?;
+        let state = self.state.read();
+        let account = state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .ok_or_else(|| no_such_tag_target(&res_type, &res_id))?;
+        if !tag_target_exists(account, &res_type, &res_id) {
+            return Err(no_such_tag_target(&res_type, &res_id));
+        }
+        let bag = account
+            .tags
+            .get(&(res_type.clone(), res_id.clone()))
+            .cloned()
+            .unwrap_or_default();
+        drop(state);
+        let mut body = String::with_capacity(512);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<ListTagsForResourceResponse xmlns=\"{NS}\">"));
+        push_resource_tag_set(&mut body, &res_type, &res_id, &bag);
+        body.push_str("</ListTagsForResourceResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    fn list_tags_for_resources(
+        &self,
+        req: &AwsRequest,
+        route: &Route,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let res_type = require_id(route)?;
+        if res_type != "healthcheck" && res_type != "hostedzone" {
+            return Err(invalid_argument(format!(
+                "Unknown tag resource type: {res_type}"
+            )));
+        }
+        let cfg: ListTagsForResourcesRequest = xml_io::from_xml_root(&req.body).map_err(|e| {
+            invalid_argument(format!("invalid ListTagsForResourcesRequest XML: {e}"))
+        })?;
+        if cfg.resource_ids.resource_id.is_empty() {
+            return Err(invalid_argument("ResourceIds must contain at least one ID"));
+        }
+        let state = self.state.read();
+        let account = state.accounts.get(DEFAULT_ACCOUNT);
+        let mut sets: Vec<(String, HashMap<String, String>)> = Vec::new();
+        for id in &cfg.resource_ids.resource_id {
+            if let Some(a) = account {
+                if !tag_target_exists(a, &res_type, id) {
+                    return Err(no_such_tag_target(&res_type, id));
+                }
+                let bag = a
+                    .tags
+                    .get(&(res_type.clone(), id.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                sets.push((id.clone(), bag));
+            } else {
+                return Err(no_such_tag_target(&res_type, id));
+            }
+        }
+        drop(state);
+        let mut body = String::with_capacity(1024);
+        body.push_str(XML_DECL);
+        body.push_str(&format!("<ListTagsForResourcesResponse xmlns=\"{NS}\">"));
+        body.push_str("<ResourceTagSets>");
+        for (id, bag) in &sets {
+            push_resource_tag_set(&mut body, &res_type, id, bag);
+        }
+        body.push_str("</ResourceTagSets>");
+        body.push_str("</ListTagsForResourcesResponse>");
+        Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+}
+
+// ─── Batch 5 helpers ─────────────────────────────────────────────────
+
+fn require_vpc(v: &VPC) -> Result<(), AwsServiceError> {
+    if v.vpc_id.as_deref().unwrap_or("").is_empty() {
+        return Err(invalid_argument("VPC.VPCId is required"));
+    }
+    if v.vpc_region.as_deref().unwrap_or("").is_empty() {
+        return Err(invalid_argument("VPC.VPCRegion is required"));
+    }
+    Ok(())
+}
+
+fn same_vpc(a: &VPC, b: &VPC) -> bool {
+    a.vpc_id == b.vpc_id && a.vpc_region == b.vpc_region
+}
+
+fn push_delegation_set(out: &mut String, d: &StoredReusableDelegationSet) {
+    out.push_str("<DelegationSet>");
+    out.push_str(&format!("<Id>{}</Id>", esc(&d.id)));
+    out.push_str(&format!(
+        "<CallerReference>{}</CallerReference>",
+        esc(&d.caller_reference)
+    ));
+    out.push_str("<NameServers>");
+    for ns in &d.name_servers {
+        out.push_str(&format!("<NameServer>{}</NameServer>", esc(ns)));
+    }
+    out.push_str("</NameServers>");
+    out.push_str("</DelegationSet>");
+}
+
+fn generate_delegation_set_id() -> String {
+    let raw = Uuid::new_v4().simple().to_string().to_uppercase();
+    format!("N{}", &raw[..14])
+}
+
+fn no_such_delegation_set(id: &str) -> AwsServiceError {
+    aws_error(
+        StatusCode::NOT_FOUND,
+        "NoSuchDelegationSet",
+        format!("No reusable delegation set found with ID: {id}"),
+    )
+}
+
+fn require_tag_target(route: &Route) -> Result<(String, String), AwsServiceError> {
+    let res_type = require_id(route)?;
+    let res_id = route
+        .second_id
+        .clone()
+        .ok_or_else(|| invalid_argument("ResourceId is required"))?;
+    if res_type != "healthcheck" && res_type != "hostedzone" {
+        return Err(invalid_argument(format!(
+            "Unknown tag resource type: {res_type}"
+        )));
+    }
+    Ok((res_type, res_id))
+}
+
+fn tag_target_exists(account: &AccountState, res_type: &str, res_id: &str) -> bool {
+    match res_type {
+        "healthcheck" => account.health_checks.contains_key(res_id),
+        "hostedzone" => account.hosted_zones.contains_key(res_id),
+        _ => false,
+    }
+}
+
+fn no_such_tag_target(res_type: &str, res_id: &str) -> AwsServiceError {
+    let code = match res_type {
+        "healthcheck" => "NoSuchHealthCheck",
+        "hostedzone" => "NoSuchHostedZone",
+        _ => "NoSuchResource",
+    };
+    aws_error(
+        StatusCode::NOT_FOUND,
+        code,
+        format!("No {res_type} found with ID: {res_id}"),
+    )
+}
+
+fn push_resource_tag_set(
+    out: &mut String,
+    res_type: &str,
+    res_id: &str,
+    bag: &HashMap<String, String>,
+) {
+    out.push_str("<ResourceTagSet>");
+    out.push_str(&format!("<ResourceType>{}</ResourceType>", esc(res_type)));
+    out.push_str(&format!("<ResourceId>{}</ResourceId>", esc(res_id)));
+    out.push_str("<Tags>");
+    let mut pairs: Vec<(&String, &String)> = bag.iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    for (k, v) in pairs {
+        out.push_str("<Tag>");
+        out.push_str(&format!("<Key>{}</Key>", esc(k)));
+        out.push_str(&format!("<Value>{}</Value>", esc(v)));
+        out.push_str("</Tag>");
+    }
+    out.push_str("</Tags>");
+    out.push_str("</ResourceTagSet>");
+}
+
+#[derive(Debug, Clone)]
+struct GeoLocationEntry {
+    continent_code: &'static str,
+    continent_name: &'static str,
+    country_code: &'static str,
+    country_name: &'static str,
+    subdivision_code: &'static str,
+    subdivision_name: &'static str,
+}
+
+fn push_geo_location_details(out: &mut String, g: &GeoLocationEntry) {
+    out.push_str("<GeoLocationDetails>");
+    if !g.continent_code.is_empty() {
+        out.push_str(&format!(
+            "<ContinentCode>{}</ContinentCode>",
+            esc(g.continent_code)
+        ));
+    }
+    if !g.continent_name.is_empty() {
+        out.push_str(&format!(
+            "<ContinentName>{}</ContinentName>",
+            esc(g.continent_name)
+        ));
+    }
+    if !g.country_code.is_empty() {
+        out.push_str(&format!(
+            "<CountryCode>{}</CountryCode>",
+            esc(g.country_code)
+        ));
+    }
+    if !g.country_name.is_empty() {
+        out.push_str(&format!(
+            "<CountryName>{}</CountryName>",
+            esc(g.country_name)
+        ));
+    }
+    if !g.subdivision_code.is_empty() {
+        out.push_str(&format!(
+            "<SubdivisionCode>{}</SubdivisionCode>",
+            esc(g.subdivision_code)
+        ));
+    }
+    if !g.subdivision_name.is_empty() {
+        out.push_str(&format!(
+            "<SubdivisionName>{}</SubdivisionName>",
+            esc(g.subdivision_name)
+        ));
+    }
+    out.push_str("</GeoLocationDetails>");
+}
+
+/// A representative slice of the geographic locations Route 53 supports
+/// for geolocation routing. fakecloud does not track every ISO-3166-1
+/// country (Route 53 supports 200+) — this list is enough to exercise
+/// continent / country / subdivision pagination with deterministic
+/// values across CI runs. `*` is the AWS-documented fallback "default
+/// resource" continent code.
+fn geo_locations() -> &'static [GeoLocationEntry] {
+    &[
+        GeoLocationEntry {
+            continent_code: "AF",
+            continent_name: "Africa",
+            country_code: "",
+            country_name: "",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "AN",
+            continent_name: "Antarctica",
+            country_code: "",
+            country_name: "",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "AS",
+            continent_name: "Asia",
+            country_code: "",
+            country_name: "",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "EU",
+            continent_name: "Europe",
+            country_code: "",
+            country_name: "",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "NA",
+            continent_name: "North America",
+            country_code: "",
+            country_name: "",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "OC",
+            continent_name: "Oceania",
+            country_code: "",
+            country_name: "",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "SA",
+            continent_name: "South America",
+            country_code: "",
+            country_name: "",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "*",
+            country_name: "Default",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "BR",
+            country_name: "Brazil",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "CA",
+            country_name: "Canada",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "DE",
+            country_name: "Germany",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "FR",
+            country_name: "France",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "GB",
+            country_name: "United Kingdom",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "JP",
+            country_name: "Japan",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "US",
+            country_name: "United States",
+            subdivision_code: "",
+            subdivision_name: "",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "US",
+            country_name: "United States",
+            subdivision_code: "CA",
+            subdivision_name: "California",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "US",
+            country_name: "United States",
+            subdivision_code: "NY",
+            subdivision_name: "New York",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "US",
+            country_name: "United States",
+            subdivision_code: "TX",
+            subdivision_name: "Texas",
+        },
+        GeoLocationEntry {
+            continent_code: "",
+            continent_name: "",
+            country_code: "US",
+            country_name: "United States",
+            subdivision_code: "WA",
+            subdivision_name: "Washington",
+        },
+    ]
 }

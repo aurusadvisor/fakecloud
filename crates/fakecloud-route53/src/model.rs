@@ -15,7 +15,7 @@ pub struct CreateHostedZoneRequest {
     pub caller_reference: String,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub hosted_zone_config: Option<HostedZoneConfig>,
-    #[serde(default, skip_serializing_if = "skip_if_none")]
+    #[serde(default, skip_serializing_if = "skip_if_none", rename = "VPC")]
     pub vpc: Option<VPC>,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub delegation_set_id: Option<String>,
@@ -411,4 +411,79 @@ pub struct CidrCollectionChange {
 pub struct CidrList {
     #[serde(default, rename = "Cidr")]
     pub cidr: Vec<String>,
+}
+
+// ─── VPC association requests ────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct AssociateVpcRequest {
+    #[serde(default, rename = "VPC")]
+    pub vpc: VPC,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct VpcAuthorizationRequest {
+    #[serde(default, rename = "VPC")]
+    pub vpc: VPC,
+}
+
+// ─── Reusable Delegation Sets ────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct CreateReusableDelegationSetRequest {
+    pub caller_reference: String,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub hosted_zone_id: Option<String>,
+}
+
+// ─── Tags ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct ChangeTagsForResourceRequest {
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub add_tags: Option<TagList>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub remove_tag_keys: Option<TagKeyList>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct TagList {
+    #[serde(default, rename = "Tag")]
+    pub tag: Vec<Tag>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct Tag {
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct TagKeyList {
+    #[serde(default, rename = "Key")]
+    pub key: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct ListTagsForResourcesRequest {
+    pub resource_ids: ResourceIdList,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct ResourceIdList {
+    #[serde(default, rename = "ResourceId")]
+    pub resource_id: Vec<String>,
 }

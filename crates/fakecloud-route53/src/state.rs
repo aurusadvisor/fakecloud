@@ -50,6 +50,13 @@ pub struct AccountState {
     pub key_signing_keys: HashMap<(String, String), StoredKeySigningKey>,
     pub query_logging_configs: HashMap<String, StoredQueryLoggingConfig>,
     pub cidr_collections: HashMap<String, StoredCidrCollection>,
+    pub reusable_delegation_sets: HashMap<String, StoredReusableDelegationSet>,
+    /// Per-zone authorized cross-account VPCs that may be associated next.
+    pub vpc_authorizations: HashMap<String, Vec<VPC>>,
+    /// Tag bag keyed by `(resource_type, resource_id)`. Both supported
+    /// resource types ("healthcheck", "hostedzone") share the bag; the
+    /// resource-type discriminator is in the key tuple.
+    pub tags: HashMap<(String, String), HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,4 +144,11 @@ pub struct StoredCidrCollection {
     pub caller_reference: String,
     /// Maps location name -> sorted list of CIDR blocks.
     pub locations: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredReusableDelegationSet {
+    pub id: String,
+    pub caller_reference: String,
+    pub name_servers: Vec<String>,
 }
