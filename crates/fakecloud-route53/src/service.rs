@@ -3300,9 +3300,7 @@ impl Route53Service {
             .hosted_zones
             .get_mut(&id)
             .ok_or_else(|| no_such_hosted_zone(&id))?;
-        let before = zone.vpcs.len();
-        zone.vpcs.retain(|v| !same_vpc(v, &vpc));
-        if zone.vpcs.len() == before {
+        let Some(pos) = zone.vpcs.iter().position(|v| same_vpc(v, &vpc)) else {
             return Err(aws_error(
                 StatusCode::NOT_FOUND,
                 "VPCAssociationNotFound",
@@ -3311,14 +3309,15 @@ impl Route53Service {
                     vpc.vpc_id.clone().unwrap_or_default()
                 ),
             ));
-        }
-        if zone.vpcs.is_empty() {
+        };
+        if zone.vpcs.len() == 1 {
             return Err(aws_error(
                 StatusCode::BAD_REQUEST,
                 "LastVPCAssociation",
-                format!("Cannot remove the last VPC association from private hosted zone {id}",),
+                format!("Cannot remove the last VPC association from private hosted zone {id}"),
             ));
         }
+        zone.vpcs.remove(pos);
         let now = Utc::now();
         let change_id = generate_change_id();
         let change = StoredChange {
@@ -3357,8 +3356,16 @@ impl Route53Service {
             .accounts
             .get_mut(DEFAULT_ACCOUNT)
             .ok_or_else(|| no_such_hosted_zone(&id))?;
-        if !account.hosted_zones.contains_key(&id) {
-            return Err(no_such_hosted_zone(&id));
+        let zone = account
+            .hosted_zones
+            .get(&id)
+            .ok_or_else(|| no_such_hosted_zone(&id))?;
+        if !zone.private_zone {
+            return Err(aws_error(
+                StatusCode::BAD_REQUEST,
+                "PublicZoneVPCAssociation",
+                format!("HostedZone {id} is a public zone; cannot authorize a VPC association"),
+            ));
         }
         let entry = account.vpc_authorizations.entry(id.clone()).or_default();
         if !entry.iter().any(|v| same_vpc(v, &vpc)) {
@@ -3541,7 +3548,22 @@ impl Route53Service {
             ));
         }
         let id = generate_delegation_set_id();
-        let name_servers = synth_name_servers(&id);
+        // When the caller supplies an existing hosted zone, reuse that
+        // zone's authoritative name servers — that's the documented Route
+        // 53 behavior for "promote a zone's delegation set to a reusable
+        // one." Without that lookup, an unknown HostedZoneId silently
+        // succeeds, which is what Cubic flagged.
+        let name_servers = if let Some(hosted_zone_id) = cfg.hosted_zone_id.as_deref() {
+            let hosted_zone_id = strip_zone_prefix(hosted_zone_id);
+            account
+                .hosted_zones
+                .get(&hosted_zone_id)
+                .ok_or_else(|| no_such_hosted_zone(&hosted_zone_id))?
+                .name_servers
+                .clone()
+        } else {
+            synth_name_servers(&id)
+        };
         let ds = StoredReusableDelegationSet {
             id: id.clone(),
             caller_reference: cfg.caller_reference,
@@ -3729,15 +3751,18 @@ impl Route53Service {
             })
             .cloned()
             .collect();
-        let truncated = filtered.len() > max_items;
-        if truncated {
-            filtered.truncate(max_items);
-        }
-        let next = if truncated {
-            geo_locations().get(max_items).cloned()
+        // Compute the next-page marker from the *filtered* list, not from
+        // the unfiltered catalogue. With non-empty start parameters the
+        // unfiltered offset would point at the wrong row entirely.
+        let next = if filtered.len() > max_items {
+            filtered.get(max_items).cloned()
         } else {
             None
         };
+        let truncated = next.is_some();
+        if truncated {
+            filtered.truncate(max_items);
+        }
         let mut body = String::with_capacity(2048);
         body.push_str(XML_DECL);
         body.push_str(&format!("<ListGeoLocationsResponse xmlns=\"{NS}\">"));

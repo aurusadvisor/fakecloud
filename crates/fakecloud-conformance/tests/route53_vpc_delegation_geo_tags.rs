@@ -95,7 +95,13 @@ async fn r53_disassociate_vpc() {
 #[tokio::test]
 async fn r53_create_vpc_authorization() {
     let server = TestServer::start().await;
-    let zone = public_zone(&server, "conf-auth.example.com", "conf-auth-1").await;
+    let zone = private_zone(
+        &server,
+        "conf-auth.example.com",
+        "conf-auth-1",
+        vpc("vpc-conf5-init"),
+    )
+    .await;
     let r53 = server.route53_client().await;
     r53.create_vpc_association_authorization()
         .hosted_zone_id(&zone)
@@ -109,7 +115,13 @@ async fn r53_create_vpc_authorization() {
 #[tokio::test]
 async fn r53_delete_vpc_authorization() {
     let server = TestServer::start().await;
-    let zone = public_zone(&server, "conf-deauth.example.com", "conf-deauth-1").await;
+    let zone = private_zone(
+        &server,
+        "conf-deauth.example.com",
+        "conf-deauth-1",
+        vpc("vpc-conf6-init"),
+    )
+    .await;
     let r53 = server.route53_client().await;
     r53.create_vpc_association_authorization()
         .hosted_zone_id(&zone)
@@ -129,7 +141,13 @@ async fn r53_delete_vpc_authorization() {
 #[tokio::test]
 async fn r53_list_vpc_authorizations() {
     let server = TestServer::start().await;
-    let zone = public_zone(&server, "conf-listauth.example.com", "conf-listauth-1").await;
+    let zone = private_zone(
+        &server,
+        "conf-listauth.example.com",
+        "conf-listauth-1",
+        vpc("vpc-conf-list-init"),
+    )
+    .await;
     let r53 = server.route53_client().await;
     r53.list_vpc_association_authorizations()
         .hosted_zone_id(&zone)

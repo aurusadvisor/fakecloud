@@ -129,6 +129,100 @@ async fn associate_vpc_rejects_public_zone() {
 }
 
 #[tokio::test]
+async fn create_vpc_authorization_rejects_public_zone() {
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+    let zone = r53
+        .create_hosted_zone()
+        .name("public-auth.example.com")
+        .caller_reference("public-auth-1")
+        .send()
+        .await
+        .expect("zone")
+        .hosted_zone()
+        .unwrap()
+        .id()
+        .to_string();
+    let bad = r53
+        .create_vpc_association_authorization()
+        .hosted_zone_id(&zone)
+        .vpc(vpc("vpc-pubauth"))
+        .send()
+        .await;
+    assert!(bad.is_err(), "public zone authorize should fail");
+}
+
+#[tokio::test]
+async fn reusable_delegation_set_with_unknown_hosted_zone_errors() {
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+    let bad = r53
+        .create_reusable_delegation_set()
+        .caller_reference("ds-bad-zone")
+        .hosted_zone_id("Z00000000000NEVER")
+        .send()
+        .await;
+    assert!(bad.is_err(), "unknown hosted zone must reject create");
+}
+
+#[tokio::test]
+async fn reusable_delegation_set_promotes_zone_name_servers() {
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+    let zone = r53
+        .create_hosted_zone()
+        .name("promote.example.com")
+        .caller_reference("promote-1")
+        .send()
+        .await
+        .expect("zone")
+        .hosted_zone()
+        .unwrap()
+        .id()
+        .to_string();
+    let bare = zone.trim_start_matches("/hostedzone/");
+    let ds = r53
+        .create_reusable_delegation_set()
+        .caller_reference("ds-promote")
+        .hosted_zone_id(bare)
+        .send()
+        .await
+        .expect("create ds")
+        .delegation_set()
+        .unwrap()
+        .clone();
+    let ns_via_zone = r53.get_hosted_zone().id(bare).send().await.expect("zone");
+    let zone_ns = ns_via_zone.delegation_set().unwrap().name_servers();
+    assert_eq!(ds.name_servers(), zone_ns, "name servers must match");
+}
+
+#[tokio::test]
+async fn list_geo_locations_pagination_resumes_correctly() {
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+    // Page 1: take 3 from the catalog start.
+    let page1 = r53
+        .list_geo_locations()
+        .max_items(3)
+        .send()
+        .await
+        .expect("page 1");
+    assert!(page1.is_truncated());
+    // The marker should land on a row that comes *after* what page 1 returned.
+    let last_seen = page1
+        .geo_location_details_list()
+        .last()
+        .and_then(|g| g.continent_code())
+        .unwrap_or("")
+        .to_string();
+    let next_continent = page1.next_continent_code().unwrap_or("").to_string();
+    assert!(
+        next_continent.is_empty() || next_continent.as_str() > last_seen.as_str(),
+        "next continent ({next_continent}) must come after page 1 last ({last_seen})"
+    );
+}
+
+#[tokio::test]
 async fn reusable_delegation_set_lifecycle() {
     let server = TestServer::start().await;
     let r53 = server.route53_client().await;
