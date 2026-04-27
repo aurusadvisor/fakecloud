@@ -656,6 +656,10 @@ impl TestServer {
         aws_sdk_applicationautoscaling::Client::new(&self.aws_config().await)
     }
 
+    pub async fn wafv2_client(&self) -> aws_sdk_wafv2::Client {
+        aws_sdk_wafv2::Client::new(&self.aws_config().await)
+    }
+
     /// S3 always uses path-style addressing against fakecloud so bucket
     /// names don't have to be DNS-legal subdomains of `localhost`.
     pub async fn s3_client(&self) -> aws_sdk_s3::Client {

@@ -129,6 +129,7 @@ fn service_source_files(project_root: &Path) -> Vec<AuditMapping> {
             &["service.rs"],
             &["application-autoscaling"],
         ),
+        ("wafv2", "wafv2", &["service.rs"], &["wafv2"]),
     ];
 
     mappings

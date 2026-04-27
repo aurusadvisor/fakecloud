@@ -28,6 +28,7 @@ members = [
     "crates/fakecloud-route53",
     "crates/fakecloud-acm",
     "crates/fakecloud-application-autoscaling",
+    "crates/fakecloud-wafv2",
     "crates/fakecloud-stepfunctions",
     "crates/fakecloud-scheduler",
     "crates/fakecloud-apigateway",
@@ -118,6 +119,7 @@ fakecloud-cloudfront = { path = "crates/fakecloud-cloudfront", version = "0.12.0
 fakecloud-route53 = { path = "crates/fakecloud-route53", version = "0.12.0" }
 fakecloud-acm = { path = "crates/fakecloud-acm", version = "0.12.0" }
 fakecloud-application-autoscaling = { path = "crates/fakecloud-application-autoscaling", version = "0.12.0" }
+fakecloud-wafv2 = { path = "crates/fakecloud-wafv2", version = "0.12.0" }
 fakecloud-stepfunctions = { path = "crates/fakecloud-stepfunctions", version = "0.12.0" }
 fakecloud-scheduler = { path = "crates/fakecloud-scheduler", version = "0.12.0" }
 fakecloud-apigateway = { path = "crates/fakecloud-apigateway", version = "0.12.0" }

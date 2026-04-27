@@ -122,5 +122,9 @@
   "application-autoscaling": {
     "repo_dir": "application-auto-scaling",
     "service_name": "application-autoscaling"
+  },
+  "wafv2": {
+    "repo_dir": "wafv2",
+    "service_name": "wafv2"
   }
 }

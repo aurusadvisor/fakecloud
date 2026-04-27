@@ -374,6 +374,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         s if s.starts_with("AWSOrganizationsV") => "organizations",
         "CertificateManager" => "acm",
         "AnyScaleFrontendService" => "application-autoscaling",
+        s if s.starts_with("AWSWAF_") => "wafv2",
         _ => return None,
     };
 

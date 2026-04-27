@@ -34,6 +34,7 @@ pub(crate) struct ResetState {
     pub acm: fakecloud_acm::SharedAcmState,
     pub application_autoscaling:
         fakecloud_application_autoscaling::SharedApplicationAutoScalingState,
+    pub wafv2: fakecloud_wafv2::SharedWafv2State,
     pub organizations: fakecloud_organizations::state::SharedOrganizationsState,
     pub container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     pub rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
@@ -164,6 +165,9 @@ impl ResetState {
             "application-autoscaling" => {
                 *self.application_autoscaling.write() =
                     fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new();
+            }
+            "wafv2" => {
+                *self.wafv2.write() = fakecloud_wafv2::Wafv2Accounts::new();
             }
             "organizations" => {
                 *self.organizations.write() = None;
@@ -358,6 +362,10 @@ impl ResetState {
                 let mut state = self.application_autoscaling.write();
                 state.accounts.remove(account_id);
             }
+            "wafv2" => {
+                let mut state = self.wafv2.write();
+                state.accounts.remove(account_id);
+            }
             _ => {
                 return Err(format!("Unknown service: {service}"));
             }
@@ -430,6 +438,7 @@ impl ResetState {
         *self.acm.write() = fakecloud_acm::AcmAccounts::new();
         *self.application_autoscaling.write() =
             fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new();
+        *self.wafv2.write() = fakecloud_wafv2::Wafv2Accounts::new();
         // Organizations is a cross-account singleton (not MultiAccountState);
         // a full reset drops the org entirely so subsequent runs start
         // with no org, matching the no-in-use default state.
@@ -743,6 +752,9 @@ mod tests {
             acm: Arc::new(parking_lot::RwLock::new(fakecloud_acm::AcmAccounts::new())),
             application_autoscaling: Arc::new(parking_lot::RwLock::new(
                 fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
+            )),
+            wafv2: Arc::new(parking_lot::RwLock::new(
+                fakecloud_wafv2::Wafv2Accounts::new(),
             )),
             organizations: Arc::new(parking_lot::RwLock::new(None)),
             container_runtime: None,

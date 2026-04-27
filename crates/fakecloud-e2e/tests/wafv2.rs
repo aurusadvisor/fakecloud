@@ -1,0 +1,614 @@
+//! WAF v2 service E2E.
+
+mod helpers;
+
+use aws_sdk_wafv2::types::{
+    DefaultAction, IpAddressVersion, IpSetReferenceStatement, Platform, Rule, RuleAction, Scope,
+    Statement, Tag, VisibilityConfig,
+};
+use helpers::TestServer;
+
+fn vis(name: &str) -> VisibilityConfig {
+    VisibilityConfig::builder()
+        .sampled_requests_enabled(false)
+        .cloud_watch_metrics_enabled(false)
+        .metric_name(name)
+        .build()
+        .unwrap()
+}
+
+fn allow_default() -> DefaultAction {
+    DefaultAction::builder()
+        .allow(aws_sdk_wafv2::types::AllowAction::builder().build())
+        .build()
+}
+
+#[tokio::test]
+async fn web_acl_create_get_update_delete_lifecycle() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+
+    let summary = waf
+        .create_web_acl()
+        .name("test-acl")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("test-acl"))
+        .description("E2E test ACL")
+        .send()
+        .await
+        .expect("create")
+        .summary
+        .expect("summary");
+    let id = summary.id().expect("id").to_owned();
+    let arn = summary.arn().expect("arn").to_owned();
+    let initial_lock = summary.lock_token().expect("lock").to_owned();
+    assert!(arn.contains("/webacl/test-acl/"), "unexpected ARN: {arn}");
+
+    let got = waf
+        .get_web_acl()
+        .name("test-acl")
+        .scope(Scope::Regional)
+        .id(&id)
+        .send()
+        .await
+        .expect("get");
+    let acl = got.web_acl().expect("acl");
+    assert_eq!(acl.name(), "test-acl");
+    assert_eq!(acl.id(), id);
+    let current_lock = got.lock_token().expect("lock").to_owned();
+    assert_eq!(current_lock, initial_lock);
+
+    let next_lock = waf
+        .update_web_acl()
+        .name("test-acl")
+        .scope(Scope::Regional)
+        .id(&id)
+        .lock_token(&current_lock)
+        .default_action(allow_default())
+        .visibility_config(vis("test-acl"))
+        .description("E2E test ACL updated")
+        .send()
+        .await
+        .expect("update")
+        .next_lock_token()
+        .expect("next lock")
+        .to_owned();
+    assert_ne!(next_lock, current_lock, "lock token rotates on update");
+
+    waf.delete_web_acl()
+        .name("test-acl")
+        .scope(Scope::Regional)
+        .id(&id)
+        .lock_token(&next_lock)
+        .send()
+        .await
+        .expect("delete");
+
+    let listed = waf
+        .list_web_acls()
+        .scope(Scope::Regional)
+        .send()
+        .await
+        .expect("list");
+    assert!(listed.web_acls().is_empty());
+}
+
+#[tokio::test]
+async fn update_with_stale_lock_token_returns_optimistic_lock_error() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let summary = waf
+        .create_web_acl()
+        .name("stale")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("stale"))
+        .send()
+        .await
+        .unwrap()
+        .summary
+        .unwrap();
+    let id = summary.id().expect("id").to_owned();
+    let err = waf
+        .update_web_acl()
+        .name("stale")
+        .scope(Scope::Regional)
+        .id(&id)
+        .lock_token("not-the-real-token")
+        .default_action(allow_default())
+        .visibility_config(vis("stale"))
+        .send()
+        .await
+        .expect_err("stale token");
+    assert!(format!("{err:?}").contains("WAFOptimisticLock"));
+}
+
+#[tokio::test]
+async fn create_duplicate_web_acl_rejected() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    waf.create_web_acl()
+        .name("dupe")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("dupe"))
+        .send()
+        .await
+        .unwrap();
+    let err = waf
+        .create_web_acl()
+        .name("dupe")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("dupe"))
+        .send()
+        .await
+        .expect_err("duplicate");
+    assert!(format!("{err:?}").contains("WAFDuplicateItem"));
+}
+
+#[tokio::test]
+async fn ip_set_lifecycle_with_lock_token_rotation() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let summary = waf
+        .create_ip_set()
+        .name("blocklist")
+        .scope(Scope::Regional)
+        .ip_address_version(IpAddressVersion::Ipv4)
+        .addresses("198.51.100.0/24")
+        .addresses("203.0.113.0/24")
+        .send()
+        .await
+        .unwrap()
+        .summary
+        .unwrap();
+    let id = summary.id().expect("id").to_owned();
+    let lock1 = summary.lock_token().expect("lock").to_owned();
+
+    let got = waf
+        .get_ip_set()
+        .name("blocklist")
+        .scope(Scope::Regional)
+        .id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.ip_set().unwrap().addresses().len(), 2);
+
+    let lock2 = waf
+        .update_ip_set()
+        .name("blocklist")
+        .scope(Scope::Regional)
+        .id(&id)
+        .lock_token(&lock1)
+        .addresses("198.51.100.0/24")
+        .send()
+        .await
+        .unwrap()
+        .next_lock_token
+        .unwrap();
+    assert_ne!(lock1, lock2);
+
+    let got2 = waf
+        .get_ip_set()
+        .name("blocklist")
+        .scope(Scope::Regional)
+        .id(&id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got2.ip_set().unwrap().addresses().len(), 1);
+
+    waf.delete_ip_set()
+        .name("blocklist")
+        .scope(Scope::Regional)
+        .id(&id)
+        .lock_token(&lock2)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn associate_web_acl_then_disassociate_clears_lookup() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let summary = waf
+        .create_web_acl()
+        .name("assoc-acl")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("assoc-acl"))
+        .send()
+        .await
+        .unwrap()
+        .summary
+        .unwrap();
+    let acl_arn = summary.arn().expect("arn").to_owned();
+    let alb_arn =
+        "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/test/abcdef";
+
+    waf.associate_web_acl()
+        .web_acl_arn(&acl_arn)
+        .resource_arn(alb_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let got = waf
+        .get_web_acl_for_resource()
+        .resource_arn(alb_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(got.web_acl().is_some());
+
+    let listed = waf
+        .list_resources_for_web_acl()
+        .web_acl_arn(&acl_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.resource_arns().len(), 1);
+
+    waf.disassociate_web_acl()
+        .resource_arn(alb_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let after = waf
+        .get_web_acl_for_resource()
+        .resource_arn(alb_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(after.web_acl().is_none());
+}
+
+#[tokio::test]
+async fn delete_web_acl_with_associated_resource_rejected() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let summary = waf
+        .create_web_acl()
+        .name("locked")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("locked"))
+        .send()
+        .await
+        .unwrap()
+        .summary
+        .unwrap();
+    let acl_arn = summary.arn().expect("arn").to_owned();
+    let id = summary.id().expect("id").to_owned();
+    let lock = summary.lock_token().expect("lock").to_owned();
+    waf.associate_web_acl()
+        .web_acl_arn(&acl_arn)
+        .resource_arn("arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/x/abc")
+        .send()
+        .await
+        .unwrap();
+    let err = waf
+        .delete_web_acl()
+        .name("locked")
+        .scope(Scope::Regional)
+        .id(&id)
+        .lock_token(&lock)
+        .send()
+        .await
+        .expect_err("associated resources block delete");
+    assert!(format!("{err:?}").contains("WAFAssociatedItem"));
+}
+
+#[tokio::test]
+async fn check_capacity_counts_statement_leaves() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+
+    let ip = waf
+        .create_ip_set()
+        .name("cap-ip")
+        .scope(Scope::Regional)
+        .ip_address_version(IpAddressVersion::Ipv4)
+        .addresses("198.51.100.0/24")
+        .send()
+        .await
+        .unwrap()
+        .summary
+        .unwrap();
+    let arn = ip.arn().expect("arn").to_owned();
+
+    let stmt = Statement::builder()
+        .ip_set_reference_statement(IpSetReferenceStatement::builder().arn(arn).build().unwrap())
+        .build();
+
+    let rule = Rule::builder()
+        .name("block-bad-ips")
+        .priority(1)
+        .action(
+            RuleAction::builder()
+                .block(aws_sdk_wafv2::types::BlockAction::builder().build())
+                .build(),
+        )
+        .visibility_config(vis("block-bad-ips"))
+        .statement(stmt)
+        .build()
+        .unwrap();
+
+    let cap = waf
+        .check_capacity()
+        .scope(Scope::Regional)
+        .rules(rule)
+        .send()
+        .await
+        .unwrap()
+        .capacity;
+    assert!(cap >= 1, "single leaf statement counts as at least 1 WCU");
+}
+
+#[tokio::test]
+async fn tag_resource_round_trip_on_web_acl() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let arn = waf
+        .create_web_acl()
+        .name("tagme")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("tagme"))
+        .send()
+        .await
+        .unwrap()
+        .summary
+        .unwrap()
+        .arn()
+        .expect("arn")
+        .to_owned();
+
+    waf.tag_resource()
+        .resource_arn(&arn)
+        .tags(Tag::builder().key("env").value("prod").build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    let listed = waf
+        .list_tags_for_resource()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    let info = listed.tag_info_for_resource().expect("info");
+    let tags = info.tag_list();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].key(), "env");
+    assert_eq!(tags[0].value(), "prod");
+
+    waf.untag_resource()
+        .resource_arn(&arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+    let after = waf
+        .list_tags_for_resource()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(after
+        .tag_info_for_resource()
+        .expect("info")
+        .tag_list()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn tag_unknown_arn_returns_nonexistent_item_error() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let err = waf
+        .list_tags_for_resource()
+        .resource_arn("arn:aws:wafv2:us-east-1:123456789012:regional/webacl/missing/00000000")
+        .send()
+        .await
+        .expect_err("missing arn");
+    assert!(format!("{err:?}").contains("WAFNonexistentItem"));
+}
+
+#[tokio::test]
+async fn put_get_delete_logging_configuration_for_web_acl() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let acl_arn = waf
+        .create_web_acl()
+        .name("loggable")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("loggable"))
+        .send()
+        .await
+        .unwrap()
+        .summary
+        .unwrap()
+        .arn()
+        .expect("arn")
+        .to_owned();
+
+    let log_dest = "arn:aws:logs:us-east-1:123456789012:log-group:aws-waf-logs-test:*";
+    let cfg = aws_sdk_wafv2::types::LoggingConfiguration::builder()
+        .resource_arn(&acl_arn)
+        .log_destination_configs(log_dest)
+        .build()
+        .unwrap();
+
+    waf.put_logging_configuration()
+        .logging_configuration(cfg)
+        .send()
+        .await
+        .unwrap();
+
+    let got = waf
+        .get_logging_configuration()
+        .resource_arn(&acl_arn)
+        .send()
+        .await
+        .unwrap();
+    let g = got.logging_configuration().expect("cfg");
+    assert_eq!(g.resource_arn(), acl_arn);
+    assert_eq!(g.log_destination_configs(), [log_dest.to_string()]);
+
+    waf.delete_logging_configuration()
+        .resource_arn(&acl_arn)
+        .send()
+        .await
+        .unwrap();
+    let err = waf
+        .get_logging_configuration()
+        .resource_arn(&acl_arn)
+        .send()
+        .await
+        .expect_err("missing config");
+    assert!(format!("{err:?}").contains("WAFNonexistentItem"));
+}
+
+#[tokio::test]
+async fn rule_group_and_permission_policy_round_trip() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let summary = waf
+        .create_rule_group()
+        .name("shared-rg")
+        .scope(Scope::Regional)
+        .capacity(50)
+        .visibility_config(vis("shared-rg"))
+        .send()
+        .await
+        .unwrap()
+        .summary
+        .unwrap();
+    let arn = summary.arn().expect("arn").to_owned();
+
+    let policy = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Principal":{{"AWS":"arn:aws:iam::222222222222:root"}},"Action":"wafv2:GetRuleGroup","Resource":"{arn}"}}]}}"#
+    );
+    waf.put_permission_policy()
+        .resource_arn(&arn)
+        .policy(&policy)
+        .send()
+        .await
+        .unwrap();
+
+    let got = waf
+        .get_permission_policy()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.policy().unwrap_or(""), policy);
+
+    waf.delete_permission_policy()
+        .resource_arn(&arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn create_api_key_then_get_decrypted() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let api_key = waf
+        .create_api_key()
+        .scope(Scope::Regional)
+        .token_domains("api.example.com")
+        .token_domains("alt.example.com")
+        .send()
+        .await
+        .unwrap()
+        .api_key()
+        .expect("api key")
+        .to_owned();
+    assert!(!api_key.is_empty());
+
+    let decrypted = waf
+        .get_decrypted_api_key()
+        .scope(Scope::Regional)
+        .api_key(&api_key)
+        .send()
+        .await
+        .unwrap();
+    let domains = decrypted.token_domains();
+    assert_eq!(domains.len(), 2);
+    assert!(domains.iter().any(|d| d == "api.example.com"));
+
+    waf.delete_api_key()
+        .scope(Scope::Regional)
+        .api_key(&api_key)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn list_managed_rule_groups_returns_seeded_set() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let listed = waf
+        .list_available_managed_rule_groups()
+        .scope(Scope::Regional)
+        .send()
+        .await
+        .unwrap();
+    assert!(listed.managed_rule_groups().len() >= 3);
+    assert!(listed
+        .managed_rule_groups()
+        .iter()
+        .any(|g| g.name().unwrap_or("") == "AWSManagedRulesCommonRuleSet"));
+}
+
+#[tokio::test]
+async fn get_mobile_sdk_release_url_uses_provided_platform() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let resp = waf
+        .generate_mobile_sdk_release_url()
+        .platform(Platform::Ios)
+        .release_version("1.0.0")
+        .send()
+        .await
+        .unwrap();
+    let url = resp.url().expect("url");
+    assert!(
+        url.to_ascii_lowercase().contains("ios"),
+        "url should contain platform: {url}"
+    );
+    assert!(url.contains("1.0.0"));
+}
+
+#[tokio::test]
+async fn paginate_with_stale_marker_does_not_panic() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    waf.create_web_acl()
+        .name("only-one")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("only-one"))
+        .send()
+        .await
+        .unwrap();
+    let resp = waf
+        .list_web_acls()
+        .scope(Scope::Regional)
+        .next_marker("99999")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.web_acls().is_empty());
+    assert!(resp.next_marker().is_none());
+}
