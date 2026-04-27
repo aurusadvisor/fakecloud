@@ -29,7 +29,7 @@ For every operation, [`generators/`](./src/generators/) produces test variants u
 | **Model examples** (`examples.rs`) | The `@examples` trait from the Smithy model itself — AWS's own canonical inputs and outputs | Divergence from AWS's documented examples |
 | **Negative** (`negative.rs`) | Missing required fields, out-of-range values, invalid enums, wrong types | Validation gaps, silent-pass bugs, 500s that should be 400s |
 
-A single operation typically produces anywhere from a dozen to several hundred variants. Across all 23 services the baseline is **59,954 / 59,954 variants passing (100%)** — see [`conformance-baseline.json`](../../conformance-baseline.json) for the per-service breakdown.
+A single operation typically produces anywhere from a dozen to several hundred variants. Across all 33 services the baseline is **80,074 / 81,489 variants passing (98.3%)** — see [`conformance-baseline.json`](../../conformance-baseline.json) for the per-service breakdown.
 
 ### 3. Send and capture
 
