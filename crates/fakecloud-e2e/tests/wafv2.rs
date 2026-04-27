@@ -24,6 +24,35 @@ fn allow_default() -> DefaultAction {
 }
 
 #[tokio::test]
+async fn cloudfront_scope_arn_uses_us_east_1_region_segment() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let arn = waf
+        .create_web_acl()
+        .name("cf-acl")
+        .scope(Scope::Cloudfront)
+        .default_action(allow_default())
+        .visibility_config(vis("cf-acl"))
+        .send()
+        .await
+        .expect("create")
+        .summary
+        .expect("summary")
+        .arn()
+        .expect("arn")
+        .to_owned();
+    // Real AWS CLOUDFRONT-scope ARNs always use us-east-1 + global path.
+    assert!(
+        arn.starts_with("arn:aws:wafv2:us-east-1:"),
+        "CLOUDFRONT ARN must contain us-east-1 region segment, got: {arn}"
+    );
+    assert!(
+        arn.contains(":global/webacl/cf-acl/"),
+        "unexpected ARN: {arn}"
+    );
+}
+
+#[tokio::test]
 async fn web_acl_create_get_update_delete_lifecycle() {
     let server = TestServer::start().await;
     let waf = server.wafv2_client().await;

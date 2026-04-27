@@ -1755,16 +1755,15 @@ fn synth_arn(
     } else {
         region
     };
-    let scope_seg = if scope == "CLOUDFRONT" {
-        "global".to_string()
+    // Real AWS WAF v2 CLOUDFRONT-scope ARNs always use `us-east-1` as the
+    // region segment plus a `global/...` resource path. REGIONAL ARNs use
+    // the caller's region with the region as the resource-path prefix.
+    let (region_in_arn, scope_seg) = if scope == "CLOUDFRONT" {
+        ("us-east-1", "global")
     } else {
-        region.to_string()
+        (region, region)
     };
-    let region_in_arn = if scope == "CLOUDFRONT" { "" } else { region };
-    format!(
-        "arn:aws:wafv2:{region_in_arn}:{account_id}:{scope_seg}/{kind}/{name}/{id}",
-        scope_seg = scope_seg,
-    )
+    format!("arn:aws:wafv2:{region_in_arn}:{account_id}:{scope_seg}/{kind}/{name}/{id}")
 }
 
 fn parse_string_list(value: Option<&Value>) -> Vec<String> {

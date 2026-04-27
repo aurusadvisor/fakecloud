@@ -41,8 +41,13 @@ aws --endpoint-url http://localhost:4566 wafv2 create-web-acl \
   --rules "[{\"Name\":\"BlockBadIps\",\"Priority\":1,\"Action\":{\"Block\":{}},\"Statement\":{\"IPSetReferenceStatement\":{\"ARN\":\"$IPSET_ARN\"}},\"VisibilityConfig\":{\"SampledRequestsEnabled\":false,\"CloudWatchMetricsEnabled\":false,\"MetricName\":\"BlockBadIps\"}}]" \
   --visibility-config SampledRequestsEnabled=false,CloudWatchMetricsEnabled=false,MetricName=api-front
 
-# Confirm the resulting WCU
+# List the Web ACLs in the REGIONAL scope and verify the new one is there.
 aws --endpoint-url http://localhost:4566 wafv2 list-web-acls --scope REGIONAL
+
+# Get the full Web ACL to inspect the computed WCU (Capacity field).
+aws --endpoint-url http://localhost:4566 wafv2 get-web-acl \
+  --name api-front --scope REGIONAL \
+  --id $(aws --endpoint-url http://localhost:4566 wafv2 list-web-acls --scope REGIONAL --query 'WebACLs[?Name==`api-front`].Id | [0]' --output text)
 ```
 
 ## Caveats
