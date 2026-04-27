@@ -52,6 +52,7 @@ SERVICES=(
     "acm:acm"
     "application-autoscaling:application-auto-scaling"
     "wafv2:wafv2"
+    "athena:athena"
 )
 
 # Sparse checkout only the models we need

@@ -35,6 +35,7 @@ pub(crate) struct ResetState {
     pub application_autoscaling:
         fakecloud_application_autoscaling::SharedApplicationAutoScalingState,
     pub wafv2: fakecloud_wafv2::SharedWafv2State,
+    pub athena: fakecloud_athena::SharedAthenaState,
     pub organizations: fakecloud_organizations::state::SharedOrganizationsState,
     pub container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     pub rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
@@ -168,6 +169,9 @@ impl ResetState {
             }
             "wafv2" => {
                 *self.wafv2.write() = fakecloud_wafv2::Wafv2Accounts::new();
+            }
+            "athena" => {
+                *self.athena.write() = fakecloud_athena::AthenaAccounts::new();
             }
             "organizations" => {
                 *self.organizations.write() = None;
@@ -366,6 +370,10 @@ impl ResetState {
                 let mut state = self.wafv2.write();
                 state.accounts.remove(account_id);
             }
+            "athena" => {
+                let mut state = self.athena.write();
+                state.accounts.remove(account_id);
+            }
             _ => {
                 return Err(format!("Unknown service: {service}"));
             }
@@ -439,6 +447,7 @@ impl ResetState {
         *self.application_autoscaling.write() =
             fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new();
         *self.wafv2.write() = fakecloud_wafv2::Wafv2Accounts::new();
+        *self.athena.write() = fakecloud_athena::AthenaAccounts::new();
         // Organizations is a cross-account singleton (not MultiAccountState);
         // a full reset drops the org entirely so subsequent runs start
         // with no org, matching the no-in-use default state.
@@ -755,6 +764,9 @@ mod tests {
             )),
             wafv2: Arc::new(parking_lot::RwLock::new(
                 fakecloud_wafv2::Wafv2Accounts::new(),
+            )),
+            athena: Arc::new(parking_lot::RwLock::new(
+                fakecloud_athena::AthenaAccounts::new(),
             )),
             organizations: Arc::new(parking_lot::RwLock::new(None)),
             container_runtime: None,
