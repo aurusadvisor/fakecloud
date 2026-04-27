@@ -370,7 +370,7 @@ async fn main() {
         )),
     );
 
-    let rds_runtime = fakecloud_rds::runtime::RdsRuntime::new().map(Arc::new);
+    let rds_runtime = fakecloud_rds::runtime::RdsRuntime::new(bound_addr.port()).map(Arc::new);
     if let Some(ref rt) = rds_runtime {
         tracing::info!(
             cli = rt.cli_name(),
@@ -1796,8 +1796,12 @@ async fn main() {
             ),
         ),
     );
-    let rds_delivery_bus = Arc::new(DeliveryBus::new().with_eventbridge(eb_delivery_for_rds));
-    rds_service = rds_service.with_delivery_bus(rds_delivery_bus);
+    let mut rds_bus = DeliveryBus::new().with_eventbridge(eb_delivery_for_rds);
+    if let Some(ref ld) = lambda_delivery {
+        rds_bus = rds_bus.with_lambda(ld.clone());
+    }
+    let rds_delivery_bus = Arc::new(rds_bus);
+    rds_service = rds_service.with_delivery_bus(rds_delivery_bus.clone());
     registry.register(Arc::new(rds_service));
     let elasticache_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -3475,6 +3479,104 @@ async fn main() {
                             a.db_instance_identifier.cmp(&b.db_instance_identifier)
                         });
                         axum::Json(types::RdsInstancesResponse { instances })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/rds/lambda-invoke",
+            axum::routing::post({
+                let bridge_lambda = lambda_delivery.clone();
+                move |headers: axum::http::HeaderMap,
+                      axum::Json(body): axum::Json<types::RdsLambdaInvokeRequest>| {
+                    let bridge_lambda = bridge_lambda.clone();
+                    async move {
+                        let Some(ld) = bridge_lambda else {
+                            return (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                axum::Json(serde_json::json!({
+                                    "status_code": 502,
+                                    "payload": { "errorMessage": "Lambda runtime not available on this fakecloud server" },
+                                    "executed_version": null,
+                                    "log_result": null,
+                                })),
+                            );
+                        };
+                        let account_id = headers
+                            .get("x-fakecloud-account-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("000000000000")
+                            .to_string();
+                        let region = body
+                            .region
+                            .clone()
+                            .unwrap_or_else(|| "us-east-1".to_string());
+                        let function_arn = if body.function_name.starts_with("arn:") {
+                            body.function_name.clone()
+                        } else {
+                            format!(
+                                "arn:aws:lambda:{}:{}:function:{}",
+                                region, account_id, body.function_name
+                            )
+                        };
+                        let payload_str = body
+                            .payload
+                            .as_ref()
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "null".to_string());
+                        let invocation_type = body
+                            .invocation_type
+                            .as_deref()
+                            .unwrap_or("RequestResponse")
+                            .to_string();
+
+                        if invocation_type == "Event" {
+                            let arn = function_arn.clone();
+                            let payload = payload_str.clone();
+                            tokio::spawn(async move {
+                                let _ = ld.invoke_lambda(&arn, &payload).await;
+                            });
+                            return (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({
+                                    "status_code": 202,
+                                    "payload": null,
+                                    "executed_version": "$LATEST",
+                                    "log_result": null,
+                                })),
+                            );
+                        }
+
+                        match ld.invoke_lambda(&function_arn, &payload_str).await {
+                            Ok(bytes) => {
+                                let payload_value = serde_json::from_slice::<serde_json::Value>(
+                                    &bytes,
+                                )
+                                .unwrap_or_else(|_| {
+                                    serde_json::Value::String(
+                                        String::from_utf8_lossy(&bytes).to_string(),
+                                    )
+                                });
+                                (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!({
+                                        "status_code": 200,
+                                        "payload": payload_value,
+                                        "executed_version": "$LATEST",
+                                        "log_result": null,
+                                    })),
+                                )
+                            }
+                            Err(msg) => (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({
+                                    "status_code": 502,
+                                    "payload": { "errorMessage": msg },
+                                    "executed_version": null,
+                                    "log_result": null,
+                                })),
+                            ),
+                        }
                     }
                 }
             }),

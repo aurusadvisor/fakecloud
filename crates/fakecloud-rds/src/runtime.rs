@@ -1,8 +1,16 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
+use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
+
+const POSTGRES_DOCKERFILE: &str = include_str!("../assets/postgres/Dockerfile");
+const AWS_COMMONS_CONTROL: &str = include_str!("../assets/postgres/aws_commons.control");
+const AWS_COMMONS_SQL: &str = include_str!("../assets/postgres/aws_commons--1.0.sql");
+const AWS_LAMBDA_CONTROL: &str = include_str!("../assets/postgres/aws_lambda.control");
+const AWS_LAMBDA_SQL: &str = include_str!("../assets/postgres/aws_lambda--1.0.sql");
 
 #[derive(Debug, Clone)]
 pub struct RunningDbContainer {
@@ -14,6 +22,9 @@ pub struct RdsRuntime {
     cli: String,
     containers: RwLock<HashMap<String, RunningDbContainer>>,
     instance_id: String,
+    host_ip: String,
+    server_port: u16,
+    image_cache: RwLock<HashMap<String, Arc<tokio::sync::Mutex<bool>>>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -25,7 +36,7 @@ pub enum RuntimeError {
 }
 
 impl RdsRuntime {
-    pub fn new() -> Option<Self> {
+    pub fn new(server_port: u16) -> Option<Self> {
         let cli = if let Ok(cli) = std::env::var("FAKECLOUD_CONTAINER_CLI") {
             if cli_available(&cli) {
                 cli
@@ -40,10 +51,22 @@ impl RdsRuntime {
             return None;
         };
 
+        // Match Lambda runtime container-to-host networking: Linux uses the
+        // bridge gateway IP directly, macOS/Windows use Docker Desktop's
+        // host-gateway alias. Containers reach fakecloud at host.docker.internal.
+        let host_ip = if cfg!(target_os = "linux") {
+            detect_bridge_gateway(&cli).unwrap_or_else(|| "172.17.0.1".to_string())
+        } else {
+            "host-gateway".to_string()
+        };
+
         Some(Self {
             cli,
             containers: RwLock::new(HashMap::new()),
             instance_id: format!("fakecloud-{}", std::process::id()),
+            host_ip,
+            server_port,
+            image_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -51,6 +74,7 @@ impl RdsRuntime {
         &self.cli
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn ensure_postgres(
         &self,
         db_instance_identifier: &str,
@@ -59,20 +83,31 @@ impl RdsRuntime {
         username: &str,
         password: &str,
         db_name: &str,
+        account_id: &str,
+        region: &str,
     ) -> Result<RunningDbContainer, RuntimeError> {
         self.stop_container(db_instance_identifier).await;
 
-        // Determine Docker image and port based on engine
-        let (image, port, env_vars) = match engine {
+        // Determine Docker image and port based on engine. The postgres
+        // image is built locally (lazily) so we can ship the aws_lambda /
+        // aws_commons extensions plus plpython3u; other engines stay on
+        // upstream images.
+        let (image, port, env_vars, postgres_major) = match engine {
             "postgres" => {
                 let major_version = engine_version.split('.').next().unwrap_or("16");
-                let image = format!("postgres:{}-alpine", major_version);
+                let image = self.ensure_postgres_image(major_version).await?;
                 let env_vars = vec![
                     format!("POSTGRES_USER={username}"),
                     format!("POSTGRES_PASSWORD={password}"),
                     format!("POSTGRES_DB={db_name}"),
+                    format!(
+                        "FAKECLOUD_ENDPOINT=http://host.docker.internal:{}",
+                        self.server_port
+                    ),
+                    format!("FAKECLOUD_ACCOUNT_ID={account_id}"),
+                    format!("FAKECLOUD_REGION={region}"),
                 ];
-                (image, "5432", env_vars)
+                (image, "5432", env_vars, Some(major_version.to_string()))
             }
             "mysql" => {
                 let major_version = if engine_version.starts_with("5.7") {
@@ -87,7 +122,7 @@ impl RdsRuntime {
                     format!("MYSQL_PASSWORD={password}"),
                     format!("MYSQL_DATABASE={db_name}"),
                 ];
-                (image, "3306", env_vars)
+                (image, "3306", env_vars, None)
             }
             "mariadb" => {
                 let major_version = if engine_version.starts_with("10.11") {
@@ -102,7 +137,7 @@ impl RdsRuntime {
                     format!("MARIADB_PASSWORD={password}"),
                     format!("MARIADB_DATABASE={db_name}"),
                 ];
-                (image, "3306", env_vars)
+                (image, "3306", env_vars, None)
             }
             "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => {
                 // Oracle Database Free is the no-cost dev edition shipped by
@@ -116,7 +151,7 @@ impl RdsRuntime {
                     format!("APP_USER_PASSWORD={password}"),
                     format!("ORACLE_DATABASE={db_name}"),
                 ];
-                (image, "1521", env_vars)
+                (image, "1521", env_vars, None)
             }
             "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" => {
                 // SQL Server Express is free for dev/test with no license
@@ -130,7 +165,7 @@ impl RdsRuntime {
                     format!("MSSQL_SA_PASSWORD={password}"),
                     "MSSQL_PID=Express".to_string(),
                 ];
-                (image, "1433", env_vars)
+                (image, "1433", env_vars, None)
             }
             "db2-se" | "db2-ae" => {
                 // Db2 Community Edition is free under the standard IBM
@@ -143,7 +178,7 @@ impl RdsRuntime {
                     format!("DB2INST1_PASSWORD={password}"),
                     format!("DBNAME={db_name}"),
                 ];
-                (image, "50000", env_vars)
+                (image, "50000", env_vars, None)
             }
             _ => {
                 return Err(RuntimeError::ContainerStartFailed(format!(
@@ -169,6 +204,14 @@ impl RdsRuntime {
 
         if needs_privileged {
             args.push("--privileged".to_string());
+        }
+
+        // Postgres runs the aws_lambda extension which calls back into
+        // fakecloud over HTTP. Wire the bridge alias so plpython3u code
+        // can resolve host.docker.internal on every platform.
+        if postgres_major.is_some() {
+            args.push("--add-host".to_string());
+            args.push(format!("host.docker.internal:{}", self.host_ip));
         }
 
         for env_var in env_vars {
@@ -525,6 +568,98 @@ impl RdsRuntime {
             .await;
     }
 
+    /// Build (or reuse) the fakecloud-postgres image for a given major
+    /// version. The image bakes plpython3u plus the aws_commons and
+    /// aws_lambda extension files so users can run
+    /// `CREATE EXTENSION aws_lambda CASCADE` inside any database.
+    /// Tag includes a content hash so changes to the embedded assets
+    /// invalidate the local cache automatically.
+    pub(crate) async fn ensure_postgres_image(
+        &self,
+        major_version: &str,
+    ) -> Result<String, RuntimeError> {
+        let tag = format!(
+            "fakecloud-postgres:{}-{}",
+            major_version,
+            postgres_assets_hash()
+        );
+
+        // Per-tag mutex so concurrent first-creates don't both shell out
+        // to `docker build` for the same image. Inner bool tracks whether
+        // the build has already succeeded in this process.
+        let lock = {
+            let mut cache = self.image_cache.write();
+            cache
+                .entry(tag.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(false)))
+                .clone()
+        };
+        let mut built = lock.lock().await;
+        if *built {
+            return Ok(tag);
+        }
+
+        // Even within a single process, the image may already exist on
+        // the daemon from a prior run. Skip the build if `image inspect`
+        // succeeds.
+        let inspect = tokio::process::Command::new(&self.cli)
+            .args(["image", "inspect", &tag])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        if inspect.success() {
+            *built = true;
+            return Ok(tag);
+        }
+
+        let build_dir =
+            tempfile::tempdir().map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        let assets: [(&str, &str); 5] = [
+            ("Dockerfile", POSTGRES_DOCKERFILE),
+            ("aws_commons.control", AWS_COMMONS_CONTROL),
+            ("aws_commons--1.0.sql", AWS_COMMONS_SQL),
+            ("aws_lambda.control", AWS_LAMBDA_CONTROL),
+            ("aws_lambda--1.0.sql", AWS_LAMBDA_SQL),
+        ];
+        for (name, contents) in assets {
+            tokio::fs::write(build_dir.path().join(name), contents)
+                .await
+                .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        }
+
+        tracing::info!(
+            tag = %tag,
+            "Building fakecloud-postgres image with aws_lambda extension (first use can take ~60s)"
+        );
+
+        let output = tokio::process::Command::new(&self.cli)
+            .args([
+                "build",
+                "--build-arg",
+                &format!("PG_VERSION={major_version}"),
+                "-t",
+                &tag,
+                ".",
+            ])
+            .current_dir(build_dir.path())
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "docker build for {} failed: {}",
+                tag,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        *built = true;
+        Ok(tag)
+    }
+
     pub async fn dump_database(
         &self,
         db_instance_identifier: &str,
@@ -690,4 +825,50 @@ fn cli_available(cli: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+/// On Linux Docker bridge networks, ask the daemon for the bridge
+/// gateway IP so containers can reach the host's loopback. macOS and
+/// Windows use the magic `host-gateway` alias instead.
+fn detect_bridge_gateway(cli: &str) -> Option<String> {
+    let output = std::process::Command::new(cli)
+        .args([
+            "network",
+            "inspect",
+            "bridge",
+            "--format",
+            "{{range .IPAM.Config}}{{.Gateway}}{{end}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let gateway = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if gateway.is_empty() || !gateway.contains('.') {
+        return None;
+    }
+    Some(gateway)
+}
+
+/// Stable hash of the postgres image build context used as a tag suffix
+/// — changes to the Dockerfile or extension files invalidate cached
+/// images automatically.
+fn postgres_assets_hash() -> &'static str {
+    use std::sync::OnceLock;
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| {
+        let mut hasher = Sha256::new();
+        hasher.update(POSTGRES_DOCKERFILE.as_bytes());
+        hasher.update(AWS_COMMONS_CONTROL.as_bytes());
+        hasher.update(AWS_COMMONS_SQL.as_bytes());
+        hasher.update(AWS_LAMBDA_CONTROL.as_bytes());
+        hasher.update(AWS_LAMBDA_SQL.as_bytes());
+        let digest = hasher.finalize();
+        digest.iter().take(6).fold(String::new(), |mut acc, b| {
+            use std::fmt::Write;
+            let _ = write!(acc, "{:02x}", b);
+            acc
+        })
+    })
 }

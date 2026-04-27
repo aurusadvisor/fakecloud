@@ -298,6 +298,32 @@ pub struct FireRuleRequest {
     pub rule_name: String,
 }
 
+// ── RDS aws_lambda extension bridge ─────────────────────────────────
+
+/// Request body for `POST /_fakecloud/rds/lambda-invoke`. The endpoint is
+/// the bridge that the PostgreSQL `aws_lambda` extension calls into from
+/// inside an RDS DB instance container — it's normally not driven by
+/// user code directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RdsLambdaInvokeRequest {
+    pub function_name: String,
+    pub payload: Option<serde_json::Value>,
+    pub invocation_type: Option<String>,
+    pub region: Option<String>,
+}
+
+/// Shape returned by the bridge — mirrors what `aws_lambda.invoke()`
+/// returns to SQL callers (RDS/Aurora-compatible).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RdsLambdaInvokeResponse {
+    pub status_code: i32,
+    pub payload: Option<serde_json::Value>,
+    pub executed_version: Option<String>,
+    pub log_result: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FireRuleTarget {

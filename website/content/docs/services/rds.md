@@ -22,6 +22,7 @@ fakecloud implements **163 of 163** RDS operations at 100% Smithy conformance. D
 - **Dump and restore** — MySQL and MariaDB database dumps for snapshot/restore flows
 - **License models** — tracking
 - **EventBridge events** — lifecycle ops emit `aws.rds` events on the `default` bus, deliverable to SQS, SNS, Lambda, etc. via standard EB rules
+- **PostgreSQL `aws_lambda` extension** — call fakecloud Lambda functions from inside RDS PostgreSQL via `CREATE EXTENSION aws_lambda CASCADE` and `aws_lambda.invoke(...)` (subset of the AWS RDS extension surface; see below)
 
 ## EventBridge integration
 
@@ -53,6 +54,34 @@ Query protocol. Form-encoded body, `Action` parameter, XML responses.
 ## Introspection
 
 - `GET /_fakecloud/rds/instances` — list fakecloud-managed DB instances with runtime metadata (container id, host port)
+- `POST /_fakecloud/rds/lambda-invoke` — internal bridge used by the PostgreSQL `aws_lambda` extension to invoke fakecloud Lambda functions from inside the DB container
+
+## PostgreSQL `aws_lambda` extension
+
+Matches the AWS RDS extension of the same name. Lets SQL running inside an RDS-managed PostgreSQL instance invoke fakecloud Lambda functions:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS aws_lambda CASCADE;
+
+SELECT aws_commons.create_lambda_function_arn('my_function');
+
+SELECT * FROM aws_lambda.invoke(
+    'my_function',
+    '{"body":"Hello!"}'::json
+);
+```
+
+Implemented function signatures (subset of the AWS RDS Lambda API):
+
+- `aws_lambda.invoke(function_name text, payload json, region text DEFAULT NULL, invocation_type text DEFAULT 'RequestResponse')` -> returns `(status_code int, payload json, executed_version text, log_result text)`
+- `aws_lambda.invoke(function_name aws_commons._lambda_function_arn_1, payload json, region text DEFAULT NULL, invocation_type text DEFAULT 'RequestResponse')` (composite-typed overload)
+- `aws_commons.create_lambda_function_arn(function_name text, region text DEFAULT NULL)` -> composite of `(function_name, region)`
+
+`invocation_type = 'Event'` returns `(202, NULL, '$LATEST', NULL)` immediately and runs the Lambda asynchronously.
+
+The first time you create a PostgreSQL DB instance, fakecloud lazily builds a `fakecloud-postgres:<major>-<hash>` Docker image off `postgres:<major>` that bakes in `plpython3u` and the extension files. The build typically takes ~60s and the image is cached locally for subsequent runs (the hash invalidates the cache when fakecloud changes the embedded extension definitions).
+
+Inside the container, the extension's `plpython3u` body POSTs to `http://host.docker.internal:<server_port>/_fakecloud/rds/lambda-invoke`, which routes through fakecloud's standard Lambda invocation path.
 
 ## How the Docker integration works
 
@@ -64,7 +93,7 @@ When you call `CreateDBInstance` for PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/
 
 | Engine | Image | Port | Wait probe |
 |--------|-------|------|------------|
-| `postgres` | `postgres:<major>-alpine` | 5432 | `tokio-postgres` ping |
+| `postgres` | `fakecloud-postgres:<major>-<hash>` (built locally on top of `postgres:<major>`, adds `plpython3u` + the `aws_lambda` and `aws_commons` extensions) | 5432 | `tokio-postgres` ping |
 | `mysql` | `mysql:<major>` | 3306 | `mysql_async` ping |
 | `mariadb` | `mariadb:<major>` | 3306 | `mysql_async` ping |
 | `oracle-ee` / `oracle-se2` (+`-cdb`) | `gvenzl/oracle-free:23-slim` | 1521 | log marker `DATABASE IS READY TO USE!` + TCP probe |

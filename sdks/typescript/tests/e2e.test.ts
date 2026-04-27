@@ -101,6 +101,8 @@ describe("health", () => {
 });
 
 describe("rds", () => {
+  // First run on a fresh runner builds the fakecloud-postgres image
+  // (plpython3u + aws_lambda extension files); allow up to 3 minutes.
   it("getInstances() returns fakecloud-managed DB instances", async () => {
     const rds = new RDSClient(awsConfig());
 
@@ -126,7 +128,7 @@ describe("rds", () => {
     expect(instance!.dbName).toBe("appdb");
     expect(instance!.containerId.length).toBeGreaterThan(0);
     expect(instance!.hostPort).toBeGreaterThan(0);
-  });
+  }, 180_000);
 });
 
 // ── ElastiCache ─────────────────────────────────────────────────────
