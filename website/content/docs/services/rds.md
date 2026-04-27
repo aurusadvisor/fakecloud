@@ -93,7 +93,7 @@ When you call `CreateDBInstance` for PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/
 
 | Engine | Image | Port | Wait probe |
 |--------|-------|------|------------|
-| `postgres` | `fakecloud-postgres:<major>-<hash>` (built locally on top of `postgres:<major>`, adds `plpython3u` + the `aws_lambda` and `aws_commons` extensions) | 5432 | `tokio-postgres` ping |
+| `postgres` | `ghcr.io/faiscadev/fakecloud-postgres:<major>-<fakecloud-version>` (prebuilt with `plpython3u` + the `aws_lambda` and `aws_commons` extensions on top of `postgres:<major>`; falls back to a local build if the pull fails) | 5432 | `tokio-postgres` ping |
 | `mysql` | `mysql:<major>` | 3306 | `mysql_async` ping |
 | `mariadb` | `mariadb:<major>` | 3306 | `mysql_async` ping |
 | `oracle-ee` / `oracle-se2` (+`-cdb`) | `gvenzl/oracle-free:23-slim` | 1521 | log marker `DATABASE IS READY TO USE!` + TCP probe |
@@ -102,10 +102,23 @@ When you call `CreateDBInstance` for PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/
 
 The Oracle / SQL Server / Db2 images are large (1-3 GB) and take 30-300 s to first-boot. fakecloud passes the engine-specific license-acceptance environment variables (`ACCEPT_EULA`, `LICENSE`) automatically. Db2 launches with `--privileged` because the container needs it to set kernel parameters during startup.
 
+### Prebuilt PostgreSQL image
+
+`ghcr.io/faiscadev/fakecloud-postgres:<major>-<fakecloud-version>` is published on every fakecloud release tag (workflow: `.github/workflows/docker-rds-images.yml`) for postgres `13`, `14`, `15`, `16`, both `linux/amd64` and `linux/arm64`. Each release also gets a rolling `:<major>` tag pointing at the latest version for that major. Resolution order at runtime:
+
+1. Image already on the local Docker daemon -> use it.
+2. `docker pull` of the version-pinned tag -> use it.
+3. Local `docker build` from the embedded `crates/fakecloud-rds/assets/postgres/` Dockerfile (covers dev / unreleased / airgapped setups).
+
+Override knobs (env vars, both optional):
+
+- `FAKECLOUD_POSTGRES_REGISTRY=registry.example.com/team` — point at a private mirror (default `ghcr.io/faiscadev`).
+- `FAKECLOUD_REBUILD_POSTGRES_IMAGE=1` — skip inspect + pull and force a fresh local build. Use after editing the embedded Dockerfile or extension SQL during development.
+
 ## Gotchas
 
 - **Requires a Docker socket.** RDS needs access to `/var/run/docker.sock` to start and stop containers.
-- **First use pulls the image.** Expect a slower first run while the database image downloads. Heavy engines (Oracle/SQL Server/Db2) can pull 1-3 GB on first use.
+- **First use pulls the image.** Expect a slower first run while the database image downloads. Heavy engines (Oracle/SQL Server/Db2) can pull 1-3 GB on first use. The PostgreSQL image is custom (`ghcr.io/faiscadev/fakecloud-postgres:<major>-<version>`) and is pulled from the registry when available; otherwise it's built locally (~60 s).
 - **Aurora is partially supported.** Aurora-specific features (Global Database, Serverless v2, I/O-optimized) are recorded but don't affect the real container.
 - **Db2 needs `--privileged`.** fakecloud sets it automatically; the host must allow privileged containers.
 - **Heavy-engine boot is slow.** Oracle takes 30-90 s to first-boot, Db2 30-60 s, SQL Server ~30 s. Factor this into test budgets.

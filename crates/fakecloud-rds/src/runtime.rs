@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
-use sha2::{Digest, Sha256};
 use tokio_postgres::NoTls;
 
 const POSTGRES_DOCKERFILE: &str = include_str!("../assets/postgres/Dockerfile");
@@ -11,6 +10,14 @@ const AWS_COMMONS_CONTROL: &str = include_str!("../assets/postgres/aws_commons.c
 const AWS_COMMONS_SQL: &str = include_str!("../assets/postgres/aws_commons--1.0.sql");
 const AWS_LAMBDA_CONTROL: &str = include_str!("../assets/postgres/aws_lambda.control");
 const AWS_LAMBDA_SQL: &str = include_str!("../assets/postgres/aws_lambda--1.0.sql");
+
+/// Default registry that hosts the prebuilt postgres images. CI publishes
+/// to `ghcr.io/faiscadev/fakecloud-postgres:<major>-<version>` on each
+/// release tag (see `.github/workflows/docker-rds-images.yml`).
+/// Override with the `FAKECLOUD_POSTGRES_REGISTRY` env var (e.g. for
+/// private mirrors); set `FAKECLOUD_REBUILD_POSTGRES_IMAGE=1` to force
+/// a local rebuild even when the published tag is reachable.
+const DEFAULT_POSTGRES_REGISTRY: &str = "ghcr.io/faiscadev";
 
 #[derive(Debug, Clone)]
 pub struct RunningDbContainer {
@@ -574,19 +581,30 @@ impl RdsRuntime {
     /// `CREATE EXTENSION aws_lambda CASCADE` inside any database.
     /// Tag includes a content hash so changes to the embedded assets
     /// invalidate the local cache automatically.
+    /// Resolve the postgres image tag for a given major version. Tries
+    /// (in order): in-process cache, `docker image inspect` for a copy
+    /// already on the daemon, `docker pull` of the prebuilt image
+    /// published by CI, and finally a local `docker build` from the
+    /// embedded Dockerfile + extension assets. The pull path is the
+    /// happy path for end users on tagged releases; the build path
+    /// covers dev / unreleased versions / airgapped setups.
+    ///
+    /// Honors:
+    /// - `FAKECLOUD_POSTGRES_REGISTRY` — registry prefix (default
+    ///   `ghcr.io/faiscadev`); useful for private mirrors.
+    /// - `FAKECLOUD_REBUILD_POSTGRES_IMAGE` — when set to a non-empty
+    ///   value, skip inspect + pull and force a fresh local build.
+    ///   Use after editing the embedded Dockerfile or extension SQL.
     pub(crate) async fn ensure_postgres_image(
         &self,
         major_version: &str,
     ) -> Result<String, RuntimeError> {
-        let tag = format!(
-            "fakecloud-postgres:{}-{}",
-            major_version,
-            postgres_assets_hash()
-        );
+        let tag = postgres_image_tag(major_version);
 
-        // Per-tag mutex so concurrent first-creates don't both shell out
-        // to `docker build` for the same image. Inner bool tracks whether
-        // the build has already succeeded in this process.
+        // Per-tag mutex so concurrent first-creates don't all shell out
+        // to docker. Inner bool tracks whether resolution has succeeded
+        // in this process (regardless of whether it landed via inspect,
+        // pull, or build).
         let lock = {
             let mut cache = self.image_cache.write();
             cache
@@ -594,26 +612,77 @@ impl RdsRuntime {
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(false)))
                 .clone()
         };
-        let mut built = lock.lock().await;
-        if *built {
+        let mut resolved = lock.lock().await;
+        if *resolved {
             return Ok(tag);
         }
 
-        // Even within a single process, the image may already exist on
-        // the daemon from a prior run. Skip the build if `image inspect`
-        // succeeds.
-        let inspect = tokio::process::Command::new(&self.cli)
-            .args(["image", "inspect", &tag])
+        let force_rebuild = std::env::var("FAKECLOUD_REBUILD_POSTGRES_IMAGE")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+
+        if !force_rebuild {
+            // Already on the daemon (prior pull, prior build, prior
+            // session)? Use it as-is.
+            if self.docker_image_exists(&tag).await {
+                *resolved = true;
+                return Ok(tag);
+            }
+
+            // Try the prebuilt image published by CI. Any failure
+            // (404 for unreleased version, network error, auth) falls
+            // through to the local build branch.
+            if self.try_pull_image(&tag).await {
+                *resolved = true;
+                return Ok(tag);
+            }
+        }
+
+        self.build_postgres_image_local(major_version, &tag).await?;
+        *resolved = true;
+        Ok(tag)
+    }
+
+    async fn docker_image_exists(&self, tag: &str) -> bool {
+        tokio::process::Command::new(&self.cli)
+            .args(["image", "inspect", tag])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .await
-            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-        if inspect.success() {
-            *built = true;
-            return Ok(tag);
-        }
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
 
+    async fn try_pull_image(&self, tag: &str) -> bool {
+        tracing::info!(tag = %tag, "Pulling prebuilt fakecloud-postgres image");
+        let output = match tokio::process::Command::new(&self.cli)
+            .args(["pull", tag])
+            .output()
+            .await
+        {
+            Ok(output) => output,
+            Err(e) => {
+                tracing::debug!(tag = %tag, error = %e, "docker pull failed to spawn");
+                return false;
+            }
+        };
+        if output.status.success() {
+            return true;
+        }
+        tracing::info!(
+            tag = %tag,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "Prebuilt postgres image not available, falling back to local build"
+        );
+        false
+    }
+
+    async fn build_postgres_image_local(
+        &self,
+        major_version: &str,
+        tag: &str,
+    ) -> Result<(), RuntimeError> {
         let build_dir =
             tempfile::tempdir().map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
         let assets: [(&str, &str); 5] = [
@@ -631,7 +700,7 @@ impl RdsRuntime {
 
         tracing::info!(
             tag = %tag,
-            "Building fakecloud-postgres image with aws_lambda extension (first use can take ~60s)"
+            "Building fakecloud-postgres image locally (first use can take ~60s)"
         );
 
         let output = tokio::process::Command::new(&self.cli)
@@ -640,7 +709,7 @@ impl RdsRuntime {
                 "--build-arg",
                 &format!("PG_VERSION={major_version}"),
                 "-t",
-                &tag,
+                tag,
                 ".",
             ])
             .current_dir(build_dir.path())
@@ -656,8 +725,7 @@ impl RdsRuntime {
             )));
         }
 
-        *built = true;
-        Ok(tag)
+        Ok(())
     }
 
     pub async fn dump_database(
@@ -851,24 +919,66 @@ fn detect_bridge_gateway(cli: &str) -> Option<String> {
     Some(gateway)
 }
 
-/// Stable hash of the postgres image build context used as a tag suffix
-/// — changes to the Dockerfile or extension files invalidate cached
-/// images automatically.
-fn postgres_assets_hash() -> &'static str {
-    use std::sync::OnceLock;
-    static HASH: OnceLock<String> = OnceLock::new();
-    HASH.get_or_init(|| {
-        let mut hasher = Sha256::new();
-        hasher.update(POSTGRES_DOCKERFILE.as_bytes());
-        hasher.update(AWS_COMMONS_CONTROL.as_bytes());
-        hasher.update(AWS_COMMONS_SQL.as_bytes());
-        hasher.update(AWS_LAMBDA_CONTROL.as_bytes());
-        hasher.update(AWS_LAMBDA_SQL.as_bytes());
-        let digest = hasher.finalize();
-        digest.iter().take(6).fold(String::new(), |mut acc, b| {
-            use std::fmt::Write;
-            let _ = write!(acc, "{:02x}", b);
-            acc
-        })
-    })
+/// Build the postgres image reference for a given major version. Uses
+/// `<registry>/fakecloud-postgres:<major>-<fakecloud-version>`, where
+/// the registry comes from `FAKECLOUD_POSTGRES_REGISTRY` (defaults to
+/// the public `ghcr.io/faiscadev`). The version pin guarantees the
+/// runtime asks the daemon for the same image CI publishes for this
+/// fakecloud release; mismatched assets force a local rebuild via
+/// the fall-through in `ensure_postgres_image`.
+fn postgres_image_tag(major_version: &str) -> String {
+    let registry = std::env::var("FAKECLOUD_POSTGRES_REGISTRY")
+        .unwrap_or_else(|_| DEFAULT_POSTGRES_REGISTRY.to_string());
+    let registry = registry.trim_end_matches('/');
+    format!(
+        "{}/fakecloud-postgres:{}-{}",
+        registry,
+        major_version,
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Single test (rather than three) so the cases run sequentially —
+    /// `postgres_image_tag` reads a process-global env var and parallel
+    /// `cargo test` workers would race over it otherwise.
+    #[test]
+    fn postgres_image_tag_resolves_registry_overrides() {
+        let prev = std::env::var("FAKECLOUD_POSTGRES_REGISTRY").ok();
+
+        std::env::remove_var("FAKECLOUD_POSTGRES_REGISTRY");
+        assert_eq!(
+            postgres_image_tag("16"),
+            format!(
+                "ghcr.io/faiscadev/fakecloud-postgres:16-{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+
+        std::env::set_var("FAKECLOUD_POSTGRES_REGISTRY", "registry.example.com/team");
+        assert_eq!(
+            postgres_image_tag("15"),
+            format!(
+                "registry.example.com/team/fakecloud-postgres:15-{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+
+        std::env::set_var("FAKECLOUD_POSTGRES_REGISTRY", "registry.example.com/team/");
+        assert_eq!(
+            postgres_image_tag("13"),
+            format!(
+                "registry.example.com/team/fakecloud-postgres:13-{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("FAKECLOUD_POSTGRES_REGISTRY", v),
+            None => std::env::remove_var("FAKECLOUD_POSTGRES_REGISTRY"),
+        }
+    }
 }
