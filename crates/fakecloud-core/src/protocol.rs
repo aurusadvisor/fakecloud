@@ -373,6 +373,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         s if s.starts_with("AWSStepFunctions") => "states",
         s if s.starts_with("AWSOrganizationsV") => "organizations",
         "CertificateManager" => "acm",
+        "AnyScaleFrontendService" => "application-autoscaling",
         _ => return None,
     };
 

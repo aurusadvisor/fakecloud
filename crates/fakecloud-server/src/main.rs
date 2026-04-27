@@ -336,6 +336,11 @@ async fn main() {
     let acm_state: fakecloud_acm::SharedAcmState =
         Arc::new(parking_lot::RwLock::new(fakecloud_acm::AcmAccounts::new()));
 
+    let app_autoscaling_state: fakecloud_application_autoscaling::SharedApplicationAutoScalingState =
+        Arc::new(parking_lot::RwLock::new(
+            fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
+        ));
+
     let bedrock_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -589,6 +594,7 @@ async fn main() {
         cloudfront: cloudfront_state.clone(),
         route53: route53_state.clone(),
         acm: acm_state.clone(),
+        application_autoscaling: app_autoscaling_state.clone(),
         stepfunctions: stepfunctions_state.clone(),
         scheduler: scheduler_state.clone(),
         apigatewayv1: apigatewayv1_state.clone(),
@@ -1977,6 +1983,12 @@ async fn main() {
 
     let acm_service = fakecloud_acm::AcmService::new(acm_state.clone());
     registry.register(Arc::new(acm_service));
+
+    let app_autoscaling_service =
+        fakecloud_application_autoscaling::ApplicationAutoScalingService::new(
+            app_autoscaling_state.clone(),
+        );
+    registry.register(Arc::new(app_autoscaling_service));
 
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {

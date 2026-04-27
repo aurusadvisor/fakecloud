@@ -337,6 +337,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-applicationautoscaling"
+version = "1.103.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e55a9aa0660fddce89f578f21200b33d7bd8e7dbaa2581124ee86b27c2d29505"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-bedrock"
 version = "1.140.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2257,6 +2281,7 @@ dependencies = [
  "fakecloud-acm",
  "fakecloud-apigateway",
  "fakecloud-apigatewayv2",
+ "fakecloud-application-autoscaling",
  "fakecloud-aws",
  "fakecloud-bedrock",
  "fakecloud-cloudformation",
@@ -2357,6 +2382,23 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-application-autoscaling"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tracing",
  "uuid",
 ]
@@ -2482,6 +2524,7 @@ dependencies = [
  "aws-sdk-acm",
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
+ "aws-sdk-applicationautoscaling",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",
@@ -2588,6 +2631,7 @@ dependencies = [
  "aws-sdk-acm",
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
+ "aws-sdk-applicationautoscaling",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",
@@ -3159,6 +3203,7 @@ dependencies = [
  "aws-sdk-acm",
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
+ "aws-sdk-applicationautoscaling",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",

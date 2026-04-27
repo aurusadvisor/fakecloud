@@ -50,6 +50,7 @@ SERVICES=(
     "cloudfront:cloudfront"
     "route53:route-53"
     "acm:acm"
+    "application-autoscaling:application-auto-scaling"
 )
 
 # Sparse checkout only the models we need
