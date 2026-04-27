@@ -118,12 +118,15 @@ impl ApplicationAutoScalingService {
         let account = account_mut(&mut state, &req.account_id);
         let now = Utc::now();
         let arn = if let Some(existing) = account.scalable_targets.get_mut(&key) {
-            if let Some(min) = min_capacity {
-                existing.min_capacity = min;
+            // Validate the merged bounds before mutating so a bad re-register
+            // can't leave the target with min > max (real AWS rejects this).
+            let new_min = min_capacity.unwrap_or(existing.min_capacity);
+            let new_max = max_capacity.unwrap_or(existing.max_capacity);
+            if new_min > new_max {
+                return Err(invalid_param("MinCapacity must be <= MaxCapacity"));
             }
-            if let Some(max) = max_capacity {
-                existing.max_capacity = max;
-            }
+            existing.min_capacity = new_min;
+            existing.max_capacity = new_max;
             if let Some(role) = role_arn {
                 existing.role_arn = role;
             }
@@ -684,9 +687,15 @@ impl ApplicationAutoScalingService {
         let body = req.json_body();
         let arn = require_str(&body, "ResourceARN")?;
         let state = self.state.read();
-        let tags = state
-            .accounts
-            .get(&req.account_id)
+        let account = state.accounts.get(&req.account_id);
+        // Real AWS rejects unknown ARNs with ObjectNotFoundException rather
+        // than returning an empty tag set — match that so callers can tell
+        // a missing target apart from a target with no tags.
+        let exists = account.is_some_and(|a| resource_exists(a, &arn));
+        if !exists {
+            return Err(object_not_found(format!("Resource {arn} not found")));
+        }
+        let tags = account
             .and_then(|a| a.tags.get(&arn))
             .cloned()
             .unwrap_or_default();
@@ -811,8 +820,12 @@ fn resource_exists(account: &AccountState, arn: &str) -> bool {
 }
 
 fn paginate<T: Clone>(items: &[T], token: Option<&str>, max: usize) -> (Vec<T>, Option<String>) {
-    let start = token.and_then(|t| t.parse::<usize>().ok()).unwrap_or(0);
-    let end = (start + max).min(items.len());
+    // Clamp start so a stale or malformed NextToken can't panic the slice.
+    let start = token
+        .and_then(|t| t.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(items.len());
+    let end = start.saturating_add(max).min(items.len());
     let page = items[start..end].to_vec();
     let next = if end < items.len() {
         Some(end.to_string())
@@ -901,7 +914,7 @@ fn synth_forecast(start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<(DateTime<Utc
         let v = 30 + ((h * 5) as i32 % 60).abs();
         out.push((cursor, v));
         cursor += step;
-        if out.len() > 168 {
+        if out.len() >= 168 {
             break; // cap at one week of hourly buckets
         }
     }

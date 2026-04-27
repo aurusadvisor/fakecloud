@@ -489,6 +489,87 @@ async fn tag_untag_list_tags_round_trip() {
 }
 
 #[tokio::test]
+async fn list_tags_unknown_resource_returns_object_not_found() {
+    let server = TestServer::start().await;
+    let aas = server.application_autoscaling_client().await;
+    let err = aas
+        .list_tags_for_resource()
+        .resource_arn(
+            "arn:aws:application-autoscaling:us-east-1:123456789012:scalable-target/deadbeef00",
+        )
+        .send()
+        .await
+        .expect_err("missing arn");
+    assert!(format!("{err:?}").contains("ObjectNotFound"));
+}
+
+#[tokio::test]
+async fn re_register_with_min_above_max_rejected() {
+    let server = TestServer::start().await;
+    let aas = server.application_autoscaling_client().await;
+
+    aas.register_scalable_target()
+        .service_namespace(ServiceNamespace::Ecs)
+        .resource_id("service/cluster/bounds")
+        .scalable_dimension(ScalableDimension::EcsServiceDesiredCount)
+        .min_capacity(1)
+        .max_capacity(5)
+        .send()
+        .await
+        .expect("register");
+
+    let err = aas
+        .register_scalable_target()
+        .service_namespace(ServiceNamespace::Ecs)
+        .resource_id("service/cluster/bounds")
+        .scalable_dimension(ScalableDimension::EcsServiceDesiredCount)
+        .min_capacity(10)
+        .send()
+        .await
+        .expect_err("min above existing max should reject");
+    assert!(format!("{err:?}").contains("ValidationException"));
+
+    // Existing target unchanged.
+    let target = aas
+        .describe_scalable_targets()
+        .service_namespace(ServiceNamespace::Ecs)
+        .send()
+        .await
+        .expect("describe")
+        .scalable_targets()
+        .first()
+        .cloned()
+        .expect("target");
+    assert_eq!(target.min_capacity(), 1);
+    assert_eq!(target.max_capacity(), 5);
+}
+
+#[tokio::test]
+async fn describe_with_stale_next_token_does_not_panic() {
+    let server = TestServer::start().await;
+    let aas = server.application_autoscaling_client().await;
+    aas.register_scalable_target()
+        .service_namespace(ServiceNamespace::Ecs)
+        .resource_id("service/cluster/page")
+        .scalable_dimension(ScalableDimension::EcsServiceDesiredCount)
+        .min_capacity(1)
+        .max_capacity(2)
+        .send()
+        .await
+        .expect("register");
+    // Token way past end — must clamp instead of panic.
+    let resp = aas
+        .describe_scalable_targets()
+        .service_namespace(ServiceNamespace::Ecs)
+        .next_token("9999")
+        .send()
+        .await
+        .expect("paginate stale token");
+    assert!(resp.scalable_targets().is_empty());
+    assert!(resp.next_token().is_none());
+}
+
+#[tokio::test]
 async fn tag_unknown_resource_returns_object_not_found() {
     let server = TestServer::start().await;
     let aas = server.application_autoscaling_client().await;
