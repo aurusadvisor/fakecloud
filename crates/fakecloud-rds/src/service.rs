@@ -504,6 +504,8 @@ impl RdsService {
                 &master_username,
                 &master_user_password,
                 &logical_db_name,
+                &request.account_id,
+                &request.region,
             )
             .await
             .map_err(|error| {
@@ -1472,6 +1474,8 @@ impl RdsService {
                 &snapshot.master_username,
                 &snapshot.master_user_password,
                 db_name,
+                &request.account_id,
+                &request.region,
             )
             .await
         {
@@ -1626,6 +1630,8 @@ impl RdsService {
                 &source_instance.master_username,
                 &source_instance.master_user_password,
                 &db_name,
+                &request.account_id,
+                &request.region,
             )
             .await
         {

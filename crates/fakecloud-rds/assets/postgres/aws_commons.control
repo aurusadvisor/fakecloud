@@ -1,0 +1,4 @@
+comment = 'AWS commons types and helpers (fakecloud)'
+default_version = '1.0'
+relocatable = false
+schema = 'aws_commons'
