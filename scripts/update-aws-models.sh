@@ -51,6 +51,7 @@ SERVICES=(
     "route53:route-53"
     "acm:acm"
     "application-autoscaling:application-auto-scaling"
+    "wafv2:wafv2"
 )
 
 # Sparse checkout only the models we need
