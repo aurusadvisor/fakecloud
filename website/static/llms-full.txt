@@ -6,7 +6,7 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~500ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 27 services (2,048 operations) are shipped today; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 33 services (2,422 operations) are shipped today; more land progressively as they hit the bar.
 
 Key design principles:
 - **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models (54,000+ generated test variants). CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
@@ -80,7 +80,7 @@ Default is `memory` mode — all state lives in RAM, startup is instant,
 shutdown is a no-op. Pass `--storage-mode=persistent --data-path=<dir>` to
 mirror all service state to disk and reload on the next launch.
 
-All 27 services are fully persisted: S3, SQS, SNS, EventBridge, IAM/STS,
+All 33 services are fully persisted: S3, SQS, SNS, EventBridge, IAM/STS,
 SSM, Secrets Manager, CloudWatch Logs, KMS, DynamoDB, Kinesis, SES,
 API Gateway v1, API Gateway v2, CloudFormation, Cognito, Lambda, Step Functions, RDS,
 ElastiCache, ECR, ECS, Elastic Load Balancing v2, and Bedrock. State is
@@ -433,6 +433,100 @@ Protocol: REST (HTTP method + path-based routing, JSON responses)
 Features: Foundation model catalog with 20+ models (Anthropic Claude, Amazon Titan, Meta Llama, Cohere, Mistral), provider-specific response formats, guardrail content evaluation (word, topic, PII detection), model invocation introspection, custom response simulation, event-stream encoding for streaming.
 
 Protocol: REST-JSON (HTTP method + path-based routing, JSON responses)
+
+### CloudFront (147 actions)
+
+**Distributions:** CreateDistribution, GetDistribution, GetDistributionConfig, UpdateDistribution, DeleteDistribution, ListDistributions, ListDistributionsByCachePolicyId, ListDistributionsByOriginRequestPolicyId, ListDistributionsByResponseHeadersPolicyId, ListDistributionsByRealtimeLogConfig, ListDistributionsByWebACLId, ListDistributionsByConnectionMode, ListDistributionsByVPCOriginId, ListDistributionsByAnycastIpListId, AssociateAlias, ListConflictingAliases
+**Invalidations:** CreateInvalidation, GetInvalidation, ListInvalidations
+**Origin Access Control:** CreateOriginAccessControl, GetOriginAccessControl, GetOriginAccessControlConfig, UpdateOriginAccessControl, DeleteOriginAccessControl, ListOriginAccessControls
+**Cache + Origin Request + Response Headers + Continuous Deployment Policies:** full CRUD for each of the four policy types
+**CloudFront Functions:** CreateFunction, DescribeFunction, GetFunction, UpdateFunction, PublishFunction, TestFunction, ListFunctions, DeleteFunction
+**Public Keys + Key Groups + Key Value Stores:** full CRUD for cookie-signing key material
+**Origin Access Identities (legacy):** full CRUD for the older origin-protection model
+**Streaming Distributions (legacy RTMP):** full CRUD
+**Field-Level Encryption:** configs + profiles + Realtime Log Configs full CRUD
+**VPC Origins, Anycast IP Lists, Trust Stores, Resource Policies:** full CRUD
+**Connection Groups + Domain Association/DNS Verification + Managed Certificate Details + Promote-Staging Distribution:** full CRUD with ETag/If-Match concurrency
+**Tagging + Monitoring Subscriptions**
+
+Features: Full `DistributionConfig` round-trip including origins, cache behaviors, custom error responses, viewer certificates, geo restrictions. ETag-based optimistic concurrency on every mutating operation.
+
+Protocol: REST-XML (HTTP method + path-based routing under `/2020-05-31/`)
+
+### Route 53 (71 actions)
+
+**Hosted Zones:** CreateHostedZone, GetHostedZone, DeleteHostedZone, ListHostedZones, ListHostedZonesByName, ListHostedZonesByVPC, GetHostedZoneCount, UpdateHostedZoneComment, UpdateHostedZoneFeatures, GetHostedZoneLimit
+**Resource Record Sets:** ChangeResourceRecordSets, ListResourceRecordSets, GetChange, TestDNSAnswer
+**Health Checks:** CreateHealthCheck, GetHealthCheck, GetHealthCheckCount, GetHealthCheckLastFailureReason, GetHealthCheckStatus, ListHealthChecks, UpdateHealthCheck, DeleteHealthCheck, GetCheckerIpRanges
+**Traffic Policies + Instances:** Create/Get/Delete/List/Update for both, including version increment, list-by-zone, list-by-policy, count
+**DNSSEC + KSK:** EnableHostedZoneDNSSEC, DisableHostedZoneDNSSEC, GetDNSSEC, CreateKeySigningKey, GetKeySigningKey, ListKeySigningKeys, ActivateKeySigningKey, DeactivateKeySigningKey, DeleteKeySigningKey
+**Query Logging:** CreateQueryLoggingConfig, GetQueryLoggingConfig, ListQueryLoggingConfigs, DeleteQueryLoggingConfig
+**CIDR Collections:** CreateCidrCollection, ChangeCidrCollection, ListCidrCollections, ListCidrBlocks, ListCidrLocations, DeleteCidrCollection
+**VPC Associations:** AssociateVPCWithHostedZone, DisassociateVPCFromHostedZone, CreateVPCAssociationAuthorization, DeleteVPCAssociationAuthorization, ListVPCAssociationAuthorizations
+**Reusable Delegation Sets:** CreateReusableDelegationSet, GetReusableDelegationSet, ListReusableDelegationSets, GetReusableDelegationSetLimit, DeleteReusableDelegationSet
+**Geo Locations + Account Limits + Tags:** ListGeoLocations, GetGeoLocation, GetAccountLimit, ChangeTagsForResource, ListTagsForResource, ListTagsForResources
+
+Features: Default SOA + NS records seeded on zone create with AWS-shaped name servers. `INSYNC` change tracking, optimistic concurrency via `HealthCheckVersion` and `CollectionVersion`. Real `HostedZoneNotEmpty`, `HealthCheckInUse`, `DelegationSetInUse`, `InvalidKeySigningKeyStatus` exceptions. Public-zone-only enforcement on query logging.
+
+Protocol: REST-XML under `/2013-04-01/` (HTTP method + URI routing)
+
+### ACM (Certificate Manager) (17 actions)
+
+**Public Certificates:** RequestCertificate, DescribeCertificate, GetCertificate, ListCertificates, SearchCertificates, DeleteCertificate, RenewCertificate, RevokeCertificate
+**Imported Certificates:** ImportCertificate (round-trips PEM, supports re-import to same ARN), ExportCertificate (returns cert + chain + key with passphrase)
+**Tags:** AddTagsToCertificate, RemoveTagsFromCertificate, ListTagsForCertificate
+**Account-wide:** GetAccountConfiguration, PutAccountConfiguration
+**Cert Options:** UpdateCertificateOptions (transparency-logging + export prefs)
+**Validation:** ResendValidationEmail (only for EMAIL-validated certs)
+
+Features: Deterministic synthesized DNS validation records. `IdempotencyToken` dedupe on token + DomainName + SANs (real ACM uses 1-hour window; fakecloud uses exact match for determinism). `RevokeCertificate` only on AMAZON_ISSUED certs. fakecloud does not run real X.509 validation — public certs land at `PENDING_VALIDATION` and stay there until renewed; `Import` flips straight to `ISSUED`.
+
+Protocol: JSON 1.1 (`X-Amz-Target: CertificateManager.<Action>`)
+
+### Application Auto Scaling (14 actions)
+
+**Scalable Targets:** RegisterScalableTarget, DeregisterScalableTarget, DescribeScalableTargets
+**Scaling Policies:** PutScalingPolicy, DescribeScalingPolicies, DeleteScalingPolicy
+**Scheduled Actions:** PutScheduledAction, DescribeScheduledActions, DeleteScheduledAction
+**Activity + Forecasting:** DescribeScalingActivities, GetPredictiveScalingForecast
+**Tags:** TagResource, UntagResource, ListTagsForResource
+
+Features: Supports all 13 documented namespaces (ECS, Lambda, DynamoDB, RDS, ElastiCache, SageMaker, EMR, AppStream, Cassandra, Kafka, Neptune, EC2 Spot Fleet, Comprehend). Step + target-tracking + predictive scaling policies. Scheduled actions with cron / one-shot start/end times + Timezone. `RoleARN` defaults to per-namespace service-linked role ARN. `Deregister` cascades to policies + scheduled actions for the same target. `GetPredictiveScalingForecast` returns deterministic hourly Load + Capacity buckets capped at 168 hours (one week).
+
+Protocol: JSON 1.1 (`X-Amz-Target: AnyScaleFrontendService.<Action>`)
+
+### WAF v2 (55 actions)
+
+**Web ACLs / Rule Groups / IP Sets / Regex Pattern Sets:** Create/Get/List/Update/Delete for each (with `LockToken` optimistic concurrency)
+**Capacity:** CheckCapacity (recursive count of statement leaves through `AndStatement`/`OrStatement`/`NotStatement`)
+**Web ACL Associations:** AssociateWebACL, DisassociateWebACL, GetWebACLForResource, ListResourcesForWebACL
+**API Keys:** CreateAPIKey, DeleteAPIKey, GetDecryptedAPIKey, ListAPIKeys
+**Logging:** PutLoggingConfiguration, GetLoggingConfiguration, DeleteLoggingConfiguration, ListLoggingConfigurations
+**Permission Policies:** PutPermissionPolicy, GetPermissionPolicy, DeletePermissionPolicy
+**Managed Rule Catalog:** ListAvailableManagedRuleGroups + Versions, DescribeManagedRuleGroup, DescribeAllManagedProducts, DescribeManagedProductsByVendor, GetManagedRuleSet, PutManagedRuleSetVersions, UpdateManagedRuleSetVersionExpiryDate, ListManagedRuleSets
+**Mobile SDK:** GenerateMobileSdkReleaseUrl, GetMobileSdkRelease, ListMobileSdkReleases
+**Tags:** TagResource, UntagResource, ListTagsForResource
+**Observability stubs:** GetSampledRequests, GetTopPathStatisticsByTraffic, GetRateBasedStatementManagedKeys
+
+Features: REGIONAL + CLOUDFRONT scope segmentation; ARN segment reflects scope (`regional/...` vs `global/...` with `us-east-1` region for CLOUDFRONT). Lock token rotates on every successful mutation. Managed rule catalog seeds three popular AWS-vendor rule groups (Common, KnownBadInputs, SQLi). Control plane only — fakecloud does not actually inspect any HTTP request.
+
+Protocol: JSON 1.1 (`X-Amz-Target: AWSWAF_20190729.<Action>`)
+
+### Athena (70 actions)
+
+**Workgroups:** CreateWorkGroup, GetWorkGroup, ListWorkGroups, UpdateWorkGroup, DeleteWorkGroup
+**Data Catalogs:** CreateDataCatalog, GetDataCatalog, ListDataCatalogs, UpdateDataCatalog, DeleteDataCatalog, GetDatabase, ListDatabases, GetTableMetadata, ListTableMetadata
+**Named Queries:** Create/Get/List/Update/Delete + BatchGetNamedQuery
+**Prepared Statements:** Create/Get/List/Update/Delete + BatchGetPreparedStatement (keyed by `(workgroup, statement_name)`)
+**Query Executions:** StartQueryExecution, StopQueryExecution, GetQueryExecution, ListQueryExecutions, BatchGetQueryExecution, GetQueryResults, GetQueryRuntimeStatistics
+**Notebooks:** CreateNotebook, ImportNotebook, ExportNotebook, GetNotebookMetadata, ListNotebookMetadata, UpdateNotebook, UpdateNotebookMetadata, DeleteNotebook, CreatePresignedNotebookUrl
+**Sessions + Calculations:** StartSession, GetSession, GetSessionStatus, GetSessionEndpoint, ListSessions, ListNotebookSessions, TerminateSession, StartCalculationExecution, StopCalculationExecution, GetCalculationExecution, GetCalculationExecutionCode, GetCalculationExecutionStatus, ListCalculationExecutions
+**Capacity Reservations:** Create/Get/List/Update/Cancel/Delete + Put/GetCapacityAssignmentConfiguration
+**Tags + Read-only catalog:** TagResource, UntagResource, ListTagsForResource, ListEngineVersions, ListApplicationDPUSizes, ListExecutors, GetResourceDashboard
+
+Features: `primary` workgroup + `AwsDataCatalog` GLUE catalog auto-seeded on first account touch and rejected on delete. `DeleteWorkGroup` refuses non-empty workgroups (queries / named queries / prepared statements) unless `RecursiveDeleteOption=true`. `StartQueryExecution` synthesizes a SUCCEEDED execution with a one-row `[["1"]]` result so callers can immediately fetch via `GetQueryResults` without polling. Statement classification (DML / DDL / UTILITY) inferred from leading SQL keyword. fakecloud is **not** a SQL engine — every query returns the synthesized result regardless of the SQL string.
+
+Protocol: JSON 1.1 (`X-Amz-Target: AmazonAthena.<Action>`)
 
 ## Cross-Service Integration
 
