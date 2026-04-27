@@ -265,6 +265,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-acm"
+version = "1.101.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d2358730be0ebab65acbe6f752fe22024722e3eb944889111b1af8b8b0ca7f2"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-apigateway"
 version = "1.103.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2230,6 +2254,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "fakecloud-acm",
  "fakecloud-apigateway",
  "fakecloud-apigatewayv2",
  "fakecloud-aws",
@@ -2271,6 +2296,26 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-acm"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "hex",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tracing",
  "uuid",
 ]
 
@@ -2434,6 +2479,7 @@ version = "0.12.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-acm",
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-bedrock",
@@ -2539,6 +2585,7 @@ version = "0.12.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-acm",
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-bedrock",
@@ -3109,6 +3156,7 @@ version = "0.12.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-acm",
  "aws-sdk-apigateway",
  "aws-sdk-apigatewayv2",
  "aws-sdk-bedrock",

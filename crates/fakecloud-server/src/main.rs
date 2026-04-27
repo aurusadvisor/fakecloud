@@ -333,6 +333,9 @@ async fn main() {
         fakecloud_route53::Route53Accounts::new(),
     ));
 
+    let acm_state: fakecloud_acm::SharedAcmState =
+        Arc::new(parking_lot::RwLock::new(fakecloud_acm::AcmAccounts::new()));
+
     let bedrock_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -585,6 +588,7 @@ async fn main() {
         ecs: ecs_state.clone(),
         cloudfront: cloudfront_state.clone(),
         route53: route53_state.clone(),
+        acm: acm_state.clone(),
         stepfunctions: stepfunctions_state.clone(),
         scheduler: scheduler_state.clone(),
         apigatewayv1: apigatewayv1_state.clone(),
@@ -1970,6 +1974,9 @@ async fn main() {
 
     let route53_service = fakecloud_route53::Route53Service::new(route53_state.clone());
     registry.register(Arc::new(route53_service));
+
+    let acm_service = fakecloud_acm::AcmService::new(acm_state.clone());
+    registry.register(Arc::new(acm_service));
 
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());
     let sfn_delivery_bus = {
