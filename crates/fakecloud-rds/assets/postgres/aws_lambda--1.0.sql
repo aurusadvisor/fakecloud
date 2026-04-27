@@ -76,6 +76,9 @@ return [(
 )]
 $$;
 
+-- LANGUAGE SQL keeps the user-facing arg name `payload` even though it
+-- also names a RETURNS TABLE column. PL/pgSQL would reject that as a
+-- duplicate identifier in the function namespace; SQL doesn't.
 CREATE FUNCTION aws_lambda.invoke(
     function_name aws_commons._lambda_function_arn_1,
     payload json,
@@ -87,14 +90,12 @@ CREATE FUNCTION aws_lambda.invoke(
     executed_version text,
     log_result text
 )
-LANGUAGE plpgsql
+LANGUAGE SQL
 AS $$
-BEGIN
-    RETURN QUERY SELECT * FROM aws_lambda.invoke(
+    SELECT * FROM aws_lambda.invoke(
         (function_name).function_name,
         payload,
         COALESCE(region, (function_name).region),
         invocation_type
     );
-END;
 $$;
