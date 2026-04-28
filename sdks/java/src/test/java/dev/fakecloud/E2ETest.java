@@ -349,7 +349,7 @@ class E2ETest {
         while (System.currentTimeMillis() < deadline) {
             var desc = rds.describeDBInstances(b -> b.dbInstanceIdentifier("java-rds-db"));
             if (!desc.dbInstances().isEmpty()
-                    && "available".equals(desc.dbInstances().get(0).dbInstanceStatusAsString())) {
+                    && "available".equals(desc.dbInstances().get(0).dbInstanceStatus())) {
                 break;
             }
             Thread.sleep(1000);
