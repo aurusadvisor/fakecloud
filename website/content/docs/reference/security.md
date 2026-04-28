@@ -264,6 +264,23 @@ AWS_ACCESS_KEY_ID=<alice-akid> AWS_SECRET_ACCESS_KEY=<alice-secret> \
 # -> AccessDeniedException
 ```
 
+## Image supply-chain (cosign + Trivy)
+
+Every published container image — `ghcr.io/faiscadev/fakecloud` and the prebuilt RDS support images (`fakecloud-postgres`, `fakecloud-mysql`, `fakecloud-mariadb`) — is:
+
+1. **Scanned** by [Trivy](https://github.com/aquasecurity/trivy) for `CRITICAL`/`HIGH` OS and library vulnerabilities (`ignore-unfixed: true`). The release fails closed if any are found.
+2. **Signed** with [cosign](https://github.com/sigstore/cosign) keyless mode using the GitHub Actions OIDC token, so attestations are anchored to the workflow that built the image — no key management, no detached secret.
+
+To verify an image before pulling:
+
+```bash
+cosign verify ghcr.io/faiscadev/fakecloud-postgres:16-0.13.1 \
+  --certificate-identity-regexp '^https://github\.com/faiscadev/fakecloud/' \
+  --certificate-oidc-issuer       https://token.actions.githubusercontent.com
+```
+
+Same shape works for `fakecloud-mysql`, `fakecloud-mariadb`, and the main `fakecloud` image. A successful verification means the image was built by a workflow run in the `faiscadev/fakecloud` repository — not republished by anyone else.
+
 ## See also
 
 - [Limitations](@/docs/reference/limitations.md) — what fakecloud doesn't do at all
