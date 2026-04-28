@@ -9,9 +9,13 @@ ARG MARIADB_VERSION=10.11
 FROM mariadb:${MARIADB_VERSION}
 
 USER root
+# UDF plugin API structs are vendored inline in fakecloud_udf.c so we
+# only need a C compiler + libcurl headers. Keeping the dep set
+# symmetric with the mysql Dockerfile means a single source of truth
+# for the build rule.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        gcc make libcurl4-openssl-dev libmariadb-dev libc6-dev ca-certificates curl \
+        gcc make libcurl4-openssl-dev libc6-dev ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY fakecloud_udf.c /tmp/fakecloud_udf.c
@@ -19,19 +23,19 @@ COPY fakecloud-bootstrap.sh /usr/local/bin/fakecloud-bootstrap.sh
 COPY 99-fakecloud-bootstrap.sql.tmpl /tmp/99-fakecloud-bootstrap.sql.tmpl
 RUN chmod +x /usr/local/bin/fakecloud-bootstrap.sh
 
-# MariaDB ships mysql_config-style headers via libmariadb-dev. The
-# plugin dir lives at /usr/lib/mysql/plugin (or under the mariadb
-# tree on some images); honor whatever mysql_config reports first.
-RUN PLUGIN_DIR="$(mariadb_config --plugindir 2>/dev/null \
-        || mysql_config --plugindir 2>/dev/null \
-        || echo /usr/lib/mysql/plugin)" \
-    && mkdir -p "$PLUGIN_DIR" \
-    && CFLAGS="$(mariadb_config --cflags 2>/dev/null \
-        || mysql_config --cflags 2>/dev/null \
-        || echo -I/usr/include/mariadb)" \
-    && gcc -O2 -fPIC -shared $CFLAGS -o "$PLUGIN_DIR/fakecloud_udf.so" \
-        /tmp/fakecloud_udf.c -lcurl -lpthread \
-    && rm /tmp/fakecloud_udf.c
+# Compile the UDF and drop it into the server's plugin dir. Mariadb
+# images use /usr/lib/mysql/plugin on Debian; probe a few common
+# locations for forward compatibility.
+RUN set -eux; \
+    PLUGIN_DIR=""; \
+    for d in /usr/lib/mysql/plugin /usr/lib/x86_64-linux-gnu/mariadb19/plugin /usr/lib/aarch64-linux-gnu/mariadb19/plugin /usr/lib64/mysql/plugin; do \
+        if [ -d "$d" ]; then PLUGIN_DIR="$d"; break; fi; \
+    done; \
+    : "${PLUGIN_DIR:=/usr/lib/mysql/plugin}"; \
+    mkdir -p "$PLUGIN_DIR"; \
+    gcc -O2 -fPIC -shared -o "$PLUGIN_DIR/fakecloud_udf.so" \
+        /tmp/fakecloud_udf.c -lcurl -lpthread; \
+    rm /tmp/fakecloud_udf.c
 
 ENTRYPOINT ["fakecloud-bootstrap.sh"]
 CMD ["mariadbd"]
