@@ -65,6 +65,9 @@ pub(crate) fn action_takes_function_name(action: &str) -> bool {
             | "ListAliases"
             | "UpdateAlias"
             | "DeleteAlias"
+            | "PutRuntimeManagementConfig"
+            | "GetRuntimeManagementConfig"
+            | "ListDurableExecutionsByFunction"
     )
 }
 
