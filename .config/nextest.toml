@@ -3,3 +3,4 @@ fail-fast = false
 failure-output = "immediate-final"
 status-level = "fail"
 final-status-level = "slow"
+retries = 2

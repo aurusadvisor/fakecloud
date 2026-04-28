@@ -143,6 +143,15 @@ jobs:
       - name: Mark fakecloud binary executable
         run: chmod +x target/debug/fakecloud
 
+      - name: Disk diagnostics before nextest
+        run: |
+          echo "=== df -h ==="
+          df -h
+          echo "=== target dir ==="
+          du -sh target 2>/dev/null || true
+          echo "=== ~/.cargo ==="
+          du -sh ~/.cargo 2>/dev/null || true
+
       - name: Run nextest partition
         run: |
           cmd=(cargo nextest run -P ci -p fakecloud-e2e -E "$NEXTEST_FILTER")
@@ -150,6 +159,14 @@ jobs:
             cmd+=(--partition "$NEXTEST_PARTITION")
           fi
           "${cmd[@]}"
+
+      - name: Disk diagnostics after nextest
+        if: always()
+        run: |
+          echo "=== df -h ==="
+          df -h
+          echo "=== target dir ==="
+          du -sh target 2>/dev/null || true
 
       - name: Prune container state after tests
         if: always()
