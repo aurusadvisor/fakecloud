@@ -4,6 +4,14 @@
 //! images. Each test creates a Lambda, spins up the engine container,
 //! and exercises both the sync and async invocation paths through the
 //! libcurl-backed UDF + bridge endpoint round trip.
+//!
+//! Gated behind `FAKECLOUD_E2E_HEAVY_DBS=1` (same pattern as
+//! `rds_heavy_engines.rs`): on a fresh PR build the prebuilt
+//! `fakecloud-mysql` / `fakecloud-mariadb` images are not yet on
+//! ghcr.io for the in-flight version, so the runtime falls back to a
+//! local `docker build` that pushes the per-job E2E budget over
+//! 30 minutes. CI lanes that bake the heavy images opt in via the
+//! variable; the regular E2E lane skips.
 
 mod helpers;
 
@@ -12,6 +20,12 @@ use std::io::Write;
 use aws_sdk_lambda::primitives::Blob;
 use helpers::TestServer;
 use mysql_async::prelude::*;
+
+fn heavy_dbs_opted_in() -> bool {
+    std::env::var("FAKECLOUD_E2E_HEAVY_DBS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
 
 fn make_echo_zip() -> Vec<u8> {
     let buf = Vec::new();
@@ -93,10 +107,20 @@ async fn run_lambda_round_trip(engine: &str, engine_version: &str, db_id: &str) 
 
 #[tokio::test]
 async fn aws_lambda_bridge_mysql_round_trip() {
+    if !heavy_dbs_opted_in() {
+        eprintln!(
+            "skipping aws_lambda_bridge_mysql_round_trip — set FAKECLOUD_E2E_HEAVY_DBS=1 to enable"
+        );
+        return;
+    }
     run_lambda_round_trip("mysql", "8.0", "mysql-lambda-db").await;
 }
 
 #[tokio::test]
 async fn aws_lambda_bridge_mariadb_round_trip() {
+    if !heavy_dbs_opted_in() {
+        eprintln!("skipping aws_lambda_bridge_mariadb_round_trip — set FAKECLOUD_E2E_HEAVY_DBS=1 to enable");
+        return;
+    }
     run_lambda_round_trip("mariadb", "10.11", "mariadb-lambda-db").await;
 }

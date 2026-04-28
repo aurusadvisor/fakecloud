@@ -393,6 +393,14 @@ pub fn default_engine_versions() -> Vec<EngineVersionInfo> {
         // MariaDB versions
         EngineVersionInfo {
             engine: "mariadb".to_string(),
+            engine_version: "11.4.5".to_string(),
+            db_parameter_group_family: "mariadb11.4".to_string(),
+            db_engine_description: "MariaDB Community Edition".to_string(),
+            db_engine_version_description: "MariaDB 11.4.5".to_string(),
+            status: "available".to_string(),
+        },
+        EngineVersionInfo {
+            engine: "mariadb".to_string(),
             engine_version: "10.11.6".to_string(),
             db_parameter_group_family: "mariadb10.11".to_string(),
             db_engine_description: "MariaDB Community Edition".to_string(),
@@ -420,6 +428,7 @@ pub fn default_orderable_options() -> Vec<OrderableDbInstanceOption> {
         ("mysql", "8.0.35", "general-public-license"),
         ("mysql", "8.0.28", "general-public-license"),
         ("mysql", "5.7.44", "general-public-license"),
+        ("mariadb", "11.4.5", "general-public-license"),
         ("mariadb", "10.11.6", "general-public-license"),
         ("mariadb", "10.6.16", "general-public-license"),
     ];
@@ -454,6 +463,7 @@ pub fn default_parameter_groups(
         ("postgres13", "Default parameter group for postgres13"),
         ("mysql8.0", "Default parameter group for mysql8.0"),
         ("mysql5.7", "Default parameter group for mysql5.7"),
+        ("mariadb11.4", "Default parameter group for mariadb11.4"),
         ("mariadb10.11", "Default parameter group for mariadb10.11"),
         ("mariadb10.6", "Default parameter group for mariadb10.6"),
         // Heavy-engine families. The names match what
@@ -611,8 +621,8 @@ mod tests {
     fn default_engine_versions_are_postgres_metadata() {
         let versions = default_engine_versions();
 
-        assert_eq!(versions.len(), 9); // 4 postgres + 3 mysql + 2 mariadb
-                                       // Check first postgres version
+        assert_eq!(versions.len(), 10); // 4 postgres + 3 mysql + 3 mariadb
+                                        // Check first postgres version
         assert_eq!(versions[0].engine, "postgres");
         assert_eq!(versions[0].engine_version, "16.3");
         assert_eq!(versions[0].db_parameter_group_family, "postgres16");
@@ -623,7 +633,7 @@ mod tests {
         let versions = default_engine_versions();
         let options = default_orderable_options();
 
-        assert_eq!(options.len(), 63); // 9 versions * 7 instance classes
+        assert_eq!(options.len(), 70); // 10 versions * 7 instance classes
                                        // Verify all engines and versions have orderable options
         for version in &versions {
             assert!(options.iter().any(|opt| {

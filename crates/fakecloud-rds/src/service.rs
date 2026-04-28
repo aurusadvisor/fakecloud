@@ -2477,10 +2477,13 @@ fn validate_create_request(
     // dev-edition images (gvenzl/oracle-free 23, mssql-server 2022,
     // db2_community 11.5). Adding a new version here also requires
     // wiring the image tag in `RdsRuntime::ensure_postgres`.
+    // Major versions ("8.0", "10.11", ...) are accepted alongside the
+    // full `<major>.<minor>.<patch>` triplets — AWS RDS validates both
+    // forms and the runtime resolves the matching prebuilt image regardless.
     let supported_versions = match engine {
-        "postgres" => vec!["16.3", "15.5", "14.10", "13.13"],
-        "mysql" => vec!["8.0.35", "8.0.28", "5.7.44"],
-        "mariadb" => vec!["10.11.6", "10.6.16"],
+        "postgres" => vec!["16", "15", "14", "13", "16.3", "15.5", "14.10", "13.13"],
+        "mysql" => vec!["8.0", "8.0.35", "8.0.28", "5.7.44"],
+        "mariadb" => vec!["10.6", "10.11", "11.4", "11.4.5", "10.11.6", "10.6.16"],
         "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => {
             vec!["23.0.0", "21.0.0", "19.0.0"]
         }
@@ -3178,7 +3181,9 @@ fn default_parameter_group(engine: &str, engine_version: &str) -> String {
             format!("default.mysql{}", major)
         }
         "mariadb" => {
-            let major = if engine_version.starts_with("10.11") {
+            let major = if engine_version.starts_with("11.4") {
+                "11.4"
+            } else if engine_version.starts_with("10.11") {
                 "10.11"
             } else {
                 "10.6"
