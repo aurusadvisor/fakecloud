@@ -324,6 +324,48 @@ pub struct RdsLambdaInvokeResponse {
     pub log_result: Option<String>,
 }
 
+// ── RDS aws_s3 extension bridge ─────────────────────────────────────
+
+/// Request body for `POST /_fakecloud/rds/s3-import`. The endpoint is
+/// the bridge that the PostgreSQL `aws_s3` extension calls into to
+/// fetch an object from a fakecloud bucket. Body is returned base64
+/// encoded so JSON transport stays text-only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RdsS3ImportRequest {
+    pub bucket: String,
+    pub key: String,
+    pub region: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RdsS3ImportResponse {
+    pub bucket: String,
+    pub key: String,
+    pub body_b64: String,
+    pub bytes_processed: i64,
+}
+
+/// Request body for `POST /_fakecloud/rds/s3-export`. Bridge equivalent
+/// of an S3 PutObject driven from inside the DB container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RdsS3ExportRequest {
+    pub bucket: String,
+    pub key: String,
+    pub region: Option<String>,
+    pub body_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RdsS3ExportResponse {
+    pub bucket: String,
+    pub key: String,
+    pub bytes_uploaded: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FireRuleTarget {

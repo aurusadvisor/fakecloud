@@ -23,6 +23,7 @@ fakecloud implements **163 of 163** RDS operations at 100% Smithy conformance. D
 - **License models** — tracking
 - **EventBridge events** — lifecycle ops emit `aws.rds` events on the `default` bus, deliverable to SQS, SNS, Lambda, etc. via standard EB rules
 - **PostgreSQL `aws_lambda` extension** — call fakecloud Lambda functions from inside RDS PostgreSQL via `CREATE EXTENSION aws_lambda CASCADE` and `aws_lambda.invoke(...)` (subset of the AWS RDS extension surface; see below)
+- **PostgreSQL `aws_s3` extension** — import objects from fakecloud S3 into tables (`aws_s3.table_import_from_s3`) and export query results back to S3 (`aws_s3.query_export_to_s3`); see below
 
 ## EventBridge integration
 
@@ -55,6 +56,7 @@ Query protocol. Form-encoded body, `Action` parameter, XML responses.
 
 - `GET /_fakecloud/rds/instances` — list fakecloud-managed DB instances with runtime metadata (container id, host port)
 - `POST /_fakecloud/rds/lambda-invoke` — internal bridge used by the PostgreSQL `aws_lambda` extension to invoke fakecloud Lambda functions from inside the DB container
+- `POST /_fakecloud/rds/s3-import` / `POST /_fakecloud/rds/s3-export` — internal bridges used by the PostgreSQL `aws_s3` extension to read/write fakecloud S3 objects from inside the DB container
 
 ## PostgreSQL `aws_lambda` extension
 
@@ -83,6 +85,41 @@ The first time you create a PostgreSQL DB instance, fakecloud lazily builds a `f
 
 Inside the container, the extension's `plpython3u` body POSTs to `http://host.docker.internal:<server_port>/_fakecloud/rds/lambda-invoke`, which routes through fakecloud's standard Lambda invocation path.
 
+## PostgreSQL `aws_s3` extension
+
+Matches the AWS RDS extension of the same name. Lets SQL running inside an RDS-managed PostgreSQL instance read objects from fakecloud S3 directly into tables and write query results back as objects:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS aws_s3 CASCADE;
+
+-- Import a CSV file into a table
+SELECT * FROM aws_s3.table_import_from_s3(
+    'people',
+    '',                           -- column list (empty = all columns)
+    'format csv',                 -- COPY options
+    aws_commons.create_s3_uri('my-bucket', 'people.csv', 'us-east-1')
+);
+
+-- Export a query result back to S3
+SELECT * FROM aws_s3.query_export_to_s3(
+    'SELECT id, name FROM people ORDER BY id',
+    aws_commons.create_s3_uri('my-bucket', 'export.csv', 'us-east-1'),
+    'format csv'
+);
+```
+
+Implemented function signatures (subset of the AWS RDS S3 import/export API):
+
+- `aws_s3.table_import_from_s3(table_name text, column_list text, options text, bucket text, file_path text, region text DEFAULT NULL)` -> returns `(rows_imported bigint, file_compression text, bytes_processed bigint)`
+- `aws_s3.table_import_from_s3(table_name text, column_list text, options text, s3_info aws_commons._s3_uri_1)` (composite-typed overload)
+- `aws_s3.query_export_to_s3(query text, bucket text, file_path text, region text DEFAULT NULL, options text DEFAULT NULL)` -> returns `(rows_uploaded bigint, files_uploaded bigint, bytes_uploaded bigint)`
+- `aws_s3.query_export_to_s3(query text, s3_info aws_commons._s3_uri_1, options text DEFAULT NULL)` (composite-typed overload)
+- `aws_commons.create_s3_uri(bucket text, file_path text, region text DEFAULT NULL)` -> composite of `(bucket, file_path, region)`
+
+The `options` argument is forwarded verbatim into the underlying postgres `COPY` `WITH (...)` clause (`format csv`, `header true`, `delimiter ','`, etc.). `file_compression` is always returned empty — fakecloud does not autodetect compression on import; pre-decompress objects before calling.
+
+The bridges (`/_fakecloud/rds/s3-import`, `/_fakecloud/rds/s3-export`) read and write the in-memory S3 state of the same fakecloud server, so any object that's visible to a `GetObject`/`PutObject` call against fakecloud is reachable from `aws_s3`.
+
 ## How the Docker integration works
 
 When you call `CreateDBInstance` for PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2, fakecloud starts a real Docker container running the upstream image for that engine and version, waits for it to be ready, and reports the mapped host port. Your application connects to that port like it would connect to any database.
@@ -93,7 +130,7 @@ When you call `CreateDBInstance` for PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/
 
 | Engine | Image | Port | Wait probe |
 |--------|-------|------|------------|
-| `postgres` | `ghcr.io/faiscadev/fakecloud-postgres:<major>-<fakecloud-version>` (prebuilt with `plpython3u` + the `aws_lambda` and `aws_commons` extensions on top of `postgres:<major>`; falls back to a local build if the pull fails) | 5432 | `tokio-postgres` ping |
+| `postgres` | `ghcr.io/faiscadev/fakecloud-postgres:<major>-<fakecloud-version>` (prebuilt with `plpython3u` + the `aws_commons`, `aws_lambda`, and `aws_s3` extensions on top of `postgres:<major>`; falls back to a local build if the pull fails) | 5432 | `tokio-postgres` ping |
 | `mysql` | `mysql:<major>` | 3306 | `mysql_async` ping |
 | `mariadb` | `mariadb:<major>` | 3306 | `mysql_async` ping |
 | `oracle-ee` / `oracle-se2` (+`-cdb`) | `gvenzl/oracle-free:23-slim` | 1521 | log marker `DATABASE IS READY TO USE!` + TCP probe |

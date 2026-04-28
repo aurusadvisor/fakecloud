@@ -549,6 +549,7 @@ async fn main() {
     let sqs_introspection_state = sqs_state.clone();
     let eb_introspection_state = eb_state.clone();
     let s3_introspection_state = s3_state.clone();
+    let rds_bridge_s3_state = s3_state.clone();
     let rds_introspection_state = rds_state.clone();
     let elasticache_introspection_state = elasticache_state.clone();
     let ecr_introspection_state = ecr_state.clone();
@@ -3577,6 +3578,144 @@ async fn main() {
                                 })),
                             ),
                         }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/rds/s3-import",
+            axum::routing::post({
+                let s3 = rds_bridge_s3_state.clone();
+                move |headers: axum::http::HeaderMap,
+                      axum::Json(body): axum::Json<types::RdsS3ImportRequest>| {
+                    let s3 = s3.clone();
+                    async move {
+                        let account_id = headers
+                            .get("x-fakecloud-account-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("000000000000")
+                            .to_string();
+                        let bytes = {
+                            let mas = s3.read();
+                            let state = mas.get(&account_id).unwrap_or_else(|| mas.default_ref());
+                            let Some(bucket) = state.buckets.get(&body.bucket) else {
+                                return (
+                                    axum::http::StatusCode::NOT_FOUND,
+                                    axum::Json(serde_json::json!({
+                                        "error": "NoSuchBucket",
+                                        "bucket": body.bucket,
+                                    })),
+                                );
+                            };
+                            let Some(object) = bucket.objects.get(&body.key) else {
+                                return (
+                                    axum::http::StatusCode::NOT_FOUND,
+                                    axum::Json(serde_json::json!({
+                                        "error": "NoSuchKey",
+                                        "bucket": body.bucket,
+                                        "key": body.key,
+                                    })),
+                                );
+                            };
+                            match state.read_body(&object.body) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    return (
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        axum::Json(serde_json::json!({
+                                            "error": "ReadBodyFailed",
+                                            "message": e.to_string(),
+                                        })),
+                                    );
+                                }
+                            }
+                        };
+                        let len = bytes.len() as i64;
+                        let resp = types::RdsS3ImportResponse {
+                            bucket: body.bucket,
+                            key: body.key,
+                            body_b64: base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &bytes,
+                            ),
+                            bytes_processed: len,
+                        };
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::to_value(resp).unwrap()),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/rds/s3-export",
+            axum::routing::post({
+                let s3 = rds_bridge_s3_state;
+                move |headers: axum::http::HeaderMap,
+                      axum::Json(body): axum::Json<types::RdsS3ExportRequest>| {
+                    let s3 = s3.clone();
+                    async move {
+                        let account_id = headers
+                            .get("x-fakecloud-account-id")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("000000000000")
+                            .to_string();
+                        let bytes = match base64::Engine::decode(
+                            &base64::engine::general_purpose::STANDARD,
+                            body.body_b64.as_bytes(),
+                        ) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(serde_json::json!({
+                                        "error": "InvalidBase64",
+                                        "message": e.to_string(),
+                                    })),
+                                );
+                            }
+                        };
+                        let bytes_uploaded = bytes.len() as i64;
+                        let now = chrono::Utc::now();
+                        let etag = {
+                            use md5::{Digest, Md5};
+                            format!("\"{:x}\"", Md5::digest(&bytes))
+                        };
+                        let body_bytes = bytes::Bytes::from(bytes);
+                        {
+                            let mut mas = s3.write();
+                            let state = mas.get_or_create(&account_id);
+                            let Some(bucket) = state.buckets.get_mut(&body.bucket) else {
+                                return (
+                                    axum::http::StatusCode::NOT_FOUND,
+                                    axum::Json(serde_json::json!({
+                                        "error": "NoSuchBucket",
+                                        "bucket": body.bucket,
+                                    })),
+                                );
+                            };
+                            let object = fakecloud_s3::state::S3Object {
+                                key: body.key.clone(),
+                                body: fakecloud_s3::state::memory_body(body_bytes),
+                                content_type: "application/octet-stream".to_string(),
+                                etag,
+                                size: bytes_uploaded as u64,
+                                last_modified: now,
+                                storage_class: "STANDARD".to_string(),
+                                ..Default::default()
+                            };
+                            bucket.objects.insert(body.key.clone(), object);
+                        }
+                        let resp = types::RdsS3ExportResponse {
+                            bucket: body.bucket,
+                            key: body.key,
+                            bytes_uploaded,
+                        };
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::to_value(resp).unwrap()),
+                        )
                     }
                 }
             }),
