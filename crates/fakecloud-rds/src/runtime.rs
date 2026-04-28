@@ -134,11 +134,12 @@ impl RdsRuntime {
                 (image, "5432", env_vars, Some(major_version.to_string()))
             }
             "mysql" => {
-                let major_version = if engine_version.starts_with("5.7") {
-                    "5.7"
-                } else {
-                    "8.0"
-                };
+                // 5.7 was dropped after Oracle community support ended
+                // (Oct 2023) — the image base no longer ships the build
+                // deps we need for the UDF. Any 5.7.* engine version
+                // resolves to 8.0.
+                let _ = engine_version;
+                let major_version = "8.0";
                 let image = self.ensure_mysql_image(major_version).await?;
                 let env_vars = vec![
                     format!("MYSQL_ROOT_PASSWORD={password}"),

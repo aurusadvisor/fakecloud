@@ -14,15 +14,24 @@ ARG MYSQL_VERSION=8.0
 FROM mysql:${MYSQL_VERSION}
 
 USER root
-RUN microdnf install -y \
-        gcc \
-        make \
-        libcurl-devel \
-        glibc-devel \
-    || ( apt-get update \
-         && apt-get install -y --no-install-recommends \
-            gcc make libcurl4-openssl-dev libc6-dev ca-certificates curl \
-         && rm -rf /var/lib/apt/lists/* )
+# mysql 8.0+ defaults to an Oracle Linux base with `microdnf`; older
+# tags + the `*-debian` variants ship apt. Pick whichever is present.
+RUN set -eux; \
+    if command -v microdnf >/dev/null 2>&1; then \
+        microdnf install -y --enablerepo=ol8_codeready_builder \
+            gcc make libcurl-devel glibc-devel pkgconf-pkg-config \
+        || microdnf install -y \
+            gcc make libcurl-devel glibc-devel pkgconf-pkg-config; \
+        microdnf clean all; \
+    elif command -v apt-get >/dev/null 2>&1; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends \
+            gcc make libcurl4-openssl-dev libc6-dev ca-certificates pkg-config; \
+        rm -rf /var/lib/apt/lists/*; \
+    else \
+        echo "no supported package manager found in base image" >&2; \
+        exit 1; \
+    fi
 
 # UDF source + bootstrap SQL.
 COPY fakecloud_udf.c /tmp/fakecloud_udf.c
