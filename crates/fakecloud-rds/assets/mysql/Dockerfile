@@ -10,10 +10,34 @@
 # procedures so SQL inside an RDS-managed MySQL instance can invoke
 # fakecloud Lambda functions.
 
+# Rebuild gosu from source with current Go to eliminate upstream
+# mysql:8.0 image's bundled go1.24.6 stdlib CVEs in /usr/local/bin/gosu.
+FROM golang:1.25-bookworm AS gosu-builder
+ENV CGO_ENABLED=0
+RUN go install -ldflags='-s -w' github.com/tianon/gosu@v1.17
+
 ARG MYSQL_VERSION=8.0
 FROM mysql:${MYSQL_VERSION}
 
 USER root
+
+COPY --from=gosu-builder /go/bin/gosu /usr/local/bin/gosu
+RUN chmod 0755 /usr/local/bin/gosu
+
+# Strip the bundled `mysql-shell` (mysqlsh) tooling. We drive the
+# server over the wire from Rust (`mysql_async`); mysqlsh is never
+# invoked, but its vendored Python site-packages bring pyOpenSSL +
+# other libraries that Trivy flags as CVEs we cannot fix without
+# a coordinated upstream re-release.
+RUN set -eux; \
+    if command -v microdnf >/dev/null 2>&1; then \
+        microdnf remove -y mysql-shell || true; \
+        microdnf clean all; \
+    elif command -v apt-get >/dev/null 2>&1; then \
+        apt-get remove -y --purge mysql-shell || true; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    rm -rf /usr/lib/mysqlsh /usr/bin/mysqlsh
 # UDF needs only gcc + libcurl headers; mysql plugin API structs are
 # vendored inline in fakecloud_udf.c (the upstream mysql:8.0 image
 # strips its community release repo so `mysql-community-devel` is not
