@@ -7,9 +7,12 @@ use tokio_postgres::NoTls;
 
 const POSTGRES_DOCKERFILE: &str = include_str!("../assets/postgres/Dockerfile");
 const AWS_COMMONS_CONTROL: &str = include_str!("../assets/postgres/aws_commons.control");
-const AWS_COMMONS_SQL: &str = include_str!("../assets/postgres/aws_commons--1.0.sql");
+const AWS_COMMONS_SQL: &str = include_str!("../assets/postgres/aws_commons--1.1.sql");
+const AWS_COMMONS_UPGRADE_SQL: &str = include_str!("../assets/postgres/aws_commons--1.0--1.1.sql");
 const AWS_LAMBDA_CONTROL: &str = include_str!("../assets/postgres/aws_lambda.control");
 const AWS_LAMBDA_SQL: &str = include_str!("../assets/postgres/aws_lambda--1.0.sql");
+const AWS_S3_CONTROL: &str = include_str!("../assets/postgres/aws_s3.control");
+const AWS_S3_SQL: &str = include_str!("../assets/postgres/aws_s3--1.0.sql");
 
 /// Default registry that hosts the prebuilt postgres images. CI publishes
 /// to `ghcr.io/faiscadev/fakecloud-postgres:<major>-<version>` on each
@@ -685,12 +688,15 @@ impl RdsRuntime {
     ) -> Result<(), RuntimeError> {
         let build_dir =
             tempfile::tempdir().map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
-        let assets: [(&str, &str); 5] = [
+        let assets: [(&str, &str); 8] = [
             ("Dockerfile", POSTGRES_DOCKERFILE),
             ("aws_commons.control", AWS_COMMONS_CONTROL),
-            ("aws_commons--1.0.sql", AWS_COMMONS_SQL),
+            ("aws_commons--1.1.sql", AWS_COMMONS_SQL),
+            ("aws_commons--1.0--1.1.sql", AWS_COMMONS_UPGRADE_SQL),
             ("aws_lambda.control", AWS_LAMBDA_CONTROL),
             ("aws_lambda--1.0.sql", AWS_LAMBDA_SQL),
+            ("aws_s3.control", AWS_S3_CONTROL),
+            ("aws_s3--1.0.sql", AWS_S3_SQL),
         ];
         for (name, contents) in assets {
             tokio::fs::write(build_dir.path().join(name), contents)

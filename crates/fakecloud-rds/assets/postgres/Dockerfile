@@ -14,6 +14,7 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY aws_commons.control aws_commons--1.0.sql \
+COPY aws_commons.control aws_commons--1.1.sql aws_commons--1.0--1.1.sql \
      aws_lambda.control aws_lambda--1.0.sql \
+     aws_s3.control aws_s3--1.0.sql \
      /usr/share/postgresql/${PG_VERSION}/extension/

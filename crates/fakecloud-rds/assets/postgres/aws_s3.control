@@ -1,0 +1,5 @@
+comment = 'AWS S3 import/export from PostgreSQL (fakecloud)'
+default_version = '1.0'
+relocatable = false
+schema = 'aws_s3'
+requires = 'plpython3u, aws_commons'

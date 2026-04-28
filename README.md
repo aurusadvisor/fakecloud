@@ -69,7 +69,7 @@ Other install options (Cargo, Docker, Docker Compose, source) are documented at 
 | SES (v2 + v1 inbound)  | 110 | Sending, templates, DKIM, **real receipt rule execution**              |
 | Cognito User Pools     | 122 | Pools, clients, MFA, identity providers, full auth flows; verification email -> SES, SMS -> SNS, all 12 Lambda triggers |
 | Kinesis                |  39 | Streams, records, shard iterators, retention                           |
-| RDS                    | 163 | Real Postgres, MySQL, MariaDB, Oracle, SQL Server, Db2 via Docker; lifecycle ops emit `aws.rds` EventBridge events; PostgreSQL `aws_lambda` extension invokes fakecloud Lambda functions from SQL |
+| RDS                    | 163 | Real Postgres, MySQL, MariaDB, Oracle, SQL Server, Db2 via Docker; lifecycle ops emit `aws.rds` EventBridge events; PostgreSQL `aws_lambda` + `aws_s3` extensions invoke fakecloud Lambda and import/export S3 objects from SQL |
 | ElastiCache            |  75 | Real Redis, Valkey, Memcached via Docker                               |
 | Step Functions         |  37 | Full ASL interpreter, Lambda/SQS/SNS/EventBridge/DynamoDB tasks        |
 | API Gateway v1         | 124 | REST APIs, resources, methods, integrations (`MOCK`/`HTTP`/`HTTP_PROXY`/`AWS_PROXY` Lambda), deployments, stages, API keys, usage plans, authorizers, models, request validators, VPC links, domain names, base path mappings, client certs, gateway responses, docs, tags |
@@ -119,7 +119,7 @@ Full guides: [fakecloud.dev/docs/guides](https://fakecloud.dev/docs/guides).
 | Cognito User Pools  | 122 operations                                     | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | SES v2              | Full send + templates + DKIM + suppression         | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | SES inbound email   | Real receipt rule action execution                 | [Stored but never executed](https://docs.localstack.cloud/user-guide/aws/ses/) |
-| RDS                 | 163 operations, PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2 via Docker, PostgreSQL `aws_lambda` extension | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
+| RDS                 | 163 operations, PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2 via Docker, PostgreSQL `aws_lambda` + `aws_s3` extensions | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | ElastiCache         | 75 operations, Redis, Valkey, and Memcached via Docker | [Paid only](https://docs.localstack.cloud/references/licensing/)           |
 | API Gateway v1      | 124 operations — REST APIs incl. real Lambda proxy data plane | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
 | API Gateway v2      | 103 operations — HTTP APIs + developer portals     | [Paid only](https://docs.localstack.cloud/references/licensing/)               |
