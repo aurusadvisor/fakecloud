@@ -165,6 +165,9 @@ impl EcsRuntime {
         tokio::spawn(async move {
             if let Err(err) = rt.run_task_inner(&state, &task_id, &account_id).await {
                 tracing::warn!(%err, task = %task_id, "ecs task execution failed");
+                // Also surface on stderr so nextest's captured-output for a
+                // failed E2E shows the reason instead of just "empty logs".
+                eprintln!("[ecs] task {task_id} failed: {err}");
                 finalize_failure(&state, &account_id, &task_id, &err.to_string());
                 rt.emit_state_change(
                     &state,
@@ -829,6 +832,10 @@ fn finalize_failure(state: &SharedEcsState, account_id: &str, task_id: &str, rea
         task.stopped_at = Some(Utc::now());
         task.stop_code = Some("TaskFailedToStart".into());
         task.stopped_reason = Some(reason.to_string());
+        // Surface the failure reason on the /logs endpoint — without this,
+        // a task that never reached RUNNING returns an empty log string,
+        // leaving E2E assertions with no diagnostic.
+        task.captured_logs = format!("[task failed to start]: {reason}");
         for c in task.containers.iter_mut() {
             c.last_status = "STOPPED".into();
             c.reason = Some(reason.to_string());
@@ -864,6 +871,10 @@ pub async fn sleep(duration: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{EcsState, Task};
+    use fakecloud_core::multi_account::MultiAccountState;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
 
     #[test]
     fn cli_works_for_known_missing_binary_is_false() {
@@ -879,6 +890,82 @@ mod tests {
             )
             .as_deref(),
             Some("127.0.0.1:4566/app:latest")
+        );
+    }
+
+    fn make_task(task_id: &str) -> Task {
+        Task {
+            task_arn: format!("arn:aws:ecs:us-east-1:000000000000:task/default/{task_id}"),
+            task_id: task_id.into(),
+            cluster_arn: "arn:aws:ecs:us-east-1:000000000000:cluster/default".into(),
+            cluster_name: "default".into(),
+            task_definition_arn: "arn:aws:ecs:us-east-1:000000000000:task-definition/app:1".into(),
+            family: "app".into(),
+            revision: 1,
+            last_status: "PENDING".into(),
+            desired_status: "RUNNING".into(),
+            launch_type: "FARGATE".into(),
+            platform_version: None,
+            cpu: None,
+            memory: None,
+            containers: Vec::new(),
+            overrides: serde_json::json!({}),
+            started_by: None,
+            group: None,
+            connectivity: "CONNECTING".into(),
+            stop_code: None,
+            stopped_reason: None,
+            created_at: Utc::now(),
+            started_at: None,
+            stopping_at: None,
+            stopped_at: None,
+            pull_started_at: None,
+            pull_stopped_at: None,
+            connectivity_at: None,
+            started_by_ref_id: None,
+            execution_role_arn: None,
+            task_role_arn: None,
+            tags: Vec::new(),
+            awslogs: None,
+            captured_logs: String::new(),
+            protection: None,
+        }
+    }
+
+    #[test]
+    fn finalize_failure_writes_reason_into_captured_logs() {
+        let mut accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
+        let acct = accounts.get_or_create("000000000000");
+        acct.tasks.insert("t1".into(), make_task("t1"));
+        let state: SharedEcsState = Arc::new(RwLock::new(accounts));
+
+        finalize_failure(
+            &state,
+            "000000000000",
+            "t1",
+            "failed to resolve secret DB_PASSWORD",
+        );
+
+        let accounts = state.read();
+        let task = accounts
+            .get("000000000000")
+            .unwrap()
+            .tasks
+            .get("t1")
+            .unwrap();
+        assert_eq!(task.last_status, "STOPPED");
+        assert_eq!(task.stop_code.as_deref(), Some("TaskFailedToStart"));
+        assert!(
+            task.captured_logs
+                .contains("failed to resolve secret DB_PASSWORD"),
+            "captured_logs missing reason: {:?}",
+            task.captured_logs
+        );
+        assert!(
+            task.captured_logs.starts_with("[task failed to start]:"),
+            "captured_logs missing prefix: {:?}",
+            task.captured_logs
         );
     }
 }
