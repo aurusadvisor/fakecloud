@@ -43,8 +43,9 @@ jobs:
           - { engine: postgres, version: "14", build_arg: "PG_VERSION" }
           - { engine: postgres, version: "15", build_arg: "PG_VERSION" }
           - { engine: postgres, version: "16", build_arg: "PG_VERSION" }
-          # MySQL majors.
-          - { engine: mysql, version: "5.7", build_arg: "MYSQL_VERSION" }
+          # MySQL majors. 5.7 is excluded — Oracle ended community
+          # support in October 2023 and the image base no longer ships
+          # the build deps we'd need to compile the UDF.
           - { engine: mysql, version: "8.0", build_arg: "MYSQL_VERSION" }
           # MariaDB majors.
           - { engine: mariadb, version: "10.6", build_arg: "MARIADB_VERSION" }
@@ -123,7 +124,6 @@ jobs:
           - { engine: postgres, version: "14" }
           - { engine: postgres, version: "15" }
           - { engine: postgres, version: "16" }
-          - { engine: mysql, version: "5.7" }
           - { engine: mysql, version: "8.0" }
           - { engine: mariadb, version: "10.6" }
           - { engine: mariadb, version: "10.11" }
