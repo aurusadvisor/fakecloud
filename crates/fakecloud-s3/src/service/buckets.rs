@@ -1,3 +1,5 @@
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use http::{HeaderMap, StatusCode};
 
 use bytes::Bytes;
@@ -15,26 +17,116 @@ impl S3Service {
     pub(super) fn list_buckets(
         &self,
         account_id: &str,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let prefix = req.query_params.get("prefix").cloned();
+        let bucket_region_filter = req.query_params.get("bucket-region").cloned();
+
+        let max_buckets: usize = match req.query_params.get("max-buckets") {
+            Some(v) => match v.parse::<i64>() {
+                Ok(n) if (1..=10_000).contains(&n) => n as usize,
+                _ => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidArgument",
+                        "max-buckets must be between 1 and 10000",
+                    ));
+                }
+            },
+            None => 10_000,
+        };
+
+        let continuation_token = req.query_params.get("continuation-token").cloned();
+        let token_after: Option<String> = match continuation_token.as_deref() {
+            None => None,
+            Some("") => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "The continuation token provided is incorrect",
+                ));
+            }
+            Some(tok) => match BASE64
+                .decode(tok.as_bytes())
+                .ok()
+                .and_then(|d| String::from_utf8(d).ok())
+            {
+                Some(s) => Some(s),
+                None => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidArgument",
+                        "The continuation token provided is incorrect",
+                    ));
+                }
+            },
+        };
+
         let accts = self.state.read();
         let __empty = crate::state::S3State::new(account_id, "us-east-1");
         let state = accts.get(account_id).unwrap_or(&__empty);
+
+        let mut filtered: Vec<&S3Bucket> = state
+            .buckets
+            .values()
+            .filter(|b| {
+                if let Some(p) = &prefix {
+                    if !b.name.starts_with(p) {
+                        return false;
+                    }
+                }
+                if let Some(r) = &bucket_region_filter {
+                    if &b.region != r {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+        filtered.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let start_index = match &token_after {
+            Some(after) => filtered.partition_point(|b| b.name.as_str() <= after.as_str()),
+            None => 0,
+        };
+        let end_index = (start_index + max_buckets).min(filtered.len());
+        let page = &filtered[start_index..end_index];
+        let next_continuation = if end_index < filtered.len() {
+            page.last().map(|b| BASE64.encode(b.name.as_bytes()))
+        } else {
+            None
+        };
+
         let mut buckets_xml = String::new();
-        let mut sorted: Vec<_> = state.buckets.values().collect();
-        sorted.sort_by_key(|b| &b.name);
-        for b in sorted {
+        for b in page {
             buckets_xml.push_str(&format!(
-                "<Bucket><Name>{}</Name><CreationDate>{}</CreationDate></Bucket>",
+                "<Bucket><Name>{}</Name><CreationDate>{}</CreationDate><BucketRegion>{}</BucketRegion></Bucket>",
                 xml_escape(&b.name),
                 b.creation_date.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                xml_escape(&b.region),
             ));
         }
+
+        let mut tail_xml = String::new();
+        if let Some(p) = &prefix {
+            tail_xml.push_str(&format!("<Prefix>{}</Prefix>", xml_escape(p)));
+        }
+        if let Some(r) = &bucket_region_filter {
+            tail_xml.push_str(&format!("<BucketRegion>{}</BucketRegion>", xml_escape(r)));
+        }
+        if let Some(nct) = &next_continuation {
+            tail_xml.push_str(&format!(
+                "<ContinuationToken>{}</ContinuationToken>",
+                xml_escape(nct),
+            ));
+        }
+
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
              <Owner><ID>{account}</ID><DisplayName>{account}</DisplayName></Owner>\
              <Buckets>{buckets_xml}</Buckets>\
+             {tail_xml}\
              </ListAllMyBucketsResult>",
             account = account_id,
         );
