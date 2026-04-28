@@ -76,6 +76,17 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.tfacc-matrix.outputs.shards) }}
     steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: true
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -110,8 +121,15 @@ jobs:
       - name: Mark fakecloud binary executable
         run: chmod +x target/debug/fakecloud
 
+      - name: Disk diagnostics before tests
+        run: df -h
+
       - name: Run ${{ matrix.name }} acceptance tests
         run: cargo test -p fakecloud-tfacc --test acc ${{ matrix.test_fn }} -- --nocapture
+
+      - name: Disk diagnostics after tests
+        if: always()
+        run: df -h
 
       - name: Upload failing go test output
         if: failure()
