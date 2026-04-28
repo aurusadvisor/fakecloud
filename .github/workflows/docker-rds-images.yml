@@ -116,6 +116,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -170,10 +171,83 @@ jobs:
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
+        id: manifest
         run: |
+          set -euo pipefail
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ env.IMAGE_BASE }}@sha256:%s ' *)
+          # Resolve the digest of the freshly-pushed manifest list so
+          # cosign can sign the immutable reference rather than a tag
+          # that could be moved out from under us.
+          DIGEST=$(docker buildx imagetools inspect \
+            "${IMAGE_BASE}:${{ steps.meta.outputs.version }}" \
+            --format '{{ .Manifest.Digest }}')
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Inspect image
         run: |
           docker buildx imagetools inspect ${{ env.IMAGE_BASE }}:${{ steps.meta.outputs.version }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a # v3.8.1
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign image with cosign (keyless, GitHub OIDC)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes "${IMAGE_BASE}@${{ steps.manifest.outputs.digest }}"
+
+  scan:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs: merge
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { engine: postgres, version: "13" }
+          - { engine: postgres, version: "14" }
+          - { engine: postgres, version: "15" }
+          - { engine: postgres, version: "16" }
+          - { engine: mysql, version: "8.0" }
+          - { engine: mariadb, version: "10.6" }
+          - { engine: mariadb, version: "10.11" }
+          - { engine: mariadb, version: "11.4" }
+    env:
+      IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/fakecloud-${{ matrix.target.engine }}
+
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve short SHA
+        id: sha
+        run: echo "short=$(echo "${{ github.sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE_BASE }}
+          tags: |
+            type=semver,pattern=${{ matrix.target.version }}-{{version}}
+            type=raw,value=${{ matrix.target.version }}-dev-${{ steps.sha.outputs.short }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@6c175e9c4083a92bbca2f9724c8a5e33bc2d97a5 # 0.30.0
+        with:
+          image-ref: ${{ env.IMAGE_BASE }}:${{ steps.meta.outputs.version }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH

@@ -215,6 +215,18 @@ Use fakecloud as a local AWS emulator for integration tests.
 - **[Reference](https://fakecloud.dev/docs/reference)** — configuration, introspection endpoints, persistence
 - **[Blog](https://fakecloud.dev/blog)** — essays and hot takes on testing, AWS, and AI-assisted development
 
+### Verifying image signatures
+
+Every published image (`fakecloud`, `fakecloud-postgres`, `fakecloud-mysql`, `fakecloud-mariadb`) is Trivy-scanned and cosign-signed via GitHub OIDC. Verify before pulling:
+
+```sh
+cosign verify ghcr.io/faiscadev/fakecloud:latest \
+  --certificate-identity-regexp '^https://github\.com/faiscadev/fakecloud/' \
+  --certificate-oidc-issuer       https://token.actions.githubusercontent.com
+```
+
+See [security docs](https://fakecloud.dev/docs/reference/security/#image-supply-chain-cosign--trivy) for details.
+
 ## Contributing
 
 Contributions welcome. Fork, branch, write tests, open a PR.
