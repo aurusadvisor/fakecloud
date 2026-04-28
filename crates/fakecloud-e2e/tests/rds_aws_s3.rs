@@ -115,19 +115,9 @@ async fn aws_s3_extension_import_export_round_trip() {
     let count: i32 = count_row.get(0);
     assert_eq!(count, 3);
 
-    let composite_row = client
-        .query_one(
-            "SELECT rows_imported FROM aws_s3.table_import_from_s3(\
-                'people', '', 'format csv', \
-                aws_commons.create_s3_uri('aws-s3-ext', 'input.csv', 'us-east-1'))",
-            &[],
-        )
-        .await
-        .expect("import via composite uri");
-    let rows: i64 = composite_row.get(0);
-    assert_eq!(rows, 3);
-
-    // 4. query_export_to_s3.
+    // 4. query_export_to_s3 — runs against the deterministic 3-row state
+    //    before we exercise the composite-typed import overload (which
+    //    appends a second copy of the CSV into the same table).
     let export_row = client
         .query_one(
             "SELECT rows_uploaded, files_uploaded FROM aws_s3.query_export_to_s3(\
@@ -143,6 +133,24 @@ async fn aws_s3_extension_import_export_round_trip() {
     assert_eq!(rows_uploaded, 2);
     assert_eq!(files_uploaded, 1);
 
+    // 5. Composite-typed import overload — into a fresh scratch table so
+    //    the export above stays deterministic.
+    client
+        .simple_query("CREATE TABLE people_scratch (id int, name text)")
+        .await
+        .expect("create scratch table");
+    let composite_row = client
+        .query_one(
+            "SELECT rows_imported FROM aws_s3.table_import_from_s3(\
+                'people_scratch', '', 'format csv', \
+                aws_commons.create_s3_uri('aws-s3-ext', 'input.csv', 'us-east-1'))",
+            &[],
+        )
+        .await
+        .expect("import via composite uri");
+    let rows: i64 = composite_row.get(0);
+    assert_eq!(rows, 3);
+
     let exported = s3
         .get_object()
         .bucket("aws-s3-ext")
@@ -157,4 +165,11 @@ async fn aws_s3_extension_import_export_round_trip() {
         "exported csv missing rows: {body_str}"
     );
     assert!(!body_str.contains("3,carol"));
+
+    let scratch_count_row = client
+        .query_one("SELECT count(*)::int FROM people_scratch", &[])
+        .await
+        .unwrap();
+    let scratch_count: i32 = scratch_count_row.get(0);
+    assert_eq!(scratch_count, 3);
 }
