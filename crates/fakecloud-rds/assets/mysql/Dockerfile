@@ -18,7 +18,7 @@ ARG MYSQL_VERSION=8.0
 # mysql:8.0 image's bundled go1.24.6 stdlib CVEs in /usr/local/bin/gosu.
 FROM golang:1.25-bookworm AS gosu-builder
 ENV CGO_ENABLED=0
-RUN go install -ldflags='-s -w' github.com/tianon/gosu@v1.17
+RUN go install -ldflags='-s -w' github.com/tianon/gosu@v0.0.0-20250923190938-6456aaa0f3c8
 
 FROM mysql:${MYSQL_VERSION}
 

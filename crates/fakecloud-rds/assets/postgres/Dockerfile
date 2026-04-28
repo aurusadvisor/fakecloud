@@ -16,7 +16,7 @@ ARG PG_VERSION=16
 # on every image build means we control the stdlib version baked in.
 FROM golang:1.25-bookworm AS gosu-builder
 ENV CGO_ENABLED=0
-RUN go install -ldflags='-s -w' github.com/tianon/gosu@v1.17
+RUN go install -ldflags='-s -w' github.com/tianon/gosu@v0.0.0-20250923190938-6456aaa0f3c8
 
 FROM postgres:${PG_VERSION}
 ARG PG_VERSION
