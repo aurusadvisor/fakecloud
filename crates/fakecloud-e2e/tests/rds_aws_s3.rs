@@ -42,7 +42,12 @@ async fn connect_with_retry(
 
 #[tokio::test]
 async fn aws_s3_extension_import_export_round_trip() {
-    let server = TestServer::start().await;
+    // Force the postgres image to be (re)built locally so the aws_s3
+    // extension files baked into this commit are present. The published
+    // `fakecloud-postgres:<major>-<release>` image only ships extensions
+    // that existed at the corresponding release tag; this test runs on
+    // pre-release commits that add aws_s3 before the next tag goes out.
+    let server = TestServer::start_with_env(&[("FAKECLOUD_REBUILD_POSTGRES_IMAGE", "1")]).await;
     let s3 = server.s3_client().await;
     let rds = server.rds_client().await;
 
