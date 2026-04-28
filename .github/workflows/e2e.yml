@@ -96,7 +96,7 @@ jobs:
 
   e2e:
     name: E2E ${{ matrix.name }}
-    needs: [changes, e2e-build, e2e-partition-check]
+    needs: [changes, e2e-build]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
