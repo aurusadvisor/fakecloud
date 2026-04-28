@@ -2740,6 +2740,7 @@ dependencies = [
  "fakecloud-testkit",
  "flate2",
  "mail-parser",
+ "mysql_async",
  "p256 0.13.2",
  "reqwest",
  "rsa",
