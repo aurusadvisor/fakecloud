@@ -5287,6 +5287,147 @@ mod tests {
         assert!(a < m && m < z, "buckets must be sorted");
     }
 
+    fn seed_bucket_in_region(svc: &S3Service, name: &str, region: &str) {
+        let mut mas = svc.state.write();
+        let state = mas.default_mut();
+        state
+            .buckets
+            .insert(name.to_string(), S3Bucket::new(name, region, "owner"));
+    }
+
+    #[test]
+    fn list_buckets_includes_bucket_region() {
+        let svc = make_service();
+        seed_bucket(&svc, "alpha");
+
+        let req = make_request(Method::GET, "/", &[], b"");
+        let resp = svc.list_buckets("123456789012", &req).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(
+            body.contains("<BucketRegion>us-east-1</BucketRegion>"),
+            "response should include BucketRegion per-bucket: {body}"
+        );
+    }
+
+    #[test]
+    fn list_buckets_filter_by_bucket_region() {
+        let svc = make_service();
+        seed_bucket_in_region(&svc, "east-bucket", "us-east-1");
+        seed_bucket_in_region(&svc, "west-bucket", "us-west-2");
+
+        let req = make_request(Method::GET, "/", &[("bucket-region", "us-west-2")], b"");
+        let resp = svc.list_buckets("123456789012", &req).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(body.contains("west-bucket"));
+        assert!(!body.contains("east-bucket"));
+        assert!(body.contains("<BucketRegion>us-west-2</BucketRegion>"));
+    }
+
+    #[test]
+    fn list_buckets_filter_by_prefix() {
+        let svc = make_service();
+        seed_bucket(&svc, "foo-1");
+        seed_bucket(&svc, "foo-2");
+        seed_bucket(&svc, "bar");
+
+        let req = make_request(Method::GET, "/", &[("prefix", "foo-")], b"");
+        let resp = svc.list_buckets("123456789012", &req).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(body.contains("foo-1"));
+        assert!(body.contains("foo-2"));
+        assert!(!body.contains("<Name>bar</Name>"));
+        assert!(body.contains("<Prefix>foo-</Prefix>"));
+    }
+
+    #[test]
+    fn list_buckets_max_buckets_paginates() {
+        let svc = make_service();
+        for n in &["a", "b", "c", "d", "e"] {
+            seed_bucket(&svc, n);
+        }
+
+        let req = make_request(Method::GET, "/", &[("max-buckets", "2")], b"");
+        let resp = svc.list_buckets("123456789012", &req).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(body.contains("<Name>a</Name>"));
+        assert!(body.contains("<Name>b</Name>"));
+        assert!(!body.contains("<Name>c</Name>"));
+        assert!(body.contains("<ContinuationToken>"));
+    }
+
+    #[test]
+    fn list_buckets_continuation_token_resumes() {
+        let svc = make_service();
+        for n in &["a", "b", "c", "d", "e"] {
+            seed_bucket(&svc, n);
+        }
+
+        let req = make_request(Method::GET, "/", &[("max-buckets", "2")], b"");
+        let resp = svc.list_buckets("123456789012", &req).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        let start = body.find("<ContinuationToken>").unwrap() + "<ContinuationToken>".len();
+        let end = body.find("</ContinuationToken>").unwrap();
+        let token = body[start..end].to_string();
+
+        let req2 = make_request(
+            Method::GET,
+            "/",
+            &[("max-buckets", "2"), ("continuation-token", &token)],
+            b"",
+        );
+        let resp2 = svc.list_buckets("123456789012", &req2).unwrap();
+        let body2 = std::str::from_utf8(resp2.body.expect_bytes()).unwrap();
+        assert!(body2.contains("<Name>c</Name>"));
+        assert!(body2.contains("<Name>d</Name>"));
+        assert!(!body2.contains("<Name>a</Name>"));
+        assert!(!body2.contains("<Name>b</Name>"));
+        // page 2 has more (e remains) so still emits a token
+        assert!(body2.contains("<ContinuationToken>"));
+
+        // page 3: should be e + no continuation
+        let start = body2.find("<ContinuationToken>").unwrap() + "<ContinuationToken>".len();
+        let end = body2.find("</ContinuationToken>").unwrap();
+        let token2 = body2[start..end].to_string();
+        let req3 = make_request(
+            Method::GET,
+            "/",
+            &[("max-buckets", "2"), ("continuation-token", &token2)],
+            b"",
+        );
+        let resp3 = svc.list_buckets("123456789012", &req3).unwrap();
+        let body3 = std::str::from_utf8(resp3.body.expect_bytes()).unwrap();
+        assert!(body3.contains("<Name>e</Name>"));
+        assert!(!body3.contains("<ContinuationToken>"));
+    }
+
+    #[test]
+    fn list_buckets_invalid_max_buckets_errors() {
+        let svc = make_service();
+        let req = make_request(Method::GET, "/", &[("max-buckets", "0")], b"");
+        assert_aws_err(svc.list_buckets("123456789012", &req), "InvalidArgument");
+
+        let req2 = make_request(Method::GET, "/", &[("max-buckets", "20000")], b"");
+        assert_aws_err(svc.list_buckets("123456789012", &req2), "InvalidArgument");
+
+        let req3 = make_request(Method::GET, "/", &[("max-buckets", "abc")], b"");
+        assert_aws_err(svc.list_buckets("123456789012", &req3), "InvalidArgument");
+    }
+
+    #[test]
+    fn list_buckets_invalid_continuation_token_errors() {
+        let svc = make_service();
+        let req = make_request(
+            Method::GET,
+            "/",
+            &[("continuation-token", "!!!notb64!!!")],
+            b"",
+        );
+        assert_aws_err(svc.list_buckets("123456789012", &req), "InvalidArgument");
+
+        let req2 = make_request(Method::GET, "/", &[("continuation-token", "")], b"");
+        assert_aws_err(svc.list_buckets("123456789012", &req2), "InvalidArgument");
+    }
+
     #[test]
     fn create_bucket_invalid_name_errors() {
         let svc = make_service();

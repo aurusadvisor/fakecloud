@@ -40,6 +40,130 @@ async fn s3_create_list_delete_bucket() {
 }
 
 #[tokio::test]
+async fn s3_list_buckets_returns_region() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("region-test")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client.list_buckets().send().await.unwrap();
+    let entry = resp
+        .buckets()
+        .iter()
+        .find(|b| b.name() == Some("region-test"))
+        .expect("bucket present");
+    assert_eq!(entry.bucket_region(), Some("us-east-1"));
+}
+
+#[tokio::test]
+async fn s3_list_buckets_pagination() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    for n in &["page-a", "page-b", "page-c"] {
+        client.create_bucket().bucket(*n).send().await.unwrap();
+    }
+
+    let page1 = client
+        .list_buckets()
+        .max_buckets(2)
+        .prefix("page-")
+        .send()
+        .await
+        .unwrap();
+    let names1: Vec<&str> = page1
+        .buckets()
+        .iter()
+        .map(|b| b.name().unwrap_or_default())
+        .collect();
+    assert_eq!(names1, vec!["page-a", "page-b"]);
+    let token = page1
+        .continuation_token()
+        .expect("continuation token present");
+
+    let page2 = client
+        .list_buckets()
+        .max_buckets(2)
+        .prefix("page-")
+        .continuation_token(token)
+        .send()
+        .await
+        .unwrap();
+    let names2: Vec<&str> = page2
+        .buckets()
+        .iter()
+        .map(|b| b.name().unwrap_or_default())
+        .collect();
+    assert_eq!(names2, vec!["page-c"]);
+    assert!(page2.continuation_token().is_none());
+}
+
+#[tokio::test]
+async fn s3_list_buckets_prefix_filter() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    for n in &["alpha-1", "alpha-2", "beta"] {
+        client.create_bucket().bucket(*n).send().await.unwrap();
+    }
+
+    let resp = client.list_buckets().prefix("alpha-").send().await.unwrap();
+    let names: Vec<&str> = resp
+        .buckets()
+        .iter()
+        .map(|b| b.name().unwrap_or_default())
+        .collect();
+    assert!(names.contains(&"alpha-1"));
+    assert!(names.contains(&"alpha-2"));
+    assert!(!names.contains(&"beta"));
+    assert_eq!(resp.prefix(), Some("alpha-"));
+}
+
+#[tokio::test]
+async fn s3_list_buckets_region_filter() {
+    use aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration};
+
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("east-only")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_bucket()
+        .bucket("west-only")
+        .create_bucket_configuration(
+            CreateBucketConfiguration::builder()
+                .location_constraint(BucketLocationConstraint::UsWest2)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_buckets()
+        .bucket_region("us-west-2")
+        .send()
+        .await
+        .unwrap();
+    let names: Vec<&str> = resp
+        .buckets()
+        .iter()
+        .map(|b| b.name().unwrap_or_default())
+        .collect();
+    assert_eq!(names, vec!["west-only"]);
+}
+
+#[tokio::test]
 async fn s3_head_bucket() {
     let server = TestServer::start().await;
     let client = server.s3_client().await;
