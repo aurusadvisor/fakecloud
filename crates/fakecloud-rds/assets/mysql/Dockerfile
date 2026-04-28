@@ -16,17 +16,21 @@ FROM mysql:${MYSQL_VERSION}
 USER root
 # mysql 8.0+ defaults to an Oracle Linux base with `microdnf`; older
 # tags + the `*-debian` variants ship apt. Pick whichever is present.
+# We need build deps (gcc/make), libcurl headers, and the MySQL UDF
+# header (`mysql.h`) — the latter ships in `mysql-community-devel`,
+# which the image's enabled `mysql-tools-community` repo already
+# provides.
 RUN set -eux; \
     if command -v microdnf >/dev/null 2>&1; then \
-        microdnf install -y --enablerepo=ol8_codeready_builder \
+        microdnf install -y \
             gcc make libcurl-devel glibc-devel pkgconf-pkg-config \
-        || microdnf install -y \
-            gcc make libcurl-devel glibc-devel pkgconf-pkg-config; \
+            mysql-community-devel; \
         microdnf clean all; \
     elif command -v apt-get >/dev/null 2>&1; then \
         apt-get update; \
         apt-get install -y --no-install-recommends \
-            gcc make libcurl4-openssl-dev libc6-dev ca-certificates pkg-config; \
+            gcc make libcurl4-openssl-dev libmysqlclient-dev libc6-dev \
+            ca-certificates pkg-config; \
         rm -rf /var/lib/apt/lists/*; \
     else \
         echo "no supported package manager found in base image" >&2; \
