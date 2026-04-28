@@ -5,13 +5,16 @@
 # tries to pull that tag first and falls back to building from this
 # Dockerfile locally when the pull fails.
 
+# MARIADB_VERSION must sit before the first FROM so its substitution is
+# available across all stages.
+ARG MARIADB_VERSION=10.11
+
 # Rebuild gosu from source with current Go to eliminate upstream
 # mariadb image's bundled go1.24.6 stdlib CVEs in /usr/local/bin/gosu.
 FROM golang:1.25-bookworm AS gosu-builder
 ENV CGO_ENABLED=0
 RUN go install -ldflags='-s -w' github.com/tianon/gosu@v1.17
 
-ARG MARIADB_VERSION=10.11
 FROM mariadb:${MARIADB_VERSION}
 
 USER root

@@ -4,6 +4,11 @@
 # (plus a rolling :<major> tag). RdsRuntime::ensure_postgres_image
 # tries to pull that tag first and falls back to building from this
 # Dockerfile locally when the pull fails (dev / unreleased / airgapped).
+# PG_VERSION must sit before the first FROM so its substitution is
+# available across all stages. Inside each stage it has to be
+# re-declared (Dockerfile spec) for `RUN`/`COPY` references to expand.
+ARG PG_VERSION=16
+
 # Rebuild `gosu` from source with current Go to eliminate the upstream
 # postgres image's bundled `/usr/local/bin/gosu` Go-stdlib CVEs (Trivy
 # flags 8 HIGH + 1 CRITICAL on go1.24.6 stdlib at scan time). gosu
@@ -13,7 +18,6 @@ FROM golang:1.25-bookworm AS gosu-builder
 ENV CGO_ENABLED=0
 RUN go install -ldflags='-s -w' github.com/tianon/gosu@v1.17
 
-ARG PG_VERSION=16
 FROM postgres:${PG_VERSION}
 ARG PG_VERSION
 

@@ -10,13 +10,16 @@
 # procedures so SQL inside an RDS-managed MySQL instance can invoke
 # fakecloud Lambda functions.
 
+# MYSQL_VERSION must sit before the first FROM so its substitution is
+# available across all stages.
+ARG MYSQL_VERSION=8.0
+
 # Rebuild gosu from source with current Go to eliminate upstream
 # mysql:8.0 image's bundled go1.24.6 stdlib CVEs in /usr/local/bin/gosu.
 FROM golang:1.25-bookworm AS gosu-builder
 ENV CGO_ENABLED=0
 RUN go install -ldflags='-s -w' github.com/tianon/gosu@v1.17
 
-ARG MYSQL_VERSION=8.0
 FROM mysql:${MYSQL_VERSION}
 
 USER root
