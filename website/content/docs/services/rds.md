@@ -24,6 +24,7 @@ fakecloud implements **163 of 163** RDS operations at 100% Smithy conformance. D
 - **EventBridge events** — lifecycle ops emit `aws.rds` events on the `default` bus, deliverable to SQS, SNS, Lambda, etc. via standard EB rules
 - **PostgreSQL `aws_lambda` extension** — call fakecloud Lambda functions from inside RDS PostgreSQL via `CREATE EXTENSION aws_lambda CASCADE` and `aws_lambda.invoke(...)` (subset of the AWS RDS extension surface; see below)
 - **PostgreSQL `aws_s3` extension** — import objects from fakecloud S3 into tables (`aws_s3.table_import_from_s3`) and export query results back to S3 (`aws_s3.query_export_to_s3`); see below
+- **MySQL / MariaDB Aurora Lambda bridge** — Aurora-compatible `mysql.lambda_async` / `mysql.lambda_sync` stored procedures invoke fakecloud Lambda functions from inside the DB container; see below
 
 ## EventBridge integration
 
@@ -120,6 +121,25 @@ The `options` argument is forwarded verbatim into the underlying postgres `COPY`
 
 The bridges (`/_fakecloud/rds/s3-import`, `/_fakecloud/rds/s3-export`) read and write the in-memory S3 state of the same fakecloud server, so any object that's visible to a `GetObject`/`PutObject` call against fakecloud is reachable from `aws_s3`.
 
+## MySQL / MariaDB Aurora Lambda bridge
+
+Aurora MySQL exposes Lambda invocation as built-in stored procedures (`mysql.lambda_async`, `mysql.lambda_sync`). fakecloud's prebuilt `fakecloud-mysql` and `fakecloud-mariadb` images provide the same surface so SQL inside an RDS-managed instance can invoke fakecloud Lambda functions:
+
+```sql
+-- Async, fire-and-forget. Returns immediately.
+CALL mysql.lambda_async('my_function', '{"k":1}');
+
+-- Synchronous, returns the function payload as a JSON string.
+SELECT mysql.lambda_sync('my_function', '{"hello":"world"}');
+```
+
+Implemented procedures (subset of the AWS Aurora MySQL Lambda surface):
+
+- `mysql.lambda_async(function_name TEXT, payload TEXT)` — `Event`-style invocation; returns nothing.
+- `mysql.lambda_sync(function_name TEXT, payload TEXT) RETURNS TEXT` — `RequestResponse`; returns the function payload as JSON.
+
+Under the hood the prebuilt image bakes a small libcurl-backed UDF (`fakecloud_post`, `fakecloud_post_async`) that POSTs to `/_fakecloud/rds/lambda-invoke` against `host.docker.internal`. A bootstrap script renders the host endpoint, account ID, and region from the container's `FAKECLOUD_*` env vars (set automatically by `RdsRuntime`) so SQL never has to know the host. Like the postgres image, the runtime tries to pull the published `fakecloud-mysql:<major>-<fakecloud-version>` (or `fakecloud-mariadb:<major>-<fakecloud-version>`) tag first and falls back to a local build when the pull fails.
+
 ## Asynchronous instance creation
 
 `CreateDBInstance` returns ~immediately with `DBInstanceStatus = "creating"`. The container start (and the underlying image pull/build for postgres) runs in the background; `DescribeDBInstances` returns the live status. Callers should poll until the status flips to `available` before connecting:
@@ -159,8 +179,8 @@ When you call `CreateDBInstance` for PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/
 | Engine | Image | Port | Wait probe |
 |--------|-------|------|------------|
 | `postgres` | `ghcr.io/faiscadev/fakecloud-postgres:<major>-<fakecloud-version>` (prebuilt with `plpython3u` + the `aws_commons`, `aws_lambda`, and `aws_s3` extensions on top of `postgres:<major>`; falls back to a local build if the pull fails) | 5432 | `tokio-postgres` ping |
-| `mysql` | `mysql:<major>` | 3306 | `mysql_async` ping |
-| `mariadb` | `mariadb:<major>` | 3306 | `mysql_async` ping |
+| `mysql` | `ghcr.io/faiscadev/fakecloud-mysql:<major>-<fakecloud-version>` (prebuilt with the libcurl-backed `fakecloud_post` UDF + Aurora-compatible `mysql.lambda_async` / `mysql.lambda_sync` stored procedures on top of `mysql:<major>`; falls back to a local build if the pull fails) | 3306 | `mysql_async` ping |
+| `mariadb` | `ghcr.io/faiscadev/fakecloud-mariadb:<major>-<fakecloud-version>` (same UDF + stored procedures, on top of `mariadb:<major>`) | 3306 | `mysql_async` ping |
 | `oracle-ee` / `oracle-se2` (+`-cdb`) | `gvenzl/oracle-free:23-slim` | 1521 | log marker `DATABASE IS READY TO USE!` + TCP probe |
 | `sqlserver-ee` / `-se` / `-ex` / `-web` | `mcr.microsoft.com/mssql/server:2022-latest` | 1433 | log marker `SQL Server is now ready for client connections` + TCP probe |
 | `db2-se` / `db2-ae` | `icr.io/db2_community/db2:latest` | 50000 | log marker `Setup has completed` + TCP probe |

@@ -14,6 +14,17 @@ const AWS_LAMBDA_SQL: &str = include_str!("../assets/postgres/aws_lambda--1.0.sq
 const AWS_S3_CONTROL: &str = include_str!("../assets/postgres/aws_s3.control");
 const AWS_S3_SQL: &str = include_str!("../assets/postgres/aws_s3--1.0.sql");
 
+const MYSQL_DOCKERFILE: &str = include_str!("../assets/mysql/Dockerfile");
+const MYSQL_UDF_C: &str = include_str!("../assets/mysql/fakecloud_udf.c");
+const MYSQL_BOOTSTRAP_SH: &str = include_str!("../assets/mysql/fakecloud-bootstrap.sh");
+const MYSQL_BOOTSTRAP_SQL: &str = include_str!("../assets/mysql/99-fakecloud-bootstrap.sql.tmpl");
+
+const MARIADB_DOCKERFILE: &str = include_str!("../assets/mariadb/Dockerfile");
+const MARIADB_UDF_C: &str = include_str!("../assets/mariadb/fakecloud_udf.c");
+const MARIADB_BOOTSTRAP_SH: &str = include_str!("../assets/mariadb/fakecloud-bootstrap.sh");
+const MARIADB_BOOTSTRAP_SQL: &str =
+    include_str!("../assets/mariadb/99-fakecloud-bootstrap.sql.tmpl");
+
 /// Default registry that hosts the prebuilt postgres images. CI publishes
 /// to `ghcr.io/faiscadev/fakecloud-postgres:<major>-<version>` on each
 /// release tag (see `.github/workflows/docker-rds-images.yml`).
@@ -98,11 +109,14 @@ impl RdsRuntime {
     ) -> Result<RunningDbContainer, RuntimeError> {
         self.stop_container(db_instance_identifier).await;
 
-        // Determine Docker image and port based on engine. The postgres
-        // image is built locally (lazily) so we can ship the aws_lambda /
-        // aws_commons extensions plus plpython3u; other engines stay on
-        // upstream images.
-        let (image, port, env_vars, postgres_major) = match engine {
+        // Determine Docker image and port based on engine. Postgres,
+        // MySQL, and MariaDB all use prebuilt fakecloud-* images that
+        // bake in the bridge UDFs / extensions and call back into the
+        // host fakecloud server; the heavier engines (oracle/mssql/db2)
+        // stay on upstream images. `bridge_engine_version` is `Some(_)`
+        // for the bridge-aware engines and gates the `--add-host`
+        // setup below.
+        let (image, port, env_vars, bridge_engine_version) = match engine {
             "postgres" => {
                 let major_version = engine_version.split('.').next().unwrap_or("16");
                 let image = self.ensure_postgres_image(major_version).await?;
@@ -125,29 +139,43 @@ impl RdsRuntime {
                 } else {
                     "8.0"
                 };
-                let image = format!("mysql:{}", major_version);
+                let image = self.ensure_mysql_image(major_version).await?;
                 let env_vars = vec![
                     format!("MYSQL_ROOT_PASSWORD={password}"),
                     format!("MYSQL_USER={username}"),
                     format!("MYSQL_PASSWORD={password}"),
                     format!("MYSQL_DATABASE={db_name}"),
+                    format!(
+                        "FAKECLOUD_ENDPOINT=http://host.docker.internal:{}",
+                        self.server_port
+                    ),
+                    format!("FAKECLOUD_ACCOUNT_ID={account_id}"),
+                    format!("FAKECLOUD_REGION={region}"),
                 ];
-                (image, "3306", env_vars, None)
+                (image, "3306", env_vars, Some(major_version.to_string()))
             }
             "mariadb" => {
                 let major_version = if engine_version.starts_with("10.11") {
                     "10.11"
+                } else if engine_version.starts_with("11.4") {
+                    "11.4"
                 } else {
                     "10.6"
                 };
-                let image = format!("mariadb:{}", major_version);
+                let image = self.ensure_mariadb_image(major_version).await?;
                 let env_vars = vec![
                     format!("MARIADB_ROOT_PASSWORD={password}"),
                     format!("MARIADB_USER={username}"),
                     format!("MARIADB_PASSWORD={password}"),
                     format!("MARIADB_DATABASE={db_name}"),
+                    format!(
+                        "FAKECLOUD_ENDPOINT=http://host.docker.internal:{}",
+                        self.server_port
+                    ),
+                    format!("FAKECLOUD_ACCOUNT_ID={account_id}"),
+                    format!("FAKECLOUD_REGION={region}"),
                 ];
-                (image, "3306", env_vars, None)
+                (image, "3306", env_vars, Some(major_version.to_string()))
             }
             "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => {
                 // Oracle Database Free is the no-cost dev edition shipped by
@@ -216,10 +244,11 @@ impl RdsRuntime {
             args.push("--privileged".to_string());
         }
 
-        // Postgres runs the aws_lambda extension which calls back into
-        // fakecloud over HTTP. Wire the bridge alias so plpython3u code
-        // can resolve host.docker.internal on every platform.
-        if postgres_major.is_some() {
+        // Bridge-aware engines (postgres aws_lambda, mysql/mariadb
+        // fakecloud_post UDF) call back into fakecloud over HTTP. Wire
+        // the host gateway alias so the in-container code can resolve
+        // host.docker.internal on every platform.
+        if bridge_engine_version.is_some() {
             args.push("--add-host".to_string());
             args.push(format!("host.docker.internal:{}", self.host_ip));
         }
@@ -602,48 +631,11 @@ impl RdsRuntime {
         &self,
         major_version: &str,
     ) -> Result<String, RuntimeError> {
-        let tag = postgres_image_tag(major_version);
-
-        // Per-tag mutex so concurrent first-creates don't all shell out
-        // to docker. Inner bool tracks whether resolution has succeeded
-        // in this process (regardless of whether it landed via inspect,
-        // pull, or build).
-        let lock = {
-            let mut cache = self.image_cache.write();
-            cache
-                .entry(tag.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(false)))
-                .clone()
-        };
-        let mut resolved = lock.lock().await;
-        if *resolved {
-            return Ok(tag);
-        }
-
-        let force_rebuild = std::env::var("FAKECLOUD_REBUILD_POSTGRES_IMAGE")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-
-        if !force_rebuild {
-            // Already on the daemon (prior pull, prior build, prior
-            // session)? Use it as-is.
-            if self.docker_image_exists(&tag).await {
-                *resolved = true;
-                return Ok(tag);
-            }
-
-            // Try the prebuilt image published by CI. Any failure
-            // (404 for unreleased version, network error, auth) falls
-            // through to the local build branch.
-            if self.try_pull_image(&tag).await {
-                *resolved = true;
-                return Ok(tag);
-            }
-        }
-
-        self.build_postgres_image_local(major_version, &tag).await?;
-        *resolved = true;
-        Ok(tag)
+        let tag = bridge_image_tag("fakecloud-postgres", major_version);
+        self.ensure_bridge_image(&tag, |tag| async move {
+            self.build_postgres_image_local(major_version, &tag).await
+        })
+        .await
     }
 
     async fn docker_image_exists(&self, tag: &str) -> bool {
@@ -686,8 +678,6 @@ impl RdsRuntime {
         major_version: &str,
         tag: &str,
     ) -> Result<(), RuntimeError> {
-        let build_dir =
-            tempfile::tempdir().map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
         let assets: [(&str, &str); 8] = [
             ("Dockerfile", POSTGRES_DOCKERFILE),
             ("aws_commons.control", AWS_COMMONS_CONTROL),
@@ -698,6 +688,135 @@ impl RdsRuntime {
             ("aws_s3.control", AWS_S3_CONTROL),
             ("aws_s3--1.0.sql", AWS_S3_SQL),
         ];
+        self.build_image_local(
+            tag,
+            &assets,
+            &format!("PG_VERSION={major_version}"),
+            "fakecloud-postgres",
+        )
+        .await
+    }
+
+    /// Pull-first / build-fallback for the prebuilt fakecloud-mysql
+    /// image. Mirrors `ensure_postgres_image`. The image bakes a small
+    /// libcurl-backed UDF + Aurora-compatible `mysql.lambda_async` /
+    /// `mysql.lambda_sync` stored procedures.
+    pub(crate) async fn ensure_mysql_image(
+        &self,
+        major_version: &str,
+    ) -> Result<String, RuntimeError> {
+        let tag = bridge_image_tag("fakecloud-mysql", major_version);
+        self.ensure_bridge_image(&tag, |tag| async move {
+            self.build_mysql_image_local(major_version, &tag).await
+        })
+        .await
+    }
+
+    pub(crate) async fn ensure_mariadb_image(
+        &self,
+        major_version: &str,
+    ) -> Result<String, RuntimeError> {
+        let tag = bridge_image_tag("fakecloud-mariadb", major_version);
+        self.ensure_bridge_image(&tag, |tag| async move {
+            self.build_mariadb_image_local(major_version, &tag).await
+        })
+        .await
+    }
+
+    /// Shared pull-first/build-fallback orchestration used by every
+    /// bridge-aware engine. Holds the per-tag mutex, checks the local
+    /// daemon first, then tries the prebuilt image, and finally
+    /// invokes the supplied local-build closure.
+    async fn ensure_bridge_image<F, Fut>(
+        &self,
+        tag: &str,
+        build_local: F,
+    ) -> Result<String, RuntimeError>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = Result<(), RuntimeError>>,
+    {
+        let lock = {
+            let mut cache = self.image_cache.write();
+            cache
+                .entry(tag.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(false)))
+                .clone()
+        };
+        let mut resolved = lock.lock().await;
+        if *resolved {
+            return Ok(tag.to_string());
+        }
+
+        let force_rebuild = std::env::var("FAKECLOUD_REBUILD_POSTGRES_IMAGE")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+
+        if !force_rebuild {
+            if self.docker_image_exists(tag).await {
+                *resolved = true;
+                return Ok(tag.to_string());
+            }
+            if self.try_pull_image(tag).await {
+                *resolved = true;
+                return Ok(tag.to_string());
+            }
+        }
+
+        build_local(tag.to_string()).await?;
+        *resolved = true;
+        Ok(tag.to_string())
+    }
+
+    async fn build_mysql_image_local(
+        &self,
+        major_version: &str,
+        tag: &str,
+    ) -> Result<(), RuntimeError> {
+        let assets: [(&str, &str); 4] = [
+            ("Dockerfile", MYSQL_DOCKERFILE),
+            ("fakecloud_udf.c", MYSQL_UDF_C),
+            ("fakecloud-bootstrap.sh", MYSQL_BOOTSTRAP_SH),
+            ("99-fakecloud-bootstrap.sql.tmpl", MYSQL_BOOTSTRAP_SQL),
+        ];
+        self.build_image_local(
+            tag,
+            &assets,
+            &format!("MYSQL_VERSION={major_version}"),
+            "fakecloud-mysql",
+        )
+        .await
+    }
+
+    async fn build_mariadb_image_local(
+        &self,
+        major_version: &str,
+        tag: &str,
+    ) -> Result<(), RuntimeError> {
+        let assets: [(&str, &str); 4] = [
+            ("Dockerfile", MARIADB_DOCKERFILE),
+            ("fakecloud_udf.c", MARIADB_UDF_C),
+            ("fakecloud-bootstrap.sh", MARIADB_BOOTSTRAP_SH),
+            ("99-fakecloud-bootstrap.sql.tmpl", MARIADB_BOOTSTRAP_SQL),
+        ];
+        self.build_image_local(
+            tag,
+            &assets,
+            &format!("MARIADB_VERSION={major_version}"),
+            "fakecloud-mariadb",
+        )
+        .await
+    }
+
+    async fn build_image_local(
+        &self,
+        tag: &str,
+        assets: &[(&str, &str)],
+        build_arg: &str,
+        image_label: &str,
+    ) -> Result<(), RuntimeError> {
+        let build_dir =
+            tempfile::tempdir().map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
         for (name, contents) in assets {
             tokio::fs::write(build_dir.path().join(name), contents)
                 .await
@@ -706,18 +825,12 @@ impl RdsRuntime {
 
         tracing::info!(
             tag = %tag,
-            "Building fakecloud-postgres image locally (first use can take ~60s)"
+            image = %image_label,
+            "Building {image_label} image locally (first use can take ~60s)"
         );
 
         let output = tokio::process::Command::new(&self.cli)
-            .args([
-                "build",
-                "--build-arg",
-                &format!("PG_VERSION={major_version}"),
-                "-t",
-                tag,
-                ".",
-            ])
+            .args(["build", "--build-arg", build_arg, "-t", tag, "."])
             .current_dir(build_dir.path())
             .output()
             .await
@@ -925,20 +1038,22 @@ fn detect_bridge_gateway(cli: &str) -> Option<String> {
     Some(gateway)
 }
 
-/// Build the postgres image reference for a given major version. Uses
-/// `<registry>/fakecloud-postgres:<major>-<fakecloud-version>`, where
-/// the registry comes from `FAKECLOUD_POSTGRES_REGISTRY` (defaults to
-/// the public `ghcr.io/faiscadev`). The version pin guarantees the
-/// runtime asks the daemon for the same image CI publishes for this
-/// fakecloud release; mismatched assets force a local rebuild via
-/// the fall-through in `ensure_postgres_image`.
-fn postgres_image_tag(major_version: &str) -> String {
+/// Build the prebuilt-image reference for a given engine + major
+/// version. Uses `<registry>/<image>:<major>-<fakecloud-version>`,
+/// where the registry comes from `FAKECLOUD_POSTGRES_REGISTRY` (kept
+/// historical name; defaults to the public `ghcr.io/faiscadev`).
+/// The version pin guarantees the runtime asks the daemon for the
+/// same image CI publishes for this fakecloud release; mismatched
+/// assets force a local rebuild via the fall-through in
+/// `ensure_bridge_image`.
+fn bridge_image_tag(image: &str, major_version: &str) -> String {
     let registry = std::env::var("FAKECLOUD_POSTGRES_REGISTRY")
         .unwrap_or_else(|_| DEFAULT_POSTGRES_REGISTRY.to_string());
     let registry = registry.trim_end_matches('/');
     format!(
-        "{}/fakecloud-postgres:{}-{}",
+        "{}/{}:{}-{}",
         registry,
+        image,
         major_version,
         env!("CARGO_PKG_VERSION")
     )
@@ -949,24 +1064,38 @@ mod tests {
     use super::*;
 
     /// Single test (rather than three) so the cases run sequentially —
-    /// `postgres_image_tag` reads a process-global env var and parallel
+    /// `bridge_image_tag` reads a process-global env var and parallel
     /// `cargo test` workers would race over it otherwise.
     #[test]
-    fn postgres_image_tag_resolves_registry_overrides() {
+    fn bridge_image_tag_resolves_registry_overrides() {
         let prev = std::env::var("FAKECLOUD_POSTGRES_REGISTRY").ok();
 
         std::env::remove_var("FAKECLOUD_POSTGRES_REGISTRY");
         assert_eq!(
-            postgres_image_tag("16"),
+            bridge_image_tag("fakecloud-postgres", "16"),
             format!(
                 "ghcr.io/faiscadev/fakecloud-postgres:16-{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert_eq!(
+            bridge_image_tag("fakecloud-mysql", "8.0"),
+            format!(
+                "ghcr.io/faiscadev/fakecloud-mysql:8.0-{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert_eq!(
+            bridge_image_tag("fakecloud-mariadb", "10.11"),
+            format!(
+                "ghcr.io/faiscadev/fakecloud-mariadb:10.11-{}",
                 env!("CARGO_PKG_VERSION")
             )
         );
 
         std::env::set_var("FAKECLOUD_POSTGRES_REGISTRY", "registry.example.com/team");
         assert_eq!(
-            postgres_image_tag("15"),
+            bridge_image_tag("fakecloud-postgres", "15"),
             format!(
                 "registry.example.com/team/fakecloud-postgres:15-{}",
                 env!("CARGO_PKG_VERSION")
@@ -975,7 +1104,7 @@ mod tests {
 
         std::env::set_var("FAKECLOUD_POSTGRES_REGISTRY", "registry.example.com/team/");
         assert_eq!(
-            postgres_image_tag("13"),
+            bridge_image_tag("fakecloud-postgres", "13"),
             format!(
                 "registry.example.com/team/fakecloud-postgres:13-{}",
                 env!("CARGO_PKG_VERSION")

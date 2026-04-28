@@ -1,0 +1,52 @@
+-- fakecloud Aurora-compatible Lambda bridge for MySQL/MariaDB.
+-- Loaded by the prebuilt fakecloud-mysql / fakecloud-mariadb image
+-- on first container start. Renders FAKECLOUD_* env vars from the
+-- entrypoint into baked-in URL/account values; SQL never has to know
+-- the host or port.
+
+CREATE FUNCTION IF NOT EXISTS fakecloud_post RETURNS STRING SONAME 'fakecloud_udf.so';
+CREATE FUNCTION IF NOT EXISTS fakecloud_post_async RETURNS INTEGER SONAME 'fakecloud_udf.so';
+
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS mysql.lambda_async $$
+CREATE PROCEDURE mysql.lambda_async(IN function_name TEXT, IN payload TEXT)
+BEGIN
+    DECLARE body TEXT;
+    SET body = JSON_OBJECT(
+        'function_name', function_name,
+        'payload', CAST(IFNULL(payload, 'null') AS JSON),
+        'invocation_type', 'Event',
+        'region', '@FAKECLOUD_REGION@'
+    );
+    DO fakecloud_post_async(
+        '@FAKECLOUD_ENDPOINT@/_fakecloud/rds/lambda-invoke',
+        body
+    );
+END $$
+
+DROP FUNCTION IF EXISTS mysql.lambda_sync $$
+CREATE FUNCTION mysql.lambda_sync(function_name TEXT, payload TEXT)
+RETURNS TEXT
+DETERMINISTIC
+BEGIN
+    DECLARE body TEXT;
+    DECLARE result TEXT;
+    SET body = JSON_OBJECT(
+        'function_name', function_name,
+        'payload', CAST(IFNULL(payload, 'null') AS JSON),
+        'invocation_type', 'RequestResponse',
+        'region', '@FAKECLOUD_REGION@'
+    );
+    SET result = fakecloud_post(
+        '@FAKECLOUD_ENDPOINT@/_fakecloud/rds/lambda-invoke',
+        body,
+        300000
+    );
+    -- Bridge response is `{ status_code, payload, ... }`. Strip down to
+    -- the payload JSON so callers see the same shape Aurora returns
+    -- from `mysql.lambda_sync` (a plain JSON value, not the wrapper).
+    RETURN JSON_EXTRACT(result, '$.payload');
+END $$
+
+DELIMITER ;

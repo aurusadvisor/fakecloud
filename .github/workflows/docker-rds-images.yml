@@ -1,25 +1,22 @@
 name: RDS support images
 
-# Builds and (on tag pushes) publishes the prebuilt postgres image used
-# by RdsRuntime. Runtime side: `RdsRuntime::ensure_postgres_image` tries
-# to pull `ghcr.io/<owner>/fakecloud-postgres:<major>-<fakecloud-version>`
+# Builds and (on tag pushes) publishes the prebuilt postgres / mysql /
+# mariadb images used by RdsRuntime. Runtime side: the matching
+# `ensure_*_image` helper tries to pull
+# `ghcr.io/<owner>/fakecloud-<engine>:<version>-<fakecloud-version>`
 # before falling back to a local build.
 #
 # Triggers:
-# - `push: tags: ["v*"]` — full release path: builds 4 majors × 2 arches,
-#   pushes per-arch by digest, merges into `<major>-<version>` and a
-#   rolling `<major>` tag.
+# - `push: tags: ["v*"]` — full release path: builds every engine ×
+#   version × arch combination, pushes per-arch by digest, merges into
+#   `<version>-<fakecloud-version>` and a rolling `<version>` tag.
 # - `pull_request` (paths-filtered) — dry-run that exercises the build
 #   for both arches without pushing. Catches Dockerfile typos and
 #   workflow syntax regressions before we ever cut a release.
-# - `workflow_dispatch` — pushes images tagged `<major>-dev-<sha>` so we
-#   can validate the full publish + manifest-merge path against ghcr.io
-#   end-to-end without polluting release tags. Rolling `<major>` is NOT
-#   updated in this mode.
-#
-# Mirrors the structure of docker.yml: per-arch build with `push-by-digest`,
-# then a per-major merge job that creates the manifest list with the
-# human-readable tags.
+# - `workflow_dispatch` — pushes images tagged `<version>-dev-<sha>` so
+#   we can validate the full publish + manifest-merge path against
+#   ghcr.io end-to-end without polluting release tags. Rolling
+#   `<version>` is NOT updated in this mode.
 
 on:
   push:
@@ -28,18 +25,31 @@ on:
     paths:
       - .github/workflows/docker-rds-images.yml
       - crates/fakecloud-rds/assets/postgres/**
+      - crates/fakecloud-rds/assets/mysql/**
+      - crates/fakecloud-rds/assets/mariadb/**
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/fakecloud-postgres
 
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: ["13", "14", "15", "16"]
+        target:
+          # Postgres majors.
+          - { engine: postgres, version: "13", build_arg: "PG_VERSION" }
+          - { engine: postgres, version: "14", build_arg: "PG_VERSION" }
+          - { engine: postgres, version: "15", build_arg: "PG_VERSION" }
+          - { engine: postgres, version: "16", build_arg: "PG_VERSION" }
+          # MySQL majors.
+          - { engine: mysql, version: "5.7", build_arg: "MYSQL_VERSION" }
+          - { engine: mysql, version: "8.0", build_arg: "MYSQL_VERSION" }
+          # MariaDB majors.
+          - { engine: mariadb, version: "10.6", build_arg: "MARIADB_VERSION" }
+          - { engine: mariadb, version: "10.11", build_arg: "MARIADB_VERSION" }
+          - { engine: mariadb, version: "11.4", build_arg: "MARIADB_VERSION" }
         platform:
           - linux/amd64
           - linux/arm64
@@ -52,6 +62,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/fakecloud-${{ matrix.target.engine }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -71,12 +83,12 @@ jobs:
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: crates/fakecloud-rds/assets/postgres
+          context: crates/fakecloud-rds/assets/${{ matrix.target.engine }}
           build-args: |
-            PG_VERSION=${{ matrix.pg_version }}
+            ${{ matrix.target.build_arg }}=${{ matrix.target.version }}
           platforms: ${{ matrix.platform }}
-          cache-from: type=gha,scope=postgres-${{ matrix.pg_version }}-${{ matrix.platform }}
-          cache-to: type=gha,scope=postgres-${{ matrix.pg_version }}-${{ matrix.platform }},mode=max
+          cache-from: type=gha,scope=${{ matrix.target.engine }}-${{ matrix.target.version }}-${{ matrix.platform }}
+          cache-to: type=gha,scope=${{ matrix.target.engine }}-${{ matrix.target.version }}-${{ matrix.platform }},mode=max
           outputs: |
             type=image,name=${{ env.IMAGE_BASE }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
 
@@ -91,7 +103,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: digest-postgres-${{ matrix.pg_version }}-${{ matrix.runner }}
+          name: digest-${{ matrix.target.engine }}-${{ matrix.target.version }}-${{ matrix.runner }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -106,14 +118,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: ["13", "14", "15", "16"]
+        target:
+          - { engine: postgres, version: "13" }
+          - { engine: postgres, version: "14" }
+          - { engine: postgres, version: "15" }
+          - { engine: postgres, version: "16" }
+          - { engine: mysql, version: "5.7" }
+          - { engine: mysql, version: "8.0" }
+          - { engine: mariadb, version: "10.6" }
+          - { engine: mariadb, version: "10.11" }
+          - { engine: mariadb, version: "11.4" }
+    env:
+      IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/fakecloud-${{ matrix.target.engine }}
 
     steps:
       - name: Download digests
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: /tmp/digests
-          pattern: digest-postgres-${{ matrix.pg_version }}-*
+          pattern: digest-${{ matrix.target.engine }}-${{ matrix.target.version }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -135,15 +158,15 @@ jobs:
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE_BASE }}
-          # On a real release tag (`v*`): pinned `<major>-<version>` plus
-          # a rolling `<major>` tag.
-          # On `workflow_dispatch`: a one-off `<major>-dev-<short-sha>`
+          # On a real release tag (`v*`): pinned `<version>-<release>` plus
+          # a rolling `<version>` tag.
+          # On `workflow_dispatch`: a one-off `<version>-dev-<short-sha>`
           # tag so we can validate the full publish + manifest-merge
           # path end-to-end without overwriting any release tag.
           tags: |
-            type=semver,pattern=${{ matrix.pg_version }}-{{version}}
-            type=raw,value=${{ matrix.pg_version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=raw,value=${{ matrix.pg_version }}-dev-${{ steps.sha.outputs.short }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=semver,pattern=${{ matrix.target.version }}-{{version}}
+            type=raw,value=${{ matrix.target.version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ matrix.target.version }}-dev-${{ steps.sha.outputs.short }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
