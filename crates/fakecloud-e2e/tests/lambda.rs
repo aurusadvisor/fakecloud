@@ -68,6 +68,63 @@ async fn lambda_create_get_delete_function() {
 }
 
 #[tokio::test]
+async fn lambda_get_function_accepts_arn_partial_arn_and_qualifier() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("arn-target")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Full ARN — what the VS Code AWS Toolkit sends.
+    let resp = client
+        .get_function()
+        .function_name("arn:aws:lambda:us-east-1:123456789012:function:arn-target")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.configuration().unwrap().function_name().unwrap(),
+        "arn-target"
+    );
+
+    // Partial ARN.
+    let resp = client
+        .get_function()
+        .function_name("123456789012:function:arn-target")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.configuration().unwrap().function_name().unwrap(),
+        "arn-target"
+    );
+
+    // Bare name with version qualifier.
+    let resp = client
+        .get_function()
+        .function_name("arn-target:1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.configuration().unwrap().function_name().unwrap(),
+        "arn-target"
+    );
+}
+
+#[tokio::test]
 async fn lambda_list_functions() {
     let server = TestServer::start().await;
     let client = server.lambda_client().await;
