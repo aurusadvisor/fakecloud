@@ -91,6 +91,8 @@ async fn rds_describe_db_instances() {
         .await
         .unwrap();
 
+    wait_for_db_available(&client, "conf-rds-db").await;
+
     let response = client
         .describe_db_instances()
         .db_instance_identifier("conf-rds-db")
@@ -540,7 +542,7 @@ async fn create_instance_with_deletion_protection(
     db_instance_identifier: &str,
     deletion_protection: bool,
 ) -> aws_sdk_rds::operation::create_db_instance::CreateDbInstanceOutput {
-    client
+    let response = client
         .create_db_instance()
         .db_instance_identifier(db_instance_identifier)
         .allocated_storage(20)
@@ -553,7 +555,39 @@ async fn create_instance_with_deletion_protection(
         .db_name("appdb")
         .send()
         .await
-        .unwrap()
+        .unwrap();
+
+    // Async CreateDBInstance returns a `creating` placeholder; the
+    // background container start has to finish before any caller can
+    // exercise snapshot / replica / dump paths without hitting
+    // "Docker/Podman is required for RDS DB instances but is not
+    // available". Poll until the instance flips to `available`.
+    wait_for_db_available(client, db_instance_identifier).await;
+
+    response
+}
+
+async fn wait_for_db_available(client: &aws_sdk_rds::Client, db_instance_identifier: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    while std::time::Instant::now() < deadline {
+        let response = client
+            .describe_db_instances()
+            .db_instance_identifier(db_instance_identifier)
+            .send()
+            .await
+            .unwrap();
+        if let Some(status) = response
+            .db_instances()
+            .first()
+            .and_then(|i| i.db_instance_status())
+        {
+            if status == "available" {
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    panic!("DB instance {db_instance_identifier} did not reach `available` within 240s");
 }
 
 #[test_action("rds", "CreateDBSubnetGroup", checksum = "1b1b06a3")]
@@ -873,6 +907,8 @@ async fn rds_delete_db_instance_with_final_snapshot() {
         .await
         .unwrap();
 
+    wait_for_db_available(&client, "conf-rds-final").await;
+
     // Delete with final snapshot
     let response = client
         .delete_db_instance()
@@ -981,6 +1017,8 @@ async fn rds_describe_db_snapshots_pagination() {
         .send()
         .await
         .unwrap();
+
+    wait_for_db_available(&client, "conf-snap-paginate").await;
 
     // Create 3 snapshots
     for i in 1..=3 {
