@@ -69,8 +69,7 @@ async fn aws_s3_extension_import_export_round_trip() {
     // 2. Postgres instance — reuses the lazy fakecloud-postgres image
     //    that the aws_lambda e2e already exercises, so this run is fast
     //    when ordered after the lambda test on the same runner.
-    let create = rds
-        .create_db_instance()
+    rds.create_db_instance()
         .db_instance_identifier("aws-s3-ext-db")
         .allocated_storage(20)
         .db_instance_class("db.t3.micro")
@@ -82,10 +81,8 @@ async fn aws_s3_extension_import_export_round_trip() {
         .send()
         .await
         .expect("create postgres instance");
-    let endpoint = create
-        .db_instance()
-        .and_then(|i| i.endpoint())
-        .expect("endpoint");
+    let instance = helpers::wait_for_db_available(&rds, "aws-s3-ext-db", 240).await;
+    let endpoint = instance.endpoint().expect("endpoint");
     let host = endpoint.address().expect("address").to_string();
     let port = endpoint.port().expect("port");
 

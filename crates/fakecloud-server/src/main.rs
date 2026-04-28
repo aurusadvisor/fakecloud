@@ -1761,6 +1761,34 @@ async fn main() {
                                     "loaded rds persistence snapshot (migrated from v1)",
                                 );
                             }
+                            // Drop any `creating` placeholder rows the snapshot
+                            // captured mid-CreateDBInstance. The background
+                            // container-start task didn't survive the restart,
+                            // so the placeholder would otherwise be stuck in
+                            // `creating` forever. Dropping them is safe — the
+                            // user can retry CreateDBInstance.
+                            {
+                                let mut mas = rds_state.write();
+                                for (_, state) in mas.iter_mut() {
+                                    let stuck: Vec<String> = state
+                                        .instances
+                                        .iter()
+                                        .filter(|(_, inst)| {
+                                            inst.db_instance_status == "creating"
+                                        })
+                                        .map(|(id, _)| id.clone())
+                                        .collect();
+                                    for id in &stuck {
+                                        state.instances.remove(id);
+                                    }
+                                    if !stuck.is_empty() {
+                                        tracing::warn!(
+                                            count = stuck.len(),
+                                            "dropped stuck `creating` rds instances after persistence load",
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(err) => fatal_exit(format_args!(
                             "failed to parse rds persistence snapshot: {err}"

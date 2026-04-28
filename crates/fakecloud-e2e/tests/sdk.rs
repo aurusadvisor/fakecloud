@@ -136,6 +136,7 @@ async fn sdk_rds_get_instances() {
         .await
         .unwrap();
 
+    helpers::wait_for_db_available(&rds, "sdk-rds-db", 240).await;
     let instances = fc.rds().get_instances().await.expect("get rds instances");
     let instance = instances
         .instances

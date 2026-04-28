@@ -316,23 +316,14 @@ impl RdsService {
         event_categories: &[&str],
         message: &str,
     ) {
-        let Some(ref bus) = self.delivery_bus else {
-            return;
-        };
-        let detail = serde_json::json!({
-            "EventCategories": event_categories,
-            "SourceType": source_type.as_str(),
-            "SourceArn": source_arn,
-            "Date": Utc::now().to_rfc3339(),
-            "Message": message,
-            "SourceIdentifier": source_identifier,
-            "EventID": event_id,
-        });
-        bus.put_event_to_eventbridge(
-            "aws.rds",
-            source_type.detail_type(),
-            &detail.to_string(),
-            "default",
+        emit_event_static(
+            self.delivery_bus.as_ref(),
+            source_type,
+            source_identifier,
+            source_arn,
+            event_id,
+            event_categories,
+            message,
         );
     }
 
@@ -491,72 +482,60 @@ impl RdsService {
             }
         }
 
-        let runtime = self.require_runtime()?;
+        let runtime = self.require_runtime()?.clone();
 
         let logical_db_name = db_name
             .clone()
             .unwrap_or_else(|| default_db_name(&engine).to_string());
-        let running = runtime
-            .ensure_postgres(
-                &db_instance_identifier,
-                &engine,
-                &engine_version,
-                &master_username,
-                &master_user_password,
-                &logical_db_name,
-                &request.account_id,
-                &request.region,
-            )
-            .await
-            .map_err(|error| {
-                self.state
-                    .write()
-                    .get_or_create(&request.account_id)
-                    .cancel_instance_creation(&db_instance_identifier);
-                runtime_error_to_service_error(error)
-            })?;
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
+        // Insert a "creating" placeholder synchronously and spawn the
+        // container start in a background task. CreateDBInstance returns
+        // ~immediately; DescribeDBInstances flips to "available" (or
+        // "failed") when the container is up. Matches AWS RDS behavior:
+        // CreateDBInstance never blocks on the container coming up.
         let created_at = Utc::now();
-        let instance = DbInstance {
-            db_instance_identifier: db_instance_identifier.clone(),
-            db_instance_arn: state.db_instance_arn(&db_instance_identifier),
-            db_instance_class: db_instance_class.clone(),
-            engine: engine.clone(),
-            engine_version: engine_version.clone(),
-            db_instance_status: "available".to_string(),
-            master_username: master_username.clone(),
-            db_name: db_name.clone(),
-            endpoint_address: "127.0.0.1".to_string(),
-            port: i32::from(running.host_port),
-            allocated_storage,
-            publicly_accessible,
-            deletion_protection,
-            created_at,
-            dbi_resource_id: state.next_dbi_resource_id(),
-            master_user_password,
-            container_id: running.container_id,
-            host_port: running.host_port,
-            tags: Vec::new(),
-            read_replica_source_db_instance_identifier: None,
-            read_replica_db_instance_identifiers: Vec::new(),
-            vpc_security_group_ids,
-            db_parameter_group_name,
-            backup_retention_period,
-            preferred_backup_window,
-            latest_restorable_time: if backup_retention_period > 0 {
-                Some(created_at)
-            } else {
-                None
-            },
-            option_group_name,
-            multi_az,
-            pending_modified_values: None,
+        let instance = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            let placeholder = DbInstance {
+                db_instance_identifier: db_instance_identifier.clone(),
+                db_instance_arn: state.db_instance_arn(&db_instance_identifier),
+                db_instance_class: db_instance_class.clone(),
+                engine: engine.clone(),
+                engine_version: engine_version.clone(),
+                db_instance_status: "creating".to_string(),
+                master_username: master_username.clone(),
+                db_name: db_name.clone(),
+                endpoint_address: String::new(),
+                port: 0,
+                allocated_storage,
+                publicly_accessible,
+                deletion_protection,
+                created_at,
+                dbi_resource_id: state.next_dbi_resource_id(),
+                master_user_password: master_user_password.clone(),
+                container_id: String::new(),
+                host_port: 0,
+                tags: Vec::new(),
+                read_replica_source_db_instance_identifier: None,
+                read_replica_db_instance_identifiers: Vec::new(),
+                vpc_security_group_ids,
+                db_parameter_group_name,
+                backup_retention_period,
+                preferred_backup_window,
+                latest_restorable_time: if backup_retention_period > 0 {
+                    Some(created_at)
+                } else {
+                    None
+                },
+                option_group_name,
+                multi_az,
+                pending_modified_values: None,
+            };
+            state.finish_instance_creation(placeholder.clone());
+            placeholder
         };
-        state.finish_instance_creation(instance.clone());
         let instance_arn = instance.db_instance_arn.clone();
-        drop(accounts);
 
         self.emit_event(
             RdsSourceType::DbInstance,
@@ -567,13 +546,71 @@ impl RdsService {
             "DB instance created",
         );
 
+        {
+            let state_handle = self.state.clone();
+            let delivery_bus = self.delivery_bus.clone();
+            let runtime = runtime.clone();
+            let id = db_instance_identifier.clone();
+            let engine = engine.clone();
+            let engine_version = engine_version.clone();
+            let master_username = master_username.clone();
+            let master_user_password = master_user_password.clone();
+            let account_id = request.account_id.clone();
+            let region = request.region.clone();
+            let arn = instance_arn.clone();
+            tokio::spawn(async move {
+                match runtime
+                    .ensure_postgres(
+                        &id,
+                        &engine,
+                        &engine_version,
+                        &master_username,
+                        &master_user_password,
+                        &logical_db_name,
+                        &account_id,
+                        &region,
+                    )
+                    .await
+                {
+                    Ok(running) => {
+                        let mut accounts = state_handle.write();
+                        let state = accounts.get_or_create(&account_id);
+                        if let Some(inst) = state.instances.get_mut(&id) {
+                            inst.db_instance_status = "available".to_string();
+                            inst.endpoint_address = "127.0.0.1".to_string();
+                            inst.port = i32::from(running.host_port);
+                            inst.host_port = running.host_port;
+                            inst.container_id = running.container_id;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, db_instance_identifier=%id, "create_db_instance background task failed");
+                        {
+                            let mut accounts = state_handle.write();
+                            let state = accounts.get_or_create(&account_id);
+                            state.instances.remove(&id);
+                        }
+                        emit_event_static(
+                            delivery_bus.as_ref(),
+                            RdsSourceType::DbInstance,
+                            &id,
+                            &arn,
+                            "RDS-EVENT-0058",
+                            &["failure"],
+                            &format!("DB instance failed to create: {}", error),
+                        );
+                    }
+                }
+            });
+        }
+
         Ok(AwsResponse::xml(
             StatusCode::OK,
             xml_wrap(
                 "CreateDBInstance",
                 &format!(
                     "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(&instance, Some("creating"))
+                    db_instance_xml(&instance, None)
                 ),
                 &request.request_id,
             ),
@@ -2692,6 +2729,37 @@ fn tag_xml(tag: &RdsTag) -> String {
     )
 }
 
+/// Free-standing version of `emit_event` so background tasks (which
+/// don't have a `&self`) can publish RDS events through the same path.
+pub(crate) fn emit_event_static(
+    delivery_bus: Option<&Arc<DeliveryBus>>,
+    source_type: RdsSourceType,
+    source_identifier: &str,
+    source_arn: &str,
+    event_id: &str,
+    event_categories: &[&str],
+    message: &str,
+) {
+    let Some(bus) = delivery_bus else {
+        return;
+    };
+    let detail = serde_json::json!({
+        "EventCategories": event_categories,
+        "SourceType": source_type.as_str(),
+        "SourceArn": source_arn,
+        "Date": Utc::now().to_rfc3339(),
+        "Message": message,
+        "SourceIdentifier": source_identifier,
+        "EventID": event_id,
+    });
+    bus.put_event_to_eventbridge(
+        "aws.rds",
+        source_type.detail_type(),
+        &detail.to_string(),
+        "default",
+    );
+}
+
 fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> String {
     let status = status_override.unwrap_or(&instance.db_instance_status);
     let db_name_xml = instance
@@ -2829,6 +2897,20 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
         })
         .unwrap_or_default();
 
+    // Endpoint is suppressed while the container is still coming up so
+    // SDK callers don't try to dial an empty host:0. Once the background
+    // task fills in `endpoint_address` and `port`, DescribeDBInstances
+    // returns the real endpoint.
+    let endpoint_xml = if instance.endpoint_address.is_empty() || instance.port == 0 {
+        String::new()
+    } else {
+        format!(
+            "<Endpoint><Address>{}</Address><Port>{}</Port></Endpoint>",
+            xml_escape(&instance.endpoint_address),
+            instance.port
+        )
+    };
+
     format!(
         "<DBInstanceIdentifier>{identifier}</DBInstanceIdentifier>\
          <DBInstanceClass>{class}</DBInstanceClass>\
@@ -2836,7 +2918,7 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
          <DBInstanceStatus>{status}</DBInstanceStatus>\
          <MasterUsername>{master_username}</MasterUsername>\
          {db_name_xml}\
-         <Endpoint><Address>{endpoint_address}</Address><Port>{port}</Port></Endpoint>\
+         {endpoint_xml}\
          <AllocatedStorage>{allocated_storage}</AllocatedStorage>\
          <InstanceCreateTime>{create_time}</InstanceCreateTime>\
          <PreferredBackupWindow>{preferred_backup_window}</PreferredBackupWindow>\
@@ -2867,7 +2949,6 @@ fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> Stri
         engine = xml_escape(&instance.engine),
         status = xml_escape(status),
         master_username = xml_escape(&instance.master_username),
-        endpoint_address = xml_escape(&instance.endpoint_address),
         port = instance.port,
         allocated_storage = instance.allocated_storage,
         create_time = instance.created_at.to_rfc3339(),

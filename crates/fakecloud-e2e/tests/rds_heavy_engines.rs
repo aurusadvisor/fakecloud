@@ -76,6 +76,8 @@ async fn rds_oracle_create_describe_delete() {
         .await
         .expect("create oracle instance");
 
+    // Oracle Free can take up to ~4 minutes to bootstrap.
+    helpers::wait_for_db_available(&client, "oracle-smoke", 360).await;
     let describe = client
         .describe_db_instances()
         .db_instance_identifier("oracle-smoke")
@@ -126,6 +128,7 @@ async fn rds_sqlserver_create_describe_delete() {
         .await
         .expect("create sqlserver instance");
 
+    helpers::wait_for_db_available(&client, "mssql-smoke", 300).await;
     let describe = client
         .describe_db_instances()
         .db_instance_identifier("mssql-smoke")
@@ -167,6 +170,8 @@ async fn rds_db2_create_describe_delete() {
         .await
         .expect("create db2 instance");
 
+    // Db2 Community Edition's first boot can take ~6 minutes.
+    helpers::wait_for_db_available(&client, "db2-smoke", 480).await;
     let describe = client
         .describe_db_instances()
         .db_instance_identifier("db2-smoke")
