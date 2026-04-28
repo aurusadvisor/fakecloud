@@ -5,10 +5,22 @@
 # tries to pull that tag first and falls back to building from this
 # Dockerfile locally when the pull fails.
 
+# MARIADB_VERSION must sit before the first FROM so its substitution is
+# available across all stages.
 ARG MARIADB_VERSION=10.11
+
+# Rebuild gosu from source with current Go to eliminate upstream
+# mariadb image's bundled go1.24.6 stdlib CVEs in /usr/local/bin/gosu.
+FROM golang:1.25-bookworm AS gosu-builder
+ENV CGO_ENABLED=0
+RUN go install -ldflags='-s -w' github.com/tianon/gosu@v0.0.0-20250923190938-6456aaa0f3c8
+
 FROM mariadb:${MARIADB_VERSION}
 
 USER root
+
+COPY --from=gosu-builder /go/bin/gosu /usr/local/bin/gosu
+RUN chmod 0755 /usr/local/bin/gosu
 # UDF plugin API structs are vendored inline in fakecloud_udf.c so we
 # only need a C compiler + libcurl headers. Keeping the dep set
 # symmetric with the mysql Dockerfile means a single source of truth
