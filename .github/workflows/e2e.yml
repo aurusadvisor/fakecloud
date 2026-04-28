@@ -167,6 +167,8 @@ jobs:
           df -h
           echo "=== target dir ==="
           du -sh target 2>/dev/null || true
+          echo "=== ~/.cargo ==="
+          du -sh ~/.cargo 2>/dev/null || true
 
       - name: Prune container state after tests
         if: always()
