@@ -1773,9 +1773,7 @@ async fn main() {
                                     let stuck: Vec<String> = state
                                         .instances
                                         .iter()
-                                        .filter(|(_, inst)| {
-                                            inst.db_instance_status == "creating"
-                                        })
+                                        .filter(|(_, inst)| inst.db_instance_status == "creating")
                                         .map(|(id, _)| id.clone())
                                         .collect();
                                     for id in &stuck {

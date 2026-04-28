@@ -329,7 +329,7 @@ class E2ETest {
 
     // ── RDS ────────────────────────────────────────────────────────
     @Test
-    void rdsGetInstancesReturnsManagedInstances() {
+    void rdsGetInstancesReturnsManagedInstances() throws Exception {
         RdsClient rds = configure(RdsClient.builder()).build();
         rds.createDBInstance(CreateDbInstanceRequest.builder()
                 .dbInstanceIdentifier("java-rds-db")
@@ -341,6 +341,19 @@ class E2ETest {
                 .masterUserPassword("secret123")
                 .dbName("appdb")
                 .build());
+
+        // CreateDBInstance returns a `creating` placeholder; poll until
+        // the container is up so the introspection endpoint reports the
+        // populated host_port / container_id.
+        long deadline = System.currentTimeMillis() + 240_000;
+        while (System.currentTimeMillis() < deadline) {
+            var desc = rds.describeDBInstances(b -> b.dbInstanceIdentifier("java-rds-db"));
+            if (!desc.dbInstances().isEmpty()
+                    && "available".equals(desc.dbInstances().get(0).dbInstanceStatusAsString())) {
+                break;
+            }
+            Thread.sleep(1000);
+        }
 
         var instance = fc.rds().getInstances().instances().stream()
                 .filter(i -> "java-rds-db".equals(i.dbInstanceIdentifier()))

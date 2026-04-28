@@ -111,6 +111,8 @@ def test_health(fc: FakeCloudSync, fakecloud_url: str) -> None:
 
 
 def test_rds_instances(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    import time
+
     rds = boto3.client("rds", **_boto_kwargs(fakecloud_url))
     rds.create_db_instance(
         DBInstanceIdentifier="py-sdk-rds-db",
@@ -122,6 +124,19 @@ def test_rds_instances(fc: FakeCloudSync, fakecloud_url: str) -> None:
         MasterUserPassword="secret123",
         DBName="appdb",
     )
+
+    # CreateDBInstance returns a `creating` placeholder; poll until the
+    # container is up so the introspection endpoint reports the populated
+    # container_id and host_port.
+    deadline = time.time() + 240
+    while time.time() < deadline:
+        desc = rds.describe_db_instances(DBInstanceIdentifier="py-sdk-rds-db")
+        if (
+            desc["DBInstances"]
+            and desc["DBInstances"][0]["DBInstanceStatus"] == "available"
+        ):
+            break
+        time.sleep(1)
 
     result = fc.rds.get_instances()
     instance = next(
