@@ -24,7 +24,13 @@ ARG PG_VERSION
 COPY --from=gosu-builder /go/bin/gosu /usr/local/bin/gosu
 RUN chmod 0755 /usr/local/bin/gosu
 
+# `apt-get upgrade` pulls in patched OS packages (openssl, glibc, dirmngr…)
+# which sometimes lag behind on the upstream `postgres:<major>` tag —
+# Trivy flags those as HIGH/CRITICAL even when fixes are available in
+# the same Debian release. Running upgrade keeps the published image
+# clean against the latest debian13 security DB at build time.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         postgresql-plpython3-${PG_VERSION} \
         ca-certificates \

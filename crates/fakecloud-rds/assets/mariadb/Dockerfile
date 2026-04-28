@@ -26,6 +26,7 @@ RUN chmod 0755 /usr/local/bin/gosu
 # symmetric with the mysql Dockerfile means a single source of truth
 # for the build rule.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         gcc make libcurl4-openssl-dev libc6-dev ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*

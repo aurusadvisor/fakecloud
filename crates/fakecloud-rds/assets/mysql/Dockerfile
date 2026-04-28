@@ -52,6 +52,7 @@ RUN set -eux; \
         microdnf clean all; \
     elif command -v apt-get >/dev/null 2>&1; then \
         apt-get update; \
+        apt-get upgrade -y --no-install-recommends; \
         apt-get install -y --no-install-recommends \
             gcc make libcurl4-openssl-dev libc6-dev ca-certificates; \
         rm -rf /var/lib/apt/lists/*; \
