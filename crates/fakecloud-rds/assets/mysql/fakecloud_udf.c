@@ -21,12 +21,50 @@
  *          'plugin_dir'`) and `CREATE FUNCTION`.
  */
 
-#include <mysql.h>
 #include <curl/curl.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+
+/*
+ * Minimal vendored UDF API. The mysql.h plugin headers ship in
+ * `mysql-community-devel` / `libmysqlclient-dev` / `libmariadb-dev`,
+ * which are absent or repo-gated on the upstream mysql:8.0 image
+ * (the official Dockerfile removes the community release repo). The
+ * struct layout below has been ABI-stable across MySQL 5.6 -> 8.x
+ * and MariaDB 10.x/11.x — the server casts our exported symbols to
+ * these shapes regardless of how we obtained them, so vendoring is
+ * safe and avoids a brittle external repo dependency at build time.
+ */
+enum Item_result {
+    INVALID_RESULT = -1,
+    STRING_RESULT = 0,
+    REAL_RESULT,
+    INT_RESULT,
+    ROW_RESULT,
+    DECIMAL_RESULT
+};
+
+typedef struct st_udf_args {
+    unsigned int arg_count;
+    enum Item_result *arg_type;
+    char **args;
+    unsigned long *lengths;
+    char *maybe_null;
+    char **attributes;
+    unsigned long *attribute_lengths;
+    void *extension;
+} UDF_ARGS;
+
+typedef struct st_udf_init {
+    char maybe_null;
+    unsigned int decimals;
+    unsigned long max_length;
+    char *ptr;
+    char const_item;
+    void *extension;
+} UDF_INIT;
 
 /* ── shared helpers ─────────────────────────────────────────────────── */
 
