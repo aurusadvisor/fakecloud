@@ -120,6 +120,34 @@ The `options` argument is forwarded verbatim into the underlying postgres `COPY`
 
 The bridges (`/_fakecloud/rds/s3-import`, `/_fakecloud/rds/s3-export`) read and write the in-memory S3 state of the same fakecloud server, so any object that's visible to a `GetObject`/`PutObject` call against fakecloud is reachable from `aws_s3`.
 
+## Asynchronous instance creation
+
+`CreateDBInstance` returns ~immediately with `DBInstanceStatus = "creating"`. The container start (and the underlying image pull/build for postgres) runs in the background; `DescribeDBInstances` returns the live status. Callers should poll until the status flips to `available` before connecting:
+
+```python
+import boto3
+import time
+
+rds = boto3.client("rds", endpoint_url="http://localhost:4566")
+rds.create_db_instance(
+    DBInstanceIdentifier="my-db",
+    Engine="postgres",
+    EngineVersion="16.3",
+    MasterUsername="admin",
+    MasterUserPassword="secret123",
+    AllocatedStorage=20,
+    DBInstanceClass="db.t3.micro",
+)
+
+while True:
+    desc = rds.describe_db_instances(DBInstanceIdentifier="my-db")
+    if desc["DBInstances"][0]["DBInstanceStatus"] == "available":
+        break
+    time.sleep(1)
+```
+
+This matches AWS RDS behavior — real `CreateDBInstance` also never blocks on the container coming up. The `Endpoint` element is omitted from create/describe responses while the instance is still in `creating`.
+
 ## How the Docker integration works
 
 When you call `CreateDBInstance` for PostgreSQL/MySQL/MariaDB/Oracle/SQL Server/Db2, fakecloud starts a real Docker container running the upstream image for that engine and version, waits for it to be ready, and reports the mapped host port. Your application connects to that port like it would connect to any database.

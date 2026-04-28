@@ -65,17 +65,7 @@ async fn rds_create_and_describe_db_instance() {
     let created = create_response.db_instance().expect("created instance");
     assert_eq!(created.db_instance_status(), Some("creating"));
 
-    let describe_response = client
-        .describe_db_instances()
-        .db_instance_identifier("orders-db")
-        .send()
-        .await
-        .unwrap();
-
-    let instances = describe_response.db_instances();
-    assert_eq!(instances.len(), 1);
-    let instance = &instances[0];
-    assert_eq!(instance.db_instance_status(), Some("available"));
+    let instance = helpers::wait_for_db_available(&client, "orders-db", 180).await;
     assert_eq!(instance.engine(), Some("postgres"));
 
     let endpoint = instance.endpoint().expect("endpoint");
@@ -612,7 +602,7 @@ async fn create_instance_with_deletion_protection(
     db_instance_identifier: &str,
     deletion_protection: bool,
 ) -> aws_sdk_rds::operation::create_db_instance::CreateDbInstanceOutput {
-    client
+    let resp = client
         .create_db_instance()
         .db_instance_identifier(db_instance_identifier)
         .allocated_storage(20)
@@ -625,7 +615,11 @@ async fn create_instance_with_deletion_protection(
         .db_name("appdb")
         .send()
         .await
-        .unwrap()
+        .unwrap();
+    // CreateDBInstance returns a `creating` placeholder; most callers
+    // need the DB to be ready before exercising downstream ops.
+    helpers::wait_for_db_available(client, db_instance_identifier, 180).await;
+    resp
 }
 
 async fn connect_with_retry(
@@ -766,8 +760,9 @@ async fn final_snapshot_on_delete() {
         .await
         .unwrap();
 
-    let instance = response.db_instance().expect("db instance");
-    let port = instance.endpoint().unwrap().port().unwrap();
+    let _instance = response.db_instance().expect("db instance");
+    let ready = helpers::wait_for_db_available(&client, "e2e-rds-final", 180).await;
+    let port = ready.endpoint().unwrap().port().unwrap();
 
     // Wait for instance and insert test data
     let (postgres, connection) =

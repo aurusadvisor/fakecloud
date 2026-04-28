@@ -26,3 +26,34 @@ pub fn gunzip(data: &[u8]) -> Vec<u8> {
 pub fn _path_buf_shim(p: PathBuf) -> PathBuf {
     p
 }
+
+/// Poll DescribeDBInstances until the instance reports
+/// `db_instance_status = "available"`, then return the populated
+/// `DbInstance`. CreateDBInstance returns a `creating` placeholder
+/// immediately; this helper bridges tests that need the endpoint.
+pub async fn wait_for_db_available(
+    rds: &aws_sdk_rds::Client,
+    db_instance_identifier: &str,
+    max_secs: u64,
+) -> aws_sdk_rds::types::DbInstance {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_secs);
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = rds
+            .describe_db_instances()
+            .db_instance_identifier(db_instance_identifier)
+            .send()
+            .await
+        {
+            for inst in resp.db_instances() {
+                if inst.db_instance_status() == Some("available") {
+                    return inst.clone();
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!(
+        "DB instance {} did not reach 'available' within {}s",
+        db_instance_identifier, max_secs
+    );
+}

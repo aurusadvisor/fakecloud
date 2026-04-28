@@ -84,8 +84,7 @@ async fn aws_lambda_extension_invoke_round_trip() {
 
     // 2. Create the Postgres DB instance — triggers lazy fakecloud-postgres
     //    image build on first run, so this can take a while.
-    let create = rds
-        .create_db_instance()
+    rds.create_db_instance()
         .db_instance_identifier("aws-lambda-ext-db")
         .allocated_storage(20)
         .db_instance_class("db.t3.micro")
@@ -98,10 +97,8 @@ async fn aws_lambda_extension_invoke_round_trip() {
         .await
         .expect("create postgres instance");
 
-    let endpoint = create
-        .db_instance()
-        .and_then(|i| i.endpoint())
-        .expect("endpoint");
+    let instance = helpers::wait_for_db_available(&rds, "aws-lambda-ext-db", 240).await;
+    let endpoint = instance.endpoint().expect("endpoint");
     let host = endpoint.address().expect("address").to_string();
     let port = endpoint.port().expect("port");
 

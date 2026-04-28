@@ -46,7 +46,11 @@ import {
   CreateScheduleCommand,
   FlexibleTimeWindowMode,
 } from "@aws-sdk/client-scheduler";
-import { RDSClient, CreateDBInstanceCommand } from "@aws-sdk/client-rds";
+import {
+  RDSClient,
+  CreateDBInstanceCommand,
+  DescribeDBInstancesCommand,
+} from "@aws-sdk/client-rds";
 import {
   ElastiCacheClient,
   CreateCacheClusterCommand,
@@ -101,8 +105,9 @@ describe("health", () => {
 });
 
 describe("rds", () => {
-  // First run on a fresh runner builds the fakecloud-postgres image
-  // (plpython3u + aws_lambda extension files); allow up to 3 minutes.
+  // CreateDBInstance returns ~immediately with status `creating`. Poll
+  // DescribeDBInstances until the container is up; the underlying image
+  // pull/build still takes up to ~3 minutes on a cold runner.
   it("getInstances() returns fakecloud-managed DB instances", async () => {
     const rds = new RDSClient(awsConfig());
 
@@ -119,6 +124,18 @@ describe("rds", () => {
       }),
     );
 
+    const deadline = Date.now() + 240_000;
+    while (Date.now() < deadline) {
+      const desc = await rds.send(
+        new DescribeDBInstancesCommand({
+          DBInstanceIdentifier: "ts-rds-db",
+        }),
+      );
+      const status = desc.DBInstances?.[0]?.DBInstanceStatus;
+      if (status === "available") break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+
     const result = await fc.rds.getInstances();
     const instance = result.instances.find(
       (candidate) => candidate.dbInstanceIdentifier === "ts-rds-db",
@@ -128,7 +145,7 @@ describe("rds", () => {
     expect(instance!.dbName).toBe("appdb");
     expect(instance!.containerId.length).toBeGreaterThan(0);
     expect(instance!.hostPort).toBeGreaterThan(0);
-  }, 180_000);
+  }, 300_000);
 });
 
 // ── ElastiCache ─────────────────────────────────────────────────────
