@@ -17,6 +17,124 @@ use crate::state::{
     LAMBDA_SNAPSHOT_SCHEMA_VERSION,
 };
 
+/// Lambda actions whose URL `resource_name` slot is a `FunctionName`
+/// (and therefore accepts ARN / partial ARN / `name:qualifier` forms).
+/// Layer / event-source-mapping / code-signing-config actions key off
+/// other resource identifiers and are excluded.
+pub(crate) fn action_takes_function_name(action: &str) -> bool {
+    matches!(
+        action,
+        "GetFunction"
+            | "DeleteFunction"
+            | "Invoke"
+            | "InvokeAsync"
+            | "InvokeWithResponseStream"
+            | "PublishVersion"
+            | "ListVersionsByFunction"
+            | "AddPermission"
+            | "RemovePermission"
+            | "GetPolicy"
+            | "GetFunctionConfiguration"
+            | "UpdateFunctionConfiguration"
+            | "UpdateFunctionCode"
+            | "GetFunctionConcurrency"
+            | "PutFunctionConcurrency"
+            | "DeleteFunctionConcurrency"
+            | "PutProvisionedConcurrencyConfig"
+            | "GetProvisionedConcurrencyConfig"
+            | "DeleteProvisionedConcurrencyConfig"
+            | "ListProvisionedConcurrencyConfigs"
+            | "PutFunctionEventInvokeConfig"
+            | "UpdateFunctionEventInvokeConfig"
+            | "GetFunctionEventInvokeConfig"
+            | "DeleteFunctionEventInvokeConfig"
+            | "ListFunctionEventInvokeConfigs"
+            | "CreateFunctionUrlConfig"
+            | "UpdateFunctionUrlConfig"
+            | "GetFunctionUrlConfig"
+            | "DeleteFunctionUrlConfig"
+            | "ListFunctionUrlConfigs"
+            | "PutFunctionCodeSigningConfig"
+            | "GetFunctionCodeSigningConfig"
+            | "DeleteFunctionCodeSigningConfig"
+            | "GetFunctionScalingConfig"
+            | "PutFunctionRecursionConfig"
+            | "GetFunctionRecursionConfig"
+            | "CreateAlias"
+            | "GetAlias"
+            | "ListAliases"
+            | "UpdateAlias"
+            | "DeleteAlias"
+    )
+}
+
+/// Strip an ARN, partial ARN, or trailing `:qualifier` from a Lambda
+/// `FunctionName` input down to the bare function name used as the
+/// state map key. AWS Lambda accepts four forms in URL path slots and
+/// API params:
+///
+///   - `MyFunction`
+///   - `MyFunction:Qualifier`
+///   - `123456789012:function:MyFunction[:Qualifier]`           (partial ARN)
+///   - `arn:aws:lambda:REGION:ACCOUNT:function:MyFunction[:Qualifier]`
+///
+/// Inputs that don't match any of those structures are returned
+/// unchanged. The qualifier (version or alias) is dropped because most
+/// callers look up the function by name and resolve qualifier
+/// separately.
+pub(crate) fn normalize_function_name(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+
+    // SDKs URL-encode `:` in path segments, so `arn:aws:lambda:...`
+    // arrives as `arn%3Aaws%3Alambda%3A...`. Decode first; legitimate
+    // function names contain no percent-encoded characters, so this is
+    // safe for the bare-name path too.
+    let decoded = percent_encoding::percent_decode_str(input)
+        .decode_utf8_lossy()
+        .into_owned();
+    let input = decoded.as_str();
+
+    // Full ARN: arn:aws:lambda:REGION:ACCOUNT:function:NAME[:QUALIFIER]
+    if let Some(rest) = input.strip_prefix("arn:aws:lambda:") {
+        let parts: Vec<&str> = rest.splitn(5, ':').collect();
+        // parts: [region, account, "function", name, qualifier?]
+        if parts.len() >= 4 && parts[2] == "function" && !parts[3].is_empty() {
+            return parts[3].to_string();
+        }
+        return input.to_string();
+    }
+
+    // Partial ARN: ACCOUNT:function:NAME[:QUALIFIER]
+    let parts: Vec<&str> = input.splitn(4, ':').collect();
+    if parts.len() >= 3 && parts[1] == "function" && parts[0].chars().all(|c| c.is_ascii_digit()) {
+        if !parts[2].is_empty() {
+            return parts[2].to_string();
+        }
+        return input.to_string();
+    }
+
+    // Bare name with qualifier: NAME:QUALIFIER. Only apply when the
+    // input contains exactly one colon and the name part is a valid
+    // Lambda function-name token, so malformed ARNs (e.g. wrong service
+    // or wrong format) fall through unchanged rather than getting their
+    // first colon-segment returned.
+    if input.matches(':').count() == 1 {
+        if let Some((name, _qualifier)) = input.split_once(':') {
+            if !name.is_empty() && name.chars().all(is_function_name_char) {
+                return name.to_string();
+            }
+        }
+    }
+
+    input.to_string()
+}
+
+fn is_function_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
 /// All fields of a `CreateFunction` request, already parsed and
 /// defaulted. The code zip (if any) is eagerly base64-decoded so the
 /// caller can hash it without doing the decode again.
@@ -1617,6 +1735,16 @@ impl AwsService for LambdaService {
             )
         })?;
 
+        // Normalize FunctionName-bearing resource slots: AWS Lambda accepts
+        // bare name, name:qualifier, partial ARN, and full ARN in any URL
+        // slot that names a function. Layer / event-source-mapping resource
+        // names go through different routes and are left as-is.
+        let resource_name = if action_takes_function_name(action) {
+            resource_name.map(|s| normalize_function_name(&s))
+        } else {
+            resource_name
+        };
+
         let mutates = matches!(
             action,
             "CreateFunction"
@@ -1951,6 +2079,140 @@ mod tests {
             access_key_id: None,
             principal: None,
         }
+    }
+
+    #[test]
+    fn normalize_function_name_bare_name_passes_through() {
+        assert_eq!(normalize_function_name("MyFunction"), "MyFunction");
+    }
+
+    #[test]
+    fn normalize_function_name_strips_qualifier_from_bare_name() {
+        assert_eq!(normalize_function_name("MyFunction:PROD"), "MyFunction");
+        assert_eq!(normalize_function_name("MyFunction:1"), "MyFunction");
+    }
+
+    #[test]
+    fn normalize_function_name_strips_full_arn() {
+        assert_eq!(
+            normalize_function_name("arn:aws:lambda:us-east-1:123456789012:function:MyFunction"),
+            "MyFunction"
+        );
+    }
+
+    #[test]
+    fn normalize_function_name_strips_qualified_full_arn() {
+        assert_eq!(
+            normalize_function_name(
+                "arn:aws:lambda:us-east-1:123456789012:function:MyFunction:PROD"
+            ),
+            "MyFunction"
+        );
+    }
+
+    #[test]
+    fn normalize_function_name_strips_partial_arn() {
+        assert_eq!(
+            normalize_function_name("123456789012:function:MyFunction"),
+            "MyFunction"
+        );
+        assert_eq!(
+            normalize_function_name("123456789012:function:MyFunction:1"),
+            "MyFunction"
+        );
+    }
+
+    #[test]
+    fn normalize_function_name_leaves_malformed_arn_alone() {
+        // wrong service in ARN — multiple colons, no lambda prefix → unchanged
+        let s = "arn:aws:s3:us-east-1:123456789012:function:Foo";
+        assert_eq!(normalize_function_name(s), s);
+        // partial ARN with non-numeric account-shaped prefix → unchanged
+        let s2 = "abc:function:Foo";
+        assert_eq!(normalize_function_name(s2), s2);
+    }
+
+    #[test]
+    fn normalize_function_name_empty() {
+        assert_eq!(normalize_function_name(""), "");
+    }
+
+    #[test]
+    fn normalize_function_name_decodes_percent_encoded_arn() {
+        // SDKs URL-encode `:` in path segments. The toolkit / aws-sdk-lambda
+        // wire form for `arn:aws:lambda:...` is `arn%3Aaws%3Alambda%3A...`.
+        let encoded = "arn%3Aaws%3Alambda%3Aus-east-1%3A123456789012%3Afunction%3AMyFunc";
+        assert_eq!(normalize_function_name(encoded), "MyFunc");
+    }
+
+    #[tokio::test]
+    async fn get_function_accepts_full_arn() {
+        let svc = LambdaService::new(make_state());
+        // Seed a function via CreateFunction
+        let create_body = json!({
+            "FunctionName": "MyFunc",
+            "Runtime": "nodejs20.x",
+            "Role": "arn:aws:iam::123456789012:role/lambda-role",
+            "Handler": "index.handler",
+            "Code": {"ZipFile": ""},
+        })
+        .to_string();
+        let req = make_request(Method::POST, "/2015-03-31/functions", &create_body);
+        svc.handle(req).await.expect("create function");
+
+        // GetFunction by full ARN
+        let req = make_request(
+            Method::GET,
+            "/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:MyFunc",
+            "",
+        );
+        let resp = svc.handle(req).await.expect("get function by ARN");
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_function_accepts_partial_arn() {
+        let svc = LambdaService::new(make_state());
+        let create_body = json!({
+            "FunctionName": "MyFunc",
+            "Runtime": "nodejs20.x",
+            "Role": "arn:aws:iam::123456789012:role/lambda-role",
+            "Handler": "index.handler",
+            "Code": {"ZipFile": ""},
+        })
+        .to_string();
+        let req = make_request(Method::POST, "/2015-03-31/functions", &create_body);
+        svc.handle(req).await.expect("create function");
+
+        let req = make_request(
+            Method::GET,
+            "/2015-03-31/functions/123456789012:function:MyFunc",
+            "",
+        );
+        let resp = svc.handle(req).await.expect("get function by partial ARN");
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_function_accepts_name_with_qualifier() {
+        let svc = LambdaService::new(make_state());
+        let create_body = json!({
+            "FunctionName": "MyFunc",
+            "Runtime": "nodejs20.x",
+            "Role": "arn:aws:iam::123456789012:role/lambda-role",
+            "Handler": "index.handler",
+            "Code": {"ZipFile": ""},
+        })
+        .to_string();
+        let req = make_request(Method::POST, "/2015-03-31/functions", &create_body);
+        svc.handle(req).await.expect("create function");
+
+        let req = make_request(Method::GET, "/2015-03-31/functions/MyFunc:1", "");
+        let resp = svc
+            .handle(req)
+            .await
+            .expect("get function by name:qualifier");
+        assert_eq!(resp.status, StatusCode::OK);
     }
 
     #[test]
