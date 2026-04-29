@@ -63,7 +63,13 @@ pub fn require_toolchain() {
 pub fn setup_provider_source() -> std::io::Result<PathBuf> {
     let target = provider_dir();
     if !target.exists() {
-        std::fs::create_dir_all(target.parent().unwrap())?;
+        let parent = target.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("provider_dir() has no parent: {}", target.display()),
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
         let status = Command::new("git")
             .args([
                 "clone",

@@ -97,9 +97,9 @@ pub(crate) fn build_invoke_stream_response(model_id: &str, response_text: &str) 
             }
         });
         let payload = serde_json::to_vec(
-            &json!({ "bytes": base64_encode(&serde_json::to_vec(&chunk).unwrap()) }),
+            &json!({ "bytes": base64_encode(&serde_json::to_vec(&chunk).expect("serde_json::Value serialization is infallible")) }),
         )
-        .unwrap();
+        .expect("serde_json::Value serialization is infallible");
         body.extend(encode_event("chunk", "application/json", &payload));
     } else {
         // Generic: single chunk with the full response
@@ -107,9 +107,9 @@ pub(crate) fn build_invoke_stream_response(model_id: &str, response_text: &str) 
             "outputText": response_text
         });
         let payload = serde_json::to_vec(
-            &json!({ "bytes": base64_encode(&serde_json::to_vec(&chunk).unwrap()) }),
+            &json!({ "bytes": base64_encode(&serde_json::to_vec(&chunk).expect("serde_json::Value serialization is infallible")) }),
         )
-        .unwrap();
+        .expect("serde_json::Value serialization is infallible");
         body.extend(encode_event("chunk", "application/json", &payload));
     }
 
@@ -122,12 +122,14 @@ pub(crate) fn build_converse_stream_response(response_text: &str) -> Vec<u8> {
 
     // messageStart event
     let start = json!({ "role": "assistant" });
-    let payload = serde_json::to_vec(&json!({ "messageStart": start })).unwrap();
+    let payload = serde_json::to_vec(&json!({ "messageStart": start }))
+        .expect("serde_json::Value serialization is infallible");
     body.extend(encode_event("messageStart", "application/json", &payload));
 
     // contentBlockStart event
     let block_start = json!({ "contentBlockIndex": 0, "start": {} });
-    let payload = serde_json::to_vec(&json!({ "contentBlockStart": block_start })).unwrap();
+    let payload = serde_json::to_vec(&json!({ "contentBlockStart": block_start }))
+        .expect("serde_json::Value serialization is infallible");
     body.extend(encode_event(
         "contentBlockStart",
         "application/json",
@@ -141,7 +143,8 @@ pub(crate) fn build_converse_stream_response(response_text: &str) -> Vec<u8> {
             "text": response_text
         }
     });
-    let payload = serde_json::to_vec(&json!({ "contentBlockDelta": delta })).unwrap();
+    let payload = serde_json::to_vec(&json!({ "contentBlockDelta": delta }))
+        .expect("serde_json::Value serialization is infallible");
     body.extend(encode_event(
         "contentBlockDelta",
         "application/json",
@@ -150,7 +153,8 @@ pub(crate) fn build_converse_stream_response(response_text: &str) -> Vec<u8> {
 
     // contentBlockStop event
     let block_stop = json!({ "contentBlockIndex": 0 });
-    let payload = serde_json::to_vec(&json!({ "contentBlockStop": block_stop })).unwrap();
+    let payload = serde_json::to_vec(&json!({ "contentBlockStop": block_stop }))
+        .expect("serde_json::Value serialization is infallible");
     body.extend(encode_event(
         "contentBlockStop",
         "application/json",
@@ -161,7 +165,8 @@ pub(crate) fn build_converse_stream_response(response_text: &str) -> Vec<u8> {
     let stop = json!({
         "stopReason": "end_turn"
     });
-    let payload = serde_json::to_vec(&json!({ "messageStop": stop })).unwrap();
+    let payload = serde_json::to_vec(&json!({ "messageStop": stop }))
+        .expect("serde_json::Value serialization is infallible");
     body.extend(encode_event("messageStop", "application/json", &payload));
 
     // metadata event
@@ -175,7 +180,8 @@ pub(crate) fn build_converse_stream_response(response_text: &str) -> Vec<u8> {
             "latencyMs": 100
         }
     });
-    let payload = serde_json::to_vec(&json!({ "metadata": metadata })).unwrap();
+    let payload = serde_json::to_vec(&json!({ "metadata": metadata }))
+        .expect("serde_json::Value serialization is infallible");
     body.extend(encode_event("metadata", "application/json", &payload));
 
     body
