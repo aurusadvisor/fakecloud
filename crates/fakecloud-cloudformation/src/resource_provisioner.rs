@@ -1063,7 +1063,7 @@ mod tests {
                     description: None,
                     kms_key_identifier: None,
                     dead_letter_config: None,
-                    tags: HashMap::new(),
+                    tags: std::collections::BTreeMap::new(),
                 },
             );
         }
