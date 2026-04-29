@@ -9,7 +9,7 @@ use crate::state::{FaultRule, ModelInvocation, SharedBedrockState};
 /// pair. Decrements the rule's remaining count; removes the rule when it hits
 /// zero. Returns the rule as it looked *before* decrementing so callers can see
 /// the intended error type/message/status.
-pub fn take_matching_fault(
+pub(crate) fn take_matching_fault(
     state: &SharedBedrockState,
     req: &AwsRequest,
     model_id: &str,
@@ -36,13 +36,13 @@ pub fn take_matching_fault(
 }
 
 /// Convert a queued fault rule into an `AwsServiceError` for the caller to return.
-pub fn fault_to_error(fault: &FaultRule) -> AwsServiceError {
+pub(crate) fn fault_to_error(fault: &FaultRule) -> AwsServiceError {
     let status = StatusCode::from_u16(fault.http_status).unwrap_or(StatusCode::BAD_REQUEST);
     AwsServiceError::aws_error(status, &fault.error_type, &fault.message)
 }
 
 /// Record an invocation that was rejected by an injected fault.
-pub fn record_faulted_invocation(
+pub(crate) fn record_faulted_invocation(
     state: &SharedBedrockState,
     req: &AwsRequest,
     model_id: &str,

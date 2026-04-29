@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{CustomModelDeployment, SharedBedrockState};
 
-pub fn create_custom_model_deployment(
+pub(crate) fn create_custom_model_deployment(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -46,7 +46,7 @@ pub fn create_custom_model_deployment(
     ))
 }
 
-pub fn get_custom_model_deployment(
+pub(crate) fn get_custom_model_deployment(
     state: &SharedBedrockState,
     req: &AwsRequest,
     deployment_identifier: &str,
@@ -59,7 +59,7 @@ pub fn get_custom_model_deployment(
     Ok(AwsResponse::ok_json(deployment_to_json(deployment)))
 }
 
-pub fn list_custom_model_deployments(
+pub(crate) fn list_custom_model_deployments(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -104,7 +104,7 @@ pub fn list_custom_model_deployments(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn update_custom_model_deployment(
+pub(crate) fn update_custom_model_deployment(
     state: &SharedBedrockState,
     req: &AwsRequest,
     deployment_identifier: &str,
@@ -129,7 +129,7 @@ pub fn update_custom_model_deployment(
     ))
 }
 
-pub fn delete_custom_model_deployment(
+pub(crate) fn delete_custom_model_deployment(
     state: &SharedBedrockState,
     req: &AwsRequest,
     deployment_identifier: &str,

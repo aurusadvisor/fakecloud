@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{AsyncInvocation, SharedBedrockState};
 
-pub fn start_async_invoke(
+pub(crate) fn start_async_invoke(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -75,7 +75,7 @@ pub fn start_async_invoke(
     ))
 }
 
-pub fn get_async_invoke(
+pub(crate) fn get_async_invoke(
     state: &SharedBedrockState,
     req: &AwsRequest,
     invocation_id: &str,
@@ -103,7 +103,7 @@ pub fn get_async_invoke(
     Ok(AwsResponse::ok_json(invocation_to_json(invocation)))
 }
 
-pub fn list_async_invokes(
+pub(crate) fn list_async_invokes(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {

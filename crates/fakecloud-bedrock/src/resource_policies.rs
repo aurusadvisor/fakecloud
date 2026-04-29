@@ -6,7 +6,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::SharedBedrockState;
 
-pub fn put_resource_policy(
+pub(crate) fn put_resource_policy(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -40,7 +40,7 @@ pub fn put_resource_policy(
     })))
 }
 
-pub fn get_resource_policy(
+pub(crate) fn get_resource_policy(
     state: &SharedBedrockState,
     req: &AwsRequest,
     resource_arn: &str,
@@ -73,7 +73,7 @@ pub fn get_resource_policy(
     })))
 }
 
-pub fn delete_resource_policy(
+pub(crate) fn delete_resource_policy(
     state: &SharedBedrockState,
     req: &AwsRequest,
     resource_arn: &str,

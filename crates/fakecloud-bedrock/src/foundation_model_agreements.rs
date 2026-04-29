@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{FoundationModelAgreement, SharedBedrockState};
 
-pub fn create_foundation_model_agreement(
+pub(crate) fn create_foundation_model_agreement(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -38,7 +38,7 @@ pub fn create_foundation_model_agreement(
     })))
 }
 
-pub fn delete_foundation_model_agreement(
+pub(crate) fn delete_foundation_model_agreement(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -72,7 +72,7 @@ pub fn delete_foundation_model_agreement(
     }
 }
 
-pub fn list_foundation_model_agreement_offers(
+pub(crate) fn list_foundation_model_agreement_offers(
     _state: &SharedBedrockState,
     _req: &AwsRequest,
     model_id: &str,
@@ -83,7 +83,7 @@ pub fn list_foundation_model_agreement_offers(
     })))
 }
 
-pub fn get_foundation_model_availability(
+pub(crate) fn get_foundation_model_availability(
     state: &SharedBedrockState,
     req: &AwsRequest,
     model_id: &str,
@@ -104,7 +104,7 @@ pub fn get_foundation_model_availability(
     })))
 }
 
-pub fn get_use_case_for_model_access(
+pub(crate) fn get_use_case_for_model_access(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -118,7 +118,7 @@ pub fn get_use_case_for_model_access(
     })))
 }
 
-pub fn put_use_case_for_model_access(
+pub(crate) fn put_use_case_for_model_access(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,

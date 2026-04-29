@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{ProvisionedThroughput, SharedBedrockState};
 
-pub fn create_provisioned_model_throughput(
+pub(crate) fn create_provisioned_model_throughput(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -85,7 +85,7 @@ pub fn create_provisioned_model_throughput(
     ))
 }
 
-pub fn get_provisioned_model_throughput(
+pub(crate) fn get_provisioned_model_throughput(
     state: &SharedBedrockState,
     req: &AwsRequest,
     provisioned_model_id: &str,
@@ -98,7 +98,7 @@ pub fn get_provisioned_model_throughput(
     Ok(AwsResponse::ok_json(throughput_to_json(throughput)))
 }
 
-pub fn list_provisioned_model_throughputs(
+pub(crate) fn list_provisioned_model_throughputs(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -156,7 +156,7 @@ pub fn list_provisioned_model_throughputs(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn update_provisioned_model_throughput(
+pub(crate) fn update_provisioned_model_throughput(
     state: &SharedBedrockState,
     req: &AwsRequest,
     provisioned_model_id: &str,
@@ -178,7 +178,7 @@ pub fn update_provisioned_model_throughput(
     Ok(AwsResponse::json(StatusCode::OK, "{}".to_string()))
 }
 
-pub fn delete_provisioned_model_throughput(
+pub(crate) fn delete_provisioned_model_throughput(
     state: &SharedBedrockState,
     req: &AwsRequest,
     provisioned_model_id: &str,

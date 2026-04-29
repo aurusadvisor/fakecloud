@@ -14,7 +14,7 @@ pub struct FoundationModel {
 }
 
 impl FoundationModel {
-    pub fn to_summary_json(&self) -> Value {
+    pub(crate) fn to_summary_json(&self) -> Value {
         json!({
             "modelId": self.model_id,
             "modelName": self.model_name,
@@ -30,7 +30,7 @@ impl FoundationModel {
         })
     }
 
-    pub fn to_detail_json(&self, region: &str, account_id: &str) -> Value {
+    pub(crate) fn to_detail_json(&self, region: &str, account_id: &str) -> Value {
         let arn = format!(
             "arn:aws:bedrock:{}::foundation-model/{}",
             region, self.model_id
@@ -230,7 +230,7 @@ pub static FOUNDATION_MODELS: &[FoundationModel] = &[
 ];
 
 /// Find a foundation model by its model ID.
-pub fn find_model(model_id: &str) -> Option<&'static FoundationModel> {
+pub(crate) fn find_model(model_id: &str) -> Option<&'static FoundationModel> {
     FOUNDATION_MODELS.iter().find(|m| m.model_id == model_id)
 }
 

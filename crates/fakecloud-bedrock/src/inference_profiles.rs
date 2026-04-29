@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{InferenceProfile, SharedBedrockState};
 
-pub fn create_inference_profile(
+pub(crate) fn create_inference_profile(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -61,7 +61,7 @@ pub fn create_inference_profile(
     ))
 }
 
-pub fn get_inference_profile(
+pub(crate) fn get_inference_profile(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,
@@ -98,7 +98,7 @@ pub fn get_inference_profile(
     })))
 }
 
-pub fn list_inference_profiles(
+pub(crate) fn list_inference_profiles(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -153,7 +153,7 @@ pub fn list_inference_profiles(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn delete_inference_profile(
+pub(crate) fn delete_inference_profile(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,

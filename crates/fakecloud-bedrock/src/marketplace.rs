@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{MarketplaceModelEndpoint, SharedBedrockState};
 
-pub fn create_marketplace_model_endpoint(
+pub(crate) fn create_marketplace_model_endpoint(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -56,7 +56,7 @@ pub fn create_marketplace_model_endpoint(
     ))
 }
 
-pub fn get_marketplace_model_endpoint(
+pub(crate) fn get_marketplace_model_endpoint(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,
@@ -93,7 +93,7 @@ pub fn get_marketplace_model_endpoint(
     })))
 }
 
-pub fn list_marketplace_model_endpoints(
+pub(crate) fn list_marketplace_model_endpoints(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -147,7 +147,7 @@ pub fn list_marketplace_model_endpoints(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn update_marketplace_model_endpoint(
+pub(crate) fn update_marketplace_model_endpoint(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,
@@ -196,7 +196,7 @@ pub fn update_marketplace_model_endpoint(
     })))
 }
 
-pub fn delete_marketplace_model_endpoint(
+pub(crate) fn delete_marketplace_model_endpoint(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,
@@ -227,7 +227,7 @@ pub fn delete_marketplace_model_endpoint(
     }
 }
 
-pub fn register_marketplace_model_endpoint(
+pub(crate) fn register_marketplace_model_endpoint(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,
@@ -272,7 +272,7 @@ pub fn register_marketplace_model_endpoint(
     })))
 }
 
-pub fn deregister_marketplace_model_endpoint(
+pub(crate) fn deregister_marketplace_model_endpoint(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,

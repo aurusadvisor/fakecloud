@@ -45,7 +45,7 @@ fn workflow_to_json(w: &AutomatedReasoningBuildWorkflow) -> Value {
     })
 }
 
-pub fn start_build_workflow(
+pub(crate) fn start_build_workflow(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -75,7 +75,7 @@ pub fn start_build_workflow(
     ))
 }
 
-pub fn get_build_workflow(
+pub(crate) fn get_build_workflow(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -100,7 +100,7 @@ pub fn get_build_workflow(
     Ok(AwsResponse::ok_json(workflow_to_json(workflow)))
 }
 
-pub fn list_build_workflows(
+pub(crate) fn list_build_workflows(
     state: &SharedBedrockState,
     policy_identifier: &str,
     req: &AwsRequest,
@@ -153,7 +153,7 @@ pub fn list_build_workflows(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn cancel_build_workflow(
+pub(crate) fn cancel_build_workflow(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -180,7 +180,7 @@ pub fn cancel_build_workflow(
     Ok(AwsResponse::json(StatusCode::OK, "{}".to_string()))
 }
 
-pub fn delete_build_workflow(
+pub(crate) fn delete_build_workflow(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -208,7 +208,7 @@ pub fn delete_build_workflow(
     Ok(AwsResponse::json(StatusCode::OK, "{}".to_string()))
 }
 
-pub fn get_build_workflow_result_assets(
+pub(crate) fn get_build_workflow_result_assets(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -233,7 +233,7 @@ pub fn get_build_workflow_result_assets(
     Ok(AwsResponse::ok_json(json!({ "assets": [] })))
 }
 
-pub fn start_test_workflow(
+pub(crate) fn start_test_workflow(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -262,7 +262,7 @@ pub fn start_test_workflow(
     ))
 }
 
-pub fn get_test_result(
+pub(crate) fn get_test_result(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -303,7 +303,7 @@ pub fn get_test_result(
     Ok(AwsResponse::ok_json(result))
 }
 
-pub fn list_test_results(
+pub(crate) fn list_test_results(
     state: &SharedBedrockState,
     policy_identifier: &str,
     workflow_id: &str,
@@ -368,7 +368,7 @@ pub fn list_test_results(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn get_annotations(
+pub(crate) fn get_annotations(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -399,7 +399,7 @@ pub fn get_annotations(
     Ok(AwsResponse::ok_json(annotations))
 }
 
-pub fn update_annotations(
+pub(crate) fn update_annotations(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -427,7 +427,7 @@ pub fn update_annotations(
     Ok(AwsResponse::ok_json(body.clone()))
 }
 
-pub fn get_next_scenario(
+pub(crate) fn get_next_scenario(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,

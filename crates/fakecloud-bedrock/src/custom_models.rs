@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{CustomModel, SharedBedrockState};
 
-pub fn create_custom_model(
+pub(crate) fn create_custom_model(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -41,7 +41,7 @@ pub fn create_custom_model(
     ))
 }
 
-pub fn get_custom_model(
+pub(crate) fn get_custom_model(
     state: &SharedBedrockState,
     req: &AwsRequest,
     model_identifier: &str,
@@ -74,7 +74,7 @@ pub fn get_custom_model(
     })))
 }
 
-pub fn list_custom_models(
+pub(crate) fn list_custom_models(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -126,7 +126,7 @@ pub fn list_custom_models(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn delete_custom_model(
+pub(crate) fn delete_custom_model(
     state: &SharedBedrockState,
     req: &AwsRequest,
     model_identifier: &str,

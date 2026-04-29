@@ -6,7 +6,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::SharedBedrockState;
 
-pub fn put_enforced_guardrail_configuration(
+pub(crate) fn put_enforced_guardrail_configuration(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -23,7 +23,7 @@ pub fn put_enforced_guardrail_configuration(
     })))
 }
 
-pub fn list_enforced_guardrails_configuration(
+pub(crate) fn list_enforced_guardrails_configuration(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -74,7 +74,7 @@ pub fn list_enforced_guardrails_configuration(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn delete_enforced_guardrail_configuration(
+pub(crate) fn delete_enforced_guardrail_configuration(
     state: &SharedBedrockState,
     req: &AwsRequest,
     config_id: &str,

@@ -8,7 +8,7 @@ use crate::state::SharedBedrockState;
 
 /// Invoke a model and return a provider-specific canned response.
 /// If a custom response has been configured via simulation endpoint, use that instead.
-pub fn invoke_model(
+pub(crate) fn invoke_model(
     state: &SharedBedrockState,
     req: &AwsRequest,
     model_id: &str,
@@ -70,7 +70,7 @@ pub fn invoke_model(
 }
 
 /// Count tokens for the given input text (rough approximation).
-pub fn count_tokens(
+pub(crate) fn count_tokens(
     _state: &SharedBedrockState,
     _req: &AwsRequest,
     model_id: &str,

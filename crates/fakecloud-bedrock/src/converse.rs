@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::state::SharedBedrockState;
 
 /// Handle the Converse API — unified conversation format across all models.
-pub fn converse(
+pub(crate) fn converse(
     state: &SharedBedrockState,
     req: &AwsRequest,
     model_id: &str,
