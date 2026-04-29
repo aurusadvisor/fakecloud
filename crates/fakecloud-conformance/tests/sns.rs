@@ -872,7 +872,7 @@ async fn sns_get_sms_attributes() {
 
     let resp = client.get_sms_attributes().send().await.unwrap();
     // Should return attributes (possibly empty map)
-    let _ = resp.attributes();
+    resp.attributes();
 }
 
 #[test_action("sns", "CheckIfPhoneNumberIsOptedOut", checksum = "1791f458")]

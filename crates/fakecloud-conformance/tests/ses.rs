@@ -1785,9 +1785,9 @@ async fn ses_get_deliverability_dashboard_options() {
         .unwrap();
     // Smithy GetDeliverabilityDashboardOptions returns DashboardEnabled,
     // SubscriptionExpiryDate, AccountStatus. Confirm the typed shape decodes.
-    let _ = resp.dashboard_enabled();
-    let _ = resp.subscription_expiry_date();
-    let _ = resp.account_status();
+    resp.dashboard_enabled();
+    resp.subscription_expiry_date();
+    resp.account_status();
 }
 
 #[test_action("ses", "PutDeliverabilityDashboardOption", checksum = "baea4aa5")]
@@ -1840,7 +1840,7 @@ async fn ses_create_deliverability_test_report() {
         .unwrap();
     // Smithy CreateDeliverabilityTestReport returns ReportId + DeliverabilityTestStatus.
     assert!(!resp.report_id().is_empty());
-    let _ = resp.deliverability_test_status();
+    resp.deliverability_test_status();
 }
 
 #[test_action("ses", "GetDeliverabilityTestReport", checksum = "cfdaf3ed")]
@@ -1881,8 +1881,8 @@ async fn ses_get_deliverability_test_report() {
     // be Some — we just created one), OverallPlacement, IspPlacements, Message,
     // Tags. Confirm the typed shape decodes.
     assert!(resp.deliverability_test_report().is_some());
-    let _ = resp.overall_placement();
-    let _ = resp.isp_placements();
+    resp.overall_placement();
+    resp.isp_placements();
 }
 
 #[test_action("ses", "ListDeliverabilityTestReports", checksum = "2ff6966f")]
@@ -1897,7 +1897,7 @@ async fn ses_list_deliverability_test_reports() {
         .unwrap();
     // Smithy ListDeliverabilityTestReports returns DeliverabilityTestReports
     // (required) + NextToken (optional).
-    let _ = resp.deliverability_test_reports();
+    resp.deliverability_test_reports();
 }
 
 #[test_action("ses", "GetBlacklistReports", checksum = "748e9215")]
@@ -1912,7 +1912,7 @@ async fn ses_get_blacklist_reports() {
         .await
         .unwrap();
     // Smithy GetBlacklistReports returns BlacklistReport (required map).
-    let _ = resp.blacklist_report();
+    resp.blacklist_report();
 }
 
 #[test_action("ses", "GetDomainDeliverabilityCampaign", checksum = "1e2c07e5")]
@@ -1945,7 +1945,7 @@ async fn ses_get_domain_statistics_report() {
         .unwrap();
     // Smithy GetDomainStatisticsReport returns OverallVolume + DailyVolumes.
     assert!(resp.overall_volume().is_some());
-    let _ = resp.daily_volumes();
+    resp.daily_volumes();
 }
 
 #[test_action("ses", "ListDomainDeliverabilityCampaigns", checksum = "4abf00ca")]
@@ -1962,7 +1962,7 @@ async fn ses_list_domain_deliverability_campaigns() {
         .await
         .unwrap();
     // Smithy ListDomainDeliverabilityCampaigns returns DomainDeliverabilityCampaigns + NextToken.
-    let _ = resp.domain_deliverability_campaigns();
+    resp.domain_deliverability_campaigns();
 }
 
 #[test_action("ses", "GetEmailAddressInsights", checksum = "c0b9de1c")]
@@ -2003,5 +2003,5 @@ async fn ses_list_recommendations() {
     let client = server.sesv2_client().await;
     let resp = client.list_recommendations().send().await.unwrap();
     // Smithy ListRecommendations returns Recommendations + NextToken.
-    let _ = resp.recommendations();
+    resp.recommendations();
 }

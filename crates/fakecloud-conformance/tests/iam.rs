@@ -1383,11 +1383,12 @@ async fn iam_service_linked_role() {
         .unwrap();
     let task_id = del.deletion_task_id().to_string();
 
-    let _ = client
+    client
         .get_service_linked_role_deletion_status()
         .deletion_task_id(&task_id)
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // ==========================================================================
@@ -1472,7 +1473,7 @@ async fn iam_credential_report() {
     let client = server.iam_client().await;
 
     client.generate_credential_report().send().await.unwrap();
-    let _ = client.get_credential_report().send().await;
+    client.get_credential_report().send().await.ok();
 }
 
 // ==========================================================================

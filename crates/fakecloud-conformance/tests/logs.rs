@@ -497,7 +497,12 @@ async fn logs_export_tasks() {
 
     client.describe_export_tasks().send().await.unwrap();
 
-    let _ = client.cancel_export_task().task_id(&task_id).send().await;
+    client
+        .cancel_export_task()
+        .task_id(&task_id)
+        .send()
+        .await
+        .ok();
 }
 
 // -- Delivery destinations --
@@ -577,17 +582,19 @@ async fn logs_delivery_destination_policy() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_delivery_destination_policy()
         .delivery_destination_name("conf-dd-pol")
         .send()
-        .await;
+        .await
+        .ok();
 
-    let _ = client
+    client
         .delete_delivery_destination_policy()
         .delivery_destination_name("conf-dd-pol")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- Delivery sources --
@@ -1138,11 +1145,12 @@ async fn logs_anomalies_stub() {
     assert!(resp.anomalies().is_empty());
 
     // UpdateAnomaly needs anomalyDetectorArn
-    let _ = client
+    client
         .update_anomaly()
         .anomaly_detector_arn("arn:aws:logs:us-east-1:123456789012:anomaly-detector:dummy")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- Import tasks --
@@ -1175,11 +1183,12 @@ async fn logs_import_tasks() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .cancel_import_task()
         .import_id(&import_id)
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- Integrations --
@@ -1307,13 +1316,14 @@ async fn logs_scheduled_queries() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_scheduled_query_history()
         .identifier(&arn)
         .start_time(0)
         .end_time(9999999999)
         .send()
-        .await;
+        .await
+        .ok();
 
     client.list_scheduled_queries().send().await.unwrap();
 
@@ -1345,11 +1355,12 @@ async fn logs_start_live_tail() {
     let client = server.logs_client().await;
 
     // StartLiveTail returns a stream; just invoke and check it doesn't error
-    let _ = client
+    client
         .start_live_tail()
         .log_group_identifiers("/conf/livetail")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 #[test_action("logs", "ListLogGroups", checksum = "949ce2bd")]
@@ -1452,11 +1463,12 @@ async fn logs_get_log_object() {
     let server = TestServer::start().await;
     let client = server.logs_client().await;
 
-    let _ = client
+    client
         .get_log_object()
         .log_object_pointer("some-pointer")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 #[test_action("logs", "GetLogFields", checksum = "15902512")]
@@ -1465,12 +1477,13 @@ async fn logs_get_log_fields() {
     let server = TestServer::start().await;
     let client = server.logs_client().await;
 
-    let _ = client
+    client
         .get_log_fields()
         .data_source_name("test-ds")
         .data_source_type("CW_LOG")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- S3 table integration stubs --
@@ -1508,11 +1521,12 @@ async fn logs_s3_table_integration() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .disassociate_source_from_s3_table_integration()
         .identifier("arn:aws:logs:us-east-1:123456789012:integration:conf-int")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- Delivery configuration --

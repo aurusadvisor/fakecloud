@@ -386,7 +386,7 @@ async fn kms_list_aliases() {
     let client = server.kms_client().await;
 
     let resp = client.list_aliases().send().await.unwrap();
-    let _ = resp.aliases();
+    resp.aliases();
 }
 
 // ---------------------------------------------------------------------------
@@ -686,7 +686,7 @@ async fn kms_list_key_rotations() {
         .send()
         .await
         .unwrap();
-    let _ = resp.rotations();
+    resp.rotations();
 }
 
 // ---------------------------------------------------------------------------
@@ -842,7 +842,7 @@ async fn kms_list_retirable_grants() {
         .send()
         .await
         .unwrap();
-    let _ = resp.grants();
+    resp.grants();
 }
 
 #[test_action("kms", "RevokeGrant", checksum = "f5a54621")]
@@ -985,12 +985,13 @@ async fn kms_replicate_key() {
 
     // ReplicateKey may succeed or return an error depending on impl;
     // we just verify the API call is accepted
-    let _ = client
+    client
         .replicate_key()
         .key_id(&key_id)
         .replica_region("eu-west-1")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 #[test_action("kms", "GenerateDataKeyPair", checksum = "abecf576")]

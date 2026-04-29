@@ -233,12 +233,18 @@ async fn sm_rotate_cancel_rotate() {
         .send()
         .await
         .unwrap();
-    let _ = client.rotate_secret().secret_id("conf/rotate").send().await;
-    let _ = client
+    client
+        .rotate_secret()
+        .secret_id("conf/rotate")
+        .send()
+        .await
+        .ok();
+    client
         .cancel_rotate_secret()
         .secret_id("conf/rotate")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- Version stage --
@@ -256,13 +262,14 @@ async fn sm_update_secret_version_stage() {
         .await
         .unwrap();
     let version_id = create.version_id().unwrap().to_string();
-    let _ = client
+    client
         .update_secret_version_stage()
         .secret_id("conf/stage")
         .version_stage("AWSCURRENT")
         .move_to_version_id(&version_id)
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- Batch get --
@@ -338,11 +345,12 @@ async fn sm_validate_resource_policy() {
     let server = TestServer::start().await;
     let client = server.secretsmanager_client().await;
     let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"secretsmanager:GetSecretValue","Resource":"*"}]}"#;
-    let _ = client
+    client
         .validate_resource_policy()
         .resource_policy(policy)
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- Replication --
@@ -366,7 +374,7 @@ async fn sm_replication() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .replicate_secret_to_regions()
         .secret_id("conf/replicate")
         .add_replica_regions(
@@ -375,18 +383,21 @@ async fn sm_replication() {
                 .build(),
         )
         .send()
-        .await;
+        .await
+        .ok();
 
-    let _ = client
+    client
         .remove_regions_from_replication()
         .secret_id("conf/replicate")
         .remove_replica_regions("eu-west-1")
         .send()
-        .await;
+        .await
+        .ok();
 
-    let _ = client
+    client
         .stop_replication_to_replica()
         .secret_id("conf/replicate")
         .send()
-        .await;
+        .await
+        .ok();
 }

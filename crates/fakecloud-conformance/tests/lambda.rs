@@ -708,8 +708,8 @@ async fn lambda_code_signing_lifecycle() {
         .code_signing_config()
         .unwrap()
         .clone();
-    let id = csc.code_signing_config_id().to_string();
     let arn = csc.code_signing_config_arn().to_string();
+    assert!(!csc.code_signing_config_id().is_empty());
     client
         .get_code_signing_config()
         .code_signing_config_arn(&arn)
@@ -755,7 +755,6 @@ async fn lambda_code_signing_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = id;
 }
 
 #[test_action("lambda", "PutFunctionEventInvokeConfig", checksum = "550a290d")]
