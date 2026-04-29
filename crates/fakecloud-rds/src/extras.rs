@@ -12,7 +12,7 @@
 
 use http::StatusCode;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
@@ -75,9 +75,9 @@ where
 }
 
 fn store<'a>(
-    extras: &'a mut HashMap<String, HashMap<String, Value>>,
+    extras: &'a mut BTreeMap<String, BTreeMap<String, Value>>,
     category: &str,
-) -> &'a mut HashMap<String, Value> {
+) -> &'a mut BTreeMap<String, Value> {
     extras.entry(category.to_string()).or_default()
 }
 

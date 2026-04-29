@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -180,11 +180,11 @@ impl fmt::Debug for DbSnapshot {
 pub struct RdsState {
     pub account_id: String,
     pub region: String,
-    pub instances: HashMap<String, DbInstance>,
+    pub instances: BTreeMap<String, DbInstance>,
     pub in_progress_instance_ids: HashSet<String>,
-    pub snapshots: HashMap<String, DbSnapshot>,
-    pub subnet_groups: HashMap<String, DbSubnetGroup>,
-    pub parameter_groups: HashMap<String, DbParameterGroup>,
+    pub snapshots: BTreeMap<String, DbSnapshot>,
+    pub subnet_groups: BTreeMap<String, DbSubnetGroup>,
+    pub parameter_groups: BTreeMap<String, DbParameterGroup>,
     /// Generic stores keyed by category (clusters, cluster_snapshots,
     /// cluster_param_groups, proxies, proxy_endpoints, security_groups,
     /// option_groups, event_subscriptions, global_clusters, integrations,
@@ -192,7 +192,7 @@ pub struct RdsState {
     /// export_tasks, etc.) so the extras handlers can persist state
     /// without proliferating per-category fields.
     #[serde(default)]
-    pub extras: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub extras: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,7 +233,7 @@ pub struct DbParameterGroup {
     pub db_parameter_group_arn: String,
     pub db_parameter_group_family: String,
     pub description: String,
-    pub parameters: HashMap<String, String>,
+    pub parameters: BTreeMap<String, String>,
     pub tags: Vec<RdsTag>,
 }
 
@@ -242,12 +242,12 @@ impl RdsState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            instances: HashMap::new(),
+            instances: BTreeMap::new(),
             in_progress_instance_ids: HashSet::new(),
-            snapshots: HashMap::new(),
-            subnet_groups: HashMap::new(),
+            snapshots: BTreeMap::new(),
+            subnet_groups: BTreeMap::new(),
             parameter_groups: default_parameter_groups(account_id, region),
-            extras: HashMap::new(),
+            extras: BTreeMap::new(),
         }
     }
 
@@ -453,8 +453,8 @@ pub fn default_orderable_options() -> Vec<OrderableDbInstanceOption> {
 pub fn default_parameter_groups(
     account_id: &str,
     region: &str,
-) -> HashMap<String, DbParameterGroup> {
-    let mut groups = HashMap::new();
+) -> BTreeMap<String, DbParameterGroup> {
+    let mut groups = BTreeMap::new();
 
     let families = vec![
         ("postgres16", "Default parameter group for postgres16"),
@@ -533,7 +533,7 @@ pub fn default_parameter_groups(
             .to_string(),
             db_parameter_group_family: family.to_string(),
             description: description.to_string(),
-            parameters: HashMap::new(),
+            parameters: BTreeMap::new(),
             tags: Vec::new(),
         };
         groups.insert(group_name, group);

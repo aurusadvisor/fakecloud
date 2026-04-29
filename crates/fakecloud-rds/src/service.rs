@@ -2038,7 +2038,7 @@ impl RdsService {
             db_parameter_group_arn,
             db_parameter_group_family,
             description,
-            parameters: std::collections::HashMap::new(),
+            parameters: std::collections::BTreeMap::new(),
             tags,
         };
 
