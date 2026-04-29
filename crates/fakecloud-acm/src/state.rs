@@ -1,6 +1,6 @@
 //! In-memory state for ACM certificates.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -11,7 +11,7 @@ pub type SharedAcmState = Arc<RwLock<AcmAccounts>>;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AcmAccounts {
-    pub accounts: HashMap<String, AccountState>,
+    pub accounts: BTreeMap<String, AccountState>,
 }
 
 impl AcmAccounts {
@@ -23,7 +23,7 @@ impl AcmAccounts {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AccountState {
     /// Keyed by full certificate ARN.
-    pub certificates: HashMap<String, StoredCertificate>,
+    pub certificates: BTreeMap<String, StoredCertificate>,
     pub account_config: AccountConfig,
 }
 
@@ -64,7 +64,7 @@ pub struct StoredCertificate {
     pub renewal_eligibility: String,
     pub managed_by: Option<String>,
     pub certificate_authority_arn: Option<String>,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     pub in_use_by: Vec<String>,
 }
 

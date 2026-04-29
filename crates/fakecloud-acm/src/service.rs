@@ -1,6 +1,6 @@
 //! ACM (Certificate Manager) JSON 1.1 service.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -791,8 +791,8 @@ fn synth_serial(arn: &str) -> String {
     hex::encode(&digest[..16])
 }
 
-fn parse_tags(value: Option<&Value>) -> Result<HashMap<String, String>, AwsServiceError> {
-    let mut out = HashMap::new();
+fn parse_tags(value: Option<&Value>) -> Result<BTreeMap<String, String>, AwsServiceError> {
+    let mut out = BTreeMap::new();
     let Some(arr) = value.and_then(Value::as_array) else {
         return Ok(out);
     };
