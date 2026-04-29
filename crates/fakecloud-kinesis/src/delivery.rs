@@ -86,7 +86,7 @@ mod tests {
     use super::*;
     use crate::state::{KinesisShard, KinesisState, KinesisStream, SharedKinesisState};
     use parking_lot::RwLock;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn make_stream(name: &str, shard_count: usize) -> KinesisStream {
         let shards = (0..shard_count)
@@ -112,7 +112,7 @@ mod tests {
             key_id: None,
             shard_count: shard_count as i32,
             open_shard_count: shard_count as i32,
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             shards,
             next_shard_index: shard_count as i32,
             enhanced_metrics: Vec::new(),

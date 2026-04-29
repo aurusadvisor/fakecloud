@@ -272,7 +272,7 @@ impl KinesisService {
             key_id: None,
             shard_count,
             open_shard_count: shard_count,
-            tags: std::collections::HashMap::new(),
+            tags: std::collections::BTreeMap::new(),
             shards: build_stream_shards(shard_count),
             next_shard_index: shard_count,
             enhanced_metrics: Vec::new(),
@@ -1885,7 +1885,6 @@ fn expired_iterator() -> AwsServiceError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use bytes::Bytes;
@@ -1902,7 +1901,7 @@ mod tests {
             account_id: "123456789012".to_string(),
             request_id: "req-1".to_string(),
             headers: HeaderMap::new(),
-            query_params: HashMap::new(),
+            query_params: std::collections::HashMap::new(),
             body: Bytes::from(serde_json::to_vec(&body).unwrap()),
             body_stream: parking_lot::Mutex::new(None),
             path_segments: Vec::new(),
