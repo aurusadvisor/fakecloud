@@ -1,6 +1,6 @@
 //! In-memory state for Athena.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -12,7 +12,7 @@ pub type SharedAthenaState = Arc<RwLock<AthenaAccounts>>;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AthenaAccounts {
-    pub accounts: HashMap<String, AccountState>,
+    pub accounts: BTreeMap<String, AccountState>,
 }
 
 impl AthenaAccounts {
@@ -23,17 +23,17 @@ impl AthenaAccounts {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AccountState {
-    pub work_groups: HashMap<String, WorkGroup>,
-    pub data_catalogs: HashMap<String, DataCatalog>,
-    pub named_queries: HashMap<String, NamedQuery>,
-    pub prepared_statements: HashMap<(String, String), PreparedStatement>,
-    pub query_executions: HashMap<String, QueryExecution>,
-    pub notebooks: HashMap<String, Notebook>,
-    pub sessions: HashMap<String, Session>,
-    pub calculations: HashMap<String, Calculation>,
-    pub capacity_reservations: HashMap<String, CapacityReservation>,
+    pub work_groups: BTreeMap<String, WorkGroup>,
+    pub data_catalogs: BTreeMap<String, DataCatalog>,
+    pub named_queries: BTreeMap<String, NamedQuery>,
+    pub prepared_statements: BTreeMap<(String, String), PreparedStatement>,
+    pub query_executions: BTreeMap<String, QueryExecution>,
+    pub notebooks: BTreeMap<String, Notebook>,
+    pub sessions: BTreeMap<String, Session>,
+    pub calculations: BTreeMap<String, Calculation>,
+    pub capacity_reservations: BTreeMap<String, CapacityReservation>,
     pub capacity_assignment_config: Option<CapacityAssignmentConfiguration>,
-    pub tags: HashMap<String, HashMap<String, String>>,
+    pub tags: BTreeMap<String, BTreeMap<String, String>>,
     pub initialized: bool,
 }
 
@@ -59,7 +59,7 @@ impl AccountState {
             name: "AwsDataCatalog".to_string(),
             description: Some("Default AWS data catalog".to_string()),
             cat_type: "GLUE".to_string(),
-            parameters: HashMap::new(),
+            parameters: BTreeMap::new(),
             status: "CREATE_COMPLETE".to_string(),
             connection_type: None,
             error: None,
@@ -84,7 +84,7 @@ pub struct DataCatalog {
     pub name: String,
     pub description: Option<String>,
     pub cat_type: String,
-    pub parameters: HashMap<String, String>,
+    pub parameters: BTreeMap<String, String>,
     pub status: String,
     pub connection_type: Option<String>,
     pub error: Option<String>,

@@ -1,6 +1,6 @@
 //! In-memory state for Route 53 resources.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -13,7 +13,7 @@ pub type SharedRoute53State = Arc<RwLock<Route53Accounts>>;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Route53Accounts {
-    pub accounts: HashMap<String, AccountState>,
+    pub accounts: BTreeMap<String, AccountState>,
 }
 
 impl Route53Accounts {
@@ -36,27 +36,27 @@ impl Route53Accounts {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AccountState {
-    pub hosted_zones: HashMap<String, StoredHostedZone>,
-    pub changes: HashMap<String, StoredChange>,
-    pub health_checks: HashMap<String, StoredHealthCheck>,
+    pub hosted_zones: BTreeMap<String, StoredHostedZone>,
+    pub changes: BTreeMap<String, StoredChange>,
+    pub health_checks: BTreeMap<String, StoredHealthCheck>,
     /// Keyed by `(traffic_policy_id, version)`. Each `CreateTrafficPolicyVersion`
     /// inserts a new entry alongside the existing versions.
-    pub traffic_policies: HashMap<(String, i64), StoredTrafficPolicy>,
-    pub traffic_policy_instances: HashMap<String, StoredTrafficPolicyInstance>,
+    pub traffic_policies: BTreeMap<(String, i64), StoredTrafficPolicy>,
+    pub traffic_policy_instances: BTreeMap<String, StoredTrafficPolicyInstance>,
     /// Per-zone DNSSEC `ServeSignature` status (SIGNING / NOT_SIGNING). Absent
     /// entries are treated as NOT_SIGNING.
-    pub dnssec_status: HashMap<String, String>,
+    pub dnssec_status: BTreeMap<String, String>,
     /// Keyed by `(hosted_zone_id, ksk_name)`.
-    pub key_signing_keys: HashMap<(String, String), StoredKeySigningKey>,
-    pub query_logging_configs: HashMap<String, StoredQueryLoggingConfig>,
-    pub cidr_collections: HashMap<String, StoredCidrCollection>,
-    pub reusable_delegation_sets: HashMap<String, StoredReusableDelegationSet>,
+    pub key_signing_keys: BTreeMap<(String, String), StoredKeySigningKey>,
+    pub query_logging_configs: BTreeMap<String, StoredQueryLoggingConfig>,
+    pub cidr_collections: BTreeMap<String, StoredCidrCollection>,
+    pub reusable_delegation_sets: BTreeMap<String, StoredReusableDelegationSet>,
     /// Per-zone authorized cross-account VPCs that may be associated next.
-    pub vpc_authorizations: HashMap<String, Vec<VPC>>,
+    pub vpc_authorizations: BTreeMap<String, Vec<VPC>>,
     /// Tag bag keyed by `(resource_type, resource_id)`. Both supported
     /// resource types ("healthcheck", "hostedzone") share the bag; the
     /// resource-type discriminator is in the key tuple.
-    pub tags: HashMap<(String, String), HashMap<String, String>>,
+    pub tags: BTreeMap<(String, String), BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,7 +143,7 @@ pub struct StoredCidrCollection {
     pub version: i64,
     pub caller_reference: String,
     /// Maps location name -> sorted list of CIDR blocks.
-    pub locations: HashMap<String, Vec<String>>,
+    pub locations: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

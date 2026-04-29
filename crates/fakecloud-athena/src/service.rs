@@ -1874,8 +1874,8 @@ fn parse_string_list(value: Option<&Value>) -> Vec<String> {
 
 fn parse_tags(
     value: Option<&Value>,
-) -> Result<std::collections::HashMap<String, String>, AwsServiceError> {
-    let mut out = std::collections::HashMap::new();
+) -> Result<std::collections::BTreeMap<String, String>, AwsServiceError> {
+    let mut out = std::collections::BTreeMap::new();
     let Some(arr) = value.and_then(Value::as_array) else {
         return Ok(out);
     };
