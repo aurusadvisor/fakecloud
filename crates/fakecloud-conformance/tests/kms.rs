@@ -386,7 +386,7 @@ async fn kms_list_aliases() {
     let client = server.kms_client().await;
 
     let resp = client.list_aliases().send().await.unwrap();
-    let _ = resp.aliases();
+    resp.aliases();
 }
 
 // ---------------------------------------------------------------------------
@@ -686,7 +686,7 @@ async fn kms_list_key_rotations() {
         .send()
         .await
         .unwrap();
-    let _ = resp.rotations();
+    resp.rotations();
 }
 
 // ---------------------------------------------------------------------------
@@ -842,7 +842,7 @@ async fn kms_list_retirable_grants() {
         .send()
         .await
         .unwrap();
-    let _ = resp.grants();
+    resp.grants();
 }
 
 #[test_action("kms", "RevokeGrant", checksum = "f5a54621")]
@@ -1050,7 +1050,7 @@ async fn kms_import_key_material_lifecycle() {
         .await
         .unwrap();
     assert!(params.import_token().is_some());
-    let _ = client
+    client
         .import_key_material()
         .key_id(key_id)
         .import_token(aws_sdk_kms::primitives::Blob::new(b"token"))
