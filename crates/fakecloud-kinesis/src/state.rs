@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
@@ -18,11 +18,11 @@ impl fakecloud_core::multi_account::AccountState for KinesisState {
 pub struct KinesisState {
     pub account_id: String,
     pub region: String,
-    pub streams: HashMap<String, KinesisStream>,
-    pub iterators: HashMap<String, ShardIteratorLease>,
-    pub lambda_checkpoints: HashMap<String, usize>,
-    pub consumers: HashMap<String, KinesisConsumer>,
-    pub resource_policies: HashMap<String, String>,
+    pub streams: BTreeMap<String, KinesisStream>,
+    pub iterators: BTreeMap<String, ShardIteratorLease>,
+    pub lambda_checkpoints: BTreeMap<String, usize>,
+    pub consumers: BTreeMap<String, KinesisConsumer>,
+    pub resource_policies: BTreeMap<String, String>,
     pub shard_limit: i32,
     pub on_demand_stream_count_limit: i32,
     pub billing_commitment_status: String,
@@ -40,7 +40,7 @@ pub struct KinesisStream {
     pub key_id: Option<String>,
     pub shard_count: i32,
     pub open_shard_count: i32,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     pub shards: Vec<KinesisShard>,
     pub next_shard_index: i32,
     pub enhanced_metrics: Vec<String>,
@@ -91,11 +91,11 @@ impl KinesisState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            streams: HashMap::new(),
-            iterators: HashMap::new(),
-            lambda_checkpoints: HashMap::new(),
-            consumers: HashMap::new(),
-            resource_policies: HashMap::new(),
+            streams: BTreeMap::new(),
+            iterators: BTreeMap::new(),
+            lambda_checkpoints: BTreeMap::new(),
+            consumers: BTreeMap::new(),
+            resource_policies: BTreeMap::new(),
             shard_limit: 500,
             on_demand_stream_count_limit: 50,
             billing_commitment_status: "DISABLED".to_string(),
