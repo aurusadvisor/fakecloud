@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use fakecloud_aws::arn::Arn;
+use fakecloud_aws::arn::{partition_for, Arn};
 use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
@@ -835,6 +835,7 @@ fn synth_scalable_target_arn(account_id: &str, region: &str) -> String {
         account_id,
         &format!("scalable-target/{id}"),
     )
+    .with_partition(partition_for(region))
     .to_string()
 }
 

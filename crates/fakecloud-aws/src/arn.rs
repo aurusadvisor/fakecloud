@@ -47,6 +47,23 @@ impl Arn {
     }
 }
 
+/// Map an AWS region name to its partition. Mirrors the AWS SDK's
+/// region-to-partition lookup so synthesized ARNs in cn/gov-cloud
+/// regions emit the correct partition prefix.
+pub fn partition_for(region: &str) -> &'static str {
+    if region.starts_with("cn-") {
+        "aws-cn"
+    } else if region.starts_with("us-gov-") {
+        "aws-us-gov"
+    } else if region.starts_with("us-iso-") {
+        "aws-iso"
+    } else if region.starts_with("us-isob-") {
+        "aws-iso-b"
+    } else {
+        "aws"
+    }
+}
+
 impl fmt::Display for Arn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -109,5 +126,16 @@ mod tests {
     fn with_partition_overrides() {
         let arn = Arn::new("sqs", "cn-north-1", "123", "q").with_partition("aws-cn");
         assert_eq!(arn.to_string(), "arn:aws-cn:sqs:cn-north-1:123:q");
+    }
+
+    #[test]
+    fn partition_for_region() {
+        assert_eq!(partition_for("us-east-1"), "aws");
+        assert_eq!(partition_for("eu-west-1"), "aws");
+        assert_eq!(partition_for("cn-north-1"), "aws-cn");
+        assert_eq!(partition_for("cn-northwest-1"), "aws-cn");
+        assert_eq!(partition_for("us-gov-west-1"), "aws-us-gov");
+        assert_eq!(partition_for("us-iso-east-1"), "aws-iso");
+        assert_eq!(partition_for("us-isob-east-1"), "aws-iso-b");
     }
 }
