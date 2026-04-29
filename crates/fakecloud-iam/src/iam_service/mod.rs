@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
 
+use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 // NOTE: The shared validation helpers use ValidationException error codes, but real IAM
 // typically returns InvalidInput or ValidationError for input validation failures. This is
@@ -1238,20 +1239,15 @@ fn paginated_tags_response(
     )?;
     validate_optional_range_i64("maxItems", max_items_i64, 1, 1000)?;
     let max_items: usize = max_items_i64.unwrap_or(100) as usize;
-    let offset: usize = req
-        .query_params
-        .get("Marker")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
 
-    let offset = offset.min(tags.len());
-    let page = &tags[offset..tags.len().min(offset + max_items)];
-    let is_truncated = offset + max_items < tags.len();
-    let members = tags_xml(page);
-    let marker = if is_truncated {
-        format!("<Marker>{}</Marker>", offset + max_items)
-    } else {
-        String::new()
+    let next_token = req.query_params.get("Marker").map(|s| s.as_str());
+    let (page, next_marker) = paginate(tags, next_token, max_items);
+
+    let is_truncated = next_marker.is_some();
+    let members = tags_xml(&page);
+    let marker = match &next_marker {
+        Some(m) => format!("<Marker>{m}</Marker>"),
+        None => String::new(),
     };
 
     Ok(format!(
