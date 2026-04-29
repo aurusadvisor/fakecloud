@@ -134,6 +134,22 @@ pub(crate) fn grants_are_public(grants: &[crate::state::AclGrant]) -> bool {
     })
 }
 
+const LIFECYCLE_TDMOS_HEADER: &str = "x-amz-transition-default-minimum-object-size";
+
+/// Default value real AWS returns on `GetBucketLifecycleConfiguration` for
+/// general purpose buckets when none was supplied at PUT. The Terraform
+/// provider's stable-state waiter compares this against its schema default
+/// (`all_storage_classes_128K`) — omitting the header makes the waiter loop
+/// indefinitely.
+const LIFECYCLE_TDMOS_DEFAULT: &str = "all_storage_classes_128K";
+
+fn insert_tdmos_header(headers: &mut HeaderMap, value: Option<&str>) {
+    let v = value.unwrap_or(LIFECYCLE_TDMOS_DEFAULT);
+    if let Ok(parsed) = v.parse() {
+        headers.insert(LIFECYCLE_TDMOS_HEADER, parsed);
+    }
+}
+
 impl S3Service {
     // ---- Encryption ----
 
@@ -237,6 +253,12 @@ impl S3Service {
         // If there are no <Rule> elements at all, treat as deleting the configuration
         let has_rules = body_str.contains("<Rule>");
 
+        let tdmos = req
+            .headers
+            .get(LIFECYCLE_TDMOS_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
         let b = state
@@ -245,16 +267,28 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
         if has_rules {
             b.lifecycle_config = Some(body_str.clone());
+            b.lifecycle_transition_default_min_size = tdmos.clone();
             self.store
                 .put_bucket_subresource(bucket, BucketSubresource::Lifecycle, &body_str)
                 .map_err(super::persistence_error)?;
+            let meta = bucket_meta_snapshot(b);
+            self.store
+                .put_bucket_meta(bucket, &meta)
+                .map_err(super::persistence_error)?;
         } else {
             b.lifecycle_config = None;
+            b.lifecycle_transition_default_min_size = None;
             self.store
                 .delete_bucket_subresource(bucket, BucketSubresource::Lifecycle)
                 .map_err(super::persistence_error)?;
+            let meta = bucket_meta_snapshot(b);
+            self.store
+                .put_bucket_meta(bucket, &meta)
+                .map_err(super::persistence_error)?;
         }
-        Ok(empty_response(StatusCode::OK))
+        let mut resp = empty_response(StatusCode::OK);
+        insert_tdmos_header(&mut resp.headers, tdmos.as_deref());
+        Ok(resp)
     }
 
     pub(super) fn get_bucket_lifecycle(
@@ -270,7 +304,14 @@ impl S3Service {
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
         match &b.lifecycle_config {
-            Some(config) => Ok(s3_xml(StatusCode::OK, config.clone())),
+            Some(config) => {
+                let mut resp = s3_xml(StatusCode::OK, config.clone());
+                insert_tdmos_header(
+                    &mut resp.headers,
+                    b.lifecycle_transition_default_min_size.as_deref(),
+                );
+                Ok(resp)
+            }
             None => Err(AwsServiceError::aws_error_with_fields(
                 StatusCode::NOT_FOUND,
                 "NoSuchLifecycleConfiguration",

@@ -68,6 +68,8 @@ pub struct BucketMeta {
     pub accelerate_status: Option<String>,
     #[serde(default)]
     pub eventbridge_enabled: bool,
+    #[serde(default)]
+    pub lifecycle_transition_default_min_size: Option<String>,
 }
 
 fn default_time() -> DateTime<Utc> {
