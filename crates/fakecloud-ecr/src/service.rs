@@ -3397,7 +3397,6 @@ mod tests {
     use super::{evaluate_lifecycle_policy, wildcard_match};
     use crate::state::{Image, Repository};
     use chrono::Utc;
-    use std::collections::BTreeMap;
 
     fn repo_with_images(entries: &[(&str, &[&str], i64)]) -> Repository {
         // entries: (digest, tags, minutes_ago_pushed)
@@ -3557,11 +3556,5 @@ mod tests {
         assert!(!wildcard_match("*-stable", "v1-beta"));
         assert!(!wildcard_match("exact", "exactly"));
         assert!(!wildcard_match("a*b*c", "a-b"));
-    }
-
-    // Suppress clippy::no_effect for BTreeMap usage anchor in this mod.
-    #[allow(dead_code)]
-    fn _anchor_btree() -> BTreeMap<String, String> {
-        BTreeMap::new()
     }
 }

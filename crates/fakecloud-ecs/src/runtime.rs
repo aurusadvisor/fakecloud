@@ -22,7 +22,7 @@ use parking_lot::RwLock;
 use tempfile::TempDir;
 use tokio::process::Command;
 
-use crate::state::{LifecycleEvent, SharedEcsState, Task};
+use crate::state::{LifecycleEvent, SharedEcsState};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -636,10 +636,6 @@ fn snapshot_task(state: &SharedEcsState, account_id: &str, task_id: &str) -> Opt
         ),
     })
 }
-
-/// Unused silencer: keep `Task` in scope for future snapshot extensions.
-#[allow(dead_code)]
-fn _task_type_anchor(_t: &Task) {}
 
 fn cli_works(cli: &str) -> bool {
     std::process::Command::new(cli)
