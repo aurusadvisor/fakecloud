@@ -9,6 +9,7 @@ use parking_lot::RwLock;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
 use crate::state::{
@@ -817,22 +818,6 @@ fn parse_epoch_time(value: Option<&Value>) -> Option<DateTime<Utc>> {
 fn resource_exists(account: &AccountState, arn: &str) -> bool {
     account.scalable_targets.values().any(|t| t.arn == arn)
         || account.scaling_policies.values().any(|p| p.arn == arn)
-}
-
-fn paginate<T: Clone>(items: &[T], token: Option<&str>, max: usize) -> (Vec<T>, Option<String>) {
-    // Clamp start so a stale or malformed NextToken can't panic the slice.
-    let start = token
-        .and_then(|t| t.parse::<usize>().ok())
-        .unwrap_or(0)
-        .min(items.len());
-    let end = start.saturating_add(max).min(items.len());
-    let page = items[start..end].to_vec();
-    let next = if end < items.len() {
-        Some(end.to_string())
-    } else {
-        None
-    };
-    (page, next)
 }
 
 fn synth_scalable_target_arn(account_id: &str, region: &str) -> String {

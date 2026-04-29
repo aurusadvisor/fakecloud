@@ -4420,27 +4420,15 @@ fn parse_reserved_duration_filter(value: Option<String>) -> Result<Option<i32>, 
         .transpose()
 }
 
-/// Simple index-based pagination. Returns the current page and an optional next marker.
+/// ElastiCache wraps the core paginate helper to carry its `Option<usize>`
+/// max_records convention (default 100, hard cap 100, matching real AWS).
 fn paginate<T: Clone>(
     items: &[T],
     marker: Option<&str>,
     max_records: Option<usize>,
 ) -> (Vec<T>, Option<String>) {
-    let start = marker.and_then(|m| m.parse::<usize>().ok()).unwrap_or(0);
     let limit = max_records.unwrap_or(100).min(100);
-
-    if start >= items.len() {
-        return (Vec::new(), None);
-    }
-
-    let end = start.saturating_add(limit).min(items.len());
-    let page = items[start..end].to_vec();
-    let next_marker = if end < items.len() {
-        Some(end.to_string())
-    } else {
-        None
-    };
-    (page, next_marker)
+    fakecloud_core::pagination::paginate(items, marker, limit)
 }
 
 // Tag helpers
