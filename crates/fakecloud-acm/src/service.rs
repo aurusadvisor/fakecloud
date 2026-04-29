@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
 use crate::state::{
@@ -781,7 +782,7 @@ fn synth_certificate_arn(account_id: &str, region: &str) -> String {
         region
     };
     let id = Uuid::new_v4();
-    format!("arn:aws:acm:{region}:{account_id}:certificate/{id}")
+    Arn::new("acm", region, account_id, &format!("certificate/{id}")).to_string()
 }
 
 fn synth_serial(arn: &str) -> String {

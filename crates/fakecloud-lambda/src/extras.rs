@@ -7,6 +7,7 @@ use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::LambdaService;
@@ -1217,7 +1218,7 @@ impl LambdaService {
             .runtime_management
             .insert(format!("{function_name}:{qualifier}"), cfg.clone());
         ok(json!({
-            "FunctionArn": format!("arn:aws:lambda:{}:{}:function:{}:{}", state.region, state.account_id, function_name, qualifier),
+            "FunctionArn": Arn::new("lambda", &state.region, &state.account_id, &format!("function:{function_name}:{qualifier}")).to_string(),
             "UpdateRuntimeOn": cfg.update_runtime_on,
             "RuntimeVersionArn": cfg.runtime_version_arn,
         }))
