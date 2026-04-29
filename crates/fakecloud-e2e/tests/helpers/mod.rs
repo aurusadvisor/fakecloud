@@ -41,6 +41,31 @@ pub async fn sqs_receive_at_least(
     all
 }
 
+/// Poll `probe` every 50ms until it returns `Some(value)` or the deadline
+/// elapses. Returns `Some(value)` on first match or `None` on timeout. The
+/// caller asserts on the returned `Option` so the failure message reflects
+/// the test's intent rather than a generic timeout panic.
+///
+/// Use this in place of `tokio::time::sleep(fixed)` followed by a one-shot
+/// assertion: a fixed sleep is either too short (flake under CI load) or too
+/// long (wastes wall clock). Polling adapts to actual readiness.
+pub async fn wait_until<F, Fut, T>(deadline: std::time::Duration, mut probe: F) -> Option<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let until = std::time::Instant::now() + deadline;
+    loop {
+        if let Some(v) = probe().await {
+            return Some(v);
+        }
+        if std::time::Instant::now() >= until {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// Decompress gzipped data.
 pub fn gunzip(data: &[u8]) -> Vec<u8> {
     use std::io::Read;
