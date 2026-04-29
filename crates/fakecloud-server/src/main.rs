@@ -569,6 +569,7 @@ async fn main() {
     let lambda_sim_warm_state = lambda_state.clone();
     let lambda_sim_warm_runtime = container_runtime.clone();
     let lambda_sim_evict_runtime = container_runtime.clone();
+    let lambda_layer_content_state = lambda_state.clone();
     let sns_sim_pending_state = sns_state.clone();
     let sns_sim_confirm_state = sns_state.clone();
 
@@ -4321,6 +4322,47 @@ async fn main() {
                         false
                     };
                     axum::Json(types::EvictContainerResponse { evicted })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/lambda/layer-content/{account_id}/{layer_name}/{file}",
+            axum::routing::get({
+                let ls = lambda_layer_content_state;
+                move |axum::extract::Path((account_id, layer_name, file)): axum::extract::Path<(String, String, String)>| {
+                    let ls = ls.clone();
+                    async move {
+                        let version: Option<i64> = file
+                            .strip_suffix(".zip")
+                            .and_then(|v| v.parse().ok());
+                        let Some(version) = version else {
+                            return (
+                                axum::http::StatusCode::NOT_FOUND,
+                                [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                                axum::body::Bytes::from_static(b"layer version not found"),
+                            );
+                        };
+                        let bytes_opt: Option<Vec<u8>> = {
+                            let accounts = ls.read();
+                            accounts
+                                .get(&account_id)
+                                .and_then(|s| s.layers.get(&layer_name))
+                                .and_then(|l| l.versions.iter().find(|v| v.version == version))
+                                .and_then(|v| v.code_zip.clone())
+                        };
+                        match bytes_opt {
+                            Some(bytes) => (
+                                axum::http::StatusCode::OK,
+                                [(axum::http::header::CONTENT_TYPE, "application/zip")],
+                                axum::body::Bytes::from(bytes),
+                            ),
+                            None => (
+                                axum::http::StatusCode::NOT_FOUND,
+                                [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                                axum::body::Bytes::from_static(b"layer version not found"),
+                            ),
+                        }
+                    }
                 }
             }),
         )

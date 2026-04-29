@@ -4045,13 +4045,30 @@ pub fn invoke_lambda_async(
     let payload = payload.as_bytes().to_vec();
 
     tokio::spawn(async move {
-        let func = {
+        let resolved = {
             let accounts = lambda_state.read();
             let state = accounts.default_ref();
-            state.functions.get(&func_name).cloned()
+            state.functions.get(&func_name).cloned().map(|func| {
+                let mut layer_zips: Vec<Vec<u8>> = Vec::with_capacity(func.layers.len());
+                for attached in &func.layers {
+                    if let Some(bytes) = fakecloud_lambda::extras::parse_layer_version_arn(
+                        &attached.arn,
+                    )
+                    .and_then(|(acct, name, ver)| {
+                        accounts
+                            .get(&acct)
+                            .and_then(|s| s.layers.get(&name))
+                            .and_then(|l| l.versions.iter().find(|v| v.version == ver))
+                            .and_then(|v| v.code_zip.clone())
+                    }) {
+                        layer_zips.push(bytes);
+                    }
+                }
+                (func, layer_zips)
+            })
         };
-        let func = match func {
-            Some(f) => f,
+        let (func, layer_zips) = match resolved {
+            Some(pair) => pair,
             None => {
                 tracing::warn!(
                     function = %func_name,
@@ -4060,7 +4077,7 @@ pub fn invoke_lambda_async(
                 return;
             }
         };
-        match runtime.invoke(&func, &payload).await {
+        match runtime.invoke(&func, &payload, &layer_zips).await {
             Ok(_) => {
                 tracing::info!(function = %func_name, "EventBridge Lambda invocation succeeded");
             }

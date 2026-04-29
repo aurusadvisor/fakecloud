@@ -49,11 +49,32 @@ impl LambdaDelivery for LambdaDeliveryImpl {
             }
         };
 
-        let func = {
+        let (func, layer_zips) = {
             let accounts = self.lambda_state.read();
-            accounts
+            match accounts
                 .get(&account_id)
                 .and_then(|state| state.functions.get(&function_name).cloned())
+            {
+                Some(func) => {
+                    let mut layer_zips: Vec<Vec<u8>> = Vec::with_capacity(func.layers.len());
+                    for attached in &func.layers {
+                        if let Some(bytes) =
+                            fakecloud_lambda::extras::parse_layer_version_arn(&attached.arn)
+                                .and_then(|(acct, name, ver)| {
+                                    accounts
+                                        .get(&acct)
+                                        .and_then(|s| s.layers.get(&name))
+                                        .and_then(|l| l.versions.iter().find(|v| v.version == ver))
+                                        .and_then(|v| v.code_zip.clone())
+                                })
+                        {
+                            layer_zips.push(bytes);
+                        }
+                    }
+                    (Some(func), layer_zips)
+                }
+                None => (None, Vec::new()),
+            }
         };
 
         let runtime = self.runtime.clone();
@@ -84,7 +105,7 @@ impl LambdaDelivery for LambdaDeliveryImpl {
                 ));
             }
             runtime
-                .invoke(&func, payload.as_bytes())
+                .invoke(&func, payload.as_bytes(), &layer_zips)
                 .await
                 .map_err(|e| format!("Lambda invocation failed: {e}"))
         })
