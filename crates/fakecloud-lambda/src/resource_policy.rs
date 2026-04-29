@@ -120,6 +120,7 @@ mod tests {
             code_zip: None,
             image_uri: None,
             policy: policy.map(str::to_string),
+            layers: Vec::new(),
         }
     }
 

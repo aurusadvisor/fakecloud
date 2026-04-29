@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use parking_lot::RwLock;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::state::LambdaFunction;
@@ -14,7 +15,29 @@ struct WarmContainer {
     container_id: String,
     host_port: u16,
     last_used: RwLock<Instant>,
-    code_sha256: String,
+    /// Combined fingerprint of the function's code SHA-256 plus the
+    /// SHA-256 of every attached layer's ZIP bytes, joined in attach
+    /// order. Layers mutate `/opt`, so a layer change invalidates the
+    /// warm container even when the function code is unchanged.
+    deploy_id: String,
+}
+
+/// Compute the warm-container key for a function with its current layer
+/// set. Stable across calls — layer ARNs are immutable in AWS, so the
+/// hash of their bytes is the right cache key.
+fn deploy_id_for(func: &LambdaFunction, layers: &[Vec<u8>]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(func.code_sha256.as_bytes());
+    for bytes in layers {
+        let mut layer_hasher = Sha256::new();
+        layer_hasher.update(bytes);
+        hasher.update(b":");
+        hasher.update(layer_hasher.finalize());
+    }
+    base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        hasher.finalize(),
+    )
 }
 
 /// Docker/Podman-based Lambda execution engine.
@@ -109,11 +132,15 @@ impl ContainerRuntime {
         &self.cli
     }
 
-    /// Invoke a Lambda function, starting a container if needed.
+    /// Invoke a Lambda function, starting a container if needed. Layer
+    /// ZIPs are extracted into `/opt` of the runtime sandbox; AWS base
+    /// images already include `/opt/python`, `/opt/nodejs/node_modules`,
+    /// `/opt/lib`, and `/opt/bin` on the right import paths.
     pub async fn invoke(
         &self,
         func: &LambdaFunction,
         payload: &[u8],
+        layers: &[Vec<u8>],
     ) -> Result<Vec<u8>, RuntimeError> {
         // Zip-based functions need code bytes; image-based functions have
         // everything baked into the image. Defer the zip check until we
@@ -123,11 +150,13 @@ impl ContainerRuntime {
             return Err(RuntimeError::NoCodeZip(func.function_name.clone()));
         }
 
-        // Check for warm container with matching code
+        let deploy_id = deploy_id_for(func, layers);
+
+        // Check for warm container with matching deploy fingerprint
         let port = {
             let containers = self.containers.read();
             if let Some(container) = containers.get(&func.function_name) {
-                if container.code_sha256 == func.code_sha256 {
+                if container.deploy_id == deploy_id {
                     *container.last_used.write() = Instant::now();
                     Some(container.host_port)
                 } else {
@@ -156,7 +185,7 @@ impl ContainerRuntime {
                     let containers = self.containers.read();
                     containers
                         .get(&func.function_name)
-                        .filter(|c| c.code_sha256 == func.code_sha256)
+                        .filter(|c| c.deploy_id == deploy_id)
                         .map(|c| {
                             *c.last_used.write() = Instant::now();
                             c.host_port
@@ -167,13 +196,14 @@ impl ContainerRuntime {
                 } else {
                     self.stop_container(&func.function_name).await;
                     let container = if is_image {
-                        self.start_image_container(func).await?
+                        self.start_image_container(func, layers, &deploy_id).await?
                     } else {
                         let zip_bytes = func
                             .code_zip
                             .as_ref()
                             .ok_or_else(|| RuntimeError::NoCodeZip(func.function_name.clone()))?;
-                        self.start_container(func, zip_bytes).await?
+                        self.start_container(func, zip_bytes, layers, &deploy_id)
+                            .await?
                     };
                     let p = container.host_port;
                     self.containers
@@ -215,6 +245,8 @@ impl ContainerRuntime {
     async fn start_image_container(
         &self,
         func: &LambdaFunction,
+        layers: &[Vec<u8>],
+        deploy_id: &str,
     ) -> Result<WarmContainer, RuntimeError> {
         let image = func.image_uri.as_deref().ok_or_else(|| {
             RuntimeError::ContainerStartFailed("PackageType=Image function has no ImageUri".into())
@@ -292,6 +324,11 @@ impl ContainerRuntime {
         }
         let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
+        if let Err(e) = self.copy_layers_into(&container_id, layers).await {
+            let _ = self.remove_container(&container_id).await;
+            return Err(e);
+        }
+
         let start_result = tokio::process::Command::new(&self.cli)
             .args(["start", &container_id])
             .output()
@@ -353,7 +390,7 @@ impl ContainerRuntime {
             container_id,
             host_port: port,
             last_used: RwLock::new(Instant::now()),
-            code_sha256: func.code_sha256.clone(),
+            deploy_id: deploy_id.to_string(),
         })
     }
 
@@ -361,6 +398,8 @@ impl ContainerRuntime {
         &self,
         func: &LambdaFunction,
         zip_bytes: &[u8],
+        layers: &[Vec<u8>],
+        deploy_id: &str,
     ) -> Result<WarmContainer, RuntimeError> {
         let image = runtime_to_image(&func.runtime)
             .ok_or_else(|| RuntimeError::UnsupportedRuntime(func.runtime.clone()))?;
@@ -453,6 +492,11 @@ impl ContainerRuntime {
             }
         }
 
+        if let Err(e) = self.copy_layers_into(&container_id, layers).await {
+            let _ = self.remove_container(&container_id).await;
+            return Err(e);
+        }
+
         // TempDir is dropped here — code now lives inside the container
 
         // Step 3: docker start
@@ -523,8 +567,51 @@ impl ContainerRuntime {
             container_id,
             host_port: port,
             last_used: RwLock::new(Instant::now()),
-            code_sha256: func.code_sha256.clone(),
+            deploy_id: deploy_id.to_string(),
         })
+    }
+
+    /// Extract each layer ZIP into a shared temp directory and `docker cp`
+    /// it into `/opt/` of the target container. Layer ZIPs include
+    /// language-specific subpaths (`python/`, `nodejs/`, `java/`, `lib/`,
+    /// `bin/`) that AWS base images already wire onto the runtime's
+    /// import paths, so plain extraction at the temp root produces the
+    /// correct on-disk layout. Empty `layers` is a no-op.
+    async fn copy_layers_into(
+        &self,
+        container_id: &str,
+        layers: &[Vec<u8>],
+    ) -> Result<(), RuntimeError> {
+        if layers.is_empty() {
+            return Ok(());
+        }
+        let layers_dir =
+            TempDir::new().map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))?;
+        let layers_path = layers_dir.path().to_path_buf();
+        let layers_owned: Vec<Vec<u8>> = layers.to_vec();
+        tokio::task::spawn_blocking(move || {
+            for bytes in &layers_owned {
+                extract_zip(bytes, &layers_path)?;
+            }
+            Ok::<_, RuntimeError>(())
+        })
+        .await
+        .map_err(|e| RuntimeError::ZipExtractionFailed(e.to_string()))??;
+
+        let cp_result = tokio::process::Command::new(&self.cli)
+            .arg("cp")
+            .arg(format!("{}/.", layers_dir.path().display()))
+            .arg(format!("{}:/opt", container_id))
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        if !cp_result.status.success() {
+            let stderr = String::from_utf8_lossy(&cp_result.stderr);
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "docker cp layers to /opt failed: {stderr}"
+            )));
+        }
+        Ok(())
     }
 
     /// Remove a container (stop + rm, since we don't use --rm with docker create).

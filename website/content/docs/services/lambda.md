@@ -12,7 +12,7 @@ fakecloud implements **85 of 85** Lambda operations at 100% Smithy conformance. 
 - **Real code execution** — functions run in Docker containers with the official AWS Lambda runtime images
 - **23 runtimes** — Node.js (16/18/20/22/24), Python (3.8/3.9/3.10/3.11/3.12/3.13/3.14), Java (11/17/21/25), Go (1.x), Ruby (3.3/3.4), .NET (8/10), `provided.al2`, `provided.al2023`
 - **Event source mappings** — SQS, Kinesis, DynamoDB Streams polling loops with **`FilterCriteria`** (EventBridge-style JSON pattern, exists/prefix/suffix/equals-ignore-case/anything-but/numeric operators, SQS body decode), **`StartingPosition`** (`TRIM_HORIZON` / `LATEST` / `AT_TIMESTAMP` for Kinesis, `TRIM_HORIZON` / `LATEST` for DDB Streams), **`MaximumBatchingWindowInSeconds`** (SQS), and **`FunctionResponseTypes=[ReportBatchItemFailures]`** for SQS partial-batch failure semantics
-- **Layers** — create, publish, attach to functions
+- **Layers** — create, publish, attach to functions; layer ZIP content is extracted into `/opt` of the runtime container at invoke time, so Python `import`, Node `require`, and `LD_LIBRARY_PATH` lookups resolve against attached layers exactly as on real AWS
 - **Environment variables** — passed to the container
 - **Aliases and versions** — publish, point aliases at versions
 - **Concurrency controls** — reserved concurrency (recorded, not enforced)
@@ -29,6 +29,7 @@ REST. Path-based routing for invoke operations, JSON for control plane.
 - `GET /_fakecloud/lambda/invocations` — list all Lambda invocations with input/output/errors
 - `GET /_fakecloud/lambda/warm-containers` — list currently warm containers
 - `POST /_fakecloud/lambda/{function-name}/evict-container` — force a cold start on the next invoke
+- `GET /_fakecloud/lambda/layer-content/{account-id}/{layer-name}/{version}.zip` — download the raw layer ZIP. Returned as the `Content.Location` from `PublishLayerVersion` and `GetLayerVersion`, so AWS SDK / Terraform clients that re-download a layer get the actual bytes
 
 ## Event source mapping example: FilterCriteria + partial batch failure
 
