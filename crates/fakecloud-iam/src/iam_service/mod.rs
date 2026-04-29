@@ -283,16 +283,6 @@ impl AwsService for IamService {
             "ResetServiceSpecificCredential" => self.reset_service_specific_credential(&req),
             "UpdateServiceSpecificCredential" => self.update_service_specific_credential(&req),
 
-            // Delegation requests
-            "CreateDelegationRequest" => self.create_delegation_request(&req),
-            "AcceptDelegationRequest" => self.accept_delegation_request(&req),
-            "RejectDelegationRequest" => self.reject_delegation_request(&req),
-            "AssociateDelegationRequest" => self.associate_delegation_request(&req),
-            "GetDelegationRequest" => self.get_delegation_request(&req),
-            "ListDelegationRequests" => self.list_delegation_requests(&req),
-            "UpdateDelegationRequest" => self.update_delegation_request(&req),
-            "SendDelegationToken" => self.send_delegation_token(&req),
-
             // Organizations integration
             "EnableOrganizationsRootCredentialsManagement" => {
                 self.enable_organizations_root_credentials_management(&req)
@@ -305,17 +295,6 @@ impl AwsService for IamService {
             "GenerateOrganizationsAccessReport" => self.generate_organizations_access_report(&req),
             "GetOrganizationsAccessReport" => self.get_organizations_access_report(&req),
             "ListOrganizationsFeatures" => self.list_organizations_features(&req),
-
-            // Outbound web identity federation
-            "EnableOutboundWebIdentityFederation" => {
-                self.enable_outbound_web_identity_federation(&req)
-            }
-            "DisableOutboundWebIdentityFederation" => {
-                self.disable_outbound_web_identity_federation(&req)
-            }
-            "GetOutboundWebIdentityFederationInfo" => {
-                self.get_outbound_web_identity_federation_info(&req)
-            }
 
             // Service last accessed details
             "GenerateServiceLastAccessedDetails" => {
@@ -348,7 +327,6 @@ impl AwsService for IamService {
             "ChangePassword" => self.change_password(&req),
             "GetMFADevice" => self.get_mfa_device(&req),
             "ResyncMFADevice" => self.resync_mfa_device(&req),
-            "GetHumanReadableSummary" => self.get_human_readable_summary(&req),
             "SetSecurityTokenServicePreferences" => {
                 self.set_security_token_service_preferences(&req)
             }
@@ -556,14 +534,6 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListServiceSpecificCredentials",
     "ResetServiceSpecificCredential",
     "UpdateServiceSpecificCredential",
-    "CreateDelegationRequest",
-    "AcceptDelegationRequest",
-    "RejectDelegationRequest",
-    "AssociateDelegationRequest",
-    "GetDelegationRequest",
-    "ListDelegationRequests",
-    "UpdateDelegationRequest",
-    "SendDelegationToken",
     "EnableOrganizationsRootCredentialsManagement",
     "DisableOrganizationsRootCredentialsManagement",
     "EnableOrganizationsRootSessions",
@@ -571,9 +541,6 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "GenerateOrganizationsAccessReport",
     "GetOrganizationsAccessReport",
     "ListOrganizationsFeatures",
-    "EnableOutboundWebIdentityFederation",
-    "DisableOutboundWebIdentityFederation",
-    "GetOutboundWebIdentityFederationInfo",
     "GenerateServiceLastAccessedDetails",
     "GetServiceLastAccessedDetails",
     "GetServiceLastAccessedDetailsWithEntities",
@@ -594,7 +561,6 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ChangePassword",
     "GetMFADevice",
     "ResyncMFADevice",
-    "GetHumanReadableSummary",
     "SetSecurityTokenServicePreferences",
     "UpdateServerCertificate",
 ];

@@ -10,8 +10,7 @@ use http::StatusCode;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
-    DelegationRequest, IamState, OrganizationsAccessReport, OutboundWebIdentityFederation,
-    ServiceLastAccessedJob, ServiceSpecificCredential,
+    IamState, OrganizationsAccessReport, ServiceLastAccessedJob, ServiceSpecificCredential,
 };
 
 use super::{empty_response, parse_tags, tags_xml, IamService};
@@ -53,31 +52,6 @@ fn service_credential_xml(c: &ServiceSpecificCredential, include_password: bool)
         xml_escape(&c.user_name),
         xml_escape(&c.credential_id),
         xml_escape(&c.status),
-    )
-}
-
-fn delegation_request_xml(d: &DelegationRequest) -> String {
-    let perms: String = d
-        .permissions
-        .iter()
-        .map(|p| format!("      <member>{}</member>", xml_escape(p)))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "<DelegationRequest>\
-         <DelegationRequestId>{}</DelegationRequestId>\
-         <SourceAccount>{}</SourceAccount>\
-         <TargetAccount>{}</TargetAccount>\
-         <Status>{}</Status>\
-         <CreateDate>{}</CreateDate>\
-         <Permissions>{}</Permissions>\
-         </DelegationRequest>",
-        xml_escape(&d.id),
-        xml_escape(&d.source_account),
-        xml_escape(&d.target_account),
-        xml_escape(&d.status),
-        d.create_date.format("%Y-%m-%dT%H:%M:%SZ"),
-        perms,
     )
 }
 
@@ -248,160 +222,6 @@ impl IamService {
         ))
     }
 
-    // ── Delegation requests ──
-
-    pub(super) fn create_delegation_request(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let target = required_param(&req.query_params, "TargetAccount")?;
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let id = random_id("DR-");
-        let dr = DelegationRequest {
-            id: id.clone(),
-            source_account: state.account_id.clone(),
-            target_account: target,
-            status: "Pending".to_string(),
-            create_date: Utc::now(),
-            permissions: Vec::new(),
-        };
-        state.delegation_requests.insert(id.clone(), dr.clone());
-        let body = format!(
-            "  <CreateDelegationRequestResult>{}</CreateDelegationRequestResult>",
-            delegation_request_xml(&dr)
-        );
-        Ok(xml_response(
-            "CreateDelegationRequest",
-            &body,
-            &req.request_id,
-        ))
-    }
-
-    pub(super) fn accept_delegation_request(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        self.update_delegation_status(req, "AcceptDelegationRequest", "Accepted")
-    }
-
-    pub(super) fn reject_delegation_request(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        self.update_delegation_status(req, "RejectDelegationRequest", "Rejected")
-    }
-
-    pub(super) fn associate_delegation_request(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        self.update_delegation_status(req, "AssociateDelegationRequest", "Associated")
-    }
-
-    pub(super) fn update_delegation_request(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_param(&req.query_params, "DelegationRequestId")?;
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let dr = state.delegation_requests.get_mut(&id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "NoSuchEntity",
-                format!("DelegationRequest {id} not found"),
-            )
-        })?;
-        if let Some(s) = req.query_params.get("Status") {
-            dr.status = s.clone();
-        }
-        Ok(AwsResponse::xml(
-            StatusCode::OK,
-            empty_response("UpdateDelegationRequest", &req.request_id),
-        ))
-    }
-
-    fn update_delegation_status(
-        &self,
-        req: &AwsRequest,
-        action: &str,
-        new_status: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_param(&req.query_params, "DelegationRequestId")?;
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let dr = state.delegation_requests.get_mut(&id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "NoSuchEntity",
-                format!("DelegationRequest {id} not found"),
-            )
-        })?;
-        dr.status = new_status.to_string();
-        Ok(AwsResponse::xml(
-            StatusCode::OK,
-            empty_response(action, &req.request_id),
-        ))
-    }
-
-    pub(super) fn get_delegation_request(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_param(&req.query_params, "DelegationRequestId")?;
-        let accounts = self.state.read();
-        let empty = IamState::new(&req.account_id);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let dr = state.delegation_requests.get(&id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "NoSuchEntity",
-                format!("DelegationRequest {id} not found"),
-            )
-        })?;
-        let body = format!(
-            "  <GetDelegationRequestResult>{}</GetDelegationRequestResult>",
-            delegation_request_xml(dr)
-        );
-        Ok(xml_response("GetDelegationRequest", &body, &req.request_id))
-    }
-
-    pub(super) fn list_delegation_requests(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let accounts = self.state.read();
-        let empty = IamState::new(&req.account_id);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let members: String = state
-            .delegation_requests
-            .values()
-            .map(delegation_request_xml)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let body = format!(
-            "  <ListDelegationRequestsResult>\n    <DelegationRequests>{members}</DelegationRequests>\n  </ListDelegationRequestsResult>"
-        );
-        Ok(xml_response(
-            "ListDelegationRequests",
-            &body,
-            &req.request_id,
-        ))
-    }
-
-    pub(super) fn send_delegation_token(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let _id = required_param(&req.query_params, "DelegationRequestId")?;
-        let body = format!(
-            "  <SendDelegationTokenResult><Token>{}</Token></SendDelegationTokenResult>",
-            random_id("TOK")
-        );
-        Ok(xml_response("SendDelegationToken", &body, &req.request_id))
-    }
-
     // ── Organizations integration ──
 
     pub(super) fn enable_organizations_root_credentials_management(
@@ -544,68 +364,6 @@ impl IamService {
         );
         Ok(xml_response(
             "ListOrganizationsFeatures",
-            &body,
-            &req.request_id,
-        ))
-    }
-
-    // ── Outbound web identity federation ──
-
-    pub(super) fn enable_outbound_web_identity_federation(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let issuer = req
-            .query_params
-            .get("IssuerUrl")
-            .cloned()
-            .unwrap_or_default();
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        state.outbound_web_identity_federation = Some(OutboundWebIdentityFederation {
-            enabled: true,
-            issuer_url: issuer,
-            audience: Vec::new(),
-        });
-        Ok(AwsResponse::xml(
-            StatusCode::OK,
-            empty_response("EnableOutboundWebIdentityFederation", &req.request_id),
-        ))
-    }
-
-    pub(super) fn disable_outbound_web_identity_federation(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        if let Some(ref mut cfg) = state.outbound_web_identity_federation {
-            cfg.enabled = false;
-        }
-        Ok(AwsResponse::xml(
-            StatusCode::OK,
-            empty_response("DisableOutboundWebIdentityFederation", &req.request_id),
-        ))
-    }
-
-    pub(super) fn get_outbound_web_identity_federation_info(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let accounts = self.state.read();
-        let empty = IamState::new(&req.account_id);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let (enabled, issuer) = state
-            .outbound_web_identity_federation
-            .as_ref()
-            .map(|c| (c.enabled, c.issuer_url.clone()))
-            .unwrap_or((false, String::new()));
-        let body = format!(
-            "  <GetOutboundWebIdentityFederationInfoResult><Enabled>{enabled}</Enabled><IssuerUrl>{}</IssuerUrl></GetOutboundWebIdentityFederationInfoResult>",
-            xml_escape(&issuer)
-        );
-        Ok(xml_response(
-            "GetOutboundWebIdentityFederationInfo",
             &body,
             &req.request_id,
         ))
@@ -960,18 +718,6 @@ impl IamService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             empty_response("ResyncMFADevice", &req.request_id),
-        ))
-    }
-
-    pub(super) fn get_human_readable_summary(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let body = "  <GetHumanReadableSummaryResult><Summary>FakeCloud IAM emulator account summary</Summary></GetHumanReadableSummaryResult>";
-        Ok(xml_response(
-            "GetHumanReadableSummary",
-            body,
-            &req.request_id,
         ))
     }
 
