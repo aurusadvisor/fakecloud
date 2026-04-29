@@ -11,6 +11,7 @@ use parking_lot::RwLock;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
 use crate::state::{
@@ -1803,21 +1804,6 @@ fn parse_custom_response_bodies(value: Option<&Value>) -> HashMap<String, Value>
         .and_then(Value::as_object)
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default()
-}
-
-fn paginate<T: Clone>(items: &[T], token: Option<&str>, max: usize) -> (Vec<T>, Option<String>) {
-    let start = token
-        .and_then(|t| t.parse::<usize>().ok())
-        .unwrap_or(0)
-        .min(items.len());
-    let end = start.saturating_add(max).min(items.len());
-    let page = items[start..end].to_vec();
-    let next = if end < items.len() {
-        Some(end.to_string())
-    } else {
-        None
-    };
-    (page, next)
 }
 
 fn resource_exists(account: &AccountState, arn: &str) -> bool {
