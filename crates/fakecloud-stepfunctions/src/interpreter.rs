@@ -49,7 +49,7 @@ pub async fn execute_state_machine(
         "ExecutionStarted",
         0,
         json!({
-            "input": serde_json::to_string(&raw_input).unwrap_or_default(),
+            "input": serde_json::to_string(&raw_input).expect("serde_json::Value serialization is infallible"),
             "roleArn": "arn:aws:iam::123456789012:role/execution-role"
         }),
     );
@@ -308,7 +308,7 @@ fn run_pass_state(
         0,
         json!({
             "name": name,
-            "input": serde_json::to_string(&input).unwrap_or_default(),
+            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
 
@@ -321,7 +321,7 @@ fn run_pass_state(
         entered_event_id,
         json!({
             "name": name,
-            "output": serde_json::to_string(&result).unwrap_or_default(),
+            "output": serde_json::to_string(&result).expect("serde_json::Value serialization is infallible"),
         }),
     );
 
@@ -342,7 +342,7 @@ fn run_succeed_state(
         0,
         json!({
             "name": name,
-            "input": serde_json::to_string(&input).unwrap_or_default(),
+            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
 
@@ -368,7 +368,7 @@ fn run_succeed_state(
         0,
         json!({
             "name": name,
-            "output": serde_json::to_string(&output).unwrap_or_default(),
+            "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
         }),
     );
 
@@ -395,7 +395,7 @@ fn run_fail_state(
         0,
         json!({
             "name": name,
-            "input": serde_json::to_string(&input).unwrap_or_default(),
+            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
 
@@ -416,7 +416,7 @@ fn run_choice_state(
         0,
         json!({
             "name": name,
-            "input": serde_json::to_string(&input).unwrap_or_default(),
+            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
 
@@ -436,7 +436,7 @@ fn run_choice_state(
                 entered_event_id,
                 json!({
                     "name": name,
-                    "output": serde_json::to_string(&input).unwrap_or_default(),
+                    "output": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
                 }),
             );
             Advance::Next(next, input)
@@ -462,7 +462,7 @@ async fn run_wait_state(
         0,
         json!({
             "name": name,
-            "input": serde_json::to_string(&input).unwrap_or_default(),
+            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
 
@@ -475,7 +475,7 @@ async fn run_wait_state(
         entered_event_id,
         json!({
             "name": name,
-            "output": serde_json::to_string(&input).unwrap_or_default(),
+            "output": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
 
@@ -499,7 +499,7 @@ async fn run_task_state(
         0,
         json!({
             "name": name,
-            "input": serde_json::to_string(&input).unwrap_or_default(),
+            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
 
@@ -523,7 +523,7 @@ async fn run_task_state(
                 entered_event_id,
                 json!({
                     "name": name,
-                    "output": serde_json::to_string(&output).unwrap_or_default(),
+                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
                 }),
             );
             advance_from_next(state_def, output)
@@ -549,7 +549,7 @@ async fn run_parallel_state(
         0,
         json!({
             "name": name,
-            "input": serde_json::to_string(&input).unwrap_or_default(),
+            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
 
@@ -572,7 +572,7 @@ async fn run_parallel_state(
                 entered_event_id,
                 json!({
                     "name": name,
-                    "output": serde_json::to_string(&output).unwrap_or_default(),
+                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
                 }),
             );
             advance_from_next(state_def, output)
@@ -598,7 +598,7 @@ async fn run_map_state(
         0,
         json!({
             "name": name,
-            "input": serde_json::to_string(&input).unwrap_or_default(),
+            "input": serde_json::to_string(&input).expect("serde_json::Value serialization is infallible"),
         }),
     );
 
@@ -621,7 +621,7 @@ async fn run_map_state(
                 entered_event_id,
                 json!({
                     "name": name,
-                    "output": serde_json::to_string(&output).unwrap_or_default(),
+                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
                 }),
             );
             advance_from_next(state_def, output)
@@ -751,7 +751,7 @@ async fn execute_task_state(
             json!({
                 "resource": resource,
                 "region": "us-east-1",
-                "parameters": serde_json::to_string(&task_input).unwrap_or_default(),
+                "parameters": serde_json::to_string(&task_input).expect("serde_json::Value serialization is infallible"),
             }),
         );
 
@@ -783,7 +783,7 @@ async fn execute_task_state(
                     entered_event_id,
                     json!({
                         "resource": resource,
-                        "output": serde_json::to_string(&result).unwrap_or_default(),
+                        "output": serde_json::to_string(&result).expect("serde_json::Value serialization is infallible"),
                     }),
                 );
 
@@ -1155,7 +1155,8 @@ fn invoke_sqs_send_message(
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
             // If MessageBody is not a string, serialize the value
-            serde_json::to_string(&input["MessageBody"]).unwrap_or_default()
+            serde_json::to_string(&input["MessageBody"])
+                .expect("serde_json::Value serialization is infallible")
         });
 
     // Convert QueueUrl to ARN format for the delivery bus
@@ -1193,7 +1194,10 @@ fn invoke_sns_publish(
     let message = input["Message"]
         .as_str()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| serde_json::to_string(&input["Message"]).unwrap_or_default());
+        .unwrap_or_else(|| {
+            serde_json::to_string(&input["Message"])
+                .expect("serde_json::Value serialization is infallible")
+        });
 
     let subject = input["Subject"].as_str();
 
@@ -1233,7 +1237,10 @@ fn invoke_eventbridge_put_events(
         let detail = entry["Detail"]
             .as_str()
             .map(|s| s.to_string())
-            .unwrap_or_else(|| serde_json::to_string(&entry["Detail"]).unwrap_or("{}".to_string()));
+            .unwrap_or_else(|| {
+                serde_json::to_string(&entry["Detail"])
+                    .expect("serde_json::Value serialization is infallible")
+            });
         let bus_name = entry["EventBusName"].as_str().unwrap_or("default");
 
         delivery.put_event_to_eventbridge(source, detail_type, &detail, bus_name);
@@ -1803,7 +1810,8 @@ async fn invoke_lambda_direct(
         )
     })?;
 
-    let payload = serde_json::to_string(input).unwrap_or_default();
+    let payload =
+        serde_json::to_string(input).expect("serde_json::Value serialization is infallible");
 
     let invoke_future = delivery.invoke_lambda(function_arn, &payload);
 
@@ -1871,7 +1879,8 @@ async fn invoke_activity(
         uuid::Uuid::new_v4().simple(),
     );
     let now = chrono::Utc::now();
-    let input_str = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+    let input_str =
+        serde_json::to_string(input).expect("serde_json::Value serialization is infallible");
     {
         let mut accounts = shared_state.write();
         let state = accounts.get_or_create(&activity_account);
@@ -2066,7 +2075,8 @@ fn succeed_execution(state: &SharedStepFunctionsState, execution_arn: &str, outp
         }
     }
 
-    let output_str = serde_json::to_string(output).unwrap_or_default();
+    let output_str =
+        serde_json::to_string(output).expect("serde_json::Value serialization is infallible");
 
     add_event(
         state,
