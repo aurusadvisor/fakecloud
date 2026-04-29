@@ -5,6 +5,8 @@
 //! `cloudfront`; the service is global so callers always sign for
 //! `us-east-1`.
 
+pub mod cfunctions;
+pub mod cfunctions_service;
 pub mod extras;
 pub mod extras2;
 pub mod extras2_service;
@@ -21,6 +23,8 @@ pub(crate) mod service;
 pub(crate) mod state;
 pub mod streaming;
 pub mod streaming_service;
+pub mod tenants;
+pub mod tenants_service;
 pub mod xml_io;
 
 pub const API_VERSION: &str = "2020-05-31";

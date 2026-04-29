@@ -171,6 +171,26 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "VerifyDnsConfiguration",
     "GetManagedCertificateDetails",
     "UpdateDistributionWithStagingConfig",
+    "CreateDistributionTenant",
+    "GetDistributionTenant",
+    "GetDistributionTenantByDomain",
+    "UpdateDistributionTenant",
+    "DeleteDistributionTenant",
+    "ListDistributionTenants",
+    "ListDistributionTenantsByCustomization",
+    "AssociateDistributionTenantWebACL",
+    "DisassociateDistributionTenantWebACL",
+    "CreateInvalidationForDistributionTenant",
+    "GetInvalidationForDistributionTenant",
+    "ListInvalidationsForDistributionTenant",
+    "CreateConnectionFunction",
+    "GetConnectionFunction",
+    "DescribeConnectionFunction",
+    "UpdateConnectionFunction",
+    "DeleteConnectionFunction",
+    "ListConnectionFunctions",
+    "PublishConnectionFunction",
+    "TestConnectionFunction",
 ];
 
 pub struct CloudFrontService {
@@ -383,6 +403,38 @@ impl AwsService for CloudFrontService {
             "UpdateDistributionWithStagingConfig" => {
                 self.update_distribution_with_staging_config(&req, &resolved)
             }
+            "CreateDistributionTenant" => self.create_distribution_tenant(&req),
+            "GetDistributionTenant" => self.get_distribution_tenant(&resolved),
+            "GetDistributionTenantByDomain" => self.get_distribution_tenant_by_domain(&req),
+            "UpdateDistributionTenant" => self.update_distribution_tenant(&req, &resolved),
+            "DeleteDistributionTenant" => self.delete_distribution_tenant(&req, &resolved),
+            "ListDistributionTenants" => self.list_distribution_tenants(&req),
+            "ListDistributionTenantsByCustomization" => {
+                self.list_distribution_tenants_by_customization(&req)
+            }
+            "AssociateDistributionTenantWebACL" => {
+                self.associate_distribution_tenant_web_acl(&req, &resolved)
+            }
+            "DisassociateDistributionTenantWebACL" => {
+                self.disassociate_distribution_tenant_web_acl(&req, &resolved)
+            }
+            "CreateInvalidationForDistributionTenant" => {
+                self.create_invalidation_for_distribution_tenant(&req, &resolved)
+            }
+            "GetInvalidationForDistributionTenant" => {
+                self.get_invalidation_for_distribution_tenant(&resolved)
+            }
+            "ListInvalidationsForDistributionTenant" => {
+                self.list_invalidations_for_distribution_tenant(&resolved)
+            }
+            "CreateConnectionFunction" => self.create_connection_function(&req),
+            "GetConnectionFunction" => self.get_connection_function(&resolved),
+            "DescribeConnectionFunction" => self.describe_connection_function(&resolved),
+            "UpdateConnectionFunction" => self.update_connection_function(&req, &resolved),
+            "DeleteConnectionFunction" => self.delete_connection_function(&req, &resolved),
+            "ListConnectionFunctions" => self.list_connection_functions(&req),
+            "PublishConnectionFunction" => self.publish_connection_function(&req, &resolved),
+            "TestConnectionFunction" => self.test_connection_function(&req, &resolved),
             other => Err(aws_error(
                 StatusCode::NOT_IMPLEMENTED,
                 "InvalidAction",
