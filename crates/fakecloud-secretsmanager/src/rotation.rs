@@ -185,7 +185,7 @@ mod tests {
     use crate::state::*;
     use chrono::Duration;
     use parking_lot::RwLock;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn make_state() -> SharedSecretsManagerState {
@@ -208,7 +208,7 @@ mod tests {
         let last_rotated = last_rotated_ago_days.map(|d| now - Duration::days(d));
         let version_id = "v1".to_string();
 
-        let mut versions = HashMap::new();
+        let mut versions = BTreeMap::new();
         versions.insert(
             version_id.clone(),
             SecretVersion {

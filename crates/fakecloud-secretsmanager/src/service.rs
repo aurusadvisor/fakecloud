@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -48,7 +48,7 @@ enum VersionIdempotency {
 /// string — callers compute this via the KMS hook before invoking so
 /// the comparison happens on plaintext, not on stored ciphertext.
 fn check_secret_version_idempotency(
-    versions: &HashMap<String, SecretVersion>,
+    versions: &BTreeMap<String, SecretVersion>,
     version_id: &str,
     existing_plaintext: Option<String>,
     secret_string: &Option<String>,
@@ -297,11 +297,11 @@ impl SecretsManagerService {
                 stages: vec!["AWSCURRENT".to_string()],
                 created_at: now,
             };
-            let mut versions = std::collections::HashMap::new();
+            let mut versions = std::collections::BTreeMap::new();
             versions.insert(vid.clone(), version);
             (versions, Some(vid.clone()), Some(vid))
         } else {
-            (std::collections::HashMap::new(), None, None)
+            (std::collections::BTreeMap::new(), None, None)
         };
 
         let tags_ever_set = !input.tags.is_empty();
@@ -2399,7 +2399,7 @@ mod tests {
     use bytes::Bytes;
     use http::{HeaderMap, Method};
     use parking_lot::RwLock;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
     fn make_state() -> SharedSecretsManagerState {
@@ -4419,7 +4419,7 @@ mod tests {
 
     #[test]
     fn test_check_version_idempotency() {
-        let mut versions = HashMap::new();
+        let mut versions = BTreeMap::new();
         versions.insert(
             "v1".to_string(),
             SecretVersion {
@@ -4497,7 +4497,7 @@ mod tests {
             arn: "arn".to_string(),
             description: None,
             kms_key_id: None,
-            versions: HashMap::new(),
+            versions: BTreeMap::new(),
             current_version_id: None,
             tags: vec![],
             tags_ever_set: false,
@@ -4523,7 +4523,7 @@ mod tests {
             arn: "arn".to_string(),
             description: None,
             kms_key_id: None,
-            versions: HashMap::new(),
+            versions: BTreeMap::new(),
             current_version_id: None,
             tags: vec![("env".to_string(), "production".to_string())],
             tags_ever_set: true,
@@ -4549,7 +4549,7 @@ mod tests {
             arn: "arn".to_string(),
             description: Some("important database".to_string()),
             kms_key_id: None,
-            versions: HashMap::new(),
+            versions: BTreeMap::new(),
             current_version_id: None,
             tags: vec![("team".to_string(), "backend".to_string())],
             tags_ever_set: true,

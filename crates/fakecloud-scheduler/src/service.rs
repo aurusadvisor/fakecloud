@@ -382,7 +382,7 @@ impl SchedulerService {
             ));
         }
 
-        let mut tags = HashMap::new();
+        let mut tags = BTreeMap::new();
         if let Err(field) =
             fakecloud_core::tags::apply_tags(&mut tags, &body, "Tags", "Key", "Value")
         {
@@ -715,7 +715,10 @@ impl AwsService for SchedulerService {
         let accounts = self.state.read();
         let account_id = arn_account_id(resource_arn)?;
         let state = accounts.get(&account_id)?;
-        state.groups.get(&group_name).map(|g| g.tags.clone())
+        state
+            .groups
+            .get(&group_name)
+            .map(|g| g.tags.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
     }
 
     fn request_tags_from(
