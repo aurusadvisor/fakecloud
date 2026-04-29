@@ -2366,27 +2366,18 @@ async fn ses_event_fanout_sns_destination() {
         .unwrap();
 
     // 5. Receive messages from SQS — should have at least 2 (Send + Delivery)
-    // Give a tiny delay for delivery
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let msgs =
+        helpers::sqs_receive_at_least(&sqs, &queue_url, 2, std::time::Duration::from_secs(3)).await;
 
-    let msgs = sqs
-        .receive_message()
-        .queue_url(&queue_url)
-        .max_number_of_messages(10)
-        .send()
-        .await
-        .unwrap();
-
-    // We expect 2 messages: one for Send, one for Delivery
     assert!(
-        msgs.messages().len() >= 2,
+        msgs.len() >= 2,
         "Expected at least 2 SNS notifications (Send + Delivery), got {}",
-        msgs.messages().len()
+        msgs.len()
     );
 
     // Parse SNS envelopes and check the event payloads
     let mut event_types: Vec<String> = Vec::new();
-    for msg in msgs.messages() {
+    for msg in &msgs {
         let envelope: serde_json::Value = serde_json::from_str(msg.body().unwrap()).unwrap();
         let inner: serde_json::Value =
             serde_json::from_str(envelope["Message"].as_str().unwrap()).unwrap();
@@ -2507,25 +2498,17 @@ async fn ses_event_fanout_bounce_simulator() {
         .await
         .unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let msgs =
+        helpers::sqs_receive_at_least(&sqs, &queue_url, 2, std::time::Duration::from_secs(3)).await;
 
-    let msgs = sqs
-        .receive_message()
-        .queue_url(&queue_url)
-        .max_number_of_messages(10)
-        .send()
-        .await
-        .unwrap();
-
-    // Should have Send + Bounce events
     assert!(
-        msgs.messages().len() >= 2,
+        msgs.len() >= 2,
         "Expected at least 2 messages (Send + Bounce), got {}",
-        msgs.messages().len()
+        msgs.len()
     );
 
     let mut event_types: Vec<String> = Vec::new();
-    for msg in msgs.messages() {
+    for msg in &msgs {
         let envelope: serde_json::Value = serde_json::from_str(msg.body().unwrap()).unwrap();
         let inner: serde_json::Value =
             serde_json::from_str(envelope["Message"].as_str().unwrap()).unwrap();
@@ -2535,7 +2518,7 @@ async fn ses_event_fanout_bounce_simulator() {
     assert!(event_types.contains(&"Send".to_string()));
 
     // Verify the bounce event has correct structure
-    for msg in msgs.messages() {
+    for msg in &msgs {
         let envelope: serde_json::Value = serde_json::from_str(msg.body().unwrap()).unwrap();
         let inner: serde_json::Value =
             serde_json::from_str(envelope["Message"].as_str().unwrap()).unwrap();
@@ -2720,25 +2703,18 @@ async fn ses_event_fanout_eventbridge_destination() {
         .await
         .unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
     // Check SQS for EventBridge-delivered events
-    let msgs = sqs
-        .receive_message()
-        .queue_url(&queue_url)
-        .max_number_of_messages(10)
-        .send()
-        .await
-        .unwrap();
+    let msgs =
+        helpers::sqs_receive_at_least(&sqs, &queue_url, 2, std::time::Duration::from_secs(3)).await;
 
     assert!(
-        msgs.messages().len() >= 2,
+        msgs.len() >= 2,
         "Expected at least 2 EventBridge->SQS messages, got {}",
-        msgs.messages().len()
+        msgs.len()
     );
 
     // Verify the event structure
-    for msg in msgs.messages() {
+    for msg in &msgs {
         let event: serde_json::Value = serde_json::from_str(msg.body().unwrap()).unwrap();
         assert_eq!(event["source"], "aws.ses");
         assert_eq!(event["detail-type"], "SES Email Sending");

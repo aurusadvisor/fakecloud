@@ -11,6 +11,38 @@ use std::path::PathBuf;
 
 pub use fakecloud_testkit::{data_path_for, run_until_exit, CliOutput, TestServer};
 
+/// Poll SQS ReceiveMessage until at least `n` messages have been collected
+/// across one or more calls, or the deadline elapses. Returns whatever was
+/// gathered so the caller's assertion can produce a useful failure message.
+///
+/// Useful when an upstream system (SES → SNS → SQS, EventBridge → SQS, etc.)
+/// publishes asynchronously and a fixed sleep would either be too short under
+/// CI load or wastefully long under local development.
+pub async fn sqs_receive_at_least(
+    sqs: &aws_sdk_sqs::Client,
+    queue_url: &str,
+    n: usize,
+    deadline: std::time::Duration,
+) -> Vec<aws_sdk_sqs::types::Message> {
+    let until = std::time::Instant::now() + deadline;
+    let mut all: Vec<aws_sdk_sqs::types::Message> = Vec::new();
+    while std::time::Instant::now() < until {
+        let resp = sqs
+            .receive_message()
+            .queue_url(queue_url)
+            .max_number_of_messages(10)
+            .send()
+            .await
+            .unwrap();
+        all.extend(resp.messages().to_vec());
+        if all.len() >= n {
+            return all;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    all
+}
+
 /// Decompress gzipped data.
 pub fn gunzip(data: &[u8]) -> Vec<u8> {
     use std::io::Read;
