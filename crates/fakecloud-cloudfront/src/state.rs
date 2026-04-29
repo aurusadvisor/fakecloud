@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use crate::cfunctions::StoredConnectionFunction;
 use crate::extras::{StoredAnycastIpList, StoredResourcePolicy, StoredTrustStore, StoredVpcOrigin};
 use crate::extras2::StoredConnectionGroup;
 use crate::fle::{
@@ -22,6 +23,7 @@ use crate::policies::{
     StoredOriginRequestPolicy, StoredResponseHeadersPolicy,
 };
 use crate::streaming::StoredStreamingDistribution;
+use crate::tenants::{StoredDistributionTenant, StoredTenantInvalidation};
 
 pub type SharedCloudFrontState = Arc<RwLock<CloudFrontAccounts>>;
 
@@ -77,6 +79,9 @@ pub struct AccountState {
     /// Resource policies keyed by resource ARN.
     pub resource_policies: BTreeMap<String, StoredResourcePolicy>,
     pub connection_groups: BTreeMap<String, StoredConnectionGroup>,
+    pub distribution_tenants: BTreeMap<String, StoredDistributionTenant>,
+    pub tenant_invalidations: BTreeMap<String, StoredTenantInvalidation>,
+    pub connection_functions: BTreeMap<String, StoredConnectionFunction>,
 }
 
 impl CloudFrontAccounts {
