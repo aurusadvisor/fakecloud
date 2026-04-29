@@ -3557,5 +3557,4 @@ mod tests {
         assert!(!wildcard_match("exact", "exactly"));
         assert!(!wildcard_match("a*b*c", "a-b"));
     }
-
 }
