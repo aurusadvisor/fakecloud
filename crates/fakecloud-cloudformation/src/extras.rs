@@ -14,6 +14,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
@@ -105,8 +106,20 @@ impl CloudFormationService {
             "CreateChangeSet" => {
                 let stack_name = params.get("StackName").ok_or_else(|| missing("StackName"))?.clone();
                 let cs_name = params.get("ChangeSetName").ok_or_else(|| missing("ChangeSetName"))?.clone();
-                let id = format!("arn:aws:cloudformation:us-east-1:{aid}:changeSet/{cs_name}/{}", rand_id());
-                let stack_id = format!("arn:aws:cloudformation:us-east-1:{aid}:stack/{stack_name}/{}", rand_id());
+                let id = Arn::new(
+                    "cloudformation",
+                    "us-east-1",
+                    &aid,
+                    &format!("changeSet/{cs_name}/{}", rand_id()),
+                )
+                .to_string();
+                let stack_id = Arn::new(
+                    "cloudformation",
+                    "us-east-1",
+                    &aid,
+                    &format!("stack/{stack_name}/{}", rand_id()),
+                )
+                .to_string();
                 let entry = json!({
                     "Id": id,
                     "ChangeSetName": cs_name,
@@ -295,12 +308,26 @@ impl CloudFormationService {
 
             // ── Types / extensions ──
             "ActivateType" => {
-                let arn = format!("arn:aws:cloudformation:us-east-1:{aid}:type/resource/{}", rand_id());
+                let arn = Arn::new(
+                    "cloudformation",
+                    "us-east-1",
+                    &aid,
+                    &format!("type/resource/{}", rand_id()),
+                )
+                .to_string();
                 Ok(xml_response("ActivateType", format!("    <Arn>{}</Arn>", xml_escape(&arn)), &rid))
             }
             "DeactivateType" => Ok(xml_response("DeactivateType", String::new(), &rid)),
             "DescribeType" => {
-                let arn = params.get("Arn").cloned().unwrap_or_else(|| format!("arn:aws:cloudformation:us-east-1:{aid}:type/resource/Default"));
+                let arn = params.get("Arn").cloned().unwrap_or_else(|| {
+                    Arn::new(
+                        "cloudformation",
+                        "us-east-1",
+                        &aid,
+                        "type/resource/Default",
+                    )
+                    .to_string()
+                });
                 let inner = format!(
                     "    <Arn>{}</Arn>\n    <Type>RESOURCE</Type>\n    <TypeName>AWS::Custom::Type</TypeName>",
                     xml_escape(&arn),
@@ -329,16 +356,34 @@ impl CloudFormationService {
                 &rid,
             )),
             "SetTypeConfiguration" => {
-                let arn = format!("arn:aws:cloudformation:us-east-1:{aid}:type-config/{}", rand_id());
+                let arn = Arn::new(
+                    "cloudformation",
+                    "us-east-1",
+                    &aid,
+                    &format!("type-config/{}", rand_id()),
+                )
+                .to_string();
                 Ok(xml_response("SetTypeConfiguration", format!("    <ConfigurationArn>{}</ConfigurationArn>", xml_escape(&arn)), &rid))
             }
             "SetTypeDefaultVersion" => Ok(xml_response("SetTypeDefaultVersion", String::new(), &rid)),
             "TestType" => {
-                let arn = format!("arn:aws:cloudformation:us-east-1:{aid}:type/resource/{}", rand_id());
+                let arn = Arn::new(
+                    "cloudformation",
+                    "us-east-1",
+                    &aid,
+                    &format!("type/resource/{}", rand_id()),
+                )
+                .to_string();
                 Ok(xml_response("TestType", format!("    <TypeVersionArn>{}</TypeVersionArn>", xml_escape(&arn)), &rid))
             }
             "PublishType" => {
-                let arn = format!("arn:aws:cloudformation:us-east-1:{aid}:type/resource/{}", rand_id());
+                let arn = Arn::new(
+                    "cloudformation",
+                    "us-east-1",
+                    &aid,
+                    &format!("type/resource/{}", rand_id()),
+                )
+                .to_string();
                 Ok(xml_response("PublishType", format!("    <PublicTypeArn>{}</PublicTypeArn>", xml_escape(&arn)), &rid))
             }
             "RegisterPublisher" => {
@@ -357,7 +402,13 @@ impl CloudFormationService {
             // ── Generated templates ──
             "CreateGeneratedTemplate" => {
                 let name = params.get("GeneratedTemplateName").ok_or_else(|| missing("GeneratedTemplateName"))?.clone();
-                let id = format!("arn:aws:cloudformation:us-east-1:{aid}:generatedtemplate/{}", rand_id());
+                let id = Arn::new(
+                    "cloudformation",
+                    "us-east-1",
+                    &aid,
+                    &format!("generatedtemplate/{}", rand_id()),
+                )
+                .to_string();
                 let entry = json!({"GeneratedTemplateId": id.clone(), "Name": name.clone(), "Status": "COMPLETE"});
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
@@ -366,7 +417,13 @@ impl CloudFormationService {
             }
             "UpdateGeneratedTemplate" => {
                 let name = params.get("GeneratedTemplateName").ok_or_else(|| missing("GeneratedTemplateName"))?.clone();
-                let id = format!("arn:aws:cloudformation:us-east-1:{aid}:generatedtemplate/{name}");
+                let id = Arn::new(
+                    "cloudformation",
+                    "us-east-1",
+                    &aid,
+                    &format!("generatedtemplate/{name}"),
+                )
+                .to_string();
                 Ok(xml_response("UpdateGeneratedTemplate", format!("    <GeneratedTemplateId>{}</GeneratedTemplateId>", xml_escape(&id)), &rid))
             }
             "DescribeGeneratedTemplate" => {
@@ -393,7 +450,13 @@ impl CloudFormationService {
 
             // ── Resource scans ──
             "StartResourceScan" => {
-                let id = format!("arn:aws:cloudformation:us-east-1:{aid}:resourceScan/{}", rand_id());
+                let id = Arn::new(
+                    "cloudformation",
+                    "us-east-1",
+                    &aid,
+                    &format!("resourceScan/{}", rand_id()),
+                )
+                .to_string();
                 Ok(xml_response("StartResourceScan", format!("    <ResourceScanId>{}</ResourceScanId>", xml_escape(&id)), &rid))
             }
             "DescribeResourceScan" => {

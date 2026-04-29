@@ -6,6 +6,7 @@
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::ApiGatewayV2Service;
@@ -296,7 +297,7 @@ impl ApiGatewayV2Service {
                 let state = accounts.get_or_create(aid);
                 let mut entry = json!({
                     "DomainName": name,
-                    "DomainNameArn": format!("arn:aws:apigateway:us-east-1::/domainnames/{}", name),
+                    "DomainNameArn": Arn::new("apigateway", "us-east-1", "", &format!("/domainnames/{name}")).to_string(),
                     "DomainNameConfigurations": body.get("DomainNameConfigurations").cloned().unwrap_or(json!([])),
                     "ApiMappingSelectionExpression": "$request.basepath",
                     "RoutingMode": "API_MAPPING_ONLY",
@@ -1277,7 +1278,7 @@ impl ApiGatewayV2Service {
                 }
                 json!({
                     id_field: id,
-                    "PortalArn": format!("arn:aws:apigateway:us-east-1::/portals/{}", id),
+                    "PortalArn": Arn::new("apigateway", "us-east-1", "", &format!("/portals/{id}")).to_string(),
                     "LastModified": now,
                     "LastPublished": now,
                     "LastPublishedDescription": "",
@@ -1293,7 +1294,7 @@ impl ApiGatewayV2Service {
             }
             "portal_products" => json!({
                 id_field: id,
-                "PortalProductArn": format!("arn:aws:apigateway:us-east-1::/portalproducts/{}", id),
+                "PortalProductArn": Arn::new("apigateway", "us-east-1", "", &format!("/portalproducts/{id}")).to_string(),
                 "LastModified": now,
                 "Description": input.get("Description").and_then(|x| x.as_str()).unwrap_or(""),
                 "DisplayName": input.get("DisplayName").and_then(|x| x.as_str()).unwrap_or(&id),

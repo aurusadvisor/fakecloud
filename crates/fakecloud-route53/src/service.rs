@@ -10,6 +10,7 @@ use http::{HeaderMap, StatusCode};
 use parking_lot::RwLock;
 use uuid::Uuid;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError, ResponseBody};
 
 use crate::model::{
@@ -2314,7 +2315,8 @@ impl Route53Service {
             ));
         }
         let id = Uuid::new_v4().to_string();
-        let arn = format!("arn:aws:route53::{}:cidrcollection/{}", DEFAULT_ACCOUNT, id);
+        let arn =
+            Arn::global("route53", DEFAULT_ACCOUNT, &format!("cidrcollection/{id}")).to_string();
         let stored = StoredCidrCollection {
             id: id.clone(),
             name: cfg.name,

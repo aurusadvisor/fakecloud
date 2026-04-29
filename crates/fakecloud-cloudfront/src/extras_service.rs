@@ -4,6 +4,7 @@
 use chrono::Utc;
 use http::{HeaderMap, StatusCode};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::extras::{
@@ -59,7 +60,8 @@ impl CloudFrontService {
         let id = generate_id_with_prefix("VO");
         let etag = generate_id_with_prefix("E");
         let now = Utc::now();
-        let arn = format!("arn:aws:cloudfront::{}:vpc-origin/{}", DEFAULT_ACCOUNT, id);
+        let arn =
+            Arn::global("cloudfront", DEFAULT_ACCOUNT, &format!("vpc-origin/{id}")).to_string();
         let stored = StoredVpcOrigin {
             id: id.clone(),
             arn,
@@ -399,7 +401,8 @@ impl CloudFrontService {
             ));
         }
         let id = generate_id_with_prefix("TS");
-        let arn = format!("arn:aws:cloudfront::{}:trust-store/{}", DEFAULT_ACCOUNT, id);
+        let arn =
+            Arn::global("cloudfront", DEFAULT_ACCOUNT, &format!("trust-store/{id}")).to_string();
         let etag = generate_id_with_prefix("E");
         let stored = StoredTrustStore {
             id: id.clone(),
