@@ -11,7 +11,6 @@
 
 mod helpers;
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use aws_sdk_ecs::types::{ContainerDefinition, Secret};
@@ -354,10 +353,4 @@ async fn ecs_task_with_missing_secret_fails_fast() {
         Some("TaskFailedToStart"),
         "expected TaskFailedToStart; got {stop_code:?}"
     );
-}
-
-// Keep the unused helpers::helpers module import alive.
-#[allow(dead_code)]
-fn _unused_hashmap_import() {
-    let _: HashMap<String, String> = HashMap::new();
 }

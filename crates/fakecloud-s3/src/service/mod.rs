@@ -49,7 +49,6 @@ pub struct S3Service {
     delivery: Arc<DeliveryBus>,
     kms_state: Option<SharedKmsState>,
     pub(crate) kms_hook: Option<Arc<dyn fakecloud_core::delivery::KmsHook>>,
-    #[allow(dead_code)]
     store: Arc<dyn S3Store>,
 }
 
@@ -1420,89 +1419,6 @@ fn s3_detect_action(
         _ => None,
     }
 }
-
-/// Full list of S3 actions whose resource ARNs are classified by
-/// [`s3_resource_for`]. Not referenced at runtime (S3's action name is
-/// derived from method + path in [`s3_detect_action`]), but kept as a
-/// documented inventory so future work can easily enumerate the
-/// enforcement surface.
-#[allow(dead_code)]
-const S3_SUPPORTED_ACTIONS: &[&str] = &[
-    "ListBuckets",
-    "CreateBucket",
-    "DeleteBucket",
-    "HeadBucket",
-    "GetBucketLocation",
-    "PutObject",
-    "GetObject",
-    "DeleteObject",
-    "HeadObject",
-    "CopyObject",
-    "DeleteObjects",
-    "ListObjectsV2",
-    "ListObjects",
-    "ListObjectVersions",
-    "GetObjectAttributes",
-    "RestoreObject",
-    "PutObjectTagging",
-    "GetObjectTagging",
-    "DeleteObjectTagging",
-    "PutObjectAcl",
-    "GetObjectAcl",
-    "PutObjectRetention",
-    "GetObjectRetention",
-    "PutObjectLegalHold",
-    "GetObjectLegalHold",
-    "PutBucketTagging",
-    "GetBucketTagging",
-    "DeleteBucketTagging",
-    "PutBucketAcl",
-    "GetBucketAcl",
-    "PutBucketVersioning",
-    "GetBucketVersioning",
-    "PutBucketCors",
-    "GetBucketCors",
-    "DeleteBucketCors",
-    "PutBucketNotificationConfiguration",
-    "GetBucketNotificationConfiguration",
-    "PutBucketWebsite",
-    "GetBucketWebsite",
-    "DeleteBucketWebsite",
-    "PutBucketAccelerateConfiguration",
-    "GetBucketAccelerateConfiguration",
-    "PutPublicAccessBlock",
-    "GetPublicAccessBlock",
-    "DeletePublicAccessBlock",
-    "PutBucketEncryption",
-    "GetBucketEncryption",
-    "DeleteBucketEncryption",
-    "PutBucketLifecycleConfiguration",
-    "GetBucketLifecycleConfiguration",
-    "DeleteBucketLifecycle",
-    "PutBucketLogging",
-    "GetBucketLogging",
-    "PutBucketPolicy",
-    "GetBucketPolicy",
-    "DeleteBucketPolicy",
-    "PutObjectLockConfiguration",
-    "GetObjectLockConfiguration",
-    "PutBucketReplication",
-    "GetBucketReplication",
-    "DeleteBucketReplication",
-    "PutBucketOwnershipControls",
-    "GetBucketOwnershipControls",
-    "DeleteBucketOwnershipControls",
-    "PutBucketInventoryConfiguration",
-    "GetBucketInventoryConfiguration",
-    "DeleteBucketInventoryConfiguration",
-    "CreateMultipartUpload",
-    "UploadPart",
-    "UploadPartCopy",
-    "CompleteMultipartUpload",
-    "AbortMultipartUpload",
-    "ListParts",
-    "ListMultipartUploads",
-];
 
 /// Build the S3 resource ARN for an action. Returns `*` for
 /// `ListBuckets` (account-scoped), a bucket ARN for bucket-level

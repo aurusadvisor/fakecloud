@@ -204,13 +204,11 @@ fn is_due_with_dedup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{
-        FlexibleTimeWindow, Schedule, SchedulerState, SharedSchedulerState, Target,
-    };
+    use crate::state::{FlexibleTimeWindow, Schedule, SharedSchedulerState, Target};
     use chrono::Utc;
     use fakecloud_core::delivery::{SqsDelivery, SqsDeliveryError, SqsMessageAttribute};
     use parking_lot::RwLock;
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -442,8 +440,4 @@ mod tests {
         ticker.tick(&mut cron);
         assert!(rec.calls.lock().unwrap().is_empty());
     }
-
-    // Silence unused-import warning.
-    #[allow(dead_code)]
-    fn _unused(_: VecDeque<()>, _: SchedulerState) {}
 }

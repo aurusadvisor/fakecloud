@@ -4,7 +4,6 @@
 
 mod helpers;
 
-use aws_sdk_ecr::primitives::Blob;
 use helpers::TestServer;
 
 async fn create_repo(ecr: &aws_sdk_ecr::Client, name: &str) {
@@ -206,7 +205,3 @@ async fn lifecycle_policy_roundtrips() {
         serde_json::Value::String("days".into())
     );
 }
-
-/// Unused silencer for the `Blob` import — ensures rustc doesn't warn.
-#[allow(dead_code)]
-fn _blob_import_anchor(_b: Blob) {}

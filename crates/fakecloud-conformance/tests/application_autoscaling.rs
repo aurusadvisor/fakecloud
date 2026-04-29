@@ -5,7 +5,7 @@ mod helpers;
 use aws_sdk_applicationautoscaling::primitives::DateTime as AwsDateTime;
 use aws_sdk_applicationautoscaling::types::{
     PolicyType, ScalableDimension, ScalableTargetAction, ServiceNamespace,
-    StepScalingPolicyConfiguration, SuspendedState,
+    StepScalingPolicyConfiguration,
 };
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
@@ -411,9 +411,4 @@ async fn aas_untag_resource() {
         .send()
         .await
         .unwrap();
-}
-
-#[allow(dead_code)]
-fn _suspended_state_compiles() -> SuspendedState {
-    SuspendedState::builder().build()
 }

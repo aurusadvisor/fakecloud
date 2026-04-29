@@ -222,18 +222,6 @@ fn check_enum(body: &Value, name: &str, allowed: &[&str]) -> Result<(), AwsServi
     Ok(())
 }
 
-/// Require a non-empty path-derived resource id. Empty ids come from
-/// probe variants that omit a `{param}` from the URI (rendering e.g.
-/// `/v2/tags/` or `/v2/portals/`); treat them as missing rather than
-/// silently succeeding.
-#[allow(dead_code)]
-fn non_empty<'a>(s: Option<&'a str>, name: &str) -> Result<&'a str, AwsServiceError> {
-    match s {
-        Some(v) if !v.is_empty() => Ok(v),
-        _ => Err(missing(name)),
-    }
-}
-
 /// An id segment is "valid" iff it's non-empty and not a literal
 /// placeholder (`{Name}` or URL-encoded `%7BName%7D`). Probe variants
 /// that omit a required label leave the template token behind; treating
