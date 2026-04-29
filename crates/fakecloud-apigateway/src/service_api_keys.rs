@@ -1,0 +1,148 @@
+// Auto-extracted from service.rs as part of carryover service.rs split.
+
+#![allow(clippy::too_many_arguments)]
+
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+
+use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
+
+use super::*;
+
+impl ApiGatewayService {
+    pub(super) fn create_api_key(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = make_id();
+        let value = body
+            .get("value")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or_else(|| {
+                // AWS API keys are 40-char alphanumeric strings.
+                uuid::Uuid::new_v4().simple().to_string()
+            });
+        let now = chrono::Utc::now();
+        let key = ApiKey {
+            id: id.clone(),
+            value,
+            name: body
+                .get("name")
+                .and_then(Value::as_str)
+                .map(String::from)
+                .unwrap_or_else(|| format!("key-{id}")),
+            description: body
+                .get("description")
+                .and_then(Value::as_str)
+                .map(String::from),
+            enabled: body.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+            created_date: now,
+            last_updated_date: now,
+            stage_keys: body
+                .get("stageKeys")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            tags: tags_from(&body),
+            customer_id: body
+                .get("customerId")
+                .and_then(Value::as_str)
+                .map(String::from),
+        };
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request_account(req));
+        state.api_keys.insert(id, key.clone());
+        ok_status(StatusCode::CREATED, api_key_to_json(&key, true))
+    }
+
+    pub(super) fn get_api_key(
+        &self,
+        req: &AwsRequest,
+        params: &BTreeMap<String, String>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = params.get("apiKeyId").cloned().unwrap_or_default();
+        let include_value = req
+            .query_params
+            .get("includeValue")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let accounts = self.state.read();
+        let k = accounts
+            .get(&request_account(req))
+            .and_then(|s| s.api_keys.get(&id))
+            .cloned()
+            .ok_or_else(|| not_found("ApiKey not found"))?;
+        ok(api_key_to_json(&k, include_value))
+    }
+
+    pub(super) fn get_api_keys(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let include_value = req
+            .query_params
+            .get("includeValues")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        let accounts = self.state.read();
+        let items: Vec<Value> = accounts
+            .get(&request_account(req))
+            .map(|s| {
+                s.api_keys
+                    .values()
+                    .map(|k| api_key_to_json(k, include_value))
+                    .collect()
+            })
+            .unwrap_or_default();
+        ok(json!({"item": items}))
+    }
+
+    pub(super) fn delete_api_key(
+        &self,
+        req: &AwsRequest,
+        params: &BTreeMap<String, String>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = params.get("apiKeyId").cloned().unwrap_or_default();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request_account(req));
+        if state.api_keys.remove(&id).is_none() {
+            return Err(not_found("ApiKey not found"));
+        }
+        ok_no_content()
+    }
+
+    pub(super) fn update_api_key(
+        &self,
+        req: &AwsRequest,
+        params: &BTreeMap<String, String>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let id = params.get("apiKeyId").cloned().unwrap_or_default();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request_account(req));
+        let k = state
+            .api_keys
+            .get_mut(&id)
+            .ok_or_else(|| not_found("ApiKey not found"))?;
+        apply_patch_operations(req, |op, path, value| {
+            if op != "replace" && op != "add" {
+                return;
+            }
+            match path {
+                "/name" => {
+                    if let Some(s) = value.as_str() {
+                        k.name = s.to_string();
+                    }
+                }
+                "/description" => k.description = value.as_str().map(String::from),
+                "/enabled" => {
+                    if let Some(b) = value.as_bool() {
+                        k.enabled = b;
+                    }
+                }
+                _ => {}
+            }
+        });
+        k.last_updated_date = chrono::Utc::now();
+        ok(api_key_to_json(k, false))
+    }
+}
