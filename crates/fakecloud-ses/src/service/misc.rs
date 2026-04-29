@@ -2020,9 +2020,12 @@ impl SesV2Service {
         let empty = SesState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let suppressed = state.suppressed_destinations.get(&email);
+        // MailboxValidation is the wire-shape field SDKs decode; emit an
+        // empty struct since fakecloud doesn't actually probe mailboxes.
         let body = json!({
             "EmailAddress": email,
             "Insights": [],
+            "MailboxValidation": {},
             "Suppression": suppressed.map(|s| json!({
                 "Status": s.reason,
                 "LastUpdateTime": s.last_update_time.timestamp(),
