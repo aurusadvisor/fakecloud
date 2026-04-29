@@ -2991,7 +2991,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn req(action: &str, params: &[(&str, &str)]) -> AwsRequest {
-        let mut q = HashMap::new();
+        let mut q = std::collections::HashMap::new();
         for (k, v) in params {
             q.insert((*k).to_string(), (*v).to_string());
         }
