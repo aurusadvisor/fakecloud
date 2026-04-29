@@ -8,6 +8,9 @@ pub fn paginate<T: Clone>(
     next_token: Option<&str>,
     max_results: usize,
 ) -> (Vec<T>, Option<String>) {
+    if max_results == 0 {
+        return (Vec::new(), None);
+    }
     let offset: usize = next_token.and_then(|s| s.parse().ok()).unwrap_or(0);
     let page = if offset < items.len() {
         &items[offset..]
@@ -77,14 +80,14 @@ mod tests {
     }
 
     #[test]
-    fn zero_max_results_returns_empty_page() {
-        // AWS list ops reject MaxResults=0 at the validation layer; this helper
-        // treats it as "take zero items" so callers can pass through user input
-        // unchanged. Coercing 0 to 1 would silently corrupt the response shape.
+    fn zero_max_results_returns_empty_page_without_token() {
+        // AWS list ops reject MaxResults=0 at the validation layer; if the helper
+        // ever sees zero it returns an empty page with no continuation token so
+        // callers can't accidentally paginate forever on a non-advancing offset.
         let items: Vec<i32> = (0..5).collect();
         let (page, token) = paginate(&items, None, 0);
         assert!(page.is_empty());
-        assert_eq!(token, Some("0".to_string()));
+        assert_eq!(token, None);
     }
 
     #[test]
