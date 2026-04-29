@@ -829,6 +829,15 @@ fn legacy_rest_request(
     variant: &TestVariant,
 ) -> RestRequestParts {
     let (method, path, query) = rest_request_config(service_name, operation_name);
+    // Hardcoded paths in `rest_request_config` use placeholder identifiers
+    // (`test-conformance-function`, `test-conformance-bucket`, `test-key`).
+    // Strategies that need to exercise alternative identifier forms
+    // (id_forms — bare/ARN/partial) inject the desired value into
+    // `variant.input`; substitute it in here so the URL actually carries
+    // the form being tested. Without this swap, the probe would silently
+    // send the placeholder name and the new forms would be invisible at
+    // the wire layer.
+    let path = legacy_substitute_identifiers(&path, service_name, &variant.input);
     let url = match query {
         Some(qs) => format!("{}{}?{}", endpoint, path, qs),
         None => format!("{}{}", endpoint, path),
@@ -840,6 +849,36 @@ fn legacy_rest_request(
         None
     };
     (method, url, Vec::new(), body)
+}
+
+/// Replace the hardcoded placeholder identifiers in legacy REST paths
+/// with the value the variant put in its input, when present. Mirrors
+/// the substitution `build_http_request_from_model` does via
+/// `@httpLabel`, but for the hand-curated Lambda/S3 routing tables.
+fn legacy_substitute_identifiers(
+    path: &str,
+    service_name: &str,
+    input: &serde_json::Value,
+) -> String {
+    let obj = match input.as_object() {
+        Some(o) => o,
+        None => return path.to_string(),
+    };
+    let mut out = path.to_string();
+    let subs: &[(&str, &str)] = match service_name {
+        "lambda" => &[("test-conformance-function", "FunctionName")],
+        "s3" => &[("test-conformance-bucket", "Bucket"), ("test-key", "Key")],
+        _ => &[],
+    };
+    for (placeholder, member) in subs {
+        if let Some(serde_json::Value::String(value)) = obj.get(*member) {
+            // The legacy path is unencoded; the variant value may be raw
+            // ARN or already URL-encoded. Trust the variant — the
+            // id_forms strategy decides whether to URL-encode.
+            out = out.replace(placeholder, value);
+        }
+    }
+    out
 }
 
 /// Build an HTTP request for an operation from the `@http` / `@httpLabel` /

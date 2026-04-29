@@ -2,6 +2,7 @@ pub mod boundary;
 pub mod enum_exhaust;
 pub mod examples;
 pub mod examples_diff;
+pub mod id_forms;
 pub mod negative;
 pub mod optionals;
 pub mod proptest_gen;
@@ -69,6 +70,11 @@ pub enum Strategy {
     ExamplesDiff,
     /// Strategy 8: Auto-discovered Create->Get round-trip echo
     RoundTrip,
+    /// Strategy 9: Identifier-form fanout for httpLabel-bound members whose
+    /// `@pattern` admits an ARN. Generates one variant per accepted form:
+    /// bare name, `name:qualifier`, partial ARN, full ARN, URL-encoded
+    /// full ARN. Catches "GetFunction returns 404 for ARN form" (#817).
+    IdForms,
 }
 
 impl std::fmt::Display for Strategy {
@@ -82,6 +88,7 @@ impl std::fmt::Display for Strategy {
             Strategy::Negative => write!(f, "negative"),
             Strategy::ExamplesDiff => write!(f, "examples_diff"),
             Strategy::RoundTrip => write!(f, "round_trip"),
+            Strategy::IdForms => write!(f, "id_forms"),
         }
     }
 }
@@ -324,6 +331,10 @@ pub fn generate_all_variants(
 
     // Strategy 8: auto-discovered Create/Put/Update -> Get/Describe round-trip echo
     variants.extend(round_trip::generate(model, operation_name, overrides));
+
+    // Strategy 9: Identifier-form fanout for httpLabel-bound members whose
+    // `@pattern` admits an ARN. Catches #817-class wire-form 404s.
+    variants.extend(id_forms::generate(model, operation_name, overrides));
 
     variants
 }
