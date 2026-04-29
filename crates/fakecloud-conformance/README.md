@@ -49,6 +49,16 @@ A single operation typically produces anywhere from a dozen to several hundred v
 
 Both directions are checked: the input must match what AWS accepts, and the output must match what AWS returns.
 
+#### 4xx responses are also validated against the model
+
+Synthetic placeholder inputs frequently provoke real AWS exceptions like `ResourceNotFoundException` or `ValidationException` from implemented handlers — those 4xxs are *expected* and shouldn't fail the variant. But a 4xx that comes from fakecloud's *own* routing layer (a URL form the dispatcher didn't recognise, an unhandled wire format) is a bug that previously slipped through as "well, it's a 4xx, probably fine." That's exactly how #817 stayed green.
+
+The classifier now splits 4xx by what's in the body:
+- **AWS error shape present** (`__type` JSON field, `<Code>` XML element) — handler ran. If the operation's Smithy `error_shapes` list is non-empty, the code's short name must match one of the declared exceptions; this catches stray fakecloud error types AWS would never emit.
+- **No recognisable AWS error code** — likely a routing miss or unhandled-form response. Fail.
+
+The check is fully Smithy-driven from each operation's already-parsed `error_shapes` — no allowlist of acceptable error strings to maintain.
+
 ### 5. Baseline and CI gate
 
 Results are written to [`conformance-baseline.json`](../../conformance-baseline.json) — total and per-service passed/total counts. The `check` subcommand compares the current run against the committed baseline and fails if any service's pass count drops. This runs on every PR. The baseline is a ratchet: it only goes up.

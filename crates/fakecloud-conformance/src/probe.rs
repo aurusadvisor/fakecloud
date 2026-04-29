@@ -170,6 +170,16 @@ pub fn probe_variant_with_model(
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
+    // Resolve the operation's declared error shapes once so the classifier
+    // can distinguish real handler-emitted exceptions from fakecloud's own
+    // routing-miss 4xxs.
+    let op_error_shapes: Option<Vec<String>> = model_info.and_then(|(m, _)| {
+        m.operations
+            .iter()
+            .find(|o| o.name == operation_name)
+            .map(|op| op.error_shapes.clone())
+    });
+
     match result {
         Ok((status_code, body)) => {
             let mut probe_result = classify_response(
@@ -178,6 +188,7 @@ pub fn probe_variant_with_model(
                 &body,
                 &variant.expectation,
                 duration_ms,
+                op_error_shapes.as_deref(),
             );
 
             // Run shape validation on successful responses
@@ -1127,12 +1138,132 @@ fn value_to_body(v: &serde_json::Value) -> String {
     }
 }
 
+/// Classify the response when the variant expected a successful outcome.
+///
+/// Pre-`Expectation::Success` policy was: any 2xx-or-4xx == Pass. Reasoning
+/// at the time was that synthetic placeholder inputs make a 4xx
+/// (ResourceNotFoundException, ValidationException) the *expected* shape
+/// for an implemented handler. The trade-off was that fakecloud's *own*
+/// routing-miss 4xxs (returning 404 for a URL form the router didn't
+/// know how to dispatch — exactly #817) were indistinguishable from
+/// real handler-emitted 4xxs and slipped through as Pass.
+///
+/// New policy splits 4xx by what the body looks like:
+/// - 4xx with an AWS-shaped error code in the body (`__type` JSON field
+///   or `<Code>` XML element) — handler ran, returned a real exception.
+///   If the op declares `error_shapes`, the code must short-name-match
+///   one of them (Smithy declares which exceptions an op can raise).
+///   Pass.
+/// - 4xx with no recognisable AWS error code, OR with a code that's
+///   absent from the op's declared `error_shapes` — likely fakecloud's
+///   own routing-miss / unhandled-form response. Fail.
+///
+/// Net effect: signed routing reaches a handler -> Pass. Routing
+/// silently misses (404 with body that doesn't match Smithy) -> Fail.
+fn classify_success_expectation(
+    http_status: u16,
+    body: &str,
+    op_error_shapes: Option<&[String]>,
+) -> ProbeStatus {
+    if (200..300).contains(&http_status) {
+        return ProbeStatus::Pass;
+    }
+    if !(400..500).contains(&http_status) {
+        return ProbeStatus::UnexpectedResult(format!(
+            "Expected success, got HTTP {}",
+            http_status
+        ));
+    }
+    let code = match extract_aws_error_code(body) {
+        Some(c) => c,
+        None => {
+            return ProbeStatus::UnexpectedResult(format!(
+                "HTTP {} with no AWS error code in body (likely routing miss): {}",
+                http_status,
+                truncate(body, 200)
+            ));
+        }
+    };
+    // Op model available -> require the code to be in its declared errors.
+    // Op model unavailable (no model for this service or unknown op) -> any
+    // AWS-shaped error counts as a handler response.
+    if let Some(declared) = op_error_shapes {
+        if declared.is_empty() || matches_declared_error(&code, declared) {
+            ProbeStatus::Pass
+        } else {
+            ProbeStatus::UnexpectedResult(format!(
+                "HTTP {} with undeclared error '{}' (not in op's Smithy error_shapes)",
+                http_status, code
+            ))
+        }
+    } else {
+        ProbeStatus::Pass
+    }
+}
+
+/// Pull the AWS error code out of a response body. Handles all four
+/// AWS wire forms:
+///   - JSON: `{"__type":"X"}` or `{"__type":"com.amazonaws.svc#X"}`
+///     (restJson1 / awsJson1.1)
+///   - JSON: `{"code":"X"}` / `{"Code":"X"}` (Smithy fallbacks some
+///     services use)
+///   - XML: `<Error><Code>X</Code></Error>` (restXml — S3, CloudFront)
+///   - XML: `<ErrorResponse><Error><Code>X</Code></Error></ErrorResponse>`
+///     (awsQuery — IAM, RDS, SNS, ELB, CFN, STS)
+///
+/// Returns the short name (after `#` if present). Returns `None` when
+/// the body has no recognisable AWS error code — the signal we care
+/// about for distinguishing real handler responses from routing misses.
+fn extract_aws_error_code(body: &str) -> Option<String> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        for key in ["__type", "Code", "code"] {
+            if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+                return Some(short_error_name(s));
+            }
+        }
+        // Some restJson1 services nest under `Error` or `error`.
+        for outer in ["Error", "error"] {
+            if let Some(inner) = v.get(outer) {
+                for key in ["Code", "code", "__type"] {
+                    if let Some(s) = inner.get(key).and_then(|x| x.as_str()) {
+                        return Some(short_error_name(s));
+                    }
+                }
+            }
+        }
+    }
+    // XML <Code>X</Code> — first occurrence wins.
+    if let Some(start) = body.find("<Code>") {
+        let after = &body[start + "<Code>".len()..];
+        if let Some(end) = after.find("</Code>") {
+            return Some(after[..end].trim().to_string());
+        }
+    }
+    None
+}
+
+/// Strip Smithy namespace from an error type. `com.amazonaws.lambda#X` -> `X`.
+fn short_error_name(s: &str) -> String {
+    let after_hash = s.rsplit('#').next().unwrap_or(s);
+    // Some services prefix with shape namespace via colon syntax.
+    let after_colon = after_hash.rsplit(':').next().unwrap_or(after_hash);
+    after_colon.trim().to_string()
+}
+
+fn matches_declared_error(code: &str, declared: &[String]) -> bool {
+    declared.iter().any(|id| {
+        let short = id.rsplit('#').next().unwrap_or(id);
+        short == code
+    })
+}
+
 fn classify_response(
     variant_name: &str,
     http_status: u16,
     body: &str,
     expectation: &Expectation,
     duration_ms: u64,
+    op_error_shapes: Option<&[String]>,
 ) -> ProbeResult {
     // Classify as NotImplemented when fakecloud signals "we did not find a
     // handler for this action" — as opposed to AWS-shaped errors that mean
@@ -1184,20 +1315,7 @@ fn classify_response(
     }
 
     let status = match expectation {
-        Expectation::Success => {
-            if (200..500).contains(&http_status) {
-                // 2xx = genuine success.
-                // 4xx = also treated as Pass because most "success" probes send synthetic
-                // placeholder data (no real fixtures), which triggers AWS validation errors
-                // (e.g. ResourceNotFoundException, ValidationException). The important signal
-                // is that the action was routed and processed — not that the dummy data was
-                // accepted. Once fixture support is added, this should be tightened to
-                // distinguish real validation errors from routing failures.
-                ProbeStatus::Pass
-            } else {
-                ProbeStatus::UnexpectedResult(format!("Expected success, got HTTP {}", http_status))
-            }
-        }
+        Expectation::Success => classify_success_expectation(http_status, body, op_error_shapes),
         Expectation::AnyError => {
             if http_status >= 400 {
                 ProbeStatus::Pass
@@ -1826,7 +1944,7 @@ mod tests {
         // API Gateway v2 emits `Unknown path: ...` when resolve_action
         // can't match a URL. Must classify as NotImplemented, not Pass.
         let body = r#"{"__type":"NotFoundException","message":"Unknown path: /v2/domainnames"}"#;
-        let result = classify_response("v1", 404, body, &Expectation::Success, 0);
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0, None);
         assert_eq!(result.status, ProbeStatus::NotImplemented);
     }
 
@@ -1835,7 +1953,7 @@ mod tests {
         // Lambda emits `UnknownOperationException` for URLs its
         // resolve_action doesn't recognize.
         let body = r#"{"__type":"UnknownOperationException","message":"Unknown operation: /foo"}"#;
-        let result = classify_response("v1", 404, body, &Expectation::Success, 0);
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0, None);
         assert_eq!(result.status, ProbeStatus::NotImplemented);
     }
 
@@ -1845,7 +1963,7 @@ mod tests {
         // in the response body.
         let body =
             r#"{"__type":"InvalidAction","message":"action Foo not implemented for service bar"}"#;
-        let result = classify_response("v1", 501, body, &Expectation::Success, 0);
+        let result = classify_response("v1", 501, body, &Expectation::Success, 0, None);
         assert_eq!(result.status, ProbeStatus::NotImplemented);
     }
 
@@ -1856,7 +1974,99 @@ mod tests {
         // confused with NotImplemented.
         let body =
             r#"{"__type":"ResourceNotFoundException","message":"Function not found: test-fn"}"#;
-        let result = classify_response("v1", 404, body, &Expectation::Success, 0);
+        let declared = vec!["com.amazonaws.lambda#ResourceNotFoundException".to_string()];
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0, Some(&declared));
         assert_eq!(result.status, ProbeStatus::Pass);
+    }
+
+    // -- error-shape-driven 4xx classification --
+
+    #[test]
+    fn classify_404_with_no_aws_error_shape_fails() {
+        // Mirrors #817: routing miss returns 404 with a body that has no
+        // AWS error code. Must NOT pass — that's the gaming we're closing.
+        let body = r#"{"message":"Function not found"}"#;
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0, None);
+        assert!(matches!(result.status, ProbeStatus::UnexpectedResult(_)));
+    }
+
+    #[test]
+    fn classify_404_with_undeclared_error_fails() {
+        // Handler-emitted error that doesn't appear in the op's Smithy
+        // error_shapes list — could be a stray fakecloud error type that
+        // AWS would never return. Flag it.
+        let body = r#"{"__type":"WeirdInternalException","message":"oops"}"#;
+        let declared = vec![
+            "com.amazonaws.svc#ResourceNotFoundException".to_string(),
+            "com.amazonaws.svc#ValidationException".to_string(),
+        ];
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0, Some(&declared));
+        assert!(
+            matches!(result.status, ProbeStatus::UnexpectedResult(_)),
+            "got {:?}",
+            result.status
+        );
+    }
+
+    #[test]
+    fn classify_400_with_xml_error_code_passes() {
+        // restXml + awsQuery both encode the error code in <Code>X</Code>.
+        let body =
+            r#"<?xml version="1.0"?><Error><Code>NoSuchBucket</Code><Message>x</Message></Error>"#;
+        let declared = vec!["com.amazonaws.s3#NoSuchBucket".to_string()];
+        let result = classify_response("v1", 404, body, &Expectation::Success, 0, Some(&declared));
+        assert_eq!(result.status, ProbeStatus::Pass);
+    }
+
+    #[test]
+    fn classify_400_query_protocol_error_passes() {
+        // awsQuery (IAM, RDS, …) wraps the error in <ErrorResponse><Error>...
+        let body = r#"<ErrorResponse><Error><Code>InvalidParameterValue</Code><Message>x</Message></Error></ErrorResponse>"#;
+        let declared = vec!["com.amazonaws.svc#InvalidParameterValue".to_string()];
+        let result = classify_response("v1", 400, body, &Expectation::Success, 0, Some(&declared));
+        assert_eq!(result.status, ProbeStatus::Pass);
+    }
+
+    #[test]
+    fn classify_4xx_no_op_model_lenient() {
+        // Op model unavailable (caller didn't pass declared errors): any
+        // AWS-shaped error counts as a real handler response.
+        let body = r#"{"__type":"SomeException"}"#;
+        let result = classify_response("v1", 400, body, &Expectation::Success, 0, None);
+        assert_eq!(result.status, ProbeStatus::Pass);
+    }
+
+    #[test]
+    fn classify_4xx_empty_error_shapes_lenient() {
+        // Op declares no errors (rare). Treat any AWS-shaped error as Pass.
+        let body = r#"{"__type":"SomeException"}"#;
+        let declared: Vec<String> = Vec::new();
+        let result = classify_response("v1", 400, body, &Expectation::Success, 0, Some(&declared));
+        assert_eq!(result.status, ProbeStatus::Pass);
+    }
+
+    #[test]
+    fn extract_error_code_from_namespaced_type() {
+        let body = r#"{"__type":"com.amazonaws.lambda#ResourceNotFoundException"}"#;
+        assert_eq!(
+            extract_aws_error_code(body),
+            Some("ResourceNotFoundException".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_error_code_from_xml() {
+        let body = r#"<Error><Code>NoSuchBucket</Code></Error>"#;
+        assert_eq!(
+            extract_aws_error_code(body),
+            Some("NoSuchBucket".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_error_code_returns_none_for_plain_message() {
+        // Routing-miss body shape — no recognisable AWS error code.
+        let body = r#"{"message":"Unknown URL"}"#;
+        assert_eq!(extract_aws_error_code(body), None);
     }
 }
