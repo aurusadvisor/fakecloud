@@ -676,25 +676,31 @@ async fn kinesis_lambda_event_source_mapping() {
         .await
         .unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    let invocations = get_lambda_invocations(server.endpoint()).await;
+    // Poll for the Kinesis-shaped Lambda invocation rather than sleeping
+    // a fixed duration. Bounded by a 10s deadline.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (invocations, inv) = loop {
+        let invocations = get_lambda_invocations(server.endpoint()).await;
+        let inv_list = invocations["invocations"].as_array().unwrap().clone();
+        let kinesis_inv = inv_list.iter().rev().find(|inv| {
+            inv["payload"]
+                .as_str()
+                .unwrap_or("")
+                .contains("\"eventSource\":\"aws:kinesis\"")
+        });
+        if let Some(inv) = kinesis_inv {
+            break (invocations, inv.clone());
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("expected a Kinesis-shaped Lambda invocation within 10s");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
     let inv_list = invocations["invocations"].as_array().unwrap();
     assert!(
         !inv_list.is_empty(),
         "expected at least one Lambda invocation"
     );
-
-    let inv = inv_list
-        .iter()
-        .rev()
-        .find(|inv| {
-            inv["payload"]
-                .as_str()
-                .unwrap_or("")
-                .contains("\"eventSource\":\"aws:kinesis\"")
-        })
-        .expect("expected a Kinesis-shaped Lambda invocation payload");
     assert!(inv["functionArn"]
         .as_str()
         .unwrap()
