@@ -1,6 +1,6 @@
 //! In-memory state for WAF v2.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -12,7 +12,7 @@ pub type SharedWafv2State = Arc<RwLock<Wafv2Accounts>>;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Wafv2Accounts {
-    pub accounts: HashMap<String, AccountState>,
+    pub accounts: BTreeMap<String, AccountState>,
 }
 
 impl Wafv2Accounts {
@@ -24,23 +24,23 @@ impl Wafv2Accounts {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AccountState {
     /// Keyed by (scope, name).
-    pub web_acls: HashMap<ScopedKey, WebAcl>,
+    pub web_acls: BTreeMap<ScopedKey, WebAcl>,
     /// Keyed by (scope, name).
-    pub rule_groups: HashMap<ScopedKey, RuleGroup>,
+    pub rule_groups: BTreeMap<ScopedKey, RuleGroup>,
     /// Keyed by (scope, name).
-    pub ip_sets: HashMap<ScopedKey, IpSet>,
+    pub ip_sets: BTreeMap<ScopedKey, IpSet>,
     /// Keyed by (scope, name).
-    pub regex_pattern_sets: HashMap<ScopedKey, RegexPatternSet>,
+    pub regex_pattern_sets: BTreeMap<ScopedKey, RegexPatternSet>,
     /// API key tokens keyed by token string.
-    pub api_keys: HashMap<String, ApiKey>,
+    pub api_keys: BTreeMap<String, ApiKey>,
     /// LoggingConfiguration keyed by ResourceArn (WebACL ARN).
-    pub logging_configs: HashMap<String, Value>,
+    pub logging_configs: BTreeMap<String, Value>,
     /// IAM-style permission policies keyed by RuleGroup ARN.
-    pub permission_policies: HashMap<String, String>,
+    pub permission_policies: BTreeMap<String, String>,
     /// WebACL ARN keyed by associated ResourceArn (ALB / APIGW / Cognito UP / etc).
-    pub associations: HashMap<String, String>,
+    pub associations: BTreeMap<String, String>,
     /// Tags keyed by ARN.
-    pub tags: HashMap<String, HashMap<String, String>>,
+    pub tags: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 pub type ScopedKey = (String, String);
@@ -58,7 +58,7 @@ pub struct WebAcl {
     pub capacity: i64,
     pub lock_token: String,
     pub label_namespace: String,
-    pub custom_response_bodies: HashMap<String, Value>,
+    pub custom_response_bodies: BTreeMap<String, Value>,
     pub captcha_config: Option<Value>,
     pub challenge_config: Option<Value>,
     pub token_domains: Vec<String>,
@@ -85,7 +85,7 @@ pub struct RuleGroup {
     pub visibility_config: Value,
     pub lock_token: String,
     pub label_namespace: String,
-    pub custom_response_bodies: HashMap<String, Value>,
+    pub custom_response_bodies: BTreeMap<String, Value>,
     pub available_labels: Vec<Value>,
     pub consumed_labels: Vec<Value>,
     pub created_time: DateTime<Utc>,

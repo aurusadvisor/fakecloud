@@ -1,6 +1,6 @@
 //! WAF v2 JSON 1.1 service.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -1778,8 +1778,8 @@ fn parse_string_list(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn parse_tags(value: Option<&Value>) -> Result<HashMap<String, String>, AwsServiceError> {
-    let mut out = HashMap::new();
+fn parse_tags(value: Option<&Value>) -> Result<BTreeMap<String, String>, AwsServiceError> {
+    let mut out = BTreeMap::new();
     let Some(arr) = value.and_then(Value::as_array) else {
         return Ok(out);
     };
@@ -1799,7 +1799,7 @@ fn parse_tags(value: Option<&Value>) -> Result<HashMap<String, String>, AwsServi
     Ok(out)
 }
 
-fn parse_custom_response_bodies(value: Option<&Value>) -> HashMap<String, Value> {
+fn parse_custom_response_bodies(value: Option<&Value>) -> BTreeMap<String, Value> {
     value
         .and_then(Value::as_object)
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())

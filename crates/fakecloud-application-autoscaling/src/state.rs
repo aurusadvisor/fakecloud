@@ -1,6 +1,6 @@
 //! In-memory state for Application Auto Scaling.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -11,7 +11,7 @@ pub type SharedApplicationAutoScalingState = Arc<RwLock<ApplicationAutoScalingAc
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ApplicationAutoScalingAccounts {
-    pub accounts: HashMap<String, AccountState>,
+    pub accounts: BTreeMap<String, AccountState>,
 }
 
 impl ApplicationAutoScalingAccounts {
@@ -23,15 +23,15 @@ impl ApplicationAutoScalingAccounts {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AccountState {
     /// Keyed by (ServiceNamespace, ResourceId, ScalableDimension).
-    pub scalable_targets: HashMap<TargetKey, ScalableTarget>,
+    pub scalable_targets: BTreeMap<TargetKey, ScalableTarget>,
     /// Keyed by (ServiceNamespace, ResourceId, ScalableDimension, PolicyName).
-    pub scaling_policies: HashMap<PolicyKey, ScalingPolicy>,
+    pub scaling_policies: BTreeMap<PolicyKey, ScalingPolicy>,
     /// Keyed by (ServiceNamespace, ResourceId, ScalableDimension, ScheduledActionName).
-    pub scheduled_actions: HashMap<ScheduledKey, ScheduledAction>,
+    pub scheduled_actions: BTreeMap<ScheduledKey, ScheduledAction>,
     /// Scaling activities, newest first.
     pub scaling_activities: Vec<ScalingActivity>,
     /// Tags keyed by ARN.
-    pub tags: HashMap<String, HashMap<String, String>>,
+    pub tags: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 pub type TargetKey = (String, String, String);
