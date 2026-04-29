@@ -183,12 +183,16 @@ pub(crate) fn stop_model_customization_job(
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
 
-    // Find the key first to avoid double mutable borrow
-    let key = s
+    let job = s
         .customization_jobs
-        .iter()
-        .find(|(k, j)| *k == job_identifier || j.job_name == job_identifier)
-        .map(|(k, _)| k.clone())
+        .iter_mut()
+        .find_map(|(k, j)| {
+            if *k == job_identifier || j.job_name == job_identifier {
+                Some(j)
+            } else {
+                None
+            }
+        })
         .ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
@@ -196,8 +200,6 @@ pub(crate) fn stop_model_customization_job(
                 format!("Model customization job {job_identifier} not found"),
             )
         })?;
-
-    let job = s.customization_jobs.get_mut(&key).unwrap();
 
     if job.status != "InProgress" {
         return Err(AwsServiceError::aws_error(
