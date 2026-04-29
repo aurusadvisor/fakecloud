@@ -31,6 +31,7 @@ pub fn generate(
         strategy: Strategy::Optionals,
         input: required_input,
         expectation: Expectation::Success,
+        expected_output: None,
     });
 
     // All-fields variant (only when there are 2+ optional fields, otherwise it
@@ -42,6 +43,7 @@ pub fn generate(
             strategy: Strategy::Optionals,
             input: full_input,
             expectation: Expectation::Success,
+            expected_output: None,
         });
     }
 
@@ -67,6 +69,7 @@ pub fn generate(
             strategy: Strategy::Optionals,
             input,
             expectation: Expectation::Success,
+            expected_output: None,
         });
     }
 

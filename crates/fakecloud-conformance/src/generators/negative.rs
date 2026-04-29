@@ -40,6 +40,7 @@ pub fn generate(
             strategy: Strategy::Negative,
             input: Value::Object(obj),
             expectation: Expectation::AnyError,
+            expected_output: None,
         });
     }
 
@@ -67,6 +68,7 @@ pub fn generate(
                         strategy: Strategy::Negative,
                         input,
                         expectation: Expectation::AnyError,
+                        expected_output: None,
                     });
                 }
             }
@@ -87,6 +89,7 @@ pub fn generate(
                         strategy: Strategy::Negative,
                         input,
                         expectation: Expectation::AnyError,
+                        expected_output: None,
                     });
                 }
             }
@@ -106,6 +109,7 @@ pub fn generate(
                             strategy: Strategy::Negative,
                             input,
                             expectation: Expectation::AnyError,
+                            expected_output: None,
                         });
                     }
                 }
@@ -127,6 +131,7 @@ pub fn generate(
                             strategy: Strategy::Negative,
                             input,
                             expectation: Expectation::AnyError,
+                            expected_output: None,
                         });
                     }
                 }
@@ -154,6 +159,7 @@ pub fn generate(
                 strategy: Strategy::Negative,
                 input,
                 expectation: Expectation::AnyError,
+                expected_output: None,
             });
         }
     }

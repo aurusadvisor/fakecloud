@@ -112,6 +112,7 @@ pub fn generate(
             strategy: Strategy::Proptest,
             input,
             expectation: Expectation::Success,
+            expected_output: None,
         });
     }
 

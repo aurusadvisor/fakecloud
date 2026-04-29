@@ -16,9 +16,9 @@ We wanted an oracle outside the loop. AWS publishes Smithy models for every serv
 
 AWS's Smithy JSON models for each service are committed to [`aws-models/`](../../aws-models/) (e.g. `s3.json`, `dynamodb.json`, `lambda.json`). `smithy.rs` parses them into a `ServiceModel` with shapes, operations, traits (`@length`, `@range`, `@required`, `@enum`, `@examples`), and error definitions.
 
-### 2. Generate inputs with six orthogonal strategies
+### 2. Generate inputs with seven orthogonal strategies
 
-For every operation, [`generators/`](./src/generators/) produces test variants using six independent strategies. Each one targets a different class of bug:
+For every operation, [`generators/`](./src/generators/) produces test variants using seven independent strategies. Each one targets a different class of bug:
 
 | Strategy | What it generates | What it catches |
 |---|---|---|
@@ -26,8 +26,9 @@ For every operation, [`generators/`](./src/generators/) produces test variants u
 | **Enum exhaustion** (`enum_exhaust.rs`) | One variant per valid enum value for every enum field | Unhandled enum branches, stale enum lists, default-case fallthrough |
 | **Optionals permutation** (`optionals.rs`) | Required-only, required+each-optional, all-fields | Mis-flagged required fields, crashes on absent optionals |
 | **Property-based** (`proptest_gen.rs`) | 20 randomized inputs per operation, drawn from each field's type and constraints | Panics on adversarial-but-valid input, parser fragility |
-| **Model examples** (`examples.rs`) | The `@examples` trait from the Smithy model itself — AWS's own canonical inputs and outputs | Divergence from AWS's documented examples |
+| **Model examples** (`examples.rs`) | The `@examples` trait from the Smithy model itself — AWS's own canonical inputs | Divergence from AWS's documented examples |
 | **Negative** (`negative.rs`) | Missing required fields, out-of-range values, invalid enums, wrong types | Validation gaps, silent-pass bugs, 500s that should be 400s |
+| **Examples diff** (`examples_diff.rs`) | The `@examples` trait's documented *output* — diffs every leaf field/JSON-type against the live response | Optional-in-Smithy fields that AWS's own examples document, but fakecloud doesn't return |
 
 A single operation typically produces anywhere from a dozen to several hundred variants. Across all 33 services the baseline is **80,074 / 81,489 variants passing (98.3%)** — see [`conformance-baseline.json`](../../conformance-baseline.json) for the per-service breakdown.
 

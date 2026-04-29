@@ -185,18 +185,35 @@ pub fn probe_variant_with_model(
                 && (200..300).contains(&status_code)
                 && !body.is_empty()
             {
+                let mut all_violations = Vec::new();
                 if let Some((model, output_shape_id)) = model_info {
-                    let violations =
-                        shape_validator::validate_response(model, output_shape_id, &body, protocol);
-                    if !violations.is_empty() {
-                        let msg = violations
-                            .iter()
-                            .take(5)
-                            .map(|v| v.to_string())
-                            .collect::<Vec<_>>()
-                            .join("; ");
-                        probe_result.status = ProbeStatus::ShapeMismatch(msg);
+                    all_violations.extend(shape_validator::validate_response(
+                        model,
+                        output_shape_id,
+                        &body,
+                        protocol,
+                    ));
+                }
+                // Strategy 7 (`examples_diff`): the variant carries a documented
+                // response from the operation's `@examples` trait. Deep-diff
+                // it against the live response — every leaf in the documented
+                // output must exist (with matching JSON type) in actual. Catches
+                // optional-but-always-present fields that shape_validator can't
+                // see (#816).
+                if let Some(documented) = variant.expected_output.as_ref() {
+                    if let Ok(actual) = serde_json::from_str::<serde_json::Value>(&body) {
+                        all_violations
+                            .extend(shape_validator::diff_against_example(&actual, documented));
                     }
+                }
+                if !all_violations.is_empty() {
+                    let msg = all_violations
+                        .iter()
+                        .take(5)
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    probe_result.status = ProbeStatus::ShapeMismatch(msg);
                 }
             }
 
