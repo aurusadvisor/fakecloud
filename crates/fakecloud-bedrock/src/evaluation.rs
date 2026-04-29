@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{EvaluationJob, SharedBedrockState};
 
-pub fn create_evaluation_job(
+pub(crate) fn create_evaluation_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -50,7 +50,7 @@ pub fn create_evaluation_job(
     ))
 }
 
-pub fn get_evaluation_job(
+pub(crate) fn get_evaluation_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     job_identifier: &str,
@@ -75,7 +75,7 @@ pub fn get_evaluation_job(
     })))
 }
 
-pub fn list_evaluation_jobs(
+pub(crate) fn list_evaluation_jobs(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -128,7 +128,7 @@ pub fn list_evaluation_jobs(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn stop_evaluation_job(
+pub(crate) fn stop_evaluation_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     job_identifier: &str,
@@ -155,7 +155,7 @@ pub fn stop_evaluation_job(
     Ok(AwsResponse::json(StatusCode::OK, "{}".to_string()))
 }
 
-pub fn batch_delete_evaluation_job(
+pub(crate) fn batch_delete_evaluation_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,

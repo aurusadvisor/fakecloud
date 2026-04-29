@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{ImportedModel, ModelImportJob, SharedBedrockState};
 
-pub fn create_model_import_job(
+pub(crate) fn create_model_import_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -61,7 +61,7 @@ pub fn create_model_import_job(
     ))
 }
 
-pub fn get_model_import_job(
+pub(crate) fn get_model_import_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     job_identifier: &str,
@@ -98,7 +98,7 @@ pub fn get_model_import_job(
     })))
 }
 
-pub fn list_model_import_jobs(
+pub(crate) fn list_model_import_jobs(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -153,7 +153,7 @@ pub fn list_model_import_jobs(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn get_imported_model(
+pub(crate) fn get_imported_model(
     state: &SharedBedrockState,
     req: &AwsRequest,
     model_identifier: &str,
@@ -187,7 +187,7 @@ pub fn get_imported_model(
     })))
 }
 
-pub fn list_imported_models(
+pub(crate) fn list_imported_models(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -238,7 +238,7 @@ pub fn list_imported_models(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn delete_imported_model(
+pub(crate) fn delete_imported_model(
     state: &SharedBedrockState,
     req: &AwsRequest,
     model_identifier: &str,

@@ -9,7 +9,7 @@ use crate::state::{ResponseRule, SharedBedrockState};
 /// Handles both InvokeModel (provider-specific shapes) and Converse bodies.
 /// Returns an empty string when nothing recognizable is found, so a rule
 /// with `prompt_contains = ""` matches any call.
-pub fn extract_prompt_text(model_id: &str, body: &[u8]) -> String {
+pub(crate) fn extract_prompt_text(model_id: &str, body: &[u8]) -> String {
     let Ok(value): Result<Value, _> = serde_json::from_slice(body) else {
         return String::new();
     };
@@ -68,7 +68,7 @@ pub fn extract_prompt_text(model_id: &str, body: &[u8]) -> String {
 
 /// Return the first rule whose `prompt_contains` filter matches the current prompt.
 /// A rule with `prompt_contains = None` or an empty string matches anything.
-pub fn match_rule<'a>(rules: &'a [ResponseRule], prompt: &str) -> Option<&'a ResponseRule> {
+pub(crate) fn match_rule<'a>(rules: &'a [ResponseRule], prompt: &str) -> Option<&'a ResponseRule> {
     rules.iter().find(|rule| match &rule.prompt_contains {
         None => true,
         Some(needle) if needle.is_empty() => true,
@@ -79,7 +79,7 @@ pub fn match_rule<'a>(rules: &'a [ResponseRule], prompt: &str) -> Option<&'a Res
 /// Resolve the response body a runtime call should use, applying
 /// rule-based overrides first, then the legacy single-response override.
 /// Returns `None` when neither is configured — caller falls back to canned.
-pub fn resolve_override(
+pub(crate) fn resolve_override(
     state: &SharedBedrockState,
     req: &AwsRequest,
     model_id: &str,

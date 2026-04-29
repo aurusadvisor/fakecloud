@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{ModelCopyJob, SharedBedrockState};
 
-pub fn create_model_copy_job(
+pub(crate) fn create_model_copy_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -44,7 +44,7 @@ pub fn create_model_copy_job(
     ))
 }
 
-pub fn get_model_copy_job(
+pub(crate) fn get_model_copy_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     job_arn: &str,
@@ -78,7 +78,7 @@ pub fn get_model_copy_job(
     })))
 }
 
-pub fn list_model_copy_jobs(
+pub(crate) fn list_model_copy_jobs(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {

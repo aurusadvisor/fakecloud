@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::SharedBedrockState;
 
-pub fn create_model_customization_job(
+pub(crate) fn create_model_customization_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -73,7 +73,7 @@ pub fn create_model_customization_job(
     ))
 }
 
-pub fn get_model_customization_job(
+pub(crate) fn get_model_customization_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     job_identifier: &str,
@@ -120,7 +120,7 @@ pub fn get_model_customization_job(
     })))
 }
 
-pub fn list_model_customization_jobs(
+pub(crate) fn list_model_customization_jobs(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -175,7 +175,7 @@ pub fn list_model_customization_jobs(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn stop_model_customization_job(
+pub(crate) fn stop_model_customization_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     job_identifier: &str,

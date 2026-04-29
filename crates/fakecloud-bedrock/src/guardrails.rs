@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{Guardrail, GuardrailVersion, SharedBedrockState};
 
-pub fn create_guardrail(
+pub(crate) fn create_guardrail(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -69,7 +69,7 @@ pub fn create_guardrail(
     ))
 }
 
-pub fn get_guardrail(
+pub(crate) fn get_guardrail(
     state: &SharedBedrockState,
     req: &AwsRequest,
     guardrail_id: &str,
@@ -107,7 +107,7 @@ pub fn get_guardrail(
     Ok(AwsResponse::ok_json(guardrail_to_json(guardrail)))
 }
 
-pub fn list_guardrails(
+pub(crate) fn list_guardrails(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -163,7 +163,7 @@ pub fn list_guardrails(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn update_guardrail(
+pub(crate) fn update_guardrail(
     state: &SharedBedrockState,
     req: &AwsRequest,
     guardrail_id: &str,
@@ -216,7 +216,7 @@ pub fn update_guardrail(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn delete_guardrail(
+pub(crate) fn delete_guardrail(
     state: &SharedBedrockState,
     req: &AwsRequest,
     guardrail_id: &str,
@@ -237,7 +237,7 @@ pub fn delete_guardrail(
     Ok(AwsResponse::json(StatusCode::OK, "{}".to_string()))
 }
 
-pub fn create_guardrail_version(
+pub(crate) fn create_guardrail_version(
     state: &SharedBedrockState,
     req: &AwsRequest,
     guardrail_id: &str,
@@ -292,7 +292,7 @@ pub fn create_guardrail_version(
 }
 
 /// Handle the ApplyGuardrail API — evaluate content against a guardrail.
-pub fn apply_guardrail(
+pub(crate) fn apply_guardrail(
     state: &SharedBedrockState,
     req: &AwsRequest,
     guardrail_id: &str,
@@ -405,7 +405,7 @@ pub struct GuardrailView<'a> {
 }
 
 impl<'a> GuardrailView<'a> {
-    pub fn from_guardrail(g: &'a Guardrail) -> Self {
+    pub(crate) fn from_guardrail(g: &'a Guardrail) -> Self {
         Self {
             word_policy: g.word_policy.as_ref(),
             topic_policy: g.topic_policy.as_ref(),
@@ -415,7 +415,7 @@ impl<'a> GuardrailView<'a> {
         }
     }
 
-    pub fn from_version(gv: &'a GuardrailVersion) -> Self {
+    pub(crate) fn from_version(gv: &'a GuardrailVersion) -> Self {
         Self {
             word_policy: gv.word_policy.as_ref(),
             topic_policy: gv.topic_policy.as_ref(),
@@ -428,7 +428,14 @@ impl<'a> GuardrailView<'a> {
 
 /// Evaluate content against a guardrail's configured policies.
 /// Returns a list of assessment results.
-pub fn evaluate_content(guardrail: &Guardrail, text: &str) -> Vec<Value> {
+///
+/// This is a test convenience around `evaluate_content_view` that takes a
+/// `Guardrail` directly. The operational call path uses
+/// `evaluate_content_view` with a `GuardrailView` built from a versioned
+/// guardrail. Compiled out of release builds via `cfg(test)` because the
+/// non-versioned form is only useful in unit tests.
+#[cfg(test)]
+fn evaluate_content(guardrail: &Guardrail, text: &str) -> Vec<Value> {
     evaluate_content_view(&GuardrailView::from_guardrail(guardrail), text)
 }
 

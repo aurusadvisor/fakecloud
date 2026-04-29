@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 /// The event stream binary format:
 ///   [total_byte_length:4] [headers_byte_length:4] [prelude_crc:4]
 ///   [headers:*] [payload:*] [message_crc:4]
-pub fn encode_event(event_type: &str, content_type: &str, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn encode_event(event_type: &str, content_type: &str, payload: &[u8]) -> Vec<u8> {
     let headers = encode_headers(event_type, content_type);
     let headers_len = headers.len() as u32;
 
@@ -81,7 +81,7 @@ fn crc32(data: &[u8]) -> u32 {
 
 /// Build the complete event stream body for InvokeModelWithResponseStream.
 /// Returns the full body as a single chunk containing all events.
-pub fn build_invoke_stream_response(model_id: &str, response_text: &str) -> Vec<u8> {
+pub(crate) fn build_invoke_stream_response(model_id: &str, response_text: &str) -> Vec<u8> {
     let mut body = Vec::new();
 
     // For Anthropic models, emit message_start, content_block_start, content_block_delta,
@@ -117,7 +117,7 @@ pub fn build_invoke_stream_response(model_id: &str, response_text: &str) -> Vec<
 }
 
 /// Build the complete event stream body for ConverseStream.
-pub fn build_converse_stream_response(response_text: &str) -> Vec<u8> {
+pub(crate) fn build_converse_stream_response(response_text: &str) -> Vec<u8> {
     let mut body = Vec::new();
 
     // messageStart event
@@ -187,13 +187,13 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Wrap response text for non-streaming provider fallback
-pub fn default_stream_text() -> &'static str {
+pub(crate) fn default_stream_text() -> &'static str {
     "This is a test response from the emulated model."
 }
 
 /// Generate the canned response text, checking for prompt-conditional and
 /// legacy custom overrides for the given call.
-pub fn get_response_text(
+pub(crate) fn get_response_text(
     state: &crate::state::SharedBedrockState,
     req: &fakecloud_core::service::AwsRequest,
     model_id: &str,

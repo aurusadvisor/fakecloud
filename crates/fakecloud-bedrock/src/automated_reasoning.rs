@@ -9,7 +9,7 @@ use crate::state::{AutomatedReasoningPolicy, AutomatedReasoningTestCase, SharedB
 
 // Policy CRUD
 
-pub fn create_automated_reasoning_policy(
+pub(crate) fn create_automated_reasoning_policy(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -52,7 +52,7 @@ pub fn create_automated_reasoning_policy(
     ))
 }
 
-pub fn get_automated_reasoning_policy(
+pub(crate) fn get_automated_reasoning_policy(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,
@@ -71,7 +71,7 @@ pub fn get_automated_reasoning_policy(
     Ok(AwsResponse::ok_json(policy_to_json(policy)))
 }
 
-pub fn list_automated_reasoning_policies(
+pub(crate) fn list_automated_reasoning_policies(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -127,7 +127,7 @@ pub fn list_automated_reasoning_policies(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn update_automated_reasoning_policy(
+pub(crate) fn update_automated_reasoning_policy(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,
@@ -164,7 +164,7 @@ pub fn update_automated_reasoning_policy(
     Ok(AwsResponse::ok_json(policy_to_json(policy)))
 }
 
-pub fn delete_automated_reasoning_policy(
+pub(crate) fn delete_automated_reasoning_policy(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,
@@ -191,7 +191,7 @@ pub fn delete_automated_reasoning_policy(
 
 // Policy versions
 
-pub fn create_automated_reasoning_policy_version(
+pub(crate) fn create_automated_reasoning_policy_version(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,
@@ -229,7 +229,7 @@ pub fn create_automated_reasoning_policy_version(
     ))
 }
 
-pub fn export_automated_reasoning_policy_version(
+pub(crate) fn export_automated_reasoning_policy_version(
     state: &SharedBedrockState,
     identifier: &str,
     req: &AwsRequest,
@@ -265,7 +265,7 @@ pub fn export_automated_reasoning_policy_version(
 
 // Test cases
 
-pub fn create_automated_reasoning_policy_test_case(
+pub(crate) fn create_automated_reasoning_policy_test_case(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -313,7 +313,7 @@ pub fn create_automated_reasoning_policy_test_case(
     ))
 }
 
-pub fn get_automated_reasoning_policy_test_case(
+pub(crate) fn get_automated_reasoning_policy_test_case(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -346,7 +346,7 @@ pub fn get_automated_reasoning_policy_test_case(
     Ok(AwsResponse::ok_json(test_case_to_json(tc)))
 }
 
-pub fn list_automated_reasoning_policy_test_cases(
+pub(crate) fn list_automated_reasoning_policy_test_cases(
     state: &SharedBedrockState,
     policy_identifier: &str,
     req: &AwsRequest,
@@ -415,7 +415,7 @@ pub fn list_automated_reasoning_policy_test_cases(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn update_automated_reasoning_policy_test_case(
+pub(crate) fn update_automated_reasoning_policy_test_case(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,
@@ -462,7 +462,7 @@ pub fn update_automated_reasoning_policy_test_case(
     Ok(AwsResponse::ok_json(test_case_to_json(tc)))
 }
 
-pub fn delete_automated_reasoning_policy_test_case(
+pub(crate) fn delete_automated_reasoning_policy_test_case(
     state: &SharedBedrockState,
     req: &AwsRequest,
     policy_identifier: &str,

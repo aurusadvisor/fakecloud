@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{PromptRouter, SharedBedrockState};
 
-pub fn create_prompt_router(
+pub(crate) fn create_prompt_router(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -45,7 +45,7 @@ pub fn create_prompt_router(
     ))
 }
 
-pub fn get_prompt_router(
+pub(crate) fn get_prompt_router(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,
@@ -84,7 +84,7 @@ pub fn get_prompt_router(
     })))
 }
 
-pub fn list_prompt_routers(
+pub(crate) fn list_prompt_routers(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -139,7 +139,7 @@ pub fn list_prompt_routers(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn delete_prompt_router(
+pub(crate) fn delete_prompt_router(
     state: &SharedBedrockState,
     req: &AwsRequest,
     identifier: &str,

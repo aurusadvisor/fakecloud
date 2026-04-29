@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{ModelInvocationJob, SharedBedrockState};
 
-pub fn create_model_invocation_job(
+pub(crate) fn create_model_invocation_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -46,7 +46,7 @@ pub fn create_model_invocation_job(
     ))
 }
 
-pub fn get_model_invocation_job(
+pub(crate) fn get_model_invocation_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     job_identifier: &str,
@@ -74,7 +74,7 @@ pub fn get_model_invocation_job(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn list_model_invocation_jobs(
+pub(crate) fn list_model_invocation_jobs(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -128,7 +128,7 @@ pub fn list_model_invocation_jobs(
     Ok(AwsResponse::ok_json(resp))
 }
 
-pub fn stop_model_invocation_job(
+pub(crate) fn stop_model_invocation_job(
     state: &SharedBedrockState,
     req: &AwsRequest,
     job_identifier: &str,

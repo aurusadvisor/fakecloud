@@ -5,7 +5,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::SharedBedrockState;
 
-pub fn put_model_invocation_logging_configuration(
+pub(crate) fn put_model_invocation_logging_configuration(
     state: &SharedBedrockState,
     req: &AwsRequest,
     body: &Value,
@@ -39,7 +39,7 @@ pub fn put_model_invocation_logging_configuration(
     Ok(AwsResponse::json(StatusCode::OK, "{}".to_string()))
 }
 
-pub fn get_model_invocation_logging_configuration(
+pub(crate) fn get_model_invocation_logging_configuration(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -67,7 +67,7 @@ pub fn get_model_invocation_logging_configuration(
     }
 }
 
-pub fn delete_model_invocation_logging_configuration(
+pub(crate) fn delete_model_invocation_logging_configuration(
     state: &SharedBedrockState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {

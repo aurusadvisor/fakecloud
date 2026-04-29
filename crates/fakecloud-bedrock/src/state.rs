@@ -29,7 +29,7 @@ mod tuple2_map_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::HashMap;
 
-    pub fn serialize<V: Serialize, S: Serializer>(
+    pub(crate) fn serialize<V: Serialize, S: Serializer>(
         map: &HashMap<(String, String), V>,
         s: S,
     ) -> Result<S::Ok, S::Error> {
@@ -38,7 +38,7 @@ mod tuple2_map_serde {
         entries.serialize(s)
     }
 
-    pub fn deserialize<'de, V: Deserialize<'de>, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, V: Deserialize<'de>, D: Deserializer<'de>>(
         d: D,
     ) -> Result<HashMap<(String, String), V>, D::Error> {
         let entries: Vec<(String, String, V)> = Vec::deserialize(d)?;
@@ -52,7 +52,7 @@ mod tuple3_map_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::HashMap;
 
-    pub fn serialize<V: Serialize, S: Serializer>(
+    pub(crate) fn serialize<V: Serialize, S: Serializer>(
         map: &HashMap<(String, String, String), V>,
         s: S,
     ) -> Result<S::Ok, S::Error> {
@@ -61,7 +61,7 @@ mod tuple3_map_serde {
         entries.serialize(s)
     }
 
-    pub fn deserialize<'de, V: Deserialize<'de>, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, V: Deserialize<'de>, D: Deserializer<'de>>(
         d: D,
     ) -> Result<HashMap<(String, String, String), V>, D::Error> {
         let entries: Vec<(String, String, String, V)> = Vec::deserialize(d)?;
