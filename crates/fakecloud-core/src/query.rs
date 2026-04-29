@@ -1,5 +1,7 @@
 //! Shared helpers for AWS Query protocol services (SQS, SNS, ElastiCache, RDS, SES v1, IAM).
 
+use std::collections::HashMap;
+
 use http::StatusCode;
 
 use crate::service::{AwsRequest, AwsServiceError};
@@ -34,27 +36,37 @@ pub fn query_metadata_only_xml(action: &str, namespace: &str, request_id: &str) 
     )
 }
 
-/// Extract an optional query parameter from an `AwsRequest`.
+/// Extract an optional parameter from a query parameter map.
 ///
 /// Returns `None` if the parameter is missing or empty.
-pub fn optional_query_param(req: &AwsRequest, name: &str) -> Option<String> {
-    req.query_params
-        .get(name)
-        .cloned()
-        .filter(|value| !value.is_empty())
+pub fn optional_param(params: &HashMap<String, String>, name: &str) -> Option<String> {
+    params.get(name).cloned().filter(|value| !value.is_empty())
 }
 
-/// Extract a required query parameter from an `AwsRequest`.
+/// Extract a required parameter from a query parameter map.
 ///
 /// Returns `MissingParameter` error if the parameter is missing or empty.
-pub fn required_query_param(req: &AwsRequest, name: &str) -> Result<String, AwsServiceError> {
-    optional_query_param(req, name).ok_or_else(|| {
+pub fn required_param(
+    params: &HashMap<String, String>,
+    name: &str,
+) -> Result<String, AwsServiceError> {
+    optional_param(params, name).ok_or_else(|| {
         AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "MissingParameter",
             format!("The request must contain the parameter {name}."),
         )
     })
+}
+
+/// Extract an optional query parameter from an `AwsRequest`.
+pub fn optional_query_param(req: &AwsRequest, name: &str) -> Option<String> {
+    optional_param(&req.query_params, name)
+}
+
+/// Extract a required query parameter from an `AwsRequest`.
+pub fn required_query_param(req: &AwsRequest, name: &str) -> Result<String, AwsServiceError> {
+    required_param(&req.query_params, name)
 }
 
 #[cfg(test)]

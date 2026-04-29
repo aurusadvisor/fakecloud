@@ -1142,13 +1142,7 @@ fn required_param(
     params: &std::collections::HashMap<String, String>,
     name: &str,
 ) -> Result<String, AwsServiceError> {
-    params.get(name).cloned().ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "MissingParameter",
-            format!("The request must contain the parameter {name}"),
-        )
-    })
+    fakecloud_core::query::required_param(params, name)
 }
 
 /// Resolve the calling user when UserName is not provided.
