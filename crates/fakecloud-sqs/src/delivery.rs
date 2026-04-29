@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use base64::Engine;
 use chrono::Utc;
@@ -105,7 +105,7 @@ impl SqsDelivery for SqsDeliveryImpl {
             None
         };
 
-        let sqs_attrs: HashMap<String, MessageAttribute> = message_attributes
+        let sqs_attrs: BTreeMap<String, MessageAttribute> = message_attributes
             .iter()
             .map(|(k, v)| {
                 (
@@ -128,7 +128,7 @@ impl SqsDelivery for SqsDeliveryImpl {
             md5_of_body: crate::service::md5_hex(message_body),
             body: message_body.to_string(),
             sent_timestamp: now.timestamp_millis(),
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             message_attributes: sqs_attrs,
             visible_at: None,
             receive_count: 0,
@@ -158,7 +158,7 @@ mod tests {
     const ENDPOINT: &str = "http://localhost:4566";
 
     fn make_queue(name: &str, is_fifo: bool, content_based_dedup: bool) -> SqsQueue {
-        let mut attributes = HashMap::new();
+        let mut attributes = BTreeMap::new();
         if content_based_dedup {
             attributes.insert("ContentBasedDeduplication".to_string(), "true".to_string());
         }
@@ -171,12 +171,12 @@ mod tests {
             inflight: Vec::new(),
             attributes,
             is_fifo,
-            dedup_cache: HashMap::new(),
+            dedup_cache: BTreeMap::new(),
             redrive_policy: None,
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             next_sequence_number: 0,
             permission_labels: Vec::new(),
-            receipt_handle_map: HashMap::new(),
+            receipt_handle_map: BTreeMap::new(),
         }
     }
 

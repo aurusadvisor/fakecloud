@@ -4,7 +4,7 @@ use http::StatusCode;
 use md5::Md5;
 use serde_json::{json, Value};
 use sha2::Sha256;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -23,7 +23,7 @@ use crate::state::{
 /// documented ranges; we return the same error code/message the real
 /// service does.
 fn validate_create_queue_attributes(
-    attrs: &HashMap<String, String>,
+    attrs: &BTreeMap<String, String>,
 ) -> Result<(), AwsServiceError> {
     if let Some(ds) = attrs.get("DelaySeconds") {
         match ds.parse::<i64>() {
@@ -300,7 +300,7 @@ fn process_batch_send_entry(
         md5_of_body: md5_hex(&message_body),
         body: stored_body_override.unwrap_or(message_body),
         sent_timestamp: cfg.now.timestamp_millis(),
-        attributes: HashMap::new(),
+        attributes: BTreeMap::new(),
         message_attributes,
         visible_at,
         receive_count: 0,
@@ -699,7 +699,13 @@ impl AwsService for SqsService {
         let state = _accts.get(account_id)?;
         let queue_url = state.name_to_url.get(queue_name)?;
         let queue = state.queues.get(queue_url)?;
-        Some(queue.tags.clone())
+        Some(
+            queue
+                .tags
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        )
     }
 
     fn request_tags_from(
@@ -1339,7 +1345,7 @@ impl SqsService {
             ));
         }
 
-        let mut new_attributes = HashMap::new();
+        let mut new_attributes = BTreeMap::new();
         if let Some(attrs) = body["Attributes"].as_object() {
             for (k, v) in attrs {
                 if let Some(s) = v.as_str() {
@@ -1388,7 +1394,7 @@ impl SqsService {
 
         let queue_url = format!("{}/{}/{}", state.endpoint, state.account_id, queue_name);
 
-        let mut attributes = HashMap::new();
+        let mut attributes = BTreeMap::new();
         // Default attributes (real AWS SQS defaults).
         attributes.insert("VisibilityTimeout".to_string(), "30".to_string());
         attributes.insert("DelaySeconds".to_string(), "0".to_string());
@@ -1456,7 +1462,7 @@ impl SqsService {
         // string is what GetQueueAttributes returns and round-trips clean.
 
         // Parse tags
-        let mut tags = HashMap::new();
+        let mut tags = BTreeMap::new();
         if let Some(tags_obj) = body["tags"].as_object() {
             for (k, v) in tags_obj {
                 if let Some(s) = v.as_str() {
@@ -1491,12 +1497,12 @@ impl SqsService {
             inflight: Vec::new(),
             attributes,
             is_fifo,
-            dedup_cache: HashMap::new(),
+            dedup_cache: BTreeMap::new(),
             redrive_policy,
             tags,
             next_sequence_number: 0,
             permission_labels: Vec::new(),
-            receipt_handle_map: HashMap::new(),
+            receipt_handle_map: BTreeMap::new(),
         };
 
         state.name_to_url.insert(queue_name, queue_url.clone());
@@ -3655,10 +3661,10 @@ fn format_receive_response(
             }
 
             // Filter message attributes
-            let filtered_attrs: HashMap<String, &MessageAttribute> =
+            let filtered_attrs: BTreeMap<String, &MessageAttribute> =
                 if let Some(names) = msg_attr_names {
                     if names.is_empty() {
-                        HashMap::new()
+                        BTreeMap::new()
                     } else if names.iter().any(|n| n == "All" || n == ".*") {
                         m.message_attributes
                             .iter()
@@ -3680,7 +3686,7 @@ fn format_receive_response(
                             .collect()
                     }
                 } else {
-                    HashMap::new()
+                    BTreeMap::new()
                 };
 
             if !filtered_attrs.is_empty() {
@@ -3718,8 +3724,8 @@ fn format_receive_response(
     sqs_response("ReceiveMessage", body, request_id, is_query)
 }
 
-fn parse_message_attributes(body: &Value) -> HashMap<String, MessageAttribute> {
-    let mut result = HashMap::new();
+fn parse_message_attributes(body: &Value) -> BTreeMap<String, MessageAttribute> {
+    let mut result = BTreeMap::new();
     if let Some(attrs) = body["MessageAttributes"].as_object() {
         for (name, val) in attrs {
             let data_type = val["DataType"].as_str().unwrap_or("String").to_string();
@@ -3781,7 +3787,7 @@ fn parse_message_attributes(body: &Value) -> HashMap<String, MessageAttribute> {
 
 /// Validate message attribute names and data types
 fn validate_message_attributes(
-    attrs: &HashMap<String, MessageAttribute>,
+    attrs: &BTreeMap<String, MessageAttribute>,
 ) -> Result<(), AwsServiceError> {
     for (name, attr) in attrs {
         // Validate attribute name
@@ -3828,7 +3834,7 @@ fn is_valid_queue_name(name: &str) -> bool {
 /// AWS sorts attributes by name, then for each: encode name length (4 bytes BE),
 /// name bytes, data type length (4 bytes BE), data type bytes,
 /// then transport type (1=String, 2=Binary) and value length + value bytes.
-fn md5_of_message_attributes(attrs: &HashMap<String, MessageAttribute>) -> String {
+fn md5_of_message_attributes(attrs: &BTreeMap<String, MessageAttribute>) -> String {
     use md5::Digest;
     let mut sorted: Vec<(&String, &MessageAttribute)> = attrs.iter().collect();
     sorted.sort_by_key(|(k, _)| k.as_str());
@@ -3865,7 +3871,7 @@ fn md5_of_message_attributes(attrs: &HashMap<String, MessageAttribute>) -> Strin
 }
 
 /// Same as md5_of_message_attributes but works with borrowed references
-fn md5_of_message_attributes_from_refs(attrs: &HashMap<String, &MessageAttribute>) -> String {
+fn md5_of_message_attributes_from_refs(attrs: &BTreeMap<String, &MessageAttribute>) -> String {
     use md5::Digest;
     let mut sorted: Vec<(&String, &&MessageAttribute)> = attrs.iter().collect();
     sorted.sort_by_key(|(k, _)| k.as_str());
@@ -3977,8 +3983,8 @@ fn find_message_id_for_receipt(
 }
 
 /// Parse MessageSystemAttributes (e.g., AWSTraceHeader) from the request body.
-fn parse_message_system_attributes(body: &Value) -> HashMap<String, String> {
-    let mut result = HashMap::new();
+fn parse_message_system_attributes(body: &Value) -> BTreeMap<String, String> {
+    let mut result = BTreeMap::new();
 
     // JSON protocol
     if let Some(attrs) = body["MessageSystemAttributes"].as_object() {

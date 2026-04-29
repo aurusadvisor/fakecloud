@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -15,10 +15,10 @@ impl fakecloud_core::multi_account::AccountState for KmsState {
 pub struct KmsState {
     pub account_id: String,
     pub region: String,
-    pub keys: HashMap<String, KmsKey>,
-    pub aliases: HashMap<String, KmsAlias>,
+    pub keys: BTreeMap<String, KmsKey>,
+    pub aliases: BTreeMap<String, KmsAlias>,
     pub grants: Vec<KmsGrant>,
-    pub custom_key_stores: HashMap<String, CustomKeyStore>,
+    pub custom_key_stores: BTreeMap<String, CustomKeyStore>,
     /// Per-account master key bytes (32 bytes for AES-256-GCM) used to
     /// wrap plaintext in the AWS-shaped ciphertext blob format. Generated
     /// lazily on first encrypt and persisted alongside the rest of the
@@ -41,10 +41,10 @@ impl KmsState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            keys: HashMap::new(),
-            aliases: HashMap::new(),
+            keys: BTreeMap::new(),
+            aliases: BTreeMap::new(),
             grants: Vec::new(),
-            custom_key_stores: HashMap::new(),
+            custom_key_stores: BTreeMap::new(),
             master_key_bytes: default_master_key_bytes(),
         }
     }
@@ -70,7 +70,7 @@ pub struct KmsKey {
     pub key_manager: String,
     pub key_state: String,
     pub deletion_date: Option<f64>,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     pub policy: String,
     pub key_rotation_enabled: bool,
     pub origin: String,

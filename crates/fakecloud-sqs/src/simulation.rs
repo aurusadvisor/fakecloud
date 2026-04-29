@@ -129,7 +129,7 @@ mod tests {
     use chrono::Duration;
     use fakecloud_core::multi_account::MultiAccountState;
     use parking_lot::RwLock;
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{BTreeMap, VecDeque};
     use std::sync::Arc;
 
     fn make_state() -> SharedSqsState {
@@ -147,8 +147,8 @@ mod tests {
             body: body.to_string(),
             md5_of_body: String::new(),
             sent_timestamp: 0,
-            attributes: HashMap::new(),
-            message_attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
+            message_attributes: BTreeMap::new(),
             visible_at: None,
             receive_count,
             message_group_id: None,
@@ -163,7 +163,7 @@ mod tests {
         let s = accts.default_mut();
         let url = format!("http://localhost:4566/123456789012/{name}");
         let arn = format!("arn:aws:sqs:us-east-1:123456789012:{name}");
-        let mut attrs = HashMap::new();
+        let mut attrs = BTreeMap::new();
         if let Some(r) = retention {
             attrs.insert("MessageRetentionPeriod".to_string(), r.to_string());
         }
@@ -176,12 +176,12 @@ mod tests {
             inflight: Vec::new(),
             attributes: attrs,
             is_fifo: false,
-            dedup_cache: HashMap::new(),
+            dedup_cache: BTreeMap::new(),
             redrive_policy: None,
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             next_sequence_number: 0,
             permission_labels: Vec::new(),
-            receipt_handle_map: HashMap::new(),
+            receipt_handle_map: BTreeMap::new(),
         };
         s.queues.insert(url.clone(), queue);
         s.name_to_url.insert(name.to_string(), url.clone());

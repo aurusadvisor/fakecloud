@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -19,8 +19,8 @@ pub struct SqsMessage {
     pub body: String,
     pub md5_of_body: String,
     pub sent_timestamp: i64,
-    pub attributes: HashMap<String, String>,
-    pub message_attributes: HashMap<String, MessageAttribute>,
+    pub attributes: BTreeMap<String, String>,
+    pub message_attributes: BTreeMap<String, MessageAttribute>,
     /// When this message becomes visible again (after ReceiveMessage)
     pub visible_at: Option<DateTime<Utc>>,
     pub receive_count: u32,
@@ -48,20 +48,20 @@ pub struct SqsQueue {
     pub created_at: DateTime<Utc>,
     pub messages: VecDeque<SqsMessage>,
     pub inflight: Vec<SqsMessage>,
-    pub attributes: HashMap<String, String>,
+    pub attributes: BTreeMap<String, String>,
     pub is_fifo: bool,
     /// For FIFO dedup: dedup_id -> expiry
-    pub dedup_cache: HashMap<String, DateTime<Utc>>,
+    pub dedup_cache: BTreeMap<String, DateTime<Utc>>,
     /// DLQ redrive policy
     pub redrive_policy: Option<RedrivePolicy>,
     /// Queue tags (key -> value)
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     /// FIFO: next sequence number counter
     pub next_sequence_number: u64,
     /// Permission labels stored on the queue
     pub permission_labels: Vec<String>,
     /// Tracks message_id -> list of all receipt handles ever issued for that message
-    pub receipt_handle_map: HashMap<String, Vec<String>>,
+    pub receipt_handle_map: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,8 +113,8 @@ pub struct SqsState {
     pub account_id: String,
     pub region: String,
     pub endpoint: String,
-    pub queues: HashMap<String, SqsQueue>, // queue_url -> queue
-    pub name_to_url: HashMap<String, String>, // queue_name -> queue_url
+    pub queues: BTreeMap<String, SqsQueue>, // queue_url -> queue
+    pub name_to_url: BTreeMap<String, String>, // queue_name -> queue_url
     #[serde(default)]
     pub message_move_tasks: Vec<MessageMoveTask>,
 }
@@ -125,8 +125,8 @@ impl SqsState {
             account_id: account_id.to_string(),
             region: region.to_string(),
             endpoint: endpoint.to_string(),
-            queues: HashMap::new(),
-            name_to_url: HashMap::new(),
+            queues: BTreeMap::new(),
+            name_to_url: BTreeMap::new(),
             message_move_tasks: Vec::new(),
         }
     }

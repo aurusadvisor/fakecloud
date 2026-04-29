@@ -115,7 +115,7 @@ impl ResourceProvisioner {
         );
 
         let is_fifo = queue_name.ends_with(".fifo");
-        let mut attributes = HashMap::new();
+        let mut attributes = std::collections::BTreeMap::new();
         if let Some(obj) = props.as_object() {
             for (k, v) in obj {
                 if k != "QueueName" {
@@ -137,12 +137,12 @@ impl ResourceProvisioner {
             inflight: Vec::new(),
             attributes,
             is_fifo,
-            dedup_cache: HashMap::new(),
+            dedup_cache: std::collections::BTreeMap::new(),
             redrive_policy: None,
-            tags: HashMap::new(),
+            tags: std::collections::BTreeMap::new(),
             next_sequence_number: 0,
             permission_labels: Vec::new(),
-            receipt_handle_map: HashMap::new(),
+            receipt_handle_map: std::collections::BTreeMap::new(),
         };
 
         state

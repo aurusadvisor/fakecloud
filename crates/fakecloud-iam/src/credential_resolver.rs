@@ -47,7 +47,7 @@ impl CredentialResolver for IamCredentialResolver {
                         account_id: lookup.account_id,
                         principal_type,
                         source_identity: None,
-                        tags: lookup.principal_tags,
+                        tags: lookup.principal_tags.map(|m| m.into_iter().collect()),
                     },
                     session_policies: lookup.session_policies,
                 });

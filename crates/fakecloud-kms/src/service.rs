@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -402,7 +402,12 @@ impl AwsService for KmsService {
         let accounts = self.state.read();
         let state = accounts.get(&account_id)?;
         let key = state.keys.get(key_id)?;
-        Some(key.tags.clone())
+        Some(
+            key.tags
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        )
     }
 
     fn request_tags_from(
@@ -540,7 +545,7 @@ struct CreateKeyInput {
     origin: String,
     multi_region: bool,
     policy: Option<String>,
-    tags: HashMap<String, String>,
+    tags: BTreeMap<String, String>,
 }
 
 impl CreateKeyInput {
@@ -586,7 +591,7 @@ impl CreateKeyInput {
             ));
         }
 
-        let tags: HashMap<String, String> = body["Tags"]
+        let tags: BTreeMap<String, String> = body["Tags"]
             .as_array()
             .map(|arr| {
                 arr.iter()

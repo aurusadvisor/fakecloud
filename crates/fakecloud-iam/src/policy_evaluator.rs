@@ -213,7 +213,7 @@ mod tests {
             .user_inline_policies
             .insert(
                 "alice".into(),
-                std::collections::HashMap::from([(
+                std::collections::BTreeMap::from([(
                     "AllowGet".into(),
                     r#"{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#
                         .into(),
@@ -242,7 +242,7 @@ mod tests {
         let state = setup();
         state.write().get_or_create("123456789012").user_inline_policies.insert(
             "alice".into(),
-            std::collections::HashMap::from([
+            std::collections::BTreeMap::from([
                 (
                     "AllowAll".into(),
                     r#"{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#.into(),
@@ -322,7 +322,7 @@ mod tests {
             let s = mas.get_or_create("123456789012");
             s.user_inline_policies.insert(
                 "alice".into(),
-                std::collections::HashMap::from([(
+                std::collections::BTreeMap::from([(
                     "AllowAll".into(),
                     r#"{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#.into(),
                 )]),
@@ -366,7 +366,7 @@ mod tests {
             let s = mas.get_or_create("123456789012");
             s.user_inline_policies.insert(
                 "alice".into(),
-                std::collections::HashMap::from([(
+                std::collections::BTreeMap::from([(
                     "AllowAll".into(),
                     r#"{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#.into(),
                 )]),
@@ -402,7 +402,7 @@ mod tests {
             let s = mas.get_or_create("123456789012");
             s.user_inline_policies.insert(
                 "alice".into(),
-                std::collections::HashMap::from([(
+                std::collections::BTreeMap::from([(
                     "AllowAll".into(),
                     r#"{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#.into(),
                 )]),
@@ -451,7 +451,7 @@ mod tests {
             );
             s.role_inline_policies.insert(
                 "AWSServiceRoleForLambda".into(),
-                std::collections::HashMap::from([(
+                std::collections::BTreeMap::from([(
                     "AllowAll".into(),
                     r#"{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#.into(),
                 )]),

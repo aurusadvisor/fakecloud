@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use fakecloud_core::multi_account::{AccountState, MultiAccountState};
 
@@ -69,9 +69,9 @@ pub struct IamGroup {
     pub arn: String,
     pub path: String,
     pub created_at: DateTime<Utc>,
-    pub members: Vec<String>,                     // user names
-    pub inline_policies: HashMap<String, String>, // policy_name -> document
-    pub attached_policies: Vec<String>,           // policy ARNs
+    pub members: Vec<String>,                      // user names
+    pub inline_policies: BTreeMap<String, String>, // policy_name -> document
+    pub attached_policies: Vec<String>,            // policy ARNs
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,12 +238,12 @@ pub struct SecretLookup {
     pub session_policies: Vec<String>,
     /// Tags on the principal (IAM user or assumed role) for
     /// `aws:PrincipalTag/<key>` condition evaluation.
-    pub principal_tags: Option<HashMap<String, String>>,
+    pub principal_tags: Option<BTreeMap<String, String>>,
 }
 
-/// Convert a `Vec<Tag>` to a `HashMap<String, String>`.
+/// Convert a `Vec<Tag>` to a `BTreeMap<String, String>`.
 /// Returns `None` when the input is empty (no tags to evaluate).
-pub fn tags_to_hashmap(tags: &[Tag]) -> Option<HashMap<String, String>> {
+pub fn tags_to_hashmap(tags: &[Tag]) -> Option<BTreeMap<String, String>> {
     if tags.is_empty() {
         return None;
     }
@@ -275,44 +275,44 @@ pub struct AccessKeyLastUsed {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IamState {
     pub account_id: String,
-    pub users: HashMap<String, IamUser>,
-    pub access_keys: HashMap<String, Vec<IamAccessKey>>, // username -> keys
-    pub roles: HashMap<String, IamRole>,
-    pub policies: HashMap<String, IamPolicy>, // arn -> policy
-    pub role_policies: HashMap<String, Vec<String>>, // role_name -> managed policy arns
-    pub role_inline_policies: HashMap<String, HashMap<String, String>>, // role_name -> {policy_name -> doc}
-    pub user_policies: HashMap<String, Vec<String>>, // user_name -> managed policy arns
-    pub user_inline_policies: HashMap<String, HashMap<String, String>>, // user_name -> {policy_name -> doc}
-    pub groups: HashMap<String, IamGroup>,
-    pub instance_profiles: HashMap<String, IamInstanceProfile>,
-    pub login_profiles: HashMap<String, LoginProfile>,
-    pub saml_providers: HashMap<String, SamlProvider>, // arn -> provider
-    pub oidc_providers: HashMap<String, OidcProvider>, // arn -> provider
-    pub server_certificates: HashMap<String, ServerCertificate>, // name -> cert
-    pub signing_certificates: HashMap<String, Vec<SigningCertificate>>, // user_name -> certs
+    pub users: BTreeMap<String, IamUser>,
+    pub access_keys: BTreeMap<String, Vec<IamAccessKey>>, // username -> keys
+    pub roles: BTreeMap<String, IamRole>,
+    pub policies: BTreeMap<String, IamPolicy>, // arn -> policy
+    pub role_policies: BTreeMap<String, Vec<String>>, // role_name -> managed policy arns
+    pub role_inline_policies: BTreeMap<String, BTreeMap<String, String>>, // role_name -> {policy_name -> doc}
+    pub user_policies: BTreeMap<String, Vec<String>>, // user_name -> managed policy arns
+    pub user_inline_policies: BTreeMap<String, BTreeMap<String, String>>, // user_name -> {policy_name -> doc}
+    pub groups: BTreeMap<String, IamGroup>,
+    pub instance_profiles: BTreeMap<String, IamInstanceProfile>,
+    pub login_profiles: BTreeMap<String, LoginProfile>,
+    pub saml_providers: BTreeMap<String, SamlProvider>, // arn -> provider
+    pub oidc_providers: BTreeMap<String, OidcProvider>, // arn -> provider
+    pub server_certificates: BTreeMap<String, ServerCertificate>, // name -> cert
+    pub signing_certificates: BTreeMap<String, Vec<SigningCertificate>>, // user_name -> certs
     pub account_aliases: Vec<String>,
     pub account_password_policy: Option<AccountPasswordPolicy>,
-    pub virtual_mfa_devices: HashMap<String, VirtualMfaDevice>, // serial_number -> device
-    pub service_linked_role_deletions: HashMap<String, ServiceLinkedRoleDeletion>,
+    pub virtual_mfa_devices: BTreeMap<String, VirtualMfaDevice>, // serial_number -> device
+    pub service_linked_role_deletions: BTreeMap<String, ServiceLinkedRoleDeletion>,
     /// Maps access key ID to the identity that should be returned by GetCallerIdentity.
-    pub credential_identities: HashMap<String, CredentialIdentity>,
+    pub credential_identities: BTreeMap<String, CredentialIdentity>,
     /// Temporary credentials issued by STS, keyed by access key ID. Includes
     /// the secret access key and session token — required for SigV4
     /// verification and IAM enforcement. Expired entries are purged lazily on
     /// lookup.
-    pub sts_temp_credentials: HashMap<String, StsTempCredential>,
+    pub sts_temp_credentials: BTreeMap<String, StsTempCredential>,
     pub credential_report_generated: bool,
-    pub ssh_public_keys: HashMap<String, Vec<SshPublicKey>>, // user_name -> keys
-    pub access_key_last_used: HashMap<String, AccessKeyLastUsed>,
+    pub ssh_public_keys: BTreeMap<String, Vec<SshPublicKey>>, // user_name -> keys
+    pub access_key_last_used: BTreeMap<String, AccessKeyLastUsed>,
     /// Per-user service-specific credentials (Codecommit/Keyspaces).
     #[serde(default)]
-    pub service_specific_credentials: HashMap<String, Vec<ServiceSpecificCredential>>, // user -> creds
+    pub service_specific_credentials: BTreeMap<String, Vec<ServiceSpecificCredential>>, // user -> creds
     /// Active delegation requests keyed by id.
     #[serde(default)]
-    pub delegation_requests: HashMap<String, DelegationRequest>,
+    pub delegation_requests: BTreeMap<String, DelegationRequest>,
     /// Per-resource-arn tag map for SAML/Server cert/MFA device tags.
     #[serde(default)]
-    pub extra_tags: HashMap<String, Vec<(String, String)>>,
+    pub extra_tags: BTreeMap<String, Vec<(String, String)>>,
     /// Organizations integration toggles.
     #[serde(default)]
     pub organizations_root_credentials_management: bool,
@@ -323,10 +323,10 @@ pub struct IamState {
     pub outbound_web_identity_federation: Option<OutboundWebIdentityFederation>,
     /// Generated ServiceLastAccessed jobs keyed by job id.
     #[serde(default)]
-    pub service_last_accessed_jobs: HashMap<String, ServiceLastAccessedJob>,
+    pub service_last_accessed_jobs: BTreeMap<String, ServiceLastAccessedJob>,
     /// Organizations access reports keyed by job id.
     #[serde(default)]
-    pub organizations_access_reports: HashMap<String, OrganizationsAccessReport>,
+    pub organizations_access_reports: BTreeMap<String, OrganizationsAccessReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,38 +377,38 @@ impl IamState {
     pub fn new(account_id: &str) -> Self {
         Self {
             account_id: account_id.to_string(),
-            users: HashMap::new(),
-            access_keys: HashMap::new(),
-            roles: HashMap::new(),
-            policies: HashMap::new(),
-            role_policies: HashMap::new(),
-            role_inline_policies: HashMap::new(),
-            user_policies: HashMap::new(),
-            user_inline_policies: HashMap::new(),
-            groups: HashMap::new(),
-            instance_profiles: HashMap::new(),
-            login_profiles: HashMap::new(),
-            saml_providers: HashMap::new(),
-            oidc_providers: HashMap::new(),
-            server_certificates: HashMap::new(),
-            signing_certificates: HashMap::new(),
+            users: BTreeMap::new(),
+            access_keys: BTreeMap::new(),
+            roles: BTreeMap::new(),
+            policies: BTreeMap::new(),
+            role_policies: BTreeMap::new(),
+            role_inline_policies: BTreeMap::new(),
+            user_policies: BTreeMap::new(),
+            user_inline_policies: BTreeMap::new(),
+            groups: BTreeMap::new(),
+            instance_profiles: BTreeMap::new(),
+            login_profiles: BTreeMap::new(),
+            saml_providers: BTreeMap::new(),
+            oidc_providers: BTreeMap::new(),
+            server_certificates: BTreeMap::new(),
+            signing_certificates: BTreeMap::new(),
             account_aliases: Vec::new(),
             account_password_policy: None,
-            virtual_mfa_devices: HashMap::new(),
-            service_linked_role_deletions: HashMap::new(),
-            credential_identities: HashMap::new(),
-            sts_temp_credentials: HashMap::new(),
+            virtual_mfa_devices: BTreeMap::new(),
+            service_linked_role_deletions: BTreeMap::new(),
+            credential_identities: BTreeMap::new(),
+            sts_temp_credentials: BTreeMap::new(),
             credential_report_generated: false,
-            ssh_public_keys: HashMap::new(),
-            access_key_last_used: HashMap::new(),
-            service_specific_credentials: HashMap::new(),
-            delegation_requests: HashMap::new(),
-            extra_tags: HashMap::new(),
+            ssh_public_keys: BTreeMap::new(),
+            access_key_last_used: BTreeMap::new(),
+            service_specific_credentials: BTreeMap::new(),
+            delegation_requests: BTreeMap::new(),
+            extra_tags: BTreeMap::new(),
             organizations_root_credentials_management: false,
             organizations_root_sessions: false,
             outbound_web_identity_federation: None,
-            service_last_accessed_jobs: HashMap::new(),
-            organizations_access_reports: HashMap::new(),
+            service_last_accessed_jobs: BTreeMap::new(),
+            organizations_access_reports: BTreeMap::new(),
         }
     }
 
@@ -514,7 +514,7 @@ impl IamState {
     /// Resolve role tags from an assumed-role principal ARN.
     /// ARN format: `arn:aws:sts::<account>:assumed-role/<role-name>/<session>`
     /// Looks up the role by name and returns its tags.
-    fn resolve_role_tags(&self, principal_arn: &str) -> Option<HashMap<String, String>> {
+    fn resolve_role_tags(&self, principal_arn: &str) -> Option<BTreeMap<String, String>> {
         // assumed-role ARNs: arn:aws:sts::<account>:assumed-role/<role>/<session>
         let parts: Vec<&str> = principal_arn.split(':').collect();
         if parts.len() < 6 {

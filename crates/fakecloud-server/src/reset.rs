@@ -526,7 +526,7 @@ pub(crate) fn create_admin_in_account(
     );
     state.user_inline_policies.insert(
         user_name.to_string(),
-        std::collections::HashMap::from([(
+        std::collections::BTreeMap::from([(
             "fakecloud-admin".to_string(),
             r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#.to_string(),
         )]),
