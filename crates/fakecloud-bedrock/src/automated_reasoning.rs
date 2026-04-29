@@ -46,9 +46,9 @@ pub fn create_automated_reasoning_policy(
     s.automated_reasoning_policies
         .insert(policy_arn.clone(), policy);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({ "policyArn": policy_arn })).unwrap(),
+        json!({ "policyArn": policy_arn }),
     ))
 }
 
@@ -220,13 +220,12 @@ pub fn create_automated_reasoning_policy_version(
     policy.versions.push(version_str.clone());
     policy.updated_at = Utc::now();
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({
+        json!({
             "policyArn": policy.policy_arn,
             "version": version_str,
-        }))
-        .unwrap(),
+        }),
     ))
 }
 
@@ -308,9 +307,9 @@ pub fn create_automated_reasoning_policy_test_case(
     s.automated_reasoning_test_cases
         .insert((policy_arn, test_case_id.clone()), tc);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({ "testCaseId": test_case_id })).unwrap(),
+        json!({ "testCaseId": test_case_id }),
     ))
 }
 

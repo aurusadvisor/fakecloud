@@ -39,9 +39,9 @@ pub fn create_prompt_router(
     let s = accts.get_or_create(&req.account_id);
     s.prompt_routers.insert(router_arn.clone(), router);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({ "promptRouterArn": router_arn })).unwrap(),
+        json!({ "promptRouterArn": router_arn }),
     ))
 }
 

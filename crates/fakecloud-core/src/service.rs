@@ -380,9 +380,21 @@ impl AwsResponse {
         }
     }
 
+    /// Build a JSON response from a `serde_json::Value` with an explicit status.
+    ///
+    /// Serialization of an in-memory `Value` cannot fail — it has no cycles and
+    /// no custom serializers — so the inner `to_vec` is documented as infallible
+    /// rather than left as a bare `unwrap()`.
+    pub fn json_value(status: StatusCode, value: serde_json::Value) -> Self {
+        Self::json(
+            status,
+            serde_json::to_vec(&value).expect("serde_json::Value serialization is infallible"),
+        )
+    }
+
     /// Convenience constructor for a 200 OK JSON response from a `serde_json::Value`.
     pub fn ok_json(value: serde_json::Value) -> Self {
-        Self::json(StatusCode::OK, serde_json::to_vec(&value).unwrap())
+        Self::json_value(StatusCode::OK, value)
     }
 }
 

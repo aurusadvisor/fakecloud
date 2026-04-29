@@ -48,11 +48,17 @@ pub fn invoke_model(
     }
 
     let mut headers = http::HeaderMap::new();
-    headers.insert("x-amzn-bedrock-input-token-count", "10".parse().unwrap());
-    headers.insert("x-amzn-bedrock-output-token-count", "20".parse().unwrap());
+    headers.insert(
+        "x-amzn-bedrock-input-token-count",
+        http::HeaderValue::from_static("10"),
+    );
+    headers.insert(
+        "x-amzn-bedrock-output-token-count",
+        http::HeaderValue::from_static("20"),
+    );
     headers.insert(
         "x-amzn-bedrock-performanceconfig-latency",
-        "standard".parse().unwrap(),
+        http::HeaderValue::from_static("standard"),
     );
 
     Ok(AwsResponse {
@@ -177,7 +183,7 @@ fn anthropic_response(model_id: &str, _input: &Value) -> String {
             "output_tokens": 20
         }
     }))
-    .unwrap()
+    .expect("serde_json::Value serialization is infallible")
 }
 
 fn amazon_titan_response(model_id: &str, _input: &Value) -> String {
@@ -188,7 +194,7 @@ fn amazon_titan_response(model_id: &str, _input: &Value) -> String {
             "embedding": embedding,
             "inputTextTokenCount": 10
         }))
-        .unwrap();
+        .expect("serde_json::Value serialization is infallible");
     }
 
     serde_json::to_string(&json!({
@@ -201,7 +207,7 @@ fn amazon_titan_response(model_id: &str, _input: &Value) -> String {
             }
         ]
     }))
-    .unwrap()
+    .expect("serde_json::Value serialization is infallible")
 }
 
 fn meta_llama_response(_input: &Value) -> String {
@@ -213,7 +219,7 @@ fn meta_llama_response(_input: &Value) -> String {
         "generation_token_count": 20,
         "prompt_token_count": 10
     }))
-    .unwrap()
+    .expect("serde_json::Value serialization is infallible")
 }
 
 fn cohere_response(_input: &Value) -> String {
@@ -228,7 +234,7 @@ fn cohere_response(_input: &Value) -> String {
         ],
         "prompt": ""
     }))
-    .unwrap()
+    .expect("serde_json::Value serialization is infallible")
 }
 
 fn mistral_response(_input: &Value) -> String {
@@ -240,14 +246,14 @@ fn mistral_response(_input: &Value) -> String {
             }
         ]
     }))
-    .unwrap()
+    .expect("serde_json::Value serialization is infallible")
 }
 
 fn generic_response(_input: &Value) -> String {
     serde_json::to_string(&json!({
         "output": "This is a test response from the emulated model."
     }))
-    .unwrap()
+    .expect("serde_json::Value serialization is infallible")
 }
 
 #[cfg(test)]

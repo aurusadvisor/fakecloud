@@ -58,15 +58,14 @@ pub fn create_guardrail(
     let s = accts.get_or_create(&req.account_id);
     s.guardrails.insert(guardrail_id.clone(), guardrail);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({
+        json!({
             "guardrailId": guardrail_id,
             "guardrailArn": guardrail_arn,
             "version": "DRAFT",
             "createdAt": now.to_rfc3339(),
-        }))
-        .unwrap(),
+        }),
     ))
 }
 
@@ -283,13 +282,12 @@ pub fn create_guardrail_version(
     let key = (guardrail_id.to_string(), version_str.clone());
     s.guardrail_versions.insert(key, version);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({
+        json!({
             "guardrailId": guardrail_id,
             "version": version_str,
-        }))
-        .unwrap(),
+        }),
     ))
 }
 

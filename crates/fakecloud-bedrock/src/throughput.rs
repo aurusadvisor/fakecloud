@@ -77,12 +77,11 @@ pub fn create_provisioned_model_throughput(
     s.provisioned_throughputs
         .insert(provisioned_model_id, throughput);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({
+        json!({
             "provisionedModelArn": provisioned_model_arn,
-        }))
-        .unwrap(),
+        }),
     ))
 }
 

@@ -69,9 +69,9 @@ pub fn start_async_invoke(
     s.async_invocations
         .insert(invocation_arn.clone(), invocation);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::OK,
-        serde_json::to_string(&json!({ "invocationArn": invocation_arn })).unwrap(),
+        json!({ "invocationArn": invocation_arn }),
     ))
 }
 

@@ -38,9 +38,9 @@ pub fn create_model_copy_job(
     let s = accts.get_or_create(&req.account_id);
     s.model_copy_jobs.insert(job_arn.clone(), job);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({ "jobArn": job_arn })).unwrap(),
+        json!({ "jobArn": job_arn }),
     ))
 }
 

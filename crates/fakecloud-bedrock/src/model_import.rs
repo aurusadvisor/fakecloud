@@ -55,9 +55,9 @@ pub fn create_model_import_job(
     s.imported_models
         .insert(imported_model_arn.clone(), imported_model);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({ "jobArn": job_arn })).unwrap(),
+        json!({ "jobArn": job_arn }),
     ))
 }
 

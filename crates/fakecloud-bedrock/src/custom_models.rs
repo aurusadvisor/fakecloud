@@ -35,9 +35,9 @@ pub fn create_custom_model(
     let s = accts.get_or_create(&req.account_id);
     s.custom_models.insert(model_arn.clone(), model);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({ "modelArn": model_arn })).unwrap(),
+        json!({ "modelArn": model_arn }),
     ))
 }
 
