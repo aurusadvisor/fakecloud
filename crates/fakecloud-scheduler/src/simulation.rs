@@ -135,9 +135,7 @@ pub fn list_all_schedules(state: &SharedSchedulerState) -> Vec<ScheduleRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{
-        FlexibleTimeWindow, Schedule, SchedulerState, SharedSchedulerState, Target,
-    };
+    use crate::state::{FlexibleTimeWindow, Schedule, SharedSchedulerState, Target};
     use fakecloud_core::delivery::{SqsDelivery, SqsDeliveryError, SqsMessageAttribute};
     use parking_lot::RwLock;
     use std::collections::HashMap;
@@ -289,8 +287,4 @@ mod tests {
         assert_eq!(rows[0].name, "a");
         assert_eq!(rows[1].name, "b");
     }
-
-    // Silence unused-import warning.
-    #[allow(dead_code)]
-    fn _type_check(_: SchedulerState) {}
 }

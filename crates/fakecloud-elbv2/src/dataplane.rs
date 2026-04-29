@@ -29,7 +29,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 use uuid::Uuid;
 
-use crate::router::{pattern_matches, select_actions};
+use crate::router::select_actions;
 use crate::state::{Action, Listener, LoadBalancer, Rule, SharedElbv2State, TargetGroup};
 
 const ENV_DISABLE: &str = "FAKECLOUD_ELBV2_DISABLE_DATAPLANE";
@@ -46,8 +46,6 @@ pub fn dataplane_enabled() -> bool {
 /// Per-LB listener handle. Held in the supervisor map so that a LB
 /// removal can drop the JoinHandle and free the OS port.
 struct BoundListener {
-    #[allow(dead_code)]
-    port: u16,
     handle: JoinHandle<()>,
 }
 
@@ -163,7 +161,7 @@ async fn reconcile(dp: &DataPlane, bindings: &mut HashMap<String, BoundListener>
                 let handle = tokio::spawn(async move {
                     accept_loop(dp2, arn2, listener).await;
                 });
-                bindings.insert(arn.clone(), BoundListener { port, handle });
+                bindings.insert(arn.clone(), BoundListener { handle });
                 trace!(arn = %arn, port, "ELBv2 data plane: bound listener");
             }
             Err(e) => {
@@ -760,11 +758,4 @@ fn extract_cookie<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
 fn short_id() -> String {
     let id = Uuid::new_v4();
     id.simple().to_string()[0..16].to_string()
-}
-
-// Suppress unused import warning when feature combinations don't
-// need this path matcher in release builds.
-#[allow(dead_code)]
-fn _path_matches(p: &str, s: &str) -> bool {
-    pattern_matches(p, s)
 }

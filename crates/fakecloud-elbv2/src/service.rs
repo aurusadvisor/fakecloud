@@ -214,12 +214,6 @@ fn parse_member_list(req: &AwsRequest, prefix: &str) -> Vec<String> {
 struct SubnetMapping {
     subnet_id: Option<String>,
     allocation_id: Option<String>,
-    #[allow(dead_code)]
-    private_ipv4_address: Option<String>,
-    #[allow(dead_code)]
-    ipv6_address: Option<String>,
-    #[allow(dead_code)]
-    source_nat_ipv6_prefix: Option<String>,
 }
 
 fn parse_subnet_mappings(req: &AwsRequest) -> Vec<SubnetMapping> {
@@ -231,31 +225,12 @@ fn parse_subnet_mappings(req: &AwsRequest) -> Vec<SubnetMapping> {
             .query_params
             .get(&format!("{prefix}.AllocationId"))
             .cloned();
-        let private_ipv4 = req
-            .query_params
-            .get(&format!("{prefix}.PrivateIPv4Address"))
-            .cloned();
-        let ipv6 = req
-            .query_params
-            .get(&format!("{prefix}.IPv6Address"))
-            .cloned();
-        let source_nat_ipv6_prefix = req
-            .query_params
-            .get(&format!("{prefix}.SourceNatIpv6Prefix"))
-            .cloned();
-        if subnet_id.is_none()
-            && allocation_id.is_none()
-            && private_ipv4.is_none()
-            && ipv6.is_none()
-        {
+        if subnet_id.is_none() && allocation_id.is_none() {
             break;
         }
         out.push(SubnetMapping {
             subnet_id,
             allocation_id,
-            private_ipv4_address: private_ipv4,
-            ipv6_address: ipv6,
-            source_nat_ipv6_prefix,
         });
     }
     out

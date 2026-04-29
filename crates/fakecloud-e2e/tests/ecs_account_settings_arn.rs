@@ -9,7 +9,7 @@
 
 mod helpers;
 
-use aws_sdk_ecs::types::{ContainerDefinition, SettingName, SettingType};
+use aws_sdk_ecs::types::{ContainerDefinition, SettingName};
 use helpers::TestServer;
 
 async fn register_noop_task_def(client: &aws_sdk_ecs::Client, family: &str) {
@@ -156,7 +156,3 @@ async fn account_setting_default_list_reflects_writes() {
         .expect("taskLongArnFormat in effective settings");
     assert_eq!(found.value(), Some("disabled"));
 }
-
-// Silences clippy about unused import when this test module lives alone.
-#[allow(dead_code)]
-fn _setting_type_anchor(_t: SettingType) {}

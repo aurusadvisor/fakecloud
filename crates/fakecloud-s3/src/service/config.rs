@@ -1803,14 +1803,6 @@ impl ConfigKind {
             ConfigKind::Metrics => "ListMetricsConfigurationsResult",
         }
     }
-    #[allow(dead_code)]
-    fn member(&self) -> &'static str {
-        match self {
-            ConfigKind::Analytics => "AnalyticsConfiguration",
-            ConfigKind::IntelligentTiering => "IntelligentTieringConfiguration",
-            ConfigKind::Metrics => "MetricsConfiguration",
-        }
-    }
     fn subresource(&self) -> BucketSubresource {
         match self {
             ConfigKind::Analytics => BucketSubresource::Analytics,
