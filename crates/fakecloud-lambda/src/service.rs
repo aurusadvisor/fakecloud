@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -150,8 +150,8 @@ struct CreateFunctionInput {
     timeout: i64,
     memory_size: i64,
     package_type: String,
-    tags: HashMap<String, String>,
-    environment: HashMap<String, String>,
+    tags: BTreeMap<String, String>,
+    environment: BTreeMap<String, String>,
     architectures: Vec<String>,
     code_zip: Option<Vec<u8>>,
     code_fallback: Vec<u8>,
@@ -172,7 +172,7 @@ impl CreateFunctionInput {
             })?
             .to_string();
 
-        let tags: HashMap<String, String> = body["Tags"]
+        let tags: BTreeMap<String, String> = body["Tags"]
             .as_object()
             .map(|m| {
                 m.iter()
@@ -181,7 +181,7 @@ impl CreateFunctionInput {
             })
             .unwrap_or_default();
 
-        let environment: HashMap<String, String> = body["Environment"]["Variables"]
+        let environment: BTreeMap<String, String> = body["Environment"]["Variables"]
             .as_object()
             .map(|m| {
                 m.iter()

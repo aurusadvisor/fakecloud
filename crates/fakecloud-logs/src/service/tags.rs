@@ -141,7 +141,7 @@ impl LogsService {
             )
         })?;
 
-        let new_tags: std::collections::HashMap<String, String> = tags
+        let new_tags: std::collections::BTreeMap<String, String> = tags
             .iter()
             .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
             .collect();
