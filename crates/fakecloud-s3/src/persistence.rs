@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use fakecloud_persistence::{
     AclGrantSnapshot, AclSnapshot, BucketMeta, BucketSnapshot, InventorySnapshot, LoadedMpu,
@@ -205,16 +205,16 @@ pub fn s3_bucket_from_snapshot(
         creation_date: meta.creation_date,
         region,
         objects: BTreeMap::new(),
-        tags: HashMap::new(),
+        tags: BTreeMap::new(),
         acl_grants: if has_acl_sidecar {
             Vec::new()
         } else {
             vec![default_owner_grant]
         },
         acl_owner_id: meta.acl_owner_id.clone(),
-        multipart_uploads: HashMap::new(),
+        multipart_uploads: BTreeMap::new(),
         versioning: meta.versioning.clone(),
-        object_versions: HashMap::new(),
+        object_versions: BTreeMap::new(),
         acl: meta.acl.clone(),
         encryption_config: None,
         lifecycle_config: None,
@@ -228,11 +228,11 @@ pub fn s3_bucket_from_snapshot(
         object_lock_config: None,
         replication_config: None,
         ownership_controls: None,
-        inventory_configs: HashMap::new(),
+        inventory_configs: BTreeMap::new(),
         eventbridge_enabled: meta.eventbridge_enabled,
-        analytics_configs: HashMap::new(),
-        intelligent_tiering_configs: HashMap::new(),
-        metrics_configs: HashMap::new(),
+        analytics_configs: BTreeMap::new(),
+        intelligent_tiering_configs: BTreeMap::new(),
+        metrics_configs: BTreeMap::new(),
         request_payment: None,
         abac_config: None,
         metadata_configuration: None,
@@ -370,7 +370,7 @@ grantee_type = "CanonicalUser"
 grantee_id = "grantee-a"
 permission = "READ"
 "#;
-        let mut subresources = HashMap::new();
+        let mut subresources = BTreeMap::new();
         subresources.insert("acl.toml".to_string(), acl_toml.to_string());
         let snap = BucketSnapshot {
             meta: BucketMeta {
@@ -441,7 +441,7 @@ permission = "READ"
             key: "k".to_string(),
             initiated: chrono::Utc::now(),
             parts: BTreeMap::new(),
-            metadata: HashMap::new(),
+            metadata: BTreeMap::new(),
             content_type: "application/octet-stream".to_string(),
             storage_class: "STANDARD".to_string(),
             sse_algorithm: None,

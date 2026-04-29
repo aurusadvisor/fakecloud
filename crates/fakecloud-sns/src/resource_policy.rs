@@ -86,7 +86,7 @@ mod tests {
     use chrono::Utc;
     use fakecloud_core::multi_account::MultiAccountState;
     use parking_lot::RwLock;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn state_with_topic(arn: &str, policy: Option<&str>) -> SharedSnsState {
         let state = Arc::new(RwLock::new(MultiAccountState::<SnsState>::new(
@@ -94,7 +94,7 @@ mod tests {
             "us-east-1",
             "http://localhost:4566",
         )));
-        let mut attrs = HashMap::new();
+        let mut attrs = BTreeMap::new();
         if let Some(p) = policy {
             attrs.insert("Policy".to_string(), p.to_string());
         }

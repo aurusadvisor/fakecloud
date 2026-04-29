@@ -665,7 +665,7 @@ impl S3Service {
             }
             parsed.into_iter().collect()
         } else {
-            std::collections::HashMap::new()
+            std::collections::BTreeMap::new()
         };
 
         // --- Read lock phase: validate preconditions and read bucket config ---

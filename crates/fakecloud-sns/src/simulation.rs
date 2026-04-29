@@ -48,7 +48,7 @@ mod tests {
     use super::*;
     use fakecloud_core::multi_account::MultiAccountState;
     use parking_lot::RwLock;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn make_state() -> SharedSnsState {
@@ -77,7 +77,7 @@ mod tests {
                 protocol: protocol.to_string(),
                 endpoint: endpoint.to_string(),
                 owner: "123456789012".to_string(),
-                attributes: HashMap::new(),
+                attributes: BTreeMap::new(),
                 confirmed,
                 confirmation_token: if confirmed {
                     None

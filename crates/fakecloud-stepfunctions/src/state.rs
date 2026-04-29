@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -32,21 +32,21 @@ pub struct StepFunctionsState {
     pub region: String,
     /// State machines keyed by ARN.
     #[serde(default)]
-    pub state_machines: HashMap<String, StateMachine>,
+    pub state_machines: BTreeMap<String, StateMachine>,
     /// Executions keyed by execution ARN.
     #[serde(default)]
-    pub executions: HashMap<String, Execution>,
+    pub executions: BTreeMap<String, Execution>,
     #[serde(default)]
-    pub activities: HashMap<String, Activity>,
+    pub activities: BTreeMap<String, Activity>,
     #[serde(default)]
-    pub state_machine_versions: HashMap<String, StateMachineVersion>,
+    pub state_machine_versions: BTreeMap<String, StateMachineVersion>,
     #[serde(default)]
-    pub state_machine_aliases: HashMap<String, StateMachineAlias>,
+    pub state_machine_aliases: BTreeMap<String, StateMachineAlias>,
     #[serde(default)]
-    pub map_runs: HashMap<String, MapRun>,
+    pub map_runs: BTreeMap<String, MapRun>,
     /// Pending task tokens issued for sync activities + their outcome.
     #[serde(default)]
-    pub task_tokens: HashMap<String, TaskTokenState>,
+    pub task_tokens: BTreeMap<String, TaskTokenState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,7 +54,7 @@ pub struct Activity {
     pub name: String,
     pub arn: String,
     pub creation_date: DateTime<Utc>,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,7 +136,7 @@ pub struct StateMachine {
     pub status: StateMachineStatus,
     pub creation_date: DateTime<Utc>,
     pub update_date: DateTime<Utc>,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     pub revision_id: String,
     pub logging_configuration: Option<Value>,
     pub tracing_configuration: Option<Value>,
@@ -234,13 +234,13 @@ impl StepFunctionsState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            state_machines: HashMap::new(),
-            executions: HashMap::new(),
-            activities: HashMap::new(),
-            state_machine_versions: HashMap::new(),
-            state_machine_aliases: HashMap::new(),
-            map_runs: HashMap::new(),
-            task_tokens: HashMap::new(),
+            state_machines: BTreeMap::new(),
+            executions: BTreeMap::new(),
+            activities: BTreeMap::new(),
+            state_machine_versions: BTreeMap::new(),
+            state_machine_aliases: BTreeMap::new(),
+            map_runs: BTreeMap::new(),
+            task_tokens: BTreeMap::new(),
         }
     }
 
@@ -340,7 +340,7 @@ mod tests {
                 status: StateMachineStatus::Active,
                 creation_date: Utc::now(),
                 update_date: Utc::now(),
-                tags: HashMap::new(),
+                tags: BTreeMap::new(),
                 revision_id: "v1".to_string(),
                 logging_configuration: None,
                 tracing_configuration: None,

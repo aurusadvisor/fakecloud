@@ -551,7 +551,7 @@ impl S3Service {
         let tags = if let Some(ref tagging) = upload.tagging {
             parse_url_encoded_tags(tagging).into_iter().collect()
         } else {
-            std::collections::HashMap::new()
+            std::collections::BTreeMap::new()
         };
 
         let b = state

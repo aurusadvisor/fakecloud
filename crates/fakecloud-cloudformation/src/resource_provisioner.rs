@@ -1,6 +1,6 @@
 use chrono::Utc;
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -181,7 +181,7 @@ impl ResourceProvisioner {
         let topic = SnsTopic {
             topic_arn: topic_arn.clone(),
             name: topic_name.to_string(),
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             tags: Vec::new(),
             is_fifo: topic_name.ends_with(".fifo"),
             created_at: Utc::now(),
@@ -235,7 +235,7 @@ impl ResourceProvisioner {
             protocol: protocol.to_string(),
             endpoint: endpoint.to_string(),
             owner: state.account_id.clone(),
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             confirmed: true,
             confirmation_token: None,
         };

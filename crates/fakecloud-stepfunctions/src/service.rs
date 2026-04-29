@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -259,7 +259,7 @@ impl StepFunctionsService {
         let now = Utc::now();
         let revision_id = uuid::Uuid::new_v4().to_string();
 
-        let mut tags = HashMap::new();
+        let mut tags = BTreeMap::new();
         if !body["tags"].is_null() {
             fakecloud_core::tags::apply_tags(&mut tags, &body, "tags", "key", "value").map_err(
                 |f| {
@@ -802,7 +802,7 @@ impl StepFunctionsService {
             name: name.to_string(),
             arn: arn.clone(),
             creation_date: chrono::Utc::now(),
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
         };
         state.activities.insert(arn.clone(), activity.clone());
         Ok(AwsResponse::ok_json(json!({
@@ -1746,6 +1746,7 @@ mod tests {
     use http::{HeaderMap, Method};
     use parking_lot::RwLock;
     use serde_json::Value;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     fn make_state() -> SharedStepFunctionsState {

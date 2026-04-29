@@ -1815,7 +1815,7 @@ impl ConfigKind {
 fn config_map(
     bucket: &mut crate::state::S3Bucket,
     kind: ConfigKind,
-) -> &mut std::collections::HashMap<String, String> {
+) -> &mut std::collections::BTreeMap<String, String> {
     match kind {
         ConfigKind::Analytics => &mut bucket.analytics_configs,
         ConfigKind::IntelligentTiering => &mut bucket.intelligent_tiering_configs,
@@ -1826,7 +1826,7 @@ fn config_map(
 fn config_map_ref(
     bucket: &crate::state::S3Bucket,
     kind: ConfigKind,
-) -> &std::collections::HashMap<String, String> {
+) -> &std::collections::BTreeMap<String, String> {
     match kind {
         ConfigKind::Analytics => &bucket.analytics_configs,
         ConfigKind::IntelligentTiering => &bucket.intelligent_tiering_configs,
