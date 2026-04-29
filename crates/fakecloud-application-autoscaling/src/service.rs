@@ -890,7 +890,12 @@ fn default_service_linked_role(account_id: &str, namespace: &str) -> String {
         "kafka" => "KafkaCluster",
         _ => "ApplicationAutoScaling_Default",
     };
-    format!("arn:aws:iam::{account_id}:role/aws-service-role/applicationautoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_{suffix}")
+    Arn::global(
+        "iam",
+        account_id,
+        &format!("role/aws-service-role/applicationautoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_{suffix}"),
+    )
+    .to_string()
 }
 
 fn synth_forecast(start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<(DateTime<Utc>, i32)> {
