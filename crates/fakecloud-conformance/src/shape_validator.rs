@@ -25,6 +25,22 @@ pub enum ShapeViolation {
     UnexpectedField { path: String, field: String },
     /// The response body could not be parsed.
     ParseError { message: String },
+    /// A field documented in the operation's `@examples` output is absent
+    /// from the live response (or has the wrong JSON type). Catches
+    /// "optional in Smithy but AWS always emits" bugs (#816).
+    ExamplesOutputDivergence {
+        path: String,
+        reason: ExamplesDivergenceReason,
+    },
+}
+
+/// What went wrong when diffing a response against a documented `@examples` output.
+#[derive(Debug, Clone)]
+pub enum ExamplesDivergenceReason {
+    /// The path exists in the documented output but not in the live response.
+    MissingField,
+    /// The path exists in both but the JSON value types differ.
+    WrongType { expected: String, got: String },
 }
 
 impl std::fmt::Display for ShapeViolation {
@@ -49,6 +65,115 @@ impl std::fmt::Display for ShapeViolation {
             }
             ShapeViolation::ParseError { message } => {
                 write!(f, "parse error: {}", message)
+            }
+            ShapeViolation::ExamplesOutputDivergence { path, reason } => match reason {
+                ExamplesDivergenceReason::MissingField => write!(
+                    f,
+                    "@examples output diverges at {}: documented field absent from live response",
+                    path
+                ),
+                ExamplesDivergenceReason::WrongType { expected, got } => write!(
+                    f,
+                    "@examples output diverges at {}: expected JSON {}, got {}",
+                    path, expected, got
+                ),
+            },
+        }
+    }
+}
+
+/// Deep-diff a live response against the operation's documented `@examples`
+/// output. Every leaf path present in `documented` must also exist in
+/// `actual` with the same JSON type. Values are intentionally not compared
+/// — many `@examples` use placeholders (`"examplebucket"`, `"123456789012"`)
+/// and string-equality would be noise.
+///
+/// Object members are recursed into. Arrays compare the first element of
+/// `documented` against the first element of `actual` if both are non-empty
+/// (the AWS examples always show a one-element array as a representative
+/// shape; comparing element 0 keeps the assertion structural).
+pub fn diff_against_example(actual: &Value, documented: &Value) -> Vec<ShapeViolation> {
+    let mut violations = Vec::new();
+    diff_at(actual, documented, "$", &mut violations);
+    violations
+}
+
+fn diff_at(actual: &Value, documented: &Value, path: &str, out: &mut Vec<ShapeViolation>) {
+    match documented {
+        Value::Object(doc_map) => {
+            let actual_map = match actual {
+                Value::Object(m) => m,
+                _ => {
+                    out.push(ShapeViolation::ExamplesOutputDivergence {
+                        path: path.to_string(),
+                        reason: ExamplesDivergenceReason::WrongType {
+                            expected: "object".to_string(),
+                            got: json_type_name(actual).to_string(),
+                        },
+                    });
+                    return;
+                }
+            };
+            for (key, doc_val) in doc_map {
+                let child_path = format!("{}.{}", path, key);
+                match actual_map.get(key) {
+                    Some(act_val) => diff_at(act_val, doc_val, &child_path, out),
+                    None => out.push(ShapeViolation::ExamplesOutputDivergence {
+                        path: child_path,
+                        reason: ExamplesDivergenceReason::MissingField,
+                    }),
+                }
+            }
+        }
+        Value::Array(doc_arr) => {
+            let actual_arr = match actual {
+                Value::Array(a) => a,
+                _ => {
+                    out.push(ShapeViolation::ExamplesOutputDivergence {
+                        path: path.to_string(),
+                        reason: ExamplesDivergenceReason::WrongType {
+                            expected: "array".to_string(),
+                            got: json_type_name(actual).to_string(),
+                        },
+                    });
+                    return;
+                }
+            };
+            // Documented arrays are representative — recurse into element 0
+            // when both sides have a first element. Empty actual is allowed
+            // (AWS examples show shape, not a guarantee of cardinality).
+            if let (Some(doc_first), Some(act_first)) = (doc_arr.first(), actual_arr.first()) {
+                let child_path = format!("{}[0]", path);
+                diff_at(act_first, doc_first, &child_path, out);
+            }
+        }
+        // For leaves we only assert JSON-type parity; values are placeholders.
+        _ => {
+            let actual_kind = json_type_name(actual);
+            let doc_kind = json_type_name(documented);
+            // null in the documented output means "present but value omitted";
+            // accept anything in the live response at that path.
+            if doc_kind != actual_kind && doc_kind != "null" {
+                // Smithy timestamps wire-encode as ISO-8601 strings or epoch
+                // numbers depending on protocol. Tolerate the cross-form only
+                // for paths whose member name looks like a timestamp.
+                let is_timestamp_name = path
+                    .rsplit(['.', '['])
+                    .next()
+                    .map(looks_like_timestamp_name)
+                    .unwrap_or(false);
+                let timestamp_ok = is_timestamp_name
+                    && ((doc_kind == "string" && actual_kind == "number")
+                        || (doc_kind == "number" && actual_kind == "string"));
+                if !timestamp_ok {
+                    out.push(ShapeViolation::ExamplesOutputDivergence {
+                        path: path.to_string(),
+                        reason: ExamplesDivergenceReason::WrongType {
+                            expected: doc_kind.to_string(),
+                            got: actual_kind.to_string(),
+                        },
+                    });
+                }
             }
         }
     }
@@ -424,6 +549,19 @@ fn validate_map(
         let child_path = format!("{}[{:?}]", path, key);
         validate_shape(model, value_target, val, &child_path, depth + 1, violations);
     }
+}
+
+/// Heuristic: does the trailing member name look like a Smithy timestamp?
+/// Used to scope the string-vs-number tolerance in `diff_against_example`.
+fn looks_like_timestamp_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.ends_with("time")
+        || n.ends_with("date")
+        || n.ends_with("timestamp")
+        || n.ends_with("at")
+        || n.ends_with("expires")
+        || n == "createdat"
+        || n == "modifiedat"
 }
 
 /// Return a human-readable name for a JSON value type.
@@ -831,5 +969,121 @@ mod tests {
             "expected an UnexpectedField(Items) violation, got {:?}",
             violations
         );
+    }
+
+    // ----- diff_against_example -----
+
+    #[test]
+    fn diff_flags_field_documented_but_missing() {
+        // Mirrors #816: documented output has BucketRegion, response doesn't.
+        let documented = serde_json::json!({
+            "Buckets": [{"Name": "x", "BucketRegion": "us-east-1"}]
+        });
+        let actual = serde_json::json!({
+            "Buckets": [{"Name": "x"}]
+        });
+        let v = diff_against_example(&actual, &documented);
+        assert!(
+            v.iter().any(|x| matches!(
+                x,
+                ShapeViolation::ExamplesOutputDivergence { path, reason: ExamplesDivergenceReason::MissingField }
+                    if path == "$.Buckets[0].BucketRegion"
+            )),
+            "expected MissingField at $.Buckets[0].BucketRegion, got {:?}",
+            v
+        );
+    }
+
+    #[test]
+    fn diff_flags_wrong_json_type() {
+        let documented = serde_json::json!({"Count": 3});
+        let actual = serde_json::json!({"Count": "three"});
+        let v = diff_against_example(&actual, &documented);
+        assert!(
+            v.iter().any(|x| matches!(
+                x,
+                ShapeViolation::ExamplesOutputDivergence { reason: ExamplesDivergenceReason::WrongType { expected, got }, .. }
+                    if expected == "number" && got == "string"
+            )),
+            "expected WrongType(number,string), got {:?}",
+            v
+        );
+    }
+
+    #[test]
+    fn diff_ignores_string_value_differences() {
+        // Documented uses placeholder, actual uses real value — both strings,
+        // so no violation. Value identity is not asserted.
+        let documented = serde_json::json!({"Name": "examplebucket"});
+        let actual = serde_json::json!({"Name": "production-logs"});
+        assert!(diff_against_example(&actual, &documented).is_empty());
+    }
+
+    #[test]
+    fn diff_ignores_extra_fields_in_response() {
+        // Live response superset of documented: not a violation.
+        let documented = serde_json::json!({"A": "x"});
+        let actual = serde_json::json!({"A": "y", "B": 42, "C": null});
+        assert!(diff_against_example(&actual, &documented).is_empty());
+    }
+
+    #[test]
+    fn diff_recurses_into_objects() {
+        let documented = serde_json::json!({"Owner": {"ID": "id", "DisplayName": "n"}});
+        let actual = serde_json::json!({"Owner": {"ID": "z"}});
+        let v = diff_against_example(&actual, &documented);
+        assert_eq!(v.len(), 1);
+        assert!(matches!(
+            &v[0],
+            ShapeViolation::ExamplesOutputDivergence { path, reason: ExamplesDivergenceReason::MissingField }
+                if path == "$.Owner.DisplayName"
+        ));
+    }
+
+    #[test]
+    fn diff_compares_first_array_element_when_both_present() {
+        let documented = serde_json::json!({"Items": [{"K": "v", "Region": "us-east-1"}]});
+        let actual = serde_json::json!({"Items": [{"K": "v"}]});
+        let v = diff_against_example(&actual, &documented);
+        assert!(v.iter().any(|x| matches!(
+            x,
+            ShapeViolation::ExamplesOutputDivergence { path, .. } if path == "$.Items[0].Region"
+        )));
+    }
+
+    #[test]
+    fn diff_allows_empty_actual_array() {
+        // AWS examples show shape with 1 element; live response with 0
+        // elements is fine — pagination, filtering, or just no resources.
+        let documented = serde_json::json!({"Items": [{"Name": "x"}]});
+        let actual = serde_json::json!({"Items": []});
+        assert!(diff_against_example(&actual, &documented).is_empty());
+    }
+
+    #[test]
+    fn diff_treats_documented_null_as_wildcard() {
+        // Documented `null` is a value placeholder — anything in actual is OK.
+        let documented = serde_json::json!({"Field": null});
+        let actual = serde_json::json!({"Field": "anything"});
+        assert!(diff_against_example(&actual, &documented).is_empty());
+    }
+
+    #[test]
+    fn diff_tolerates_timestamp_string_vs_number() {
+        // Smithy timestamps wire-encode as string OR number across protocols.
+        // Don't flag either form when the documented example shows the other.
+        let documented = serde_json::json!({"CreatedAt": "2024-01-01T00:00:00Z"});
+        let actual = serde_json::json!({"CreatedAt": 1704067200});
+        assert!(diff_against_example(&actual, &documented).is_empty());
+    }
+
+    #[test]
+    fn diff_handles_top_level_object_mismatch() {
+        let documented = serde_json::json!({"A": 1});
+        let actual = serde_json::json!([1, 2, 3]);
+        let v = diff_against_example(&actual, &documented);
+        assert!(v
+            .iter()
+            .any(|x| matches!(x, ShapeViolation::ExamplesOutputDivergence { .. })));
     }
 }

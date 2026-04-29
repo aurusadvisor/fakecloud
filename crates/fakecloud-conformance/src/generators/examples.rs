@@ -23,6 +23,7 @@ pub fn generate(traits: &ShapeTraits) -> Vec<TestVariant> {
             strategy: Strategy::Examples,
             input: example.input.clone(),
             expectation: Expectation::Success,
+            expected_output: None,
         })
         .collect()
 }

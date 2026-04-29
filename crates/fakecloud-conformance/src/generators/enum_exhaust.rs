@@ -48,6 +48,7 @@ pub fn generate(
                     strategy: Strategy::EnumExhaust,
                     input,
                     expectation: Expectation::Success,
+                    expected_output: None,
                 }
             })
             .collect();
@@ -74,6 +75,7 @@ pub fn generate(
                 strategy: Strategy::EnumExhaust,
                 input,
                 expectation: Expectation::Success,
+                expected_output: None,
             });
         }
     } else {
@@ -89,6 +91,7 @@ pub fn generate(
                     strategy: Strategy::EnumExhaust,
                     input,
                     expectation: Expectation::Success,
+                    expected_output: None,
                 });
             }
         }

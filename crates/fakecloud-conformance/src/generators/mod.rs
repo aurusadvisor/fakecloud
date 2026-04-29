@@ -1,6 +1,7 @@
 pub mod boundary;
 pub mod enum_exhaust;
 pub mod examples;
+pub mod examples_diff;
 pub mod negative;
 pub mod optionals;
 pub mod proptest_gen;
@@ -21,6 +22,12 @@ pub struct TestVariant {
     pub input: Value,
     /// Whether this variant is expected to succeed or return a specific error.
     pub expectation: Expectation,
+    /// Documented response body from the operation's `@examples` trait.
+    /// When `Some`, the harness deep-diffs the live response against this
+    /// value: every leaf field present here must also be present (with
+    /// matching JSON type) in the actual response. Catches "optional in
+    /// Smithy but AWS always emits" bugs (see #816).
+    pub expected_output: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +44,8 @@ pub enum Strategy {
     Examples,
     /// Strategy 6: Negative testing
     Negative,
+    /// Strategy 7: Documented `@examples` output diff against live response
+    ExamplesDiff,
 }
 
 impl std::fmt::Display for Strategy {
@@ -48,6 +57,7 @@ impl std::fmt::Display for Strategy {
             Strategy::Proptest => write!(f, "proptest"),
             Strategy::Examples => write!(f, "examples"),
             Strategy::Negative => write!(f, "negative"),
+            Strategy::ExamplesDiff => write!(f, "examples_diff"),
         }
     }
 }
@@ -257,6 +267,7 @@ pub fn generate_all_variants(
                 strategy: Strategy::Optionals,
                 input: Value::Object(serde_json::Map::new()),
                 expectation: Expectation::Success,
+                expected_output: None,
             }]
         }
     };
@@ -275,32 +286,36 @@ pub fn generate_all_variants(
     // Strategy 4: Property-based random value generation (20 variants)
     variants.extend(proptest_gen::generate(model, input_shape_id, overrides, 20));
 
-    // Strategy 5: Examples from model
-    let op_shape_id = format!("{}#{}", model.service_name, operation_name);
-    // Try to find examples on the operation shape. We look up by the canonical
-    // shape ID first, then fall back to scanning all shapes. Use a flag to avoid
-    // generating duplicate examples when both paths resolve to the same shape.
-    let mut examples_added = false;
-    if let Some(op_shape) = model.shapes.get(&op_shape_id) {
-        let ex = examples::generate(&op_shape.traits);
-        if !ex.is_empty() {
-            variants.extend(ex);
-            examples_added = true;
-        }
-    }
-    if !examples_added {
-        for (shape_id, shape) in &model.shapes {
-            if shape_id.ends_with(&format!("#{}", operation_name))
-                && matches!(shape.shape_type, ShapeType::Operation)
-            {
-                variants.extend(examples::generate(&shape.traits));
-                break;
-            }
-        }
+    // Strategy 5 + 7: Examples from model. Both strategies want the same
+    // `ShapeTraits` (operation-level `@examples`); resolve once.
+    let op_traits = find_operation_traits(model, operation_name);
+    if let Some(traits) = op_traits {
+        variants.extend(examples::generate(traits));
+        variants.extend(examples_diff::generate(traits));
     }
 
     // Strategy 6: Negative testing
     variants.extend(negative::generate(model, input_shape_id, overrides));
 
     variants
+}
+
+/// Locate the `ShapeTraits` for an operation, looking up by canonical shape
+/// ID first, then falling back to a scan. Used by the `examples` and
+/// `examples_diff` strategies, which both consume operation-level traits.
+fn find_operation_traits<'a>(
+    model: &'a ServiceModel,
+    operation_name: &str,
+) -> Option<&'a crate::smithy::ShapeTraits> {
+    let canonical_id = format!("{}#{}", model.service_name, operation_name);
+    if let Some(op_shape) = model.shapes.get(&canonical_id) {
+        return Some(&op_shape.traits);
+    }
+    let suffix = format!("#{}", operation_name);
+    for (shape_id, shape) in &model.shapes {
+        if shape_id.ends_with(&suffix) && matches!(shape.shape_type, ShapeType::Operation) {
+            return Some(&shape.traits);
+        }
+    }
+    None
 }
