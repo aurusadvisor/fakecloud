@@ -459,7 +459,7 @@ async fn ecs_list_account_settings() {
         .unwrap();
     // New account has no defaults set; the call should succeed with an
     // empty-or-populated settings list.
-    let _ = resp.settings().len();
+    resp.settings();
 }
 
 // ── Batch 2: task lifecycle ────────────────────────────────────────
@@ -742,7 +742,7 @@ async fn ecs_list_services_by_namespace() {
         .send()
         .await
         .unwrap();
-    let _ = resp.service_arns().len();
+    resp.service_arns();
 }
 
 #[test_action("ecs", "UpdateService", checksum = "c1482ff6")]
@@ -1048,7 +1048,7 @@ async fn ecs_delete_attributes() {
         .send()
         .await
         .unwrap();
-    let _ = resp.attributes().len();
+    resp.attributes();
 }
 
 #[test_action("ecs", "ListAttributes", checksum = "c4f675bd")]
@@ -1070,7 +1070,7 @@ async fn ecs_list_attributes() {
         .send()
         .await
         .unwrap();
-    let _ = resp.attributes().len();
+    resp.attributes();
 }
 
 #[test_action("ecs", "CreateCapacityProvider", checksum = "0b1e10ac")]
@@ -1139,7 +1139,7 @@ async fn ecs_describe_capacity_providers() {
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
     let resp = client.describe_capacity_providers().send().await.unwrap();
-    let _ = resp.capacity_providers().len();
+    resp.capacity_providers();
 }
 
 #[test_action("ecs", "UpdateCapacityProvider", checksum = "def5b8f2")]
@@ -1198,7 +1198,7 @@ async fn ecs_get_task_protection() {
         .send()
         .await
         .unwrap();
-    let _ = resp.protected_tasks().len();
+    resp.protected_tasks();
 }
 
 #[test_action("ecs", "UpdateTaskProtection", checksum = "5b5526a7")]
@@ -1229,7 +1229,7 @@ async fn ecs_update_task_protection() {
         .send()
         .await
         .unwrap();
-    let _ = resp.protected_tasks().len();
+    resp.protected_tasks();
 }
 
 #[test_action("ecs", "CreateTaskSet", checksum = "bf51b8b6")]
@@ -1389,7 +1389,7 @@ async fn ecs_execute_command() {
         .send()
         .await
         .unwrap();
-    let _ = resp.session();
+    resp.session();
 }
 
 #[test_action("ecs", "SubmitContainerStateChange", checksum = "129dc8b3")]
@@ -1403,7 +1403,7 @@ async fn ecs_submit_container_state_change() {
         .send()
         .await
         .unwrap();
-    let _ = resp.acknowledgment();
+    resp.acknowledgment();
 }
 
 #[test_action("ecs", "SubmitTaskStateChange", checksum = "8dbcf4ff")]
@@ -1412,7 +1412,7 @@ async fn ecs_submit_task_state_change() {
     let server = TestServer::start().await;
     let client = server.ecs_client().await;
     let resp = client.submit_task_state_change().send().await.unwrap();
-    let _ = resp.acknowledgment();
+    resp.acknowledgment();
 }
 
 #[test_action("ecs", "SubmitAttachmentStateChanges", checksum = "95374e0d")]
@@ -1433,7 +1433,7 @@ async fn ecs_submit_attachment_state_changes() {
         .send()
         .await
         .unwrap();
-    let _ = resp.acknowledgment();
+    resp.acknowledgment();
 }
 
 #[test_action("ecs", "DiscoverPollEndpoint", checksum = "c9e6854a")]
@@ -1468,7 +1468,7 @@ async fn ecs_stop_service_deployment() {
         .send()
         .await
         .unwrap();
-    let _ = resp.service_deployment_arn();
+    resp.service_deployment_arn();
 }
 
 #[test_action("ecs", "ListServiceDeployments", checksum = "7c21263a")]
@@ -1492,7 +1492,7 @@ async fn ecs_list_service_deployments() {
         .send()
         .await
         .unwrap();
-    let _ = resp.service_deployments().len();
+    resp.service_deployments();
 }
 
 #[test_action("ecs", "DescribeServiceDeployments", checksum = "cd7d2a70")]
@@ -1518,7 +1518,7 @@ async fn ecs_describe_service_deployments() {
         .send()
         .await
         .unwrap();
-    let _ = resp.service_deployments().len();
+    resp.service_deployments();
 }
 
 #[test_action("ecs", "DescribeServiceRevisions", checksum = "324b5e93")]
@@ -1532,5 +1532,5 @@ async fn ecs_describe_service_revisions() {
         .send()
         .await
         .unwrap();
-    let _ = resp.service_revisions().len();
+    resp.service_revisions();
 }

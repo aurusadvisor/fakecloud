@@ -133,7 +133,7 @@ async fn sfn_update_state_machine() {
         .send()
         .await
         .unwrap();
-    let _ = resp.update_date();
+    resp.update_date();
 
     let describe = client
         .describe_state_machine()

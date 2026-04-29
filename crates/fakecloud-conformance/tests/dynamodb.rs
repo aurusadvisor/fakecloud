@@ -857,7 +857,7 @@ async fn dynamodb_execute_transaction() {
         .send()
         .await
         .unwrap();
-    let _ = resp.responses();
+    resp.responses();
 }
 
 // ---------------------------------------------------------------------------

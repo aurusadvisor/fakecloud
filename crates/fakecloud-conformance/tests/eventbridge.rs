@@ -725,7 +725,7 @@ async fn eb_list_connections() {
     let client = server.eventbridge_client().await;
 
     let resp = client.list_connections().send().await.unwrap();
-    let _ = resp.connections();
+    resp.connections();
 }
 
 #[test_action("events", "UpdateConnection", checksum = "4783b1fa")]
@@ -890,7 +890,7 @@ async fn eb_list_api_destinations() {
     let client = server.eventbridge_client().await;
 
     let resp = client.list_api_destinations().send().await.unwrap();
-    let _ = resp.api_destinations();
+    resp.api_destinations();
 }
 
 #[test_action("events", "UpdateApiDestination", checksum = "f2e3330b")]
@@ -1073,7 +1073,7 @@ async fn eb_list_replays() {
     let client = server.eventbridge_client().await;
 
     let resp = client.list_replays().send().await.unwrap();
-    let _ = resp.replays();
+    resp.replays();
 }
 
 #[test_action("events", "CancelReplay", checksum = "be020ca9")]
@@ -1135,7 +1135,7 @@ async fn eb_create_partner_event_source() {
         .send()
         .await
         .unwrap();
-    let _ = resp.event_source_arn();
+    resp.event_source_arn();
 }
 
 #[test_action("events", "DescribePartnerEventSource", checksum = "0cef9de8")]
@@ -1227,7 +1227,7 @@ async fn eb_list_partner_event_source_accounts() {
         .send()
         .await
         .unwrap();
-    let _ = resp.partner_event_source_accounts();
+    resp.partner_event_source_accounts();
 }
 
 #[test_action("events", "ActivateEventSource", checksum = "c72d22a8")]
@@ -1304,7 +1304,7 @@ async fn eb_list_event_sources() {
     let client = server.eventbridge_client().await;
 
     let resp = client.list_event_sources().send().await.unwrap();
-    let _ = resp.event_sources();
+    resp.event_sources();
 }
 
 #[test_action("events", "PutPartnerEvents", checksum = "94e2fc0d")]
@@ -1504,7 +1504,7 @@ async fn eb_list_endpoints() {
     let client = server.eventbridge_client().await;
 
     let resp = client.list_endpoints().send().await.unwrap();
-    let _ = resp.endpoints();
+    resp.endpoints();
 }
 
 #[test_action("events", "UpdateEndpoint", checksum = "e7b112c5")]
