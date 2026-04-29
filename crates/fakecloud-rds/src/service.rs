@@ -608,7 +608,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "CreateDBInstance", RDS_NS,
+                "CreateDBInstance",
+                RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
                     db_instance_xml(&instance, None)
@@ -715,7 +716,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "DeleteDBInstance", RDS_NS,
+                "DeleteDBInstance",
+                RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
                     db_instance_xml(&instance, Some("deleting"))
@@ -897,7 +899,8 @@ impl RdsService {
         }
         let instance_arn = instance.db_instance_arn.clone();
         let xml = query_response_xml(
-            "ModifyDBInstance", RDS_NS,
+            "ModifyDBInstance",
+            RDS_NS,
             &format!(
                 "<DBInstance>{}</DBInstance>",
                 db_instance_xml(instance, Some("modifying"))
@@ -1007,7 +1010,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "RebootDBInstance", RDS_NS,
+                "RebootDBInstance",
+                RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
                     db_instance_xml(&instance, Some("rebooting"))
@@ -1040,7 +1044,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "DescribeDBEngineVersions", RDS_NS,
+                "DescribeDBEngineVersions",
+                RDS_NS,
                 &format!(
                     "<DBEngineVersions>{}</DBEngineVersions>",
                     versions.iter().map(engine_version_xml).collect::<String>()
@@ -1070,7 +1075,8 @@ impl RdsService {
             return Ok(AwsResponse::xml(
                 StatusCode::OK,
                 query_response_xml(
-                    "DescribeDBInstances", RDS_NS,
+                    "DescribeDBInstances",
+                    RDS_NS,
                     &format!(
                         "<DBInstances><DBInstance>{}</DBInstance></DBInstances>",
                         db_instance_xml(&instance, None)
@@ -1102,7 +1108,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "DescribeDBInstances", RDS_NS,
+                "DescribeDBInstances",
+                RDS_NS,
                 &format!(
                     "<DBInstances>{}</DBInstances>{}",
                     paginated
@@ -1144,7 +1151,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "DescribeOrderableDBInstanceOptions", RDS_NS,
+                "DescribeOrderableDBInstanceOptions",
+                RDS_NS,
                 &format!(
                     "<OrderableDBInstanceOptions>{}</OrderableDBInstanceOptions>",
                     options.iter().map(orderable_option_xml).collect::<String>()
@@ -1196,7 +1204,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "ListTagsForResource", RDS_NS,
+                "ListTagsForResource",
+                RDS_NS,
                 &format!("<TagList>{tag_xml}</TagList>"),
                 &request.request_id,
             ),
@@ -1334,7 +1343,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "CreateDBSnapshot", RDS_NS,
+                "CreateDBSnapshot",
+                RDS_NS,
                 &format!("<DBSnapshot>{}</DBSnapshot>", db_snapshot_xml(&snapshot)),
                 &request.request_id,
             ),
@@ -1370,7 +1380,8 @@ impl RdsService {
             return Ok(AwsResponse::xml(
                 StatusCode::OK,
                 query_response_xml(
-                    "DescribeDBSnapshots", RDS_NS,
+                    "DescribeDBSnapshots",
+                    RDS_NS,
                     &format!(
                         "<DBSnapshots><DBSnapshot>{}</DBSnapshot></DBSnapshots>",
                         db_snapshot_xml(&snapshot)
@@ -1413,7 +1424,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "DescribeDBSnapshots", RDS_NS,
+                "DescribeDBSnapshots",
+                RDS_NS,
                 &format!(
                     "<DBSnapshots>{}</DBSnapshots>{}",
                     paginated
@@ -1456,7 +1468,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "DeleteDBSnapshot", RDS_NS,
+                "DeleteDBSnapshot",
+                RDS_NS,
                 &format!("<DBSnapshot>{}</DBSnapshot>", db_snapshot_xml(&snapshot)),
                 &request.request_id,
             ),
@@ -1573,7 +1586,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "RestoreDBInstanceFromDBSnapshot", RDS_NS,
+                "RestoreDBInstanceFromDBSnapshot",
+                RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
                     db_instance_xml(&instance, None)
@@ -1747,7 +1761,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "CreateDBInstanceReadReplica", RDS_NS,
+                "CreateDBInstanceReadReplica",
+                RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
                     db_instance_xml(&replica, None)
@@ -1824,7 +1839,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "CreateDBSubnetGroup", RDS_NS,
+                "CreateDBSubnetGroup",
+                RDS_NS,
                 &format!(
                     "<DBSubnetGroup>{}</DBSubnetGroup>",
                     db_subnet_group_xml(&subnet_group)
@@ -1859,7 +1875,8 @@ impl RdsService {
             return Ok(AwsResponse::xml(
                 StatusCode::OK,
                 query_response_xml(
-                    "DescribeDBSubnetGroups", RDS_NS,
+                    "DescribeDBSubnetGroups",
+                    RDS_NS,
                     &format!(
                         "<DBSubnetGroups><DBSubnetGroup>{}</DBSubnetGroup></DBSubnetGroups>",
                         db_subnet_group_xml(sg)
@@ -1894,7 +1911,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "DescribeDBSubnetGroups", RDS_NS,
+                "DescribeDBSubnetGroups",
+                RDS_NS,
                 &format!("<DBSubnetGroups>{}</DBSubnetGroups>{}", body, marker_xml),
                 &request.request_id,
             ),
@@ -1979,7 +1997,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "ModifyDBSubnetGroup", RDS_NS,
+                "ModifyDBSubnetGroup",
+                RDS_NS,
                 &format!(
                     "<DBSubnetGroup>{}</DBSubnetGroup>",
                     db_subnet_group_xml(&subnet_group_clone)
@@ -2050,7 +2069,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "CreateDBParameterGroup", RDS_NS,
+                "CreateDBParameterGroup",
+                RDS_NS,
                 &format!(
                     "<DBParameterGroup>{}</DBParameterGroup>",
                     db_parameter_group_xml(&parameter_group)
@@ -2126,7 +2146,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "DescribeDBParameterGroups", RDS_NS,
+                "DescribeDBParameterGroups",
+                RDS_NS,
                 &format!(
                     "<DBParameterGroups>{}</DBParameterGroups>{}",
                     body, marker_xml
@@ -2200,7 +2221,8 @@ impl RdsService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "ModifyDBParameterGroup", RDS_NS,
+                "ModifyDBParameterGroup",
+                RDS_NS,
                 &format!(
                     "<DBParameterGroupName>{}</DBParameterGroupName>",
                     xml_escape(&parameter_group_clone.db_parameter_group_name)

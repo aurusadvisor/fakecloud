@@ -630,7 +630,12 @@ fn get_identity_verification_attributes(
     inner.push_str("</VerificationAttributes>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        query_response_xml("GetIdentityVerificationAttributes", SES_NS, &inner, &req.request_id),
+        query_response_xml(
+            "GetIdentityVerificationAttributes",
+            SES_NS,
+            &inner,
+            &req.request_id,
+        ),
     ))
 }
 
@@ -807,7 +812,12 @@ fn get_identity_notification_attributes(
     inner.push_str("</NotificationAttributes>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        query_response_xml("GetIdentityNotificationAttributes", SES_NS, &inner, &req.request_id),
+        query_response_xml(
+            "GetIdentityNotificationAttributes",
+            SES_NS,
+            &inner,
+            &req.request_id,
+        ),
     ))
 }
 
@@ -858,7 +868,8 @@ fn get_identity_mail_from_domain_attributes(
     Ok(AwsResponse::xml(
         StatusCode::OK,
         query_response_xml(
-            "GetIdentityMailFromDomainAttributes", SES_NS,
+            "GetIdentityMailFromDomainAttributes",
+            SES_NS,
             &inner,
             &req.request_id,
         ),
