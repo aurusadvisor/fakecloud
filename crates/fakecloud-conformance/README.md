@@ -16,9 +16,9 @@ We wanted an oracle outside the loop. AWS publishes Smithy models for every serv
 
 AWS's Smithy JSON models for each service are committed to [`aws-models/`](../../aws-models/) (e.g. `s3.json`, `dynamodb.json`, `lambda.json`). `smithy.rs` parses them into a `ServiceModel` with shapes, operations, traits (`@length`, `@range`, `@required`, `@enum`, `@examples`), and error definitions.
 
-### 2. Generate inputs with eight orthogonal strategies
+### 2. Generate inputs with nine orthogonal strategies
 
-For every operation, [`generators/`](./src/generators/) produces test variants using eight independent strategies. Each one targets a different class of bug:
+For every operation, [`generators/`](./src/generators/) produces test variants using nine independent strategies. Each one targets a different class of bug:
 
 | Strategy | What it generates | What it catches |
 |---|---|---|
@@ -30,6 +30,7 @@ For every operation, [`generators/`](./src/generators/) produces test variants u
 | **Negative** (`negative.rs`) | Missing required fields, out-of-range values, invalid enums, wrong types | Validation gaps, silent-pass bugs, 500s that should be 400s |
 | **Examples diff** (`examples_diff.rs`) | The `@examples` trait's documented *output* — diffs every leaf field/JSON-type against the live response | Optional-in-Smithy fields that AWS's own examples document, but fakecloud doesn't return |
 | **Round-trip echo** (`round_trip.rs`) | Walks the Smithy graph to pair every `Create*`/`Put*`/`Update*` with its matching `Get*`/`Describe*`. Sends the writer with one optional input field set, then chases the reader and asserts that field echoed | Silent input drops on Create/Put/Update — the field is accepted at the wire layer but lost before storage (e.g. Lambda `Layers` dropped on `CreateFunction`, [#853](https://github.com/faiscadev/fakecloud/issues/853)) |
+| **Identifier-form fanout** (`id_forms.rs`) | For URL-bound `@httpLabel` members whose `@pattern` admits an ARN, sends the operation with each accepted identifier form: bare name, `name:qualifier`, partial ARN, full ARN, URL-encoded full ARN | REST endpoints that 404 on alternate identifier forms (e.g. Lambda `GetFunction` rejecting full ARNs, [#817](https://github.com/faiscadev/fakecloud/issues/817)) |
 
 A single operation typically produces anywhere from a dozen to several hundred variants. Across all 33 services the baseline is **80,074 / 81,489 variants passing (98.3%)** — see [`conformance-baseline.json`](../../conformance-baseline.json) for the per-service breakdown.
 

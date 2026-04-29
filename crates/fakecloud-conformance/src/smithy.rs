@@ -742,6 +742,17 @@ pub fn primitive_compatible(model: &ServiceModel, a: &str, b: &str) -> bool {
     }
 }
 
+/// Best-effort heuristic: does this `@pattern` regex admit ARN-form input?
+///
+/// AWS Smithy patterns that allow both bare names and ARNs typically
+/// contain a literal `arn:` in an alternation. We accept anything that
+/// mentions `arn:` literally — that covers every ARN-tolerant shape in
+/// the vendored models (verified against `aws-models/lambda.json`,
+/// `aws-models/iam.json`, `aws-models/s3.json`).
+pub fn pattern_admits_arn(pattern: &str) -> bool {
+    pattern.contains("arn:")
+}
+
 /// Load the service map from service-map.json.
 pub fn load_service_map(models_dir: &Path) -> Result<HashMap<String, ServiceMapEntry>, String> {
     let path = models_dir.join("service-map.json");
@@ -941,5 +952,24 @@ mod tests {
             .expect("CreateTable must pair with DescribeTable");
         assert_eq!(table_pair.reader.name, "DescribeTable");
         assert_eq!(table_pair.id_source_field, "TableName");
+    }
+
+    #[test]
+    fn pattern_admits_arn_recognises_lambda_function_name() {
+        // Real Lambda FunctionName pattern admits both bare names and ARNs.
+        let p = "(arn:(aws[a-zA-Z-]*)?:lambda:)?([a-z]{2}(-gov)?-[a-z]+-\\d{1}:)?(\\d{12}:)?(function:)?([a-zA-Z0-9-_\\.]+)(:(\\$LATEST|[a-zA-Z0-9-_]+))?";
+        assert!(pattern_admits_arn(p));
+    }
+
+    #[test]
+    fn pattern_admits_arn_rejects_bare_name_only() {
+        let p = "[a-zA-Z0-9_-]+";
+        assert!(!pattern_admits_arn(p));
+    }
+
+    #[test]
+    fn pattern_admits_arn_recognises_iam_role_pattern() {
+        let p = "^arn:[\\w+=/,.@-]+:iam::\\d+:role/[\\w+=,.@-]+$";
+        assert!(pattern_admits_arn(p));
     }
 }
