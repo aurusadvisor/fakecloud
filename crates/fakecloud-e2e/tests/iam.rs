@@ -710,6 +710,44 @@ async fn iam_attach_detach_role_policy() {
     assert!(attached.attached_policies().is_empty());
 }
 
+#[tokio::test]
+async fn iam_list_attached_role_policies_includes_aws_managed() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    client
+        .create_role()
+        .role_name("task-exec")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+
+    let managed_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy";
+    client
+        .attach_role_policy()
+        .role_name("task-exec")
+        .policy_arn(managed_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let attached = client
+        .list_attached_role_policies()
+        .role_name("task-exec")
+        .send()
+        .await
+        .unwrap();
+    let policies = attached.attached_policies();
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0].policy_arn(), Some(managed_arn));
+    assert_eq!(
+        policies[0].policy_name(),
+        Some("AmazonECSTaskExecutionRolePolicy"),
+    );
+}
+
 // ---- IAM Inline Policy Tests ----
 
 #[tokio::test]

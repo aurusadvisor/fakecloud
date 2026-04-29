@@ -2189,6 +2189,43 @@ fn attach_detach_list_role_policies_managed() {
     .unwrap();
 }
 
+#[test]
+fn list_attached_role_policies_includes_aws_managed() {
+    let svc = make_service();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    svc.create_role(&make_request(
+        "CreateRole",
+        vec![
+            ("RoleName", "task-exec"),
+            ("AssumeRolePolicyDocument", trust),
+        ],
+    ))
+    .unwrap();
+
+    let managed_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy";
+    svc.attach_role_policy(&make_request(
+        "AttachRolePolicy",
+        vec![("RoleName", "task-exec"), ("PolicyArn", managed_arn)],
+    ))
+    .unwrap();
+
+    let resp = svc
+        .list_attached_role_policies(&make_request(
+            "ListAttachedRolePolicies",
+            vec![("RoleName", "task-exec")],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(
+        body.contains(managed_arn),
+        "managed policy ARN missing from response: {body}"
+    );
+    assert!(
+        body.contains("<PolicyName>AmazonECSTaskExecutionRolePolicy</PolicyName>"),
+        "managed policy name missing from response: {body}"
+    );
+}
+
 // ── users.rs additional coverage ──
 
 #[test]

@@ -633,13 +633,17 @@ impl IamService {
 
         let members: String = policy_arns
             .iter()
-            .filter_map(|arn| {
-                state.policies.get(arn).map(|p| {
-                    format!(
-                        "      <member>\n        <PolicyName>{}</PolicyName>\n        <PolicyArn>{}</PolicyArn>\n      </member>",
-                        p.policy_name, p.arn
-                    )
-                })
+            .map(|arn| {
+                let policy_name = state
+                    .policies
+                    .get(arn)
+                    .map(|p| p.policy_name.clone())
+                    .unwrap_or_else(|| {
+                        arn.rsplit('/').next().unwrap_or(arn.as_str()).to_string()
+                    });
+                format!(
+                    "      <member>\n        <PolicyName>{policy_name}</PolicyName>\n        <PolicyArn>{arn}</PolicyArn>\n      </member>"
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
