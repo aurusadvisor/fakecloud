@@ -14,12 +14,13 @@ pub mod data_plane;
 pub mod dispatch;
 pub mod facade;
 pub mod lambda_proxy;
-pub mod service;
-pub mod state;
+pub(crate) mod service;
+pub(crate) mod state;
 
 pub use facade::ApiGatewayFacade;
-pub use service::ApiGatewayService;
 pub use state::{
     ApiGatewaySnapshot, ApiGatewayState, RestApi, SharedApiGatewayState,
     APIGATEWAY_SNAPSHOT_SCHEMA_VERSION,
 };
+
+pub use service::ApiGatewayService;

@@ -7,9 +7,7 @@
 
 use fakecloud_sdk::types;
 
-pub(crate) fn rds_instance_response(
-    instance: &fakecloud_rds::state::DbInstance,
-) -> types::RdsInstance {
+pub(crate) fn rds_instance_response(instance: &fakecloud_rds::DbInstance) -> types::RdsInstance {
     types::RdsInstance {
         db_instance_identifier: instance.db_instance_identifier.clone(),
         db_instance_arn: instance.db_instance_arn.clone(),
@@ -39,9 +37,7 @@ pub(crate) fn rds_instance_response(
     }
 }
 
-pub(crate) fn ecr_repository_response(
-    repo: &fakecloud_ecr::state::Repository,
-) -> types::EcrRepository {
+pub(crate) fn ecr_repository_response(repo: &fakecloud_ecr::Repository) -> types::EcrRepository {
     let image_count = repo.images.len() as u64;
     let layer_count = repo.layers.len() as u64;
     types::EcrRepository {
@@ -68,8 +64,8 @@ pub(crate) fn ecr_repository_response(
 }
 
 pub(crate) fn ecr_image_response(
-    repo: &fakecloud_ecr::state::Repository,
-    image: &fakecloud_ecr::state::Image,
+    repo: &fakecloud_ecr::Repository,
+    image: &fakecloud_ecr::Image,
 ) -> types::EcrImage {
     let tags: Vec<String> = repo
         .image_tags
@@ -88,7 +84,7 @@ pub(crate) fn ecr_image_response(
 }
 
 pub(crate) fn ecr_pull_through_rule_response(
-    rule: &fakecloud_ecr::state::PullThroughCacheRule,
+    rule: &fakecloud_ecr::PullThroughCacheRule,
 ) -> types::EcrPullThroughRule {
     types::EcrPullThroughRule {
         ecr_repository_prefix: rule.ecr_repository_prefix.clone(),
@@ -101,7 +97,7 @@ pub(crate) fn ecr_pull_through_rule_response(
     }
 }
 
-pub(crate) fn ecs_task_response(task: &fakecloud_ecs::state::Task) -> types::EcsTask {
+pub(crate) fn ecs_task_response(task: &fakecloud_ecs::Task) -> types::EcsTask {
     types::EcsTask {
         task_arn: task.task_arn.clone(),
         task_id: task.task_id.clone(),
@@ -136,7 +132,7 @@ pub(crate) fn ecs_task_response(task: &fakecloud_ecs::state::Task) -> types::Ecs
 }
 
 pub(crate) fn ecs_lifecycle_event(
-    event: &fakecloud_ecs::state::LifecycleEvent,
+    event: &fakecloud_ecs::LifecycleEvent,
 ) -> types::EcsLifecycleEvent {
     types::EcsLifecycleEvent {
         at: event.at.to_rfc3339(),
@@ -148,7 +144,7 @@ pub(crate) fn ecs_lifecycle_event(
     }
 }
 
-pub(crate) fn ecs_cluster_response(cluster: &fakecloud_ecs::state::Cluster) -> types::EcsCluster {
+pub(crate) fn ecs_cluster_response(cluster: &fakecloud_ecs::Cluster) -> types::EcsCluster {
     types::EcsCluster {
         cluster_name: cluster.cluster_name.clone(),
         cluster_arn: cluster.cluster_arn.clone(),
@@ -171,7 +167,7 @@ pub(crate) fn ecs_cluster_response(cluster: &fakecloud_ecs::state::Cluster) -> t
 }
 
 pub(crate) fn elasticache_cluster_response(
-    cluster: &fakecloud_elasticache::state::CacheCluster,
+    cluster: &fakecloud_elasticache::CacheCluster,
 ) -> types::ElastiCacheCluster {
     types::ElastiCacheCluster {
         cache_cluster_id: cluster.cache_cluster_id.clone(),
@@ -188,7 +184,7 @@ pub(crate) fn elasticache_cluster_response(
 }
 
 pub(crate) fn elasticache_replication_group_response(
-    group: &fakecloud_elasticache::state::ReplicationGroup,
+    group: &fakecloud_elasticache::ReplicationGroup,
 ) -> types::ElastiCacheReplicationGroupIntrospection {
     types::ElastiCacheReplicationGroupIntrospection {
         replication_group_id: group.replication_group_id.clone(),
@@ -205,7 +201,7 @@ pub(crate) fn elasticache_replication_group_response(
 }
 
 pub(crate) fn elasticache_serverless_cache_response(
-    cache: &fakecloud_elasticache::state::ServerlessCache,
+    cache: &fakecloud_elasticache::ServerlessCache,
 ) -> types::ElastiCacheServerlessCacheIntrospection {
     types::ElastiCacheServerlessCacheIntrospection {
         serverless_cache_name: cache.serverless_cache_name.clone(),
@@ -217,7 +213,7 @@ pub(crate) fn elasticache_serverless_cache_response(
 }
 
 pub(crate) fn elbv2_load_balancer_response(
-    lb: &fakecloud_elbv2::state::LoadBalancer,
+    lb: &fakecloud_elbv2::LoadBalancer,
 ) -> types::Elbv2LoadBalancer {
     types::Elbv2LoadBalancer {
         arn: lb.arn.clone(),
@@ -252,7 +248,7 @@ pub(crate) fn elbv2_load_balancer_response(
 }
 
 pub(crate) fn elbv2_target_group_response(
-    tg: &fakecloud_elbv2::state::TargetGroup,
+    tg: &fakecloud_elbv2::TargetGroup,
 ) -> types::Elbv2TargetGroup {
     types::Elbv2TargetGroup {
         arn: tg.arn.clone(),
@@ -291,9 +287,7 @@ pub(crate) fn elbv2_target_group_response(
     }
 }
 
-pub(crate) fn elbv2_listener_response(
-    l: &fakecloud_elbv2::state::Listener,
-) -> types::Elbv2Listener {
+pub(crate) fn elbv2_listener_response(l: &fakecloud_elbv2::Listener) -> types::Elbv2Listener {
     let default = l.default_actions.first();
     types::Elbv2Listener {
         arn: l.arn.clone(),
@@ -311,7 +305,7 @@ pub(crate) fn elbv2_listener_response(
     }
 }
 
-pub(crate) fn elbv2_rule_response(r: &fakecloud_elbv2::state::Rule) -> types::Elbv2Rule {
+pub(crate) fn elbv2_rule_response(r: &fakecloud_elbv2::Rule) -> types::Elbv2Rule {
     types::Elbv2Rule {
         arn: r.arn.clone(),
         listener_arn: r.listener_arn.clone(),
@@ -325,7 +319,7 @@ pub(crate) fn elbv2_rule_response(r: &fakecloud_elbv2::state::Rule) -> types::El
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use fakecloud_rds::state::DbInstance;
+    use fakecloud_rds::DbInstance;
 
     use super::rds_instance_response;
 
@@ -351,7 +345,7 @@ mod tests {
             master_user_password: "secret123".to_string(),
             container_id: "container-id".to_string(),
             host_port: 15432,
-            tags: vec![fakecloud_rds::state::RdsTag {
+            tags: vec![fakecloud_rds::RdsTag {
                 key: "env".to_string(),
                 value: "test".to_string(),
             }],

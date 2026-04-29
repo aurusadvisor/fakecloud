@@ -4,8 +4,11 @@ pub mod http_proxy;
 pub mod lambda_proxy;
 pub mod mock;
 pub mod router;
-pub mod service;
-pub mod state;
+pub(crate) mod service;
+pub(crate) mod state;
 
 pub use service::ApiGatewayV2Service;
-pub use state::{ApiGatewayV2State, HttpApi, SharedApiGatewayV2State};
+pub use state::{
+    ApiGatewayV2Snapshot, ApiGatewayV2State, HttpApi, SharedApiGatewayV2State,
+    APIGATEWAYV2_SNAPSHOT_SCHEMA_VERSION,
+};

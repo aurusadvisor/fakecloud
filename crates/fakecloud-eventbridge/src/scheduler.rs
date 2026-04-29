@@ -7,8 +7,8 @@ use serde_json::json;
 
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_lambda::runtime::ContainerRuntime;
-use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
-use fakecloud_logs::state::SharedLogsState;
+use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
+use fakecloud_logs::SharedLogsState;
 
 use crate::state::SharedEventBridgeState;
 

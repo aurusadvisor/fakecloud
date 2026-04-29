@@ -3,7 +3,10 @@ pub mod lifecycle;
 pub mod logging;
 pub mod persistence;
 pub mod resource_policy;
-pub mod service;
+pub(crate) mod service;
 pub mod simulation;
-pub mod state;
+pub(crate) mod state;
 mod xml_util;
+
+pub use service::S3Service;
+pub use state::{memory_body, S3Bucket, S3Object, S3State, SharedS3State};

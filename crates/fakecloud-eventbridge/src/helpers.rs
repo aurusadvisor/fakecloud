@@ -697,7 +697,7 @@ pub(crate) fn deliver_to_logs(
     let group = state
         .log_groups
         .entry(group_name.to_string())
-        .or_insert_with(|| fakecloud_logs::state::LogGroup {
+        .or_insert_with(|| fakecloud_logs::LogGroup {
             name: group_name.to_string(),
             arn: Arn::new(
                 "logs",
@@ -723,7 +723,7 @@ pub(crate) fn deliver_to_logs(
     let stream = group
         .log_streams
         .entry(stream_name.clone())
-        .or_insert_with(|| fakecloud_logs::state::LogStream {
+        .or_insert_with(|| fakecloud_logs::LogStream {
             name: stream_name,
             arn: format!("{}:log-stream:events", group.arn),
             creation_time: ts_millis,
@@ -734,7 +734,7 @@ pub(crate) fn deliver_to_logs(
             events: Vec::new(),
         });
 
-    stream.events.push(fakecloud_logs::state::LogEvent {
+    stream.events.push(fakecloud_logs::LogEvent {
         timestamp: ts_millis,
         message: payload.to_string(),
         ingestion_time: ts_millis,

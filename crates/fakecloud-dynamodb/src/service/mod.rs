@@ -19,7 +19,7 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
 use fakecloud_persistence::{S3Store, SnapshotStore};
-use fakecloud_s3::state::SharedS3State;
+use fakecloud_s3::SharedS3State;
 
 use crate::state::{
     attribute_type_and_value, AttributeDefinition, AttributeValue, DynamoDbSnapshot, DynamoTable,

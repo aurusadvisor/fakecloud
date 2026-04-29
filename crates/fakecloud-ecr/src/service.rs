@@ -89,7 +89,7 @@ pub struct EcrService {
     /// `EncryptionConfiguration.encryption_type == "KMS"` store layer
     /// blobs encrypted under the configured CMK via
     /// `fakecloud_kms::api::encrypt_blob` / `decrypt_blob`.
-    kms_state: Option<fakecloud_kms::state::SharedKmsState>,
+    kms_state: Option<fakecloud_kms::SharedKmsState>,
 }
 
 impl EcrService {
@@ -107,7 +107,7 @@ impl EcrService {
         self
     }
 
-    pub fn with_kms(mut self, kms: fakecloud_kms::state::SharedKmsState) -> Self {
+    pub fn with_kms(mut self, kms: fakecloud_kms::SharedKmsState) -> Self {
         self.kms_state = Some(kms);
         self
     }
@@ -122,7 +122,7 @@ impl EcrService {
 
     /// Handle for the shared KMS state when wired. `None` skips the
     /// encrypt/decrypt paths and stores / returns plaintext blobs.
-    pub(crate) fn kms_handle(&self) -> Option<&fakecloud_kms::state::SharedKmsState> {
+    pub(crate) fn kms_handle(&self) -> Option<&fakecloud_kms::SharedKmsState> {
         self.kms_state.as_ref()
     }
 

@@ -11,7 +11,7 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
-use fakecloud_dynamodb::state::SharedDynamoDbState;
+use fakecloud_dynamodb::SharedDynamoDbState;
 use fakecloud_persistence::SnapshotStore;
 
 use crate::interpreter;

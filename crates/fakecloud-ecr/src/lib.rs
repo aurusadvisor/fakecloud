@@ -1,6 +1,12 @@
 pub mod oci;
 pub(crate) mod pull_through;
 pub mod scanner;
-pub mod service;
+pub(crate) mod service;
 pub mod signing;
-pub mod state;
+pub(crate) mod state;
+
+pub use service::EcrService;
+pub use state::{
+    EcrSnapshot, Image, PullThroughCacheRule, Repository, SharedEcrState,
+    ECR_SNAPSHOT_SCHEMA_VERSION,
+};

@@ -6,30 +6,30 @@ use fakecloud_sdk::types;
 // Make pub so main.rs can construct it
 #[derive(Clone)]
 pub(crate) struct ResetState {
-    pub iam: fakecloud_iam::state::SharedIamState,
-    pub sqs: fakecloud_sqs::state::SharedSqsState,
-    pub sns: fakecloud_sns::state::SharedSnsState,
-    pub eb: fakecloud_eventbridge::state::SharedEventBridgeState,
-    pub ssm: fakecloud_ssm::state::SharedSsmState,
-    pub dynamodb: fakecloud_dynamodb::state::SharedDynamoDbState,
-    pub lambda: fakecloud_lambda::state::SharedLambdaState,
-    pub secretsmanager: fakecloud_secretsmanager::state::SharedSecretsManagerState,
-    pub s3: fakecloud_s3::state::SharedS3State,
-    pub logs: fakecloud_logs::state::SharedLogsState,
-    pub kms: fakecloud_kms::state::SharedKmsState,
-    pub cloudformation: fakecloud_cloudformation::state::SharedCloudFormationState,
-    pub ses: fakecloud_ses::state::SharedSesState,
-    pub cognito: fakecloud_cognito::state::SharedCognitoState,
-    pub kinesis: fakecloud_kinesis::state::SharedKinesisState,
-    pub rds: fakecloud_rds::state::SharedRdsState,
-    pub elasticache: fakecloud_elasticache::state::SharedElastiCacheState,
-    pub ecr: fakecloud_ecr::state::SharedEcrState,
-    pub ecs: fakecloud_ecs::state::SharedEcsState,
-    pub stepfunctions: fakecloud_stepfunctions::state::SharedStepFunctionsState,
-    pub scheduler: fakecloud_scheduler::state::SharedSchedulerState,
+    pub iam: fakecloud_iam::SharedIamState,
+    pub sqs: fakecloud_sqs::SharedSqsState,
+    pub sns: fakecloud_sns::SharedSnsState,
+    pub eb: fakecloud_eventbridge::SharedEventBridgeState,
+    pub ssm: fakecloud_ssm::SharedSsmState,
+    pub dynamodb: fakecloud_dynamodb::SharedDynamoDbState,
+    pub lambda: fakecloud_lambda::SharedLambdaState,
+    pub secretsmanager: fakecloud_secretsmanager::SharedSecretsManagerState,
+    pub s3: fakecloud_s3::SharedS3State,
+    pub logs: fakecloud_logs::SharedLogsState,
+    pub kms: fakecloud_kms::SharedKmsState,
+    pub cloudformation: fakecloud_cloudformation::SharedCloudFormationState,
+    pub ses: fakecloud_ses::SharedSesState,
+    pub cognito: fakecloud_cognito::SharedCognitoState,
+    pub kinesis: fakecloud_kinesis::SharedKinesisState,
+    pub rds: fakecloud_rds::SharedRdsState,
+    pub elasticache: fakecloud_elasticache::SharedElastiCacheState,
+    pub ecr: fakecloud_ecr::SharedEcrState,
+    pub ecs: fakecloud_ecs::SharedEcsState,
+    pub stepfunctions: fakecloud_stepfunctions::SharedStepFunctionsState,
+    pub scheduler: fakecloud_scheduler::SharedSchedulerState,
     pub apigatewayv1: fakecloud_apigateway::SharedApiGatewayState,
-    pub apigatewayv2: fakecloud_apigatewayv2::state::SharedApiGatewayV2State,
-    pub bedrock: fakecloud_bedrock::state::SharedBedrockState,
+    pub apigatewayv2: fakecloud_apigatewayv2::SharedApiGatewayV2State,
+    pub bedrock: fakecloud_bedrock::SharedBedrockState,
     pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
     pub route53: fakecloud_route53::SharedRoute53State,
     pub acm: fakecloud_acm::SharedAcmState,
@@ -37,7 +37,7 @@ pub(crate) struct ResetState {
         fakecloud_application_autoscaling::SharedApplicationAutoScalingState,
     pub wafv2: fakecloud_wafv2::SharedWafv2State,
     pub athena: fakecloud_athena::SharedAthenaState,
-    pub organizations: fakecloud_organizations::state::SharedOrganizationsState,
+    pub organizations: fakecloud_organizations::SharedOrganizationsState,
     pub container_runtime: Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     pub rds_runtime: Option<Arc<fakecloud_rds::runtime::RdsRuntime>>,
     pub elasticache_runtime: Option<Arc<fakecloud_elasticache::runtime::ElastiCacheRuntime>>,
@@ -469,8 +469,8 @@ impl ResetState {
 /// bypass only targets the default account, so there's no way to create
 /// credentials for a non-default account via the normal AWS API.
 pub(crate) fn create_admin_in_account(
-    iam: &fakecloud_iam::state::SharedIamState,
-    organizations: &fakecloud_organizations::state::SharedOrganizationsState,
+    iam: &fakecloud_iam::SharedIamState,
+    organizations: &fakecloud_organizations::SharedOrganizationsState,
     account_id: &str,
     user_name: &str,
 ) -> types::CreateAdminResponse {
@@ -504,7 +504,7 @@ pub(crate) fn create_admin_in_account(
 
     state.users.insert(
         user_name.to_string(),
-        fakecloud_iam::state::IamUser {
+        fakecloud_iam::IamUser {
             user_name: user_name.to_string(),
             user_id,
             arn: arn.clone(),
@@ -516,7 +516,7 @@ pub(crate) fn create_admin_in_account(
     );
     state.access_keys.insert(
         user_name.to_string(),
-        vec![fakecloud_iam::state::IamAccessKey {
+        vec![fakecloud_iam::IamAccessKey {
             access_key_id: akid.clone(),
             secret_access_key: secret.clone(),
             user_name: user_name.to_string(),
@@ -545,7 +545,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
-    use fakecloud_rds::state::{DbInstance, RdsState};
+    use fakecloud_rds::{DbInstance, RdsState};
 
     use super::ResetState;
 
@@ -783,10 +783,10 @@ mod tests {
 
     #[test]
     fn create_admin_in_default_account() {
-        let iam: fakecloud_iam::state::SharedIamState = Arc::new(parking_lot::RwLock::new(
+        let iam: fakecloud_iam::SharedIamState = Arc::new(parking_lot::RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
         ));
-        let orgs: fakecloud_organizations::state::SharedOrganizationsState =
+        let orgs: fakecloud_organizations::SharedOrganizationsState =
             Arc::new(parking_lot::RwLock::new(None));
         let resp = super::create_admin_in_account(&iam, &orgs, "123456789012", "admin");
         assert_eq!(resp.account_id, "123456789012");
@@ -804,10 +804,10 @@ mod tests {
 
     #[test]
     fn create_admin_in_new_account() {
-        let iam: fakecloud_iam::state::SharedIamState = Arc::new(parking_lot::RwLock::new(
+        let iam: fakecloud_iam::SharedIamState = Arc::new(parking_lot::RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
         ));
-        let orgs: fakecloud_organizations::state::SharedOrganizationsState =
+        let orgs: fakecloud_organizations::SharedOrganizationsState =
             Arc::new(parking_lot::RwLock::new(None));
         let resp = super::create_admin_in_account(&iam, &orgs, "999999999999", "bob");
         assert_eq!(resp.account_id, "999999999999");
@@ -829,10 +829,10 @@ mod tests {
         use fakecloud_core::auth::{
             ConditionContext, IamAction, IamDecision, IamPolicyEvaluator, Principal, PrincipalType,
         };
-        let iam: fakecloud_iam::state::SharedIamState = Arc::new(parking_lot::RwLock::new(
+        let iam: fakecloud_iam::SharedIamState = Arc::new(parking_lot::RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
         ));
-        let orgs: fakecloud_organizations::state::SharedOrganizationsState =
+        let orgs: fakecloud_organizations::SharedOrganizationsState =
             Arc::new(parking_lot::RwLock::new(None));
         let resp = super::create_admin_in_account(&iam, &orgs, "222222222222", "admin");
 
@@ -861,10 +861,10 @@ mod tests {
 
     #[test]
     fn create_admin_credentials_resolve() {
-        let iam: fakecloud_iam::state::SharedIamState = Arc::new(parking_lot::RwLock::new(
+        let iam: fakecloud_iam::SharedIamState = Arc::new(parking_lot::RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
         ));
-        let orgs: fakecloud_organizations::state::SharedOrganizationsState =
+        let orgs: fakecloud_organizations::SharedOrganizationsState =
             Arc::new(parking_lot::RwLock::new(None));
         let resp = super::create_admin_in_account(&iam, &orgs, "222222222222", "alice");
 

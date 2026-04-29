@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::delivery::DeliveryBus;
-use fakecloud_dynamodb::state::SharedDynamoDbState;
+use fakecloud_dynamodb::SharedDynamoDbState;
 
 use crate::choice::evaluate_choice;
 use crate::error_handling::{find_catcher, should_retry};
