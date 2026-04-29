@@ -8,7 +8,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::state::{AutomatedReasoningBuildWorkflow, SharedBedrockState};
 
 fn find_policy_arn(
-    policies: &std::collections::HashMap<String, crate::state::AutomatedReasoningPolicy>,
+    policies: &std::collections::BTreeMap<String, crate::state::AutomatedReasoningPolicy>,
     identifier: &str,
 ) -> Option<String> {
     policies
@@ -22,7 +22,7 @@ fn find_policy_arn(
 }
 
 fn require_policy_arn(
-    policies: &std::collections::HashMap<String, crate::state::AutomatedReasoningPolicy>,
+    policies: &std::collections::BTreeMap<String, crate::state::AutomatedReasoningPolicy>,
     identifier: &str,
 ) -> Result<String, AwsServiceError> {
     find_policy_arn(policies, identifier).ok_or_else(|| {

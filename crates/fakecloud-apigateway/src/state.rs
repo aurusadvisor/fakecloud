@@ -14,7 +14,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub type SharedApiGatewayState =
@@ -41,81 +41,81 @@ pub struct ApiGatewayState {
     pub region: String,
     /// REST APIs keyed by `restApiId`.
     #[serde(default)]
-    pub apis: HashMap<String, RestApi>,
+    pub apis: BTreeMap<String, RestApi>,
     /// Resources keyed by `restApiId` -> `resourceId`.
     #[serde(default)]
-    pub resources: HashMap<String, HashMap<String, Resource>>,
+    pub resources: BTreeMap<String, BTreeMap<String, Resource>>,
     /// Methods keyed by `restApiId/resourceId/HTTP_METHOD`. Stored
     /// flat so dispatch can do a single lookup.
     #[serde(default)]
-    pub methods: HashMap<String, Method>,
+    pub methods: BTreeMap<String, Method>,
     /// Integrations keyed by the same `restApiId/resourceId/HTTP_METHOD`
     /// composite key as methods. One integration per method.
     #[serde(default)]
-    pub integrations: HashMap<String, Integration>,
+    pub integrations: BTreeMap<String, Integration>,
     /// Method-level integration responses keyed by
     /// `restApiId/resourceId/HTTP_METHOD/statusCode`.
     #[serde(default)]
-    pub integration_responses: HashMap<String, serde_json::Value>,
+    pub integration_responses: BTreeMap<String, serde_json::Value>,
     /// Method responses (response shape declarations) keyed by
     /// `restApiId/resourceId/HTTP_METHOD/statusCode`.
     #[serde(default)]
-    pub method_responses: HashMap<String, serde_json::Value>,
+    pub method_responses: BTreeMap<String, serde_json::Value>,
     /// Deployments keyed by `restApiId` -> `deploymentId`.
     #[serde(default)]
-    pub deployments: HashMap<String, HashMap<String, Deployment>>,
+    pub deployments: BTreeMap<String, BTreeMap<String, Deployment>>,
     /// Stages keyed by `restApiId` -> `stageName`.
     #[serde(default)]
-    pub stages: HashMap<String, HashMap<String, Stage>>,
+    pub stages: BTreeMap<String, BTreeMap<String, Stage>>,
     /// Models keyed by `restApiId` -> `modelName`.
     #[serde(default)]
-    pub models: HashMap<String, HashMap<String, Model>>,
+    pub models: BTreeMap<String, BTreeMap<String, Model>>,
     /// Request validators keyed by `restApiId` -> `validatorId`.
     #[serde(default)]
-    pub request_validators: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub request_validators: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Authorizers keyed by `restApiId` -> `authorizerId`.
     #[serde(default)]
-    pub authorizers: HashMap<String, HashMap<String, Authorizer>>,
+    pub authorizers: BTreeMap<String, BTreeMap<String, Authorizer>>,
     /// API keys keyed by `apiKeyId`.
     #[serde(default)]
-    pub api_keys: HashMap<String, ApiKey>,
+    pub api_keys: BTreeMap<String, ApiKey>,
     /// Usage plans keyed by `usagePlanId`.
     #[serde(default)]
-    pub usage_plans: HashMap<String, UsagePlan>,
+    pub usage_plans: BTreeMap<String, UsagePlan>,
     /// Usage plan keys keyed by `usagePlanId` -> `apiKeyId`.
     #[serde(default)]
-    pub usage_plan_keys: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub usage_plan_keys: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// VPC links keyed by id.
     #[serde(default)]
-    pub vpc_links: HashMap<String, serde_json::Value>,
+    pub vpc_links: BTreeMap<String, serde_json::Value>,
     /// Domain names keyed by domain.
     #[serde(default)]
-    pub domain_names: HashMap<String, serde_json::Value>,
+    pub domain_names: BTreeMap<String, serde_json::Value>,
     /// Domain name access associations keyed by ARN.
     #[serde(default)]
-    pub domain_name_access_associations: HashMap<String, serde_json::Value>,
+    pub domain_name_access_associations: BTreeMap<String, serde_json::Value>,
     /// Base path mappings keyed by `domain` -> `basePath`.
     #[serde(default)]
-    pub base_path_mappings: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub base_path_mappings: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Client certificates keyed by id.
     #[serde(default)]
-    pub client_certificates: HashMap<String, serde_json::Value>,
+    pub client_certificates: BTreeMap<String, serde_json::Value>,
     /// Documentation parts keyed by `restApiId` -> `documentationPartId`.
     #[serde(default)]
-    pub documentation_parts: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub documentation_parts: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Documentation versions keyed by `restApiId` -> `version`.
     #[serde(default)]
-    pub documentation_versions: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub documentation_versions: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Gateway responses keyed by `restApiId` -> `responseType`.
     #[serde(default)]
-    pub gateway_responses: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub gateway_responses: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Account-wide settings (the `Account` resource — singleton per
     /// AWS account).
     #[serde(default)]
     pub account_settings: serde_json::Value,
     /// Tags keyed by resource ARN.
     #[serde(default)]
-    pub tags: HashMap<String, HashMap<String, String>>,
+    pub tags: BTreeMap<String, BTreeMap<String, String>>,
     /// Introspection-only request history (not persisted).
     #[serde(default, skip_serializing)]
     pub request_history: Vec<ApiRequest>,
@@ -126,30 +126,30 @@ impl ApiGatewayState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            apis: HashMap::new(),
-            resources: HashMap::new(),
-            methods: HashMap::new(),
-            integrations: HashMap::new(),
-            integration_responses: HashMap::new(),
-            method_responses: HashMap::new(),
-            deployments: HashMap::new(),
-            stages: HashMap::new(),
-            models: HashMap::new(),
-            request_validators: HashMap::new(),
-            authorizers: HashMap::new(),
-            api_keys: HashMap::new(),
-            usage_plans: HashMap::new(),
-            usage_plan_keys: HashMap::new(),
-            vpc_links: HashMap::new(),
-            domain_names: HashMap::new(),
-            domain_name_access_associations: HashMap::new(),
-            base_path_mappings: HashMap::new(),
-            client_certificates: HashMap::new(),
-            documentation_parts: HashMap::new(),
-            documentation_versions: HashMap::new(),
-            gateway_responses: HashMap::new(),
+            apis: BTreeMap::new(),
+            resources: BTreeMap::new(),
+            methods: BTreeMap::new(),
+            integrations: BTreeMap::new(),
+            integration_responses: BTreeMap::new(),
+            method_responses: BTreeMap::new(),
+            deployments: BTreeMap::new(),
+            stages: BTreeMap::new(),
+            models: BTreeMap::new(),
+            request_validators: BTreeMap::new(),
+            authorizers: BTreeMap::new(),
+            api_keys: BTreeMap::new(),
+            usage_plans: BTreeMap::new(),
+            usage_plan_keys: BTreeMap::new(),
+            vpc_links: BTreeMap::new(),
+            domain_names: BTreeMap::new(),
+            domain_name_access_associations: BTreeMap::new(),
+            base_path_mappings: BTreeMap::new(),
+            client_certificates: BTreeMap::new(),
+            documentation_parts: BTreeMap::new(),
+            documentation_versions: BTreeMap::new(),
+            gateway_responses: BTreeMap::new(),
             account_settings: default_account_settings(),
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             request_history: Vec::new(),
         }
     }
@@ -206,7 +206,7 @@ pub struct RestApi {
     pub minimum_compression_size: Option<i64>,
     pub disable_execute_api_endpoint: bool,
     pub root_resource_id: String,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     /// Body of an OpenAPI/Swagger import, when the API was created by
     /// `ImportRestApi`. Kept around so `GetExport` can round-trip it.
     pub import_source: Option<String>,
@@ -229,8 +229,8 @@ pub struct Method {
     pub authorizer_id: Option<String>,
     pub api_key_required: bool,
     pub operation_name: Option<String>,
-    pub request_parameters: HashMap<String, bool>,
-    pub request_models: HashMap<String, String>,
+    pub request_parameters: BTreeMap<String, bool>,
+    pub request_models: BTreeMap<String, String>,
     pub request_validator_id: Option<String>,
     pub authorization_scopes: Vec<String>,
 }
@@ -249,8 +249,8 @@ pub struct Integration {
     /// Backend URI: ARN for AWS_PROXY (Lambda), HTTPS for HTTP_PROXY.
     pub uri: Option<String>,
     pub credentials: Option<String>,
-    pub request_parameters: HashMap<String, String>,
-    pub request_templates: HashMap<String, String>,
+    pub request_parameters: BTreeMap<String, String>,
+    pub request_templates: BTreeMap<String, String>,
     pub passthrough_behavior: String,
     pub timeout_in_millis: Option<i32>,
     pub cache_namespace: Option<String>,
@@ -279,15 +279,15 @@ pub struct Stage {
     pub description: Option<String>,
     pub cache_cluster_enabled: bool,
     pub cache_cluster_size: Option<String>,
-    pub variables: HashMap<String, String>,
-    pub method_settings: HashMap<String, serde_json::Value>,
+    pub variables: BTreeMap<String, String>,
+    pub method_settings: BTreeMap<String, serde_json::Value>,
     pub created_date: DateTime<Utc>,
     pub last_updated_date: DateTime<Utc>,
     pub tracing_enabled: bool,
     pub web_acl_arn: Option<String>,
     pub canary_settings: Option<serde_json::Value>,
     pub access_log_settings: Option<serde_json::Value>,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,7 +323,7 @@ pub struct ApiKey {
     pub created_date: DateTime<Utc>,
     pub last_updated_date: DateTime<Utc>,
     pub stage_keys: Vec<String>,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     pub customer_id: Option<String>,
 }
 
@@ -336,7 +336,7 @@ pub struct UsagePlan {
     pub throttle: Option<serde_json::Value>,
     pub quota: Option<serde_json::Value>,
     pub product_code: Option<String>,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

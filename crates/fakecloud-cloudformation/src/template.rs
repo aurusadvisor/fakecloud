@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A parsed CloudFormation template.
 #[derive(Debug, Clone)]
@@ -31,16 +31,16 @@ const PSEUDO_REFS: &[&str] = &[
 /// Parse a CloudFormation template from a string (JSON or YAML).
 pub fn parse_template(
     template_body: &str,
-    parameters: &HashMap<String, String>,
+    parameters: &BTreeMap<String, String>,
 ) -> Result<ParsedTemplate, String> {
-    parse_template_with_physical_ids(template_body, parameters, &HashMap::new())
+    parse_template_with_physical_ids(template_body, parameters, &BTreeMap::new())
 }
 
 /// Parse a CloudFormation template, resolving Refs using known physical resource IDs.
 pub fn parse_template_with_physical_ids(
     template_body: &str,
-    parameters: &HashMap<String, String>,
-    resource_physical_ids: &HashMap<String, String>,
+    parameters: &BTreeMap<String, String>,
+    resource_physical_ids: &BTreeMap<String, String>,
 ) -> Result<ParsedTemplate, String> {
     let value: Value = if template_body.trim_start().starts_with('{') {
         serde_json::from_str(template_body).map_err(|e| format!("Invalid JSON template: {e}"))?
@@ -96,8 +96,8 @@ pub fn parse_template_with_physical_ids(
 pub fn resolve_resource_properties(
     resource: &ResourceDefinition,
     template_body: &str,
-    parameters: &HashMap<String, String>,
-    resource_physical_ids: &HashMap<String, String>,
+    parameters: &BTreeMap<String, String>,
+    resource_physical_ids: &BTreeMap<String, String>,
 ) -> Result<ResourceDefinition, String> {
     let value: Value = if template_body.trim_start().starts_with('{') {
         serde_json::from_str(template_body).map_err(|e| format!("Invalid JSON template: {e}"))?
@@ -128,9 +128,9 @@ pub fn resolve_resource_properties(
 /// Resolve { "Ref": "param_name" } and { "Fn::GetAtt": [...] } in property values.
 fn resolve_refs(
     value: &Value,
-    parameters: &HashMap<String, String>,
+    parameters: &BTreeMap<String, String>,
     _resources: &serde_json::Map<String, Value>,
-    resource_physical_ids: &HashMap<String, String>,
+    resource_physical_ids: &BTreeMap<String, String>,
 ) -> Value {
     match value {
         Value::Object(map) => {
@@ -232,7 +232,7 @@ mod tests {
             }
         }"#;
 
-        let parsed = parse_template(template, &HashMap::new()).unwrap();
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
         assert_eq!(parsed.resources.len(), 1);
         assert_eq!(parsed.resources[0].logical_id, "MyQueue");
         assert_eq!(parsed.resources[0].resource_type, "AWS::SQS::Queue");
@@ -248,7 +248,7 @@ Resources:
       TopicName: test-topic
 "#;
 
-        let parsed = parse_template(template, &HashMap::new()).unwrap();
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
         assert_eq!(parsed.resources.len(), 1);
         assert_eq!(parsed.resources[0].logical_id, "MyTopic");
         assert_eq!(parsed.resources[0].resource_type, "AWS::SNS::Topic");
@@ -267,7 +267,7 @@ Resources:
             }
         }"#;
 
-        let mut params = HashMap::new();
+        let mut params = BTreeMap::new();
         params.insert("QueueNameParam".to_string(), "resolved-queue".to_string());
         let parsed = parse_template(template, &params).unwrap();
         assert_eq!(
@@ -297,14 +297,14 @@ Resources:
             }
         }"#;
 
-        let mut physical_ids = HashMap::new();
+        let mut physical_ids = BTreeMap::new();
         physical_ids.insert(
             "MyTopic".to_string(),
             "arn:aws:sns:us-east-1:123456789012:my-topic".to_string(),
         );
 
         let parsed =
-            parse_template_with_physical_ids(template, &HashMap::new(), &physical_ids).unwrap();
+            parse_template_with_physical_ids(template, &BTreeMap::new(), &physical_ids).unwrap();
         let sub = parsed
             .resources
             .iter()
@@ -338,7 +338,7 @@ Resources:
         }"#;
 
         // No physical IDs yet — logical ID returned for known resources
-        let parsed = parse_template(template, &HashMap::new()).unwrap();
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
         let sub = parsed
             .resources
             .iter()
@@ -363,7 +363,7 @@ Resources:
             }
         }"#;
 
-        let parsed = parse_template(template, &HashMap::new()).unwrap();
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
         assert_eq!(
             parsed.resources[0].properties["QueueName"],
             Value::String("AWS::StackName".to_string())
@@ -391,14 +391,14 @@ Resources:
             }
         }"#;
 
-        let mut physical_ids = HashMap::new();
+        let mut physical_ids = BTreeMap::new();
         physical_ids.insert(
             "MyTopic".to_string(),
             "arn:aws:sns:us-east-1:123456789012:my-topic".to_string(),
         );
 
         let parsed =
-            parse_template_with_physical_ids(template, &HashMap::new(), &physical_ids).unwrap();
+            parse_template_with_physical_ids(template, &BTreeMap::new(), &physical_ids).unwrap();
         let param = parsed
             .resources
             .iter()
@@ -414,35 +414,35 @@ Resources:
 
     #[test]
     fn parse_template_invalid_json_errors() {
-        let params = HashMap::new();
+        let params = BTreeMap::new();
         let result = parse_template("{not-json}", &params);
         assert!(result.is_err());
     }
 
     #[test]
     fn parse_template_missing_resources_errors() {
-        let params = HashMap::new();
+        let params = BTreeMap::new();
         let result = parse_template(r#"{"Description":"no resources"}"#, &params);
         assert!(result.is_err());
     }
 
     #[test]
     fn parse_template_resources_not_object_errors() {
-        let params = HashMap::new();
+        let params = BTreeMap::new();
         let result = parse_template(r#"{"Resources": []}"#, &params);
         assert!(result.is_err());
     }
 
     #[test]
     fn parse_template_missing_type_errors() {
-        let params = HashMap::new();
+        let params = BTreeMap::new();
         let result = parse_template(r#"{"Resources":{"R":{"Properties":{}}}}"#, &params);
         assert!(result.is_err());
     }
 
     #[test]
     fn parse_template_with_description() {
-        let params = HashMap::new();
+        let params = BTreeMap::new();
         let parsed = parse_template(
             r#"{"Description":"My template","Resources":{"R":{"Type":"AWS::SQS::Queue"}}}"#,
             &params,

@@ -66,7 +66,7 @@ mod tests {
     use crate::state::*;
     use parking_lot::RwLock;
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
     fn make_state() -> SharedDynamoDbState {
@@ -95,7 +95,7 @@ mod tests {
             items: vec![],
             gsi: vec![],
             lsi: vec![],
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             created_at: chrono::Utc::now(),
             status: "ACTIVE".to_string(),
             item_count: 0,
@@ -107,7 +107,7 @@ mod tests {
             pitr_enabled: false,
             kinesis_destinations: vec![],
             contributor_insights_status: "DISABLED".to_string(),
-            contributor_insights_counters: HashMap::new(),
+            contributor_insights_counters: BTreeMap::new(),
             stream_enabled: false,
             stream_view_type: None,
             stream_arn: None,

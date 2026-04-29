@@ -80,6 +80,7 @@ mod tests {
     use crate::state::{KeySchemaElement, ProvisionedThroughput};
     use parking_lot::RwLock;
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn make_stream_table() -> DynamoTable {
@@ -99,7 +100,7 @@ mod tests {
             items: vec![],
             gsi: vec![],
             lsi: vec![],
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             created_at: Utc::now(),
             status: "ACTIVE".to_string(),
             item_count: 0,
@@ -111,7 +112,7 @@ mod tests {
             pitr_enabled: false,
             kinesis_destinations: vec![],
             contributor_insights_status: "DISABLED".to_string(),
-            contributor_insights_counters: HashMap::new(),
+            contributor_insights_counters: BTreeMap::new(),
             stream_enabled: true,
             stream_view_type: Some("NEW_AND_OLD_IMAGES".to_string()),
             stream_arn: Some(

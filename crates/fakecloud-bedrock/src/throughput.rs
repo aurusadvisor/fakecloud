@@ -210,7 +210,7 @@ pub(crate) fn delete_provisioned_model_throughput(
 }
 
 fn find_throughput<'a>(
-    throughputs: &'a std::collections::HashMap<String, ProvisionedThroughput>,
+    throughputs: &'a std::collections::BTreeMap<String, ProvisionedThroughput>,
     id_or_arn: &str,
 ) -> Result<&'a ProvisionedThroughput, AwsServiceError> {
     throughputs
@@ -230,7 +230,7 @@ fn find_throughput<'a>(
 }
 
 fn find_throughput_mut<'a>(
-    throughputs: &'a mut std::collections::HashMap<String, ProvisionedThroughput>,
+    throughputs: &'a mut std::collections::BTreeMap<String, ProvisionedThroughput>,
     id_or_arn: &str,
 ) -> Result<&'a mut ProvisionedThroughput, AwsServiceError> {
     // First find the key

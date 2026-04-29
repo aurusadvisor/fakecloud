@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -33,7 +33,7 @@ impl SsmService {
             .ok_or_else(|| missing("DocumentName"))?
             .to_string();
         let document_version = body["DocumentVersion"].as_str().map(|s| s.to_string());
-        let parameters: HashMap<String, Vec<String>> = body["Parameters"]
+        let parameters: BTreeMap<String, Vec<String>> = body["Parameters"]
             .as_object()
             .map(|obj| {
                 obj.iter()
@@ -76,7 +76,7 @@ impl SsmService {
             execution_start_time: now,
             execution_end_time: None,
             parameters,
-            outputs: HashMap::new(),
+            outputs: BTreeMap::new(),
             mode,
             target,
             targets,
@@ -287,8 +287,8 @@ impl SsmService {
             automation_execution_status: "Pending".to_string(),
             execution_start_time: now,
             execution_end_time: None,
-            parameters: HashMap::new(),
-            outputs: HashMap::new(),
+            parameters: BTreeMap::new(),
+            outputs: BTreeMap::new(),
             mode: "Auto".to_string(),
             target: None,
             targets: Vec::new(),

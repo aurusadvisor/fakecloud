@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -38,7 +38,7 @@ impl SsmService {
         let description = body["Description"].as_str().map(|s| s.to_string());
         let default_instance_name = body["DefaultInstanceName"].as_str().map(|s| s.to_string());
         let registration_limit = body["RegistrationLimit"].as_i64().unwrap_or(1);
-        let tags: HashMap<String, String> = body["Tags"]
+        let tags: BTreeMap<String, String> = body["Tags"]
             .as_array()
             .map(|arr| {
                 arr.iter()

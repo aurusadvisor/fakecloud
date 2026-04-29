@@ -495,7 +495,7 @@ pub(crate) fn delete_automated_reasoning_policy_test_case(
 // Helpers
 
 fn find_policy<'a>(
-    policies: &'a std::collections::HashMap<String, AutomatedReasoningPolicy>,
+    policies: &'a std::collections::BTreeMap<String, AutomatedReasoningPolicy>,
     identifier: &str,
 ) -> Option<&'a AutomatedReasoningPolicy> {
     policies.get(identifier).or_else(|| {
@@ -506,7 +506,7 @@ fn find_policy<'a>(
 }
 
 fn find_policy_key(
-    policies: &std::collections::HashMap<String, AutomatedReasoningPolicy>,
+    policies: &std::collections::BTreeMap<String, AutomatedReasoningPolicy>,
     identifier: &str,
 ) -> Option<String> {
     policies

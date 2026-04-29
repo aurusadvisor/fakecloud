@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -36,7 +36,7 @@ impl SsmService {
         let severity = body["Severity"].as_str().map(|s| s.to_string());
         let category = body["Category"].as_str().map(|s| s.to_string());
         let ops_item_type = body["OpsItemType"].as_str().map(|s| s.to_string());
-        let operational_data: HashMap<String, serde_json::Value> = body["OperationalData"]
+        let operational_data: BTreeMap<String, serde_json::Value> = body["OperationalData"]
             .as_object()
             .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
@@ -48,7 +48,7 @@ impl SsmService {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let tags: HashMap<String, String> = body["Tags"]
+        let tags: BTreeMap<String, String> = body["Tags"]
             .as_array()
             .map(|arr| {
                 arr.iter()
@@ -412,7 +412,7 @@ impl SsmService {
             .as_str()
             .ok_or_else(|| missing("ResourceId"))?
             .to_string();
-        let metadata: HashMap<String, serde_json::Value> = body["Metadata"]
+        let metadata: BTreeMap<String, serde_json::Value> = body["Metadata"]
             .as_object()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();

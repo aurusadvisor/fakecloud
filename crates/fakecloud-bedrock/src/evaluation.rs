@@ -198,7 +198,7 @@ pub(crate) fn batch_delete_evaluation_job(
 }
 
 fn find_job<'a>(
-    jobs: &'a std::collections::HashMap<String, EvaluationJob>,
+    jobs: &'a std::collections::BTreeMap<String, EvaluationJob>,
     id_or_arn: &str,
 ) -> Result<&'a EvaluationJob, AwsServiceError> {
     jobs.get(id_or_arn)
@@ -216,7 +216,7 @@ fn find_job<'a>(
 }
 
 fn find_job_key(
-    jobs: &std::collections::HashMap<String, EvaluationJob>,
+    jobs: &std::collections::BTreeMap<String, EvaluationJob>,
     id_or_arn: &str,
 ) -> Result<String, AwsServiceError> {
     jobs.iter()

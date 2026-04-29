@@ -2988,7 +2988,6 @@ mod tests {
     use bytes::Bytes;
     use http::HeaderMap;
     use parking_lot::RwLock;
-    use std::collections::HashMap;
 
     fn req(action: &str, params: &[(&str, &str)]) -> AwsRequest {
         let mut q = std::collections::HashMap::new();

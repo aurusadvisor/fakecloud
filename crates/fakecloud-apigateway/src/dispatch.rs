@@ -16,7 +16,7 @@
 //! `apiKeyId`, etc.) so handlers don't have to re-parse the URL.
 
 use http::Method;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Returns true when the request's `mode` query parameter equals `import`.
 /// `POST /restapis?mode=import` is the AWS REST shape for `ImportRestApi`,
@@ -28,14 +28,14 @@ fn is_import_mode(query_params: &HashMap<String, String>) -> bool {
 #[derive(Debug, Clone)]
 pub struct ResolvedAction {
     pub action: &'static str,
-    pub params: HashMap<String, String>,
+    pub params: BTreeMap<String, String>,
 }
 
 impl ResolvedAction {
     fn new(action: &'static str) -> Self {
         Self {
             action,
-            params: HashMap::new(),
+            params: BTreeMap::new(),
         }
     }
 

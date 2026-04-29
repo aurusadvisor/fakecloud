@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use http::StatusCode;
 use serde_json::{json, Value};
@@ -24,7 +24,7 @@ struct CreateMaintenanceWindowInput {
     start_date: Option<String>,
     end_date: Option<String>,
     client_token: Option<String>,
-    tags: HashMap<String, String>,
+    tags: BTreeMap<String, String>,
 }
 
 impl CreateMaintenanceWindowInput {
@@ -61,7 +61,7 @@ impl CreateMaintenanceWindowInput {
         let schedule_offset = body["ScheduleOffset"].as_i64();
         validate_optional_range_i64("ScheduleOffset", schedule_offset, 1, 6)?;
 
-        let tags: HashMap<String, String> = body["Tags"]
+        let tags: BTreeMap<String, String> = body["Tags"]
             .as_array()
             .map(|arr| {
                 arr.iter()

@@ -2131,7 +2131,7 @@ impl ApiGatewayV2Service {
         path: &str,
         status_code: u16,
     ) {
-        let headers_map: std::collections::HashMap<String, String> = req
+        let headers_map: std::collections::BTreeMap<String, String> = req
             .headers
             .iter()
             .filter_map(|(k, v)| {
@@ -2154,7 +2154,7 @@ impl ApiGatewayV2Service {
             method: req.method.to_string(),
             path: path.to_string(),
             headers: headers_map,
-            query_params: req.query_params.clone(),
+            query_params: req.query_params.clone().into_iter().collect(),
             body: body_string,
             timestamp: chrono::Utc::now(),
             status_code,

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -33,7 +33,7 @@ impl SsmService {
                 .as_str()
                 .ok_or_else(|| missing("CaptureTime"))?
                 .to_string();
-            let content: Vec<HashMap<String, String>> = item["Content"]
+            let content: Vec<BTreeMap<String, String>> = item["Content"]
                 .as_array()
                 .map(|arr| {
                     arr.iter()
@@ -50,11 +50,12 @@ impl SsmService {
                 })
                 .unwrap_or_default();
             let content_hash = item["ContentHash"].as_str().map(|s| s.to_string());
-            let context: Option<HashMap<String, String>> = item["Context"].as_object().map(|obj| {
-                obj.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            });
+            let context: Option<BTreeMap<String, String>> =
+                item["Context"].as_object().map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                });
 
             inv_items.push(InventoryItem {
                 type_name,
@@ -104,7 +105,7 @@ impl SsmService {
             .inventory_entries
             .values()
             .map(|entry| {
-                let data: HashMap<String, Value> = entry
+                let data: BTreeMap<String, Value> = entry
                     .items
                     .iter()
                     .map(|item| {
@@ -200,7 +201,7 @@ impl SsmService {
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let entries: Vec<&HashMap<String, String>> = state
+        let entries: Vec<&BTreeMap<String, String>> = state
             .inventory_entries
             .get(instance_id)
             .map(|entry| {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -17,7 +17,7 @@ struct SendCommandInput {
     document_name: String,
     instance_ids: Vec<String>,
     targets: Vec<Value>,
-    parameters: HashMap<String, Vec<String>>,
+    parameters: BTreeMap<String, Vec<String>>,
     comment: Option<String>,
     output_s3_bucket: Option<String>,
     output_s3_prefix: Option<String>,
@@ -76,7 +76,7 @@ impl SendCommandInput {
             })
             .unwrap_or_default();
         let targets: Vec<Value> = body["Targets"].as_array().cloned().unwrap_or_default();
-        let parameters: HashMap<String, Vec<String>> = body["Parameters"]
+        let parameters: BTreeMap<String, Vec<String>> = body["Parameters"]
             .as_object()
             .map(|obj| {
                 obj.iter()

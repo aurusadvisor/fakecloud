@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -251,7 +251,7 @@ fn create_new_parameter(
 
     let tag_map = input
         .tags
-        .map(|list| list.into_iter().collect::<HashMap<_, _>>())
+        .map(|list| list.into_iter().collect::<BTreeMap<_, _>>())
         .unwrap_or_default();
 
     Ok(SsmParameter {
@@ -262,7 +262,7 @@ fn create_new_parameter(
         version: 1,
         last_modified: Utc::now(),
         history: Vec::new(),
-        labels: HashMap::new(),
+        labels: BTreeMap::new(),
         tags: tag_map,
         description: input.description,
         allowed_pattern: input.allowed_pattern,
@@ -331,7 +331,7 @@ impl SsmService {
             return plaintext.to_string();
         };
         let key = key_id.filter(|k| !k.is_empty()).unwrap_or("aws/ssm");
-        let mut ctx = HashMap::new();
+        let mut ctx = std::collections::HashMap::new();
         ctx.insert("PARAMETER_ARN".to_string(), param_arn.to_string());
         match hook.encrypt(
             account_id,
@@ -368,7 +368,7 @@ impl SsmService {
         let Some(hook) = &self.kms_hook else {
             return ciphertext.to_string();
         };
-        let mut ctx = HashMap::new();
+        let mut ctx = std::collections::HashMap::new();
         ctx.insert("PARAMETER_ARN".to_string(), param_arn.to_string());
         match hook.decrypt(account_id, ciphertext, "ssm.amazonaws.com", ctx) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),

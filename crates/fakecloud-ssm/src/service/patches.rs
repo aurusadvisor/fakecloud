@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use http::StatusCode;
 use serde_json::{json, Value};
@@ -918,7 +918,7 @@ struct CreatePatchBaselineInput {
     approved_patches_enable_non_security: bool,
     available_security_updates_compliance_status: Option<String>,
     client_token: Option<String>,
-    tags: HashMap<String, String>,
+    tags: BTreeMap<String, String>,
 }
 
 impl CreatePatchBaselineInput {
@@ -990,7 +990,7 @@ impl CreatePatchBaselineInput {
                     .collect()
             })
             .unwrap_or_default();
-        let tags: HashMap<String, String> = body["Tags"]
+        let tags: BTreeMap<String, String> = body["Tags"]
             .as_array()
             .map(|arr| {
                 arr.iter()

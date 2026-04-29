@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
@@ -64,7 +64,7 @@ impl SsmService {
             let status = item["Status"].as_str().unwrap_or("COMPLIANT").to_string();
             let title = item["Title"].as_str().map(|s| s.to_string());
             let id = item["Id"].as_str().map(|s| s.to_string());
-            let details: HashMap<String, String> = item["Details"]
+            let details: BTreeMap<String, String> = item["Details"]
                 .as_object()
                 .map(|obj| {
                     obj.iter()
@@ -163,7 +163,7 @@ impl SsmService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
         // Group by compliance_type
-        let mut type_counts: HashMap<String, (i64, i64)> = HashMap::new(); // (compliant, non_compliant)
+        let mut type_counts: BTreeMap<String, (i64, i64)> = BTreeMap::new(); // (compliant, non_compliant)
         for item in &state.compliance_items {
             let entry = type_counts
                 .entry(item.compliance_type.clone())
@@ -208,7 +208,7 @@ impl SsmService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
         // Group by resource_id
-        let mut resource_status: HashMap<String, (String, String, i64, i64)> = HashMap::new();
+        let mut resource_status: BTreeMap<String, (String, String, i64, i64)> = BTreeMap::new();
         for item in &state.compliance_items {
             let entry = resource_status
                 .entry(item.resource_id.clone())

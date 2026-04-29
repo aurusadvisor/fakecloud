@@ -158,7 +158,7 @@ pub(crate) fn stop_model_invocation_job(
 }
 
 fn find_job<'a>(
-    jobs: &'a std::collections::HashMap<String, ModelInvocationJob>,
+    jobs: &'a std::collections::BTreeMap<String, ModelInvocationJob>,
     id_or_arn: &str,
 ) -> Result<&'a ModelInvocationJob, AwsServiceError> {
     jobs.get(id_or_arn)
@@ -176,7 +176,7 @@ fn find_job<'a>(
 }
 
 fn find_job_key(
-    jobs: &std::collections::HashMap<String, ModelInvocationJob>,
+    jobs: &std::collections::BTreeMap<String, ModelInvocationJob>,
     id_or_arn: &str,
 ) -> Result<String, AwsServiceError> {
     jobs.iter()
