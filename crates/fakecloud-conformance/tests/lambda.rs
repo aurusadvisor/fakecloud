@@ -376,14 +376,14 @@ async fn lambda_alias_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_alias()
         .function_name("alias-fn")
         .name("live")
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_aliases()
         .function_name("alias-fn")
         .send()
@@ -412,7 +412,7 @@ async fn lambda_list_versions_by_function() {
     let server = TestServer::start().await;
     let client = server.lambda_client().await;
     make_basic_function(&client, "ver-fn").await;
-    let _ = client
+    client
         .list_versions_by_function()
         .function_name("ver-fn")
         .send()
@@ -428,7 +428,7 @@ async fn lambda_function_configuration_extras() {
     let server = TestServer::start().await;
     let client = server.lambda_client().await;
     make_basic_function(&client, "cfg-fn").await;
-    let _ = client
+    client
         .get_function_configuration()
         .function_name("cfg-fn")
         .send()
@@ -455,7 +455,7 @@ async fn lambda_function_configuration_extras() {
 async fn lambda_get_account_settings() {
     let server = TestServer::start().await;
     let client = server.lambda_client().await;
-    let _ = client.get_account_settings().send().await.unwrap();
+    client.get_account_settings().send().await.unwrap();
 }
 
 #[test_action("lambda", "InvokeAsync", checksum = "77173d97")]
@@ -466,7 +466,7 @@ async fn lambda_invoke_async_and_stream() {
     let client = server.lambda_client().await;
     make_basic_function(&client, "inv-fn").await;
     #[allow(deprecated)]
-    let _ = client
+    client
         .invoke_async()
         .function_name("inv-fn")
         .invoke_args(aws_sdk_lambda::primitives::ByteStream::from_static(b"{}"))
@@ -518,21 +518,21 @@ async fn lambda_layer_lifecycle() {
         .unwrap();
     let version = resp.version();
     let arn = resp.layer_version_arn().unwrap().to_string();
-    let _ = client
+    client
         .get_layer_version()
         .layer_name("conf-layer")
         .version_number(version)
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_layer_version_by_arn()
         .arn(&arn)
         .send()
         .await
         .unwrap();
-    let _ = client.list_layers().send().await.unwrap();
-    let _ = client
+    client.list_layers().send().await.unwrap();
+    client
         .list_layer_versions()
         .layer_name("conf-layer")
         .send()
@@ -548,7 +548,7 @@ async fn lambda_layer_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_layer_version_policy()
         .layer_name("conf-layer")
         .version_number(version)
@@ -589,7 +589,7 @@ async fn lambda_function_url_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_function_url_config()
         .function_name("url-fn")
         .send()
@@ -602,7 +602,7 @@ async fn lambda_function_url_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_function_url_configs()
         .function_name("url-fn")
         .send()
@@ -635,7 +635,7 @@ async fn lambda_concurrency_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_function_concurrency()
         .function_name("conc-fn")
         .send()
@@ -655,14 +655,14 @@ async fn lambda_concurrency_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_provisioned_concurrency_config()
         .function_name("conc-fn")
         .qualifier("$LATEST")
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_provisioned_concurrency_configs()
         .function_name("conc-fn")
         .send()
@@ -710,7 +710,7 @@ async fn lambda_code_signing_lifecycle() {
         .clone();
     let id = csc.code_signing_config_id().to_string();
     let arn = csc.code_signing_config_arn().to_string();
-    let _ = client
+    client
         .get_code_signing_config()
         .code_signing_config_arn(&arn)
         .send()
@@ -723,7 +723,7 @@ async fn lambda_code_signing_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client.list_code_signing_configs().send().await.unwrap();
+    client.list_code_signing_configs().send().await.unwrap();
     client
         .put_function_code_signing_config()
         .function_name("csc-fn")
@@ -731,13 +731,13 @@ async fn lambda_code_signing_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_function_code_signing_config()
         .function_name("csc-fn")
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_functions_by_code_signing_config()
         .code_signing_config_arn(&arn)
         .send()
@@ -776,7 +776,7 @@ async fn lambda_event_invoke_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_function_event_invoke_config()
         .function_name("ev-fn")
         .send()
@@ -789,7 +789,7 @@ async fn lambda_event_invoke_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_function_event_invoke_configs()
         .function_name("ev-fn")
         .send()
@@ -817,7 +817,7 @@ async fn lambda_runtime_management() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_runtime_management_config()
         .function_name("rm-fn")
         .send()
@@ -839,7 +839,7 @@ async fn lambda_recursion_config() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_function_recursion_config()
         .function_name("rec-fn")
         .send()
@@ -887,7 +887,7 @@ async fn lambda_tag_resource_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client.list_tags().resource(&arn).send().await.unwrap();
+    client.list_tags().resource(&arn).send().await.unwrap();
     client
         .untag_resource()
         .resource(&arn)
@@ -917,7 +917,7 @@ async fn lambda_capacity_provider_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_capacity_provider()
         .capacity_provider_name("cp1")
         .send()
@@ -929,8 +929,8 @@ async fn lambda_capacity_provider_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client.list_capacity_providers().send().await.unwrap();
-    let _ = client
+    client.list_capacity_providers().send().await.unwrap();
+    client
         .list_function_versions_by_capacity_provider()
         .capacity_provider_name("cp1")
         .send()
@@ -969,26 +969,26 @@ async fn lambda_durable_execution_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_durable_execution()
         .durable_execution_arn("durable-1")
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_durable_execution_history()
         .durable_execution_arn("durable-1")
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_durable_execution_state()
         .durable_execution_arn("durable-1")
         .checkpoint_token("token-1")
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_durable_executions_by_function()
         .function_name("durable-fn")
         .send()
@@ -1034,7 +1034,7 @@ async fn lambda_update_event_source_mapping() {
         .await
         .unwrap();
     let uuid = esm.uuid().unwrap();
-    let _ = client
+    client
         .update_event_source_mapping()
         .uuid(uuid)
         .batch_size(20)

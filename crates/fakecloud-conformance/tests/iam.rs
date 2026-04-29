@@ -142,7 +142,7 @@ async fn iam_access_key_lifecycle() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_access_key_last_used()
         .access_key_id(&key_id)
         .send()
@@ -359,8 +359,8 @@ async fn iam_policy_lifecycle() {
         .unwrap();
     let arn = create.policy().unwrap().arn().unwrap().to_string();
 
-    let _ = client.get_policy().policy_arn(&arn).send().await.unwrap();
-    let _ = client.list_policies().send().await.unwrap();
+    client.get_policy().policy_arn(&arn).send().await.unwrap();
+    client.list_policies().send().await.unwrap();
 
     client
         .delete_policy()
@@ -456,7 +456,7 @@ async fn iam_policy_versions() {
         .unwrap()
         .to_string();
 
-    let _ = client
+    client
         .get_policy_version()
         .policy_arn(&arn)
         .version_id(&v2_id)
@@ -464,7 +464,7 @@ async fn iam_policy_versions() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .list_policy_versions()
         .policy_arn(&arn)
         .send()
@@ -572,7 +572,7 @@ async fn iam_role_inline_policies() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_role_policy()
         .role_name("conf-rip")
         .policy_name("inline1")
@@ -678,7 +678,7 @@ async fn iam_user_inline_policies() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_user_policy()
         .user_name("conf-uip")
         .policy_name("inline1")
@@ -830,7 +830,7 @@ async fn iam_group_inline_policies() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_group_policy()
         .group_name("conf-gip")
         .policy_name("inline1")
@@ -927,14 +927,14 @@ async fn iam_instance_profile_lifecycle() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_instance_profile()
         .instance_profile_name("conf-ip")
         .send()
         .await
         .unwrap();
 
-    let _ = client.list_instance_profiles().send().await.unwrap();
+    client.list_instance_profiles().send().await.unwrap();
 
     client
         .delete_instance_profile()
@@ -1065,7 +1065,7 @@ async fn iam_login_profile() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_login_profile()
         .user_name("conf-lp")
         .send()
@@ -1113,14 +1113,14 @@ async fn iam_saml_provider() {
         .unwrap();
     let arn = create.saml_provider_arn().unwrap().to_string();
 
-    let _ = client
+    client
         .get_saml_provider()
         .saml_provider_arn(&arn)
         .send()
         .await
         .unwrap();
 
-    let _ = client.list_saml_providers().send().await.unwrap();
+    client.list_saml_providers().send().await.unwrap();
 
     client
         .update_saml_provider()
@@ -1167,14 +1167,14 @@ async fn iam_oidc_provider() {
         .unwrap();
     let arn = create.open_id_connect_provider_arn().unwrap().to_string();
 
-    let _ = client
+    client
         .get_open_id_connect_provider()
         .open_id_connect_provider_arn(&arn)
         .send()
         .await
         .unwrap();
 
-    let _ = client
+    client
         .list_open_id_connect_providers()
         .send()
         .await
@@ -1285,14 +1285,14 @@ async fn iam_server_certificate() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_server_certificate()
         .server_certificate_name("conf-cert")
         .send()
         .await
         .unwrap();
 
-    let _ = client.list_server_certificates().send().await.unwrap();
+    client.list_server_certificates().send().await.unwrap();
 
     client
         .delete_server_certificate()
@@ -1331,7 +1331,7 @@ async fn iam_signing_certificate() {
         .unwrap();
     let cert_id = upload.certificate().unwrap().certificate_id().to_string();
 
-    let _ = client
+    client
         .list_signing_certificates()
         .user_name("conf-sc")
         .send()
@@ -1401,8 +1401,8 @@ async fn iam_account_info() {
     let server = TestServer::start().await;
     let client = server.iam_client().await;
 
-    let _ = client.get_account_summary().send().await.unwrap();
-    let _ = client
+    client.get_account_summary().send().await.unwrap();
+    client
         .get_account_authorization_details()
         .send()
         .await
@@ -1451,7 +1451,7 @@ async fn iam_password_policy() {
         .await
         .unwrap();
 
-    let _ = client.get_account_password_policy().send().await.unwrap();
+    client.get_account_password_policy().send().await.unwrap();
 
     client
         .delete_account_password_policy()
@@ -1499,7 +1499,7 @@ async fn iam_virtual_mfa_device() {
         .serial_number()
         .to_string();
 
-    let _ = client.list_virtual_mfa_devices().send().await.unwrap();
+    client.list_virtual_mfa_devices().send().await.unwrap();
 
     client
         .delete_virtual_mfa_device()
@@ -1585,7 +1585,7 @@ async fn iam_list_entities_for_policy() {
         .unwrap();
     let arn = pol.policy().unwrap().arn().unwrap().to_string();
 
-    let _ = client
+    client
         .list_entities_for_policy()
         .policy_arn(&arn)
         .send()
@@ -1629,7 +1629,7 @@ async fn iam_ssh_public_keys() {
         .ssh_public_key_id()
         .to_string();
 
-    let _ = client
+    client
         .get_ssh_public_key()
         .user_name("conf-ssh")
         .ssh_public_key_id(&key_id)
@@ -1638,7 +1638,7 @@ async fn iam_ssh_public_keys() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .list_ssh_public_keys()
         .user_name("conf-ssh")
         .send()
@@ -1691,7 +1691,7 @@ async fn iam_service_specific_credential_lifecycle() {
         .unwrap()
         .service_specific_credential_id()
         .to_string();
-    let _ = client
+    client
         .list_service_specific_credentials()
         .user_name("ssc-user")
         .send()

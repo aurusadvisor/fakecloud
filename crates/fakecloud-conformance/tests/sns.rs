@@ -1024,7 +1024,7 @@ async fn sns_get_data_protection_policy() {
         .topic_arn()
         .unwrap()
         .to_string();
-    let _ = client
+    client
         .get_data_protection_policy()
         .resource_arn(&topic_arn)
         .send()

@@ -863,7 +863,7 @@ async fn apigateway_v1_domain_name_lifecycle() {
         .unwrap();
 
     let (api_id, _) = create_api(&client, "conf-bpm").await;
-    let _ = client
+    client
         .create_deployment()
         .rest_api_id(&api_id)
         .stage_name("v1")
@@ -1086,7 +1086,7 @@ async fn apigateway_v1_export_sdk() {
     let server = TestServer::start().await;
     let client = server.apigateway_client().await;
     let (api_id, _) = create_api(&client, "conf-export").await;
-    let _ = client
+    client
         .create_deployment()
         .rest_api_id(&api_id)
         .stage_name("v1")
