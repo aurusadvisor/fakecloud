@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -191,7 +191,7 @@ impl DynamoDbService {
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
-            contributor_insights_counters: HashMap::new(),
+            contributor_insights_counters: BTreeMap::new(),
             stream_enabled,
             stream_view_type,
             stream_arn,
@@ -957,7 +957,7 @@ impl DynamoDbService {
             items: backup.items.clone(),
             gsi: Vec::new(),
             lsi: Vec::new(),
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             created_at: now,
             status: "ACTIVE".to_string(),
             item_count: 0,
@@ -969,7 +969,7 @@ impl DynamoDbService {
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
-            contributor_insights_counters: HashMap::new(),
+            contributor_insights_counters: BTreeMap::new(),
             stream_enabled: false,
             stream_view_type: None,
             stream_arn: None,
@@ -1039,7 +1039,7 @@ impl DynamoDbService {
             items: source.items.clone(),
             gsi: Vec::new(),
             lsi: Vec::new(),
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             created_at: now,
             status: "ACTIVE".to_string(),
             item_count: 0,
@@ -1051,7 +1051,7 @@ impl DynamoDbService {
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
-            contributor_insights_counters: HashMap::new(),
+            contributor_insights_counters: BTreeMap::new(),
             stream_enabled: false,
             stream_view_type: None,
             stream_arn: None,
@@ -1532,7 +1532,7 @@ impl DynamoDbService {
             items: imported_items,
             gsi: Vec::new(),
             lsi: Vec::new(),
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             created_at: now,
             status: "ACTIVE".to_string(),
             item_count: 0,
@@ -1544,7 +1544,7 @@ impl DynamoDbService {
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
-            contributor_insights_counters: HashMap::new(),
+            contributor_insights_counters: BTreeMap::new(),
             stream_enabled: false,
             stream_view_type: None,
             stream_arn: None,

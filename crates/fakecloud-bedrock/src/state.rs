@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -24,13 +24,13 @@ pub struct BedrockSnapshot {
     pub state: Option<BedrockState>,
 }
 
-/// Serialize/deserialize `HashMap<(String, String), V>` as `Vec<(String, String, V)>`.
+/// Serialize/deserialize `BTreeMap<(String, String), V>` as `Vec<(String, String, V)>`.
 mod tuple2_map_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     pub(crate) fn serialize<V: Serialize, S: Serializer>(
-        map: &HashMap<(String, String), V>,
+        map: &BTreeMap<(String, String), V>,
         s: S,
     ) -> Result<S::Ok, S::Error> {
         let entries: Vec<(&String, &String, &V)> =
@@ -40,20 +40,20 @@ mod tuple2_map_serde {
 
     pub(crate) fn deserialize<'de, V: Deserialize<'de>, D: Deserializer<'de>>(
         d: D,
-    ) -> Result<HashMap<(String, String), V>, D::Error> {
+    ) -> Result<BTreeMap<(String, String), V>, D::Error> {
         let entries: Vec<(String, String, V)> = Vec::deserialize(d)?;
         Ok(entries.into_iter().map(|(a, b, v)| ((a, b), v)).collect())
     }
 }
 
-/// Serialize/deserialize `HashMap<(String, String, String), V>` as `Vec<(String, String, String, V)>`.
+/// Serialize/deserialize `BTreeMap<(String, String, String), V>` as `Vec<(String, String, String, V)>`.
 #[allow(clippy::type_complexity)]
 mod tuple3_map_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     pub(crate) fn serialize<V: Serialize, S: Serializer>(
-        map: &HashMap<(String, String, String), V>,
+        map: &BTreeMap<(String, String, String), V>,
         s: S,
     ) -> Result<S::Ok, S::Error> {
         let entries: Vec<(&String, &String, &String, &V)> =
@@ -63,7 +63,7 @@ mod tuple3_map_serde {
 
     pub(crate) fn deserialize<'de, V: Deserialize<'de>, D: Deserializer<'de>>(
         d: D,
-    ) -> Result<HashMap<(String, String, String), V>, D::Error> {
+    ) -> Result<BTreeMap<(String, String, String), V>, D::Error> {
         let entries: Vec<(String, String, String, V)> = Vec::deserialize(d)?;
         Ok(entries
             .into_iter()
@@ -77,16 +77,16 @@ pub struct BedrockState {
     pub account_id: String,
     pub region: String,
     /// Tags keyed by resource ARN.
-    pub tags: HashMap<String, HashMap<String, String>>,
+    pub tags: BTreeMap<String, BTreeMap<String, String>>,
     /// Guardrails keyed by guardrail ID.
-    pub guardrails: HashMap<String, Guardrail>,
+    pub guardrails: BTreeMap<String, Guardrail>,
     /// Guardrail versions keyed by (guardrail_id, version).
     #[serde(with = "tuple2_map_serde")]
-    pub guardrail_versions: HashMap<(String, String), GuardrailVersion>,
+    pub guardrail_versions: BTreeMap<(String, String), GuardrailVersion>,
     /// Model customization jobs keyed by job ARN.
-    pub customization_jobs: HashMap<String, CustomizationJob>,
+    pub customization_jobs: BTreeMap<String, CustomizationJob>,
     /// Provisioned model throughputs keyed by provisioned model ID.
-    pub provisioned_throughputs: HashMap<String, ProvisionedThroughput>,
+    pub provisioned_throughputs: BTreeMap<String, ProvisionedThroughput>,
     /// Model invocation logging configuration.
     pub logging_config: Option<LoggingConfig>,
     /// All model invocations recorded for introspection.
@@ -94,57 +94,57 @@ pub struct BedrockState {
     pub invocations: Vec<ModelInvocation>,
     /// Custom responses configured per model ID via simulation endpoint.
     #[serde(skip)]
-    pub custom_responses: HashMap<String, String>,
+    pub custom_responses: BTreeMap<String, String>,
     /// Prompt-conditional response rules per model ID.
     #[serde(skip)]
-    pub response_rules: HashMap<String, Vec<ResponseRule>>,
+    pub response_rules: BTreeMap<String, Vec<ResponseRule>>,
     /// Queued fault-injection rules.
     #[serde(skip)]
     pub fault_rules: Vec<FaultRule>,
     /// Async invocations keyed by invocation ARN.
-    pub async_invocations: HashMap<String, AsyncInvocation>,
+    pub async_invocations: BTreeMap<String, AsyncInvocation>,
     /// Custom models keyed by model ARN.
-    pub custom_models: HashMap<String, CustomModel>,
+    pub custom_models: BTreeMap<String, CustomModel>,
     /// Custom model deployments keyed by deployment ARN.
-    pub custom_model_deployments: HashMap<String, CustomModelDeployment>,
+    pub custom_model_deployments: BTreeMap<String, CustomModelDeployment>,
     /// Model import jobs keyed by job ARN.
-    pub model_import_jobs: HashMap<String, ModelImportJob>,
+    pub model_import_jobs: BTreeMap<String, ModelImportJob>,
     /// Imported models keyed by model ARN.
-    pub imported_models: HashMap<String, ImportedModel>,
+    pub imported_models: BTreeMap<String, ImportedModel>,
     /// Model copy jobs keyed by job ARN.
-    pub model_copy_jobs: HashMap<String, ModelCopyJob>,
+    pub model_copy_jobs: BTreeMap<String, ModelCopyJob>,
     /// Model invocation jobs (batch inference) keyed by job ARN.
-    pub model_invocation_jobs: HashMap<String, ModelInvocationJob>,
+    pub model_invocation_jobs: BTreeMap<String, ModelInvocationJob>,
     /// Evaluation jobs keyed by job ARN.
-    pub evaluation_jobs: HashMap<String, EvaluationJob>,
+    pub evaluation_jobs: BTreeMap<String, EvaluationJob>,
     /// Inference profiles keyed by ARN.
-    pub inference_profiles: HashMap<String, InferenceProfile>,
+    pub inference_profiles: BTreeMap<String, InferenceProfile>,
     /// Prompt routers keyed by ARN.
-    pub prompt_routers: HashMap<String, PromptRouter>,
+    pub prompt_routers: BTreeMap<String, PromptRouter>,
     /// Resource policies keyed by resource ARN.
-    pub resource_policies: HashMap<String, String>,
+    pub resource_policies: BTreeMap<String, String>,
     /// Marketplace model endpoints keyed by endpoint ARN.
-    pub marketplace_endpoints: HashMap<String, MarketplaceModelEndpoint>,
+    pub marketplace_endpoints: BTreeMap<String, MarketplaceModelEndpoint>,
     /// Foundation model agreements keyed by agreement ID.
-    pub foundation_model_agreements: HashMap<String, FoundationModelAgreement>,
+    pub foundation_model_agreements: BTreeMap<String, FoundationModelAgreement>,
     /// Use case for model access.
     pub use_case_for_model_access: Option<serde_json::Value>,
     /// Enforced guardrail configurations keyed by config ID.
-    pub enforced_guardrail_configs: HashMap<String, serde_json::Value>,
+    pub enforced_guardrail_configs: BTreeMap<String, serde_json::Value>,
     /// Automated reasoning policies keyed by policy ARN.
-    pub automated_reasoning_policies: HashMap<String, AutomatedReasoningPolicy>,
+    pub automated_reasoning_policies: BTreeMap<String, AutomatedReasoningPolicy>,
     /// Automated reasoning test cases keyed by (policy_arn, test_case_id).
     #[serde(with = "tuple2_map_serde")]
-    pub automated_reasoning_test_cases: HashMap<(String, String), AutomatedReasoningTestCase>,
+    pub automated_reasoning_test_cases: BTreeMap<(String, String), AutomatedReasoningTestCase>,
     /// Automated reasoning build workflows keyed by (policy_arn, workflow_id).
     #[serde(with = "tuple2_map_serde")]
-    pub ar_build_workflows: HashMap<(String, String), AutomatedReasoningBuildWorkflow>,
+    pub ar_build_workflows: BTreeMap<(String, String), AutomatedReasoningBuildWorkflow>,
     /// Automated reasoning test results keyed by (policy_arn, workflow_id, test_case_id).
     #[serde(with = "tuple3_map_serde")]
-    pub ar_test_results: HashMap<(String, String, String), serde_json::Value>,
+    pub ar_test_results: BTreeMap<(String, String, String), serde_json::Value>,
     /// Automated reasoning annotations keyed by (policy_arn, workflow_id).
     #[serde(with = "tuple2_map_serde")]
-    pub ar_annotations: HashMap<(String, String), serde_json::Value>,
+    pub ar_annotations: BTreeMap<(String, String), serde_json::Value>,
 }
 
 impl BedrockState {
@@ -152,36 +152,36 @@ impl BedrockState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            tags: HashMap::new(),
-            guardrails: HashMap::new(),
-            guardrail_versions: HashMap::new(),
-            customization_jobs: HashMap::new(),
-            provisioned_throughputs: HashMap::new(),
+            tags: BTreeMap::new(),
+            guardrails: BTreeMap::new(),
+            guardrail_versions: BTreeMap::new(),
+            customization_jobs: BTreeMap::new(),
+            provisioned_throughputs: BTreeMap::new(),
             logging_config: None,
             invocations: Vec::new(),
-            custom_responses: HashMap::new(),
-            response_rules: HashMap::new(),
+            custom_responses: BTreeMap::new(),
+            response_rules: BTreeMap::new(),
             fault_rules: Vec::new(),
-            async_invocations: HashMap::new(),
-            custom_models: HashMap::new(),
-            custom_model_deployments: HashMap::new(),
-            model_import_jobs: HashMap::new(),
-            imported_models: HashMap::new(),
-            model_copy_jobs: HashMap::new(),
-            model_invocation_jobs: HashMap::new(),
-            evaluation_jobs: HashMap::new(),
-            inference_profiles: HashMap::new(),
-            prompt_routers: HashMap::new(),
-            resource_policies: HashMap::new(),
-            marketplace_endpoints: HashMap::new(),
-            foundation_model_agreements: HashMap::new(),
+            async_invocations: BTreeMap::new(),
+            custom_models: BTreeMap::new(),
+            custom_model_deployments: BTreeMap::new(),
+            model_import_jobs: BTreeMap::new(),
+            imported_models: BTreeMap::new(),
+            model_copy_jobs: BTreeMap::new(),
+            model_invocation_jobs: BTreeMap::new(),
+            evaluation_jobs: BTreeMap::new(),
+            inference_profiles: BTreeMap::new(),
+            prompt_routers: BTreeMap::new(),
+            resource_policies: BTreeMap::new(),
+            marketplace_endpoints: BTreeMap::new(),
+            foundation_model_agreements: BTreeMap::new(),
             use_case_for_model_access: None,
-            enforced_guardrail_configs: HashMap::new(),
-            automated_reasoning_policies: HashMap::new(),
-            automated_reasoning_test_cases: HashMap::new(),
-            ar_build_workflows: HashMap::new(),
-            ar_test_results: HashMap::new(),
-            ar_annotations: HashMap::new(),
+            enforced_guardrail_configs: BTreeMap::new(),
+            automated_reasoning_policies: BTreeMap::new(),
+            automated_reasoning_test_cases: BTreeMap::new(),
+            ar_build_workflows: BTreeMap::new(),
+            ar_test_results: BTreeMap::new(),
+            ar_annotations: BTreeMap::new(),
         }
     }
 
@@ -264,7 +264,7 @@ pub struct CustomizationJob {
     pub role_arn: String,
     pub training_data_config: serde_json::Value,
     pub output_data_config: serde_json::Value,
-    pub hyper_parameters: HashMap<String, String>,
+    pub hyper_parameters: BTreeMap<String, String>,
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub last_modified_at: DateTime<Utc>,
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn reset_clears_all_collections() {
         let mut s = BedrockState::new("123", "us-east-1");
-        s.tags.insert("arn".to_string(), HashMap::new());
+        s.tags.insert("arn".to_string(), BTreeMap::new());
         s.custom_responses.insert("m".to_string(), "r".to_string());
         s.fault_rules.push(FaultRule {
             error_type: "T".to_string(),

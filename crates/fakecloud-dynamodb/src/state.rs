@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 fn empty_stream_records() -> Arc<RwLock<Vec<StreamRecord>>> {
@@ -85,7 +85,7 @@ pub struct DynamoTable {
     pub items: Vec<HashMap<String, AttributeValue>>,
     pub gsi: Vec<GlobalSecondaryIndex>,
     pub lsi: Vec<LocalSecondaryIndex>,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     pub created_at: DateTime<Utc>,
     pub status: String,
     pub item_count: i64,
@@ -101,7 +101,7 @@ pub struct DynamoTable {
     /// Contributor insights status
     pub contributor_insights_status: String,
     /// Contributor insights: partition key access counters (key_value_string -> count)
-    pub contributor_insights_counters: HashMap<String, u64>,
+    pub contributor_insights_counters: BTreeMap<String, u64>,
     /// DynamoDB Streams configuration
     pub stream_enabled: bool,
     pub stream_view_type: Option<String>, // KEYS_ONLY, NEW_IMAGE, OLD_IMAGE, NEW_AND_OLD_IMAGES
@@ -359,11 +359,11 @@ impl DynamoTable {
 pub struct DynamoDbState {
     pub account_id: String,
     pub region: String,
-    pub tables: HashMap<String, DynamoTable>,
-    pub backups: HashMap<String, BackupDescription>,
-    pub global_tables: HashMap<String, GlobalTableDescription>,
-    pub exports: HashMap<String, ExportDescription>,
-    pub imports: HashMap<String, ImportDescription>,
+    pub tables: BTreeMap<String, DynamoTable>,
+    pub backups: BTreeMap<String, BackupDescription>,
+    pub global_tables: BTreeMap<String, GlobalTableDescription>,
+    pub exports: BTreeMap<String, ExportDescription>,
+    pub imports: BTreeMap<String, ImportDescription>,
 }
 
 /// On-disk snapshot envelope. The payload is the full [`DynamoDbState`];
@@ -387,11 +387,11 @@ impl DynamoDbState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            tables: HashMap::new(),
-            backups: HashMap::new(),
-            global_tables: HashMap::new(),
-            exports: HashMap::new(),
-            imports: HashMap::new(),
+            tables: BTreeMap::new(),
+            backups: BTreeMap::new(),
+            global_tables: BTreeMap::new(),
+            exports: BTreeMap::new(),
+            imports: BTreeMap::new(),
         }
     }
 
@@ -475,7 +475,7 @@ mod tests {
             items: Vec::new(),
             gsi: Vec::new(),
             lsi: Vec::new(),
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             created_at: Utc::now(),
             status: "ACTIVE".to_string(),
             item_count: 0,
@@ -487,7 +487,7 @@ mod tests {
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
-            contributor_insights_counters: HashMap::new(),
+            contributor_insights_counters: BTreeMap::new(),
             stream_enabled: false,
             stream_view_type: None,
             stream_arn: None,

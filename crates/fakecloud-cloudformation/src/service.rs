@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fakecloud_core::delivery::DeliveryBus;
@@ -37,10 +37,10 @@ fn provision_stack_resources(
     provisioner: &ResourceProvisioner,
     resource_defs: &[template::ResourceDefinition],
     template_body: &str,
-    parameters: &HashMap<String, String>,
+    parameters: &BTreeMap<String, String>,
 ) -> Result<Vec<StackResource>, AwsServiceError> {
     let mut resources = Vec::new();
-    let mut physical_ids: HashMap<String, String> = HashMap::new();
+    let mut physical_ids: BTreeMap<String, String> = BTreeMap::new();
     let mut pending: Vec<&template::ResourceDefinition> = resource_defs.iter().collect();
     let max_passes = pending.len() + 1;
 
@@ -190,8 +190,8 @@ impl CloudFormationService {
         body_params.get(key).cloned()
     }
 
-    pub(crate) fn get_all_params(req: &AwsRequest) -> HashMap<String, String> {
-        let mut params = req.query_params.clone();
+    pub(crate) fn get_all_params(req: &AwsRequest) -> BTreeMap<String, String> {
+        let mut params: BTreeMap<String, String> = req.query_params.clone().into_iter().collect();
         let body_params = fakecloud_core::protocol::parse_query_body(&req.body);
         for (k, v) in body_params {
             params.entry(k).or_insert(v);
@@ -199,8 +199,8 @@ impl CloudFormationService {
         params
     }
 
-    fn extract_tags(params: &HashMap<String, String>) -> HashMap<String, String> {
-        let mut tags = HashMap::new();
+    fn extract_tags(params: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        let mut tags = BTreeMap::new();
         for i in 1.. {
             let key_param = format!("Tags.member.{i}.Key");
             let value_param = format!("Tags.member.{i}.Value");
@@ -214,8 +214,8 @@ impl CloudFormationService {
         tags
     }
 
-    fn extract_parameters(params: &HashMap<String, String>) -> HashMap<String, String> {
-        let mut result = HashMap::new();
+    fn extract_parameters(params: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        let mut result = BTreeMap::new();
         for i in 1.. {
             let key_param = format!("Parameters.member.{i}.ParameterKey");
             let value_param = format!("Parameters.member.{i}.ParameterValue");
@@ -229,7 +229,7 @@ impl CloudFormationService {
         result
     }
 
-    fn extract_notification_arns(params: &HashMap<String, String>) -> Vec<String> {
+    fn extract_notification_arns(params: &BTreeMap<String, String>) -> Vec<String> {
         let mut arns = Vec::new();
         for i in 1.. {
             let key = format!("NotificationARNs.member.{i}");
@@ -810,8 +810,8 @@ impl AwsService for CloudFormationService {
 struct UpdateStackInput {
     stack_name: String,
     template_body: String,
-    parameters: HashMap<String, String>,
-    tags: HashMap<String, String>,
+    parameters: BTreeMap<String, String>,
+    tags: BTreeMap<String, String>,
     notification_arns: Vec<String>,
 }
 
@@ -857,7 +857,7 @@ fn apply_resource_updates(
     stack: &mut crate::state::Stack,
     new_resource_defs: &[template::ResourceDefinition],
     template_body: &str,
-    parameters: &HashMap<String, String>,
+    parameters: &BTreeMap<String, String>,
     provisioner: &crate::resource_provisioner::ResourceProvisioner,
 ) -> Result<(), String> {
     let old_logical_ids: std::collections::HashSet<String> = stack
@@ -885,7 +885,7 @@ fn apply_resource_updates(
         .retain(|r| new_logical_ids.contains(&r.logical_id));
 
     // Build physical ID map from existing resources
-    let mut physical_ids: HashMap<String, String> = stack
+    let mut physical_ids: BTreeMap<String, String> = stack
         .resources
         .iter()
         .map(|r| (r.logical_id.clone(), r.physical_id.clone()))
@@ -937,6 +937,7 @@ mod tests {
     use super::*;
     use http::HeaderMap;
     use parking_lot::RwLock;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     fn make_service() -> CloudFormationService {

@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub type SharedApiGatewayV2State =
@@ -17,17 +17,17 @@ pub struct ApiGatewayV2State {
     pub account_id: String,
     pub region: String,
     #[serde(default)]
-    pub apis: HashMap<String, HttpApi>,
+    pub apis: BTreeMap<String, HttpApi>,
     #[serde(default)]
-    pub routes: HashMap<String, HashMap<String, Route>>,
+    pub routes: BTreeMap<String, BTreeMap<String, Route>>,
     #[serde(default)]
-    pub integrations: HashMap<String, HashMap<String, Integration>>,
+    pub integrations: BTreeMap<String, BTreeMap<String, Integration>>,
     #[serde(default)]
-    pub stages: HashMap<String, HashMap<String, Stage>>,
+    pub stages: BTreeMap<String, BTreeMap<String, Stage>>,
     #[serde(default)]
-    pub deployments: HashMap<String, HashMap<String, Deployment>>,
+    pub deployments: BTreeMap<String, BTreeMap<String, Deployment>>,
     #[serde(default)]
-    pub authorizers: HashMap<String, HashMap<String, Authorizer>>,
+    pub authorizers: BTreeMap<String, BTreeMap<String, Authorizer>>,
     /// Introspection-only buffer backing `/_fakecloud/apigatewayv2/requests`.
     /// Intentionally not persisted across restarts.
     #[serde(default, skip_serializing)]
@@ -35,41 +35,41 @@ pub struct ApiGatewayV2State {
     /// Per-resource generic stores for ops added in the closure batch.
     /// Each map values are JSON bodies the API gateway returns verbatim.
     #[serde(default)]
-    pub domain_names: HashMap<String, serde_json::Value>,
+    pub domain_names: BTreeMap<String, serde_json::Value>,
     /// Per-domain api mappings keyed by mapping id.
     #[serde(default)]
-    pub api_mappings: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub api_mappings: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Per-api models keyed by model id.
     #[serde(default)]
-    pub models: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub models: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Per-api integration responses keyed by `{integration}/{response}`.
     #[serde(default)]
-    pub integration_responses: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub integration_responses: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Per-api route responses keyed by `{route}/{response}`.
     #[serde(default)]
-    pub route_responses: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub route_responses: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Routing rules keyed by domain name + rule id.
     #[serde(default)]
-    pub routing_rules: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub routing_rules: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// VPC links keyed by id.
     #[serde(default)]
-    pub vpc_links: HashMap<String, serde_json::Value>,
+    pub vpc_links: BTreeMap<String, serde_json::Value>,
     /// Tags keyed by resource ARN.
     #[serde(default)]
-    pub tags: HashMap<String, HashMap<String, String>>,
+    pub tags: BTreeMap<String, BTreeMap<String, String>>,
     /// Portals + portal products by id.
     #[serde(default)]
-    pub portals: HashMap<String, serde_json::Value>,
+    pub portals: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
-    pub portal_products: HashMap<String, serde_json::Value>,
+    pub portal_products: BTreeMap<String, serde_json::Value>,
     /// Sharing policies keyed by portal product id.
     #[serde(default)]
-    pub portal_product_sharing_policies: HashMap<String, serde_json::Value>,
+    pub portal_product_sharing_policies: BTreeMap<String, serde_json::Value>,
     /// Product pages and rest endpoint pages keyed by `{portal-product}/{page}`.
     #[serde(default)]
-    pub product_pages: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub product_pages: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     #[serde(default)]
-    pub product_rest_endpoint_pages: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub product_rest_endpoint_pages: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
 }
 
 pub const APIGATEWAYV2_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
@@ -88,26 +88,26 @@ impl ApiGatewayV2State {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            apis: HashMap::new(),
-            routes: HashMap::new(),
-            integrations: HashMap::new(),
-            stages: HashMap::new(),
-            deployments: HashMap::new(),
-            authorizers: HashMap::new(),
+            apis: BTreeMap::new(),
+            routes: BTreeMap::new(),
+            integrations: BTreeMap::new(),
+            stages: BTreeMap::new(),
+            deployments: BTreeMap::new(),
+            authorizers: BTreeMap::new(),
             request_history: Vec::new(),
-            domain_names: HashMap::new(),
-            api_mappings: HashMap::new(),
-            models: HashMap::new(),
-            integration_responses: HashMap::new(),
-            route_responses: HashMap::new(),
-            routing_rules: HashMap::new(),
-            vpc_links: HashMap::new(),
-            tags: HashMap::new(),
-            portals: HashMap::new(),
-            portal_products: HashMap::new(),
-            portal_product_sharing_policies: HashMap::new(),
-            product_pages: HashMap::new(),
-            product_rest_endpoint_pages: HashMap::new(),
+            domain_names: BTreeMap::new(),
+            api_mappings: BTreeMap::new(),
+            models: BTreeMap::new(),
+            integration_responses: BTreeMap::new(),
+            route_responses: BTreeMap::new(),
+            routing_rules: BTreeMap::new(),
+            vpc_links: BTreeMap::new(),
+            tags: BTreeMap::new(),
+            portals: BTreeMap::new(),
+            portal_products: BTreeMap::new(),
+            portal_product_sharing_policies: BTreeMap::new(),
+            product_pages: BTreeMap::new(),
+            product_rest_endpoint_pages: BTreeMap::new(),
         }
     }
 
@@ -146,7 +146,7 @@ pub struct HttpApi {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cors_configuration: Option<CorsConfiguration>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tags: Option<HashMap<String, String>>,
+    pub tags: Option<BTreeMap<String, String>>,
     pub created_date: DateTime<Utc>,
     pub api_endpoint: String,
     /// Real AWS API Gateway v2 always returns this on GetApi, defaulting
@@ -169,7 +169,7 @@ impl HttpApi {
         api_id: String,
         name: String,
         description: Option<String>,
-        tags: Option<HashMap<String, String>>,
+        tags: Option<BTreeMap<String, String>>,
         region: &str,
     ) -> Self {
         let created_date = Utc::now();
@@ -290,8 +290,8 @@ pub struct ApiRequest {
     pub stage: String,
     pub method: String,
     pub path: String,
-    pub headers: HashMap<String, String>,
-    pub query_params: HashMap<String, String>,
+    pub headers: BTreeMap<String, String>,
+    pub query_params: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     pub timestamp: DateTime<Utc>,

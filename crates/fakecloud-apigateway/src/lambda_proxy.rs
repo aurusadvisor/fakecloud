@@ -12,7 +12,7 @@ use base64::prelude::*;
 use bytes::Bytes;
 use http::{HeaderMap, StatusCode};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
@@ -22,15 +22,15 @@ pub fn construct_event(
     rest_api_id: &str,
     stage: &str,
     resource_path: &str,
-    path_parameters: HashMap<String, String>,
-    stage_variables: HashMap<String, String>,
+    path_parameters: BTreeMap<String, String>,
+    stage_variables: BTreeMap<String, String>,
 ) -> serde_json::Value {
     let (is_base64, body) = encode_body(req);
 
     // Headers as both single-value and multi-value maps. AWS sends both
     // shapes; agents that only check one or the other should still work.
-    let mut headers: HashMap<String, String> = HashMap::new();
-    let mut multi_value_headers: HashMap<String, Vec<String>> = HashMap::new();
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
+    let mut multi_value_headers: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (k, v) in req.headers.iter() {
         if let Ok(v_str) = v.to_str() {
             headers.insert(k.as_str().to_string(), v_str.to_string());
@@ -41,8 +41,8 @@ pub fn construct_event(
         }
     }
 
-    let mut query_string_parameters: HashMap<String, String> = HashMap::new();
-    let mut multi_value_query_string_parameters: HashMap<String, Vec<String>> = HashMap::new();
+    let mut query_string_parameters: BTreeMap<String, String> = BTreeMap::new();
+    let mut multi_value_query_string_parameters: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (k, v) in &req.query_params {
         query_string_parameters.insert(k.clone(), v.clone());
         multi_value_query_string_parameters
@@ -284,6 +284,7 @@ fn parse_lambda_response(response: serde_json::Value) -> Result<AwsResponse, Aws
 mod tests {
     use super::*;
     use http::Method;
+    use std::collections::HashMap;
 
     fn req() -> AwsRequest {
         let mut headers = HeaderMap::new();
@@ -315,8 +316,8 @@ mod tests {
             "abc123",
             "prod",
             "/pets",
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
         );
         assert_eq!(event["resource"], "/pets");
         assert_eq!(event["httpMethod"], "POST");

@@ -1,13 +1,13 @@
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnsTopic {
     pub topic_arn: String,
     pub name: String,
-    pub attributes: HashMap<String, String>,
+    pub attributes: BTreeMap<String, String>,
     pub tags: Vec<(String, String)>,
     pub is_fifo: bool,
     pub created_at: DateTime<Utc>,
@@ -20,7 +20,7 @@ pub struct SnsSubscription {
     pub protocol: String,
     pub endpoint: String,
     pub owner: String,
-    pub attributes: HashMap<String, String>,
+    pub attributes: BTreeMap<String, String>,
     pub confirmed: bool,
     /// Token used for HTTP/HTTPS subscription confirmation.
     pub confirmation_token: Option<String>,
@@ -40,7 +40,7 @@ pub struct PublishedMessage {
     pub topic_arn: String,
     pub message: String,
     pub subject: Option<String>,
-    pub message_attributes: HashMap<String, MessageAttribute>,
+    pub message_attributes: BTreeMap<String, MessageAttribute>,
     pub message_group_id: Option<String>,
     pub message_dedup_id: Option<String>,
     pub timestamp: DateTime<Utc>,
@@ -51,15 +51,15 @@ pub struct PlatformApplication {
     pub arn: String,
     pub name: String,
     pub platform: String,
-    pub attributes: HashMap<String, String>,
-    pub endpoints: HashMap<String, PlatformEndpoint>,
+    pub attributes: BTreeMap<String, String>,
+    pub endpoints: BTreeMap<String, PlatformEndpoint>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlatformEndpoint {
     pub arn: String,
     pub token: String,
-    pub attributes: HashMap<String, String>,
+    pub attributes: BTreeMap<String, String>,
     pub enabled: bool,
     pub messages: Vec<PublishedMessage>,
 }
@@ -125,7 +125,7 @@ pub struct SnsState {
     pub subscriptions: BTreeMap<String, SnsSubscription>, // sub_arn -> subscription
     pub published: Vec<PublishedMessage>,
     pub platform_applications: BTreeMap<String, PlatformApplication>,
-    pub sms_attributes: HashMap<String, String>,
+    pub sms_attributes: BTreeMap<String, String>,
     pub opted_out_numbers: Vec<String>,
     pub sms_messages: Vec<(String, String)>, // (phone_number, message)
     /// Recorded Lambda invocations (stub deliveries).
@@ -151,7 +151,7 @@ impl SnsState {
             subscriptions: BTreeMap::new(),
             published: Vec::new(),
             platform_applications: BTreeMap::new(),
-            sms_attributes: HashMap::new(),
+            sms_attributes: BTreeMap::new(),
             opted_out_numbers: Vec::new(),
             sms_messages: Vec::new(),
             lambda_invocations: Vec::new(),

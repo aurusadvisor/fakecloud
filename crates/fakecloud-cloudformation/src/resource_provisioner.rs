@@ -1,6 +1,6 @@
 use chrono::Utc;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -181,7 +181,7 @@ impl ResourceProvisioner {
         let topic = SnsTopic {
             topic_arn: topic_arn.clone(),
             name: topic_name.to_string(),
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             tags: Vec::new(),
             is_fifo: topic_name.ends_with(".fifo"),
             created_at: Utc::now(),
@@ -235,7 +235,7 @@ impl ResourceProvisioner {
             protocol: protocol.to_string(),
             endpoint: endpoint.to_string(),
             owner: state.account_id.clone(),
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             confirmed: true,
             confirmation_token: None,
         };
@@ -289,8 +289,8 @@ impl ResourceProvisioner {
             arn: arn.clone(),
             last_modified: Utc::now(),
             history: Vec::new(),
-            tags: HashMap::new(),
-            labels: HashMap::new(),
+            tags: BTreeMap::new(),
+            labels: BTreeMap::new(),
             description: props
                 .get("Description")
                 .and_then(|v| v.as_str())
@@ -709,7 +709,7 @@ impl ResourceProvisioner {
             items: Vec::new(),
             gsi: Vec::new(),
             lsi: Vec::new(),
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             created_at: Utc::now(),
             status: "ACTIVE".to_string(),
             item_count: 0,
@@ -721,7 +721,7 @@ impl ResourceProvisioner {
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
-            contributor_insights_counters: HashMap::new(),
+            contributor_insights_counters: BTreeMap::new(),
             stream_enabled,
             stream_view_type,
             stream_arn,

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,8 +21,8 @@ pub struct Stack {
     pub template: String,
     pub status: String,
     pub resources: Vec<StackResource>,
-    pub parameters: HashMap<String, String>,
-    pub tags: HashMap<String, String>,
+    pub parameters: BTreeMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
     pub description: Option<String>,
@@ -34,19 +34,19 @@ pub struct CloudFormationState {
     pub account_id: String,
     pub region: String,
     #[serde(default)]
-    pub stacks: HashMap<String, Stack>,
+    pub stacks: BTreeMap<String, Stack>,
     /// Generic stores keyed by `category` (change_sets, stack_sets, types,
     /// generated_templates, resource_scans, refactors, etc.) so the
     /// extras handlers can keep state alive without proliferating
     /// per-category fields.
     #[serde(default)]
-    pub extras: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub extras: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     #[serde(default)]
-    pub events: HashMap<String, Vec<serde_json::Value>>,
+    pub events: BTreeMap<String, Vec<serde_json::Value>>,
     #[serde(default)]
-    pub stack_policies: HashMap<String, String>,
+    pub stack_policies: BTreeMap<String, String>,
     #[serde(default)]
-    pub termination_protection: HashMap<String, bool>,
+    pub termination_protection: BTreeMap<String, bool>,
     #[serde(default)]
     pub orgs_access_enabled: bool,
 }
@@ -56,11 +56,11 @@ impl CloudFormationState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            stacks: HashMap::new(),
-            extras: HashMap::new(),
-            events: HashMap::new(),
-            stack_policies: HashMap::new(),
-            termination_protection: HashMap::new(),
+            stacks: BTreeMap::new(),
+            extras: BTreeMap::new(),
+            events: BTreeMap::new(),
+            stack_policies: BTreeMap::new(),
+            termination_protection: BTreeMap::new(),
             orgs_access_enabled: false,
         }
     }
@@ -118,8 +118,8 @@ mod tests {
                 template: "{}".to_string(),
                 status: "CREATE_COMPLETE".to_string(),
                 resources: vec![],
-                parameters: HashMap::new(),
-                tags: HashMap::new(),
+                parameters: BTreeMap::new(),
+                tags: BTreeMap::new(),
                 created_at: Utc::now(),
                 updated_at: None,
                 description: None,

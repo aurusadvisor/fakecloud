@@ -39,7 +39,7 @@ pub(crate) fn create_inference_profile(
     let s = accts.get_or_create(&req.account_id);
 
     if let Some(tags) = body["tags"].as_array() {
-        let tag_map: std::collections::HashMap<String, String> = tags
+        let tag_map: std::collections::BTreeMap<String, String> = tags
             .iter()
             .filter_map(|t| {
                 Some((

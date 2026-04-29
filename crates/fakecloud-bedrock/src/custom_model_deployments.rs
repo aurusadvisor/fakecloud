@@ -142,7 +142,7 @@ pub(crate) fn delete_custom_model_deployment(
 }
 
 fn find_deployment<'a>(
-    deployments: &'a std::collections::HashMap<String, CustomModelDeployment>,
+    deployments: &'a std::collections::BTreeMap<String, CustomModelDeployment>,
     id_or_arn: &str,
 ) -> Result<&'a CustomModelDeployment, AwsServiceError> {
     deployments
@@ -163,7 +163,7 @@ fn find_deployment<'a>(
 }
 
 fn find_deployment_key(
-    deployments: &std::collections::HashMap<String, CustomModelDeployment>,
+    deployments: &std::collections::BTreeMap<String, CustomModelDeployment>,
     id_or_arn: &str,
 ) -> Result<String, AwsServiceError> {
     deployments

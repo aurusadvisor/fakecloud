@@ -7,7 +7,7 @@ mod queries;
 mod streams;
 mod tables;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -484,7 +484,7 @@ fn require_object(
 }
 
 fn get_table<'a>(
-    tables: &'a HashMap<String, DynamoTable>,
+    tables: &'a BTreeMap<String, DynamoTable>,
     name: &str,
 ) -> Result<&'a DynamoTable, AwsServiceError> {
     tables.get(name).ok_or_else(|| {
@@ -497,7 +497,7 @@ fn get_table<'a>(
 }
 
 fn get_table_mut<'a>(
-    tables: &'a mut HashMap<String, DynamoTable>,
+    tables: &'a mut BTreeMap<String, DynamoTable>,
     name: &str,
 ) -> Result<&'a mut DynamoTable, AwsServiceError> {
     tables.get_mut(name).ok_or_else(|| {
@@ -510,7 +510,7 @@ fn get_table_mut<'a>(
 }
 
 fn find_table_by_arn<'a>(
-    tables: &'a HashMap<String, DynamoTable>,
+    tables: &'a BTreeMap<String, DynamoTable>,
     arn: &str,
 ) -> Result<&'a DynamoTable, AwsServiceError> {
     tables.values().find(|t| t.arn == arn).ok_or_else(|| {
@@ -523,7 +523,7 @@ fn find_table_by_arn<'a>(
 }
 
 fn find_table_by_arn_mut<'a>(
-    tables: &'a mut HashMap<String, DynamoTable>,
+    tables: &'a mut BTreeMap<String, DynamoTable>,
     arn: &str,
 ) -> Result<&'a mut DynamoTable, AwsServiceError> {
     tables.values_mut().find(|t| t.arn == arn).ok_or_else(|| {
@@ -663,8 +663,8 @@ pub(super) fn parse_projection(val: &Value) -> Projection {
     }
 }
 
-fn parse_tags(val: &Value) -> HashMap<String, String> {
-    let mut tags = HashMap::new();
+fn parse_tags(val: &Value) -> BTreeMap<String, String> {
+    let mut tags = BTreeMap::new();
     if let Some(arr) = val.as_array() {
         for tag in arr {
             if let (Some(k), Some(v)) = (tag["Key"].as_str(), tag["Value"].as_str()) {

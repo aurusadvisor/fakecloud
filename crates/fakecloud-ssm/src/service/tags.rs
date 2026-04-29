@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use http::StatusCode;
 use serde_json::json;
@@ -21,7 +21,7 @@ impl SsmService {
         state: &'a mut crate::state::SsmState,
         resource_type: &str,
         resource_id: &str,
-    ) -> Result<&'a mut HashMap<String, String>, AwsServiceError> {
+    ) -> Result<&'a mut BTreeMap<String, String>, AwsServiceError> {
         match resource_type {
             "Parameter" => {
                 let param = lookup_param_mut(&mut state.parameters, resource_id)
@@ -62,7 +62,7 @@ impl SsmService {
         state: &'a crate::state::SsmState,
         resource_type: &str,
         resource_id: &str,
-    ) -> Result<&'a HashMap<String, String>, AwsServiceError> {
+    ) -> Result<&'a BTreeMap<String, String>, AwsServiceError> {
         match resource_type {
             "Parameter" => {
                 let param = lookup_param(&state.parameters, resource_id)

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bytes::Bytes;
@@ -13,20 +13,20 @@ pub struct S3State {
     #[serde(default)]
     pub region: String,
     #[serde(default)]
-    pub buckets: HashMap<String, BucketSnapshot>,
+    pub buckets: BTreeMap<String, BucketSnapshot>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BucketSnapshot {
     pub meta: BucketMeta,
     #[serde(default)]
-    pub objects: HashMap<String, LoadedObject>,
+    pub objects: BTreeMap<String, LoadedObject>,
     #[serde(default)]
-    pub object_versions: HashMap<String, Vec<LoadedObject>>,
+    pub object_versions: BTreeMap<String, Vec<LoadedObject>>,
     #[serde(default)]
-    pub subresources: HashMap<String, String>,
+    pub subresources: BTreeMap<String, String>,
     #[serde(default)]
-    pub multipart_uploads: HashMap<String, LoadedMpu>,
+    pub multipart_uploads: BTreeMap<String, LoadedMpu>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -89,7 +89,7 @@ pub struct AclGrantSnapshot {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TagsSnapshot {
     #[serde(default)]
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -103,7 +103,7 @@ pub struct AclSnapshot {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct InventorySnapshot {
     #[serde(default)]
-    pub configs: HashMap<String, String>,
+    pub configs: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -119,9 +119,9 @@ pub struct ObjectMeta {
     #[serde(default = "default_time")]
     pub last_modified: DateTime<Utc>,
     #[serde(default)]
-    pub metadata: HashMap<String, String>,
+    pub metadata: BTreeMap<String, String>,
     #[serde(default)]
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     #[serde(default)]
     pub storage_class: String,
     #[serde(default)]
@@ -169,7 +169,7 @@ pub struct MpuInit {
     #[serde(default = "default_time")]
     pub initiated: DateTime<Utc>,
     #[serde(default)]
-    pub metadata: HashMap<String, String>,
+    pub metadata: BTreeMap<String, String>,
     #[serde(default)]
     pub content_type: String,
     #[serde(default)]
@@ -621,10 +621,10 @@ impl S3Store for DiskS3Store {
                 toml::from_str(&meta_text).map_err(|e| StoreError::Serde(e.to_string()))?;
             let mut snap = BucketSnapshot {
                 meta: meta.clone(),
-                objects: HashMap::new(),
-                object_versions: HashMap::new(),
-                subresources: HashMap::new(),
-                multipart_uploads: HashMap::new(),
+                objects: BTreeMap::new(),
+                object_versions: BTreeMap::new(),
+                subresources: BTreeMap::new(),
+                multipart_uploads: BTreeMap::new(),
             };
 
             for kind in ALL_SUBRESOURCES {
@@ -2285,7 +2285,7 @@ mod disk_tests {
                 },
             )
             .unwrap();
-        let mut tags = HashMap::new();
+        let mut tags = BTreeMap::new();
         tags.insert("env".to_string(), "prod".to_string());
         tags.insert("team".to_string(), "s3".to_string());
         let snap = TagsSnapshot { tags: tags.clone() };
@@ -2373,7 +2373,7 @@ mod disk_tests {
                 },
             )
             .unwrap();
-        let mut configs = HashMap::new();
+        let mut configs = BTreeMap::new();
         configs.insert(
             "inv-1".to_string(),
             "<InventoryConfiguration id=\"inv-1\"/>".to_string(),

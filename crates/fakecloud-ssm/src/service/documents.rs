@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -197,7 +197,7 @@ impl SsmService {
         let target_type = body["TargetType"].as_str().map(|s| s.to_string());
         let version_name = body["VersionName"].as_str().map(|s| s.to_string());
 
-        let tags: HashMap<String, String> = body["Tags"]
+        let tags: BTreeMap<String, String> = body["Tags"]
             .as_array()
             .map(|arr| {
                 arr.iter()
@@ -257,7 +257,7 @@ impl SsmService {
             created_date: now,
             owner: state.account_id.clone(),
             status: "Active".to_string(),
-            permissions: HashMap::new(),
+            permissions: BTreeMap::new(),
             reviews: Vec::new(),
         };
 

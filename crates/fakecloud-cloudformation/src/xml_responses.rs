@@ -266,7 +266,7 @@ pub fn get_template_response(template_body: &str, request_id: &str) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn make_stack(name: &str) -> Stack {
         Stack {
@@ -275,8 +275,8 @@ mod tests {
             template: "{}".to_string(),
             status: "CREATE_COMPLETE".to_string(),
             resources: vec![],
-            parameters: HashMap::new(),
-            tags: HashMap::new(),
+            parameters: BTreeMap::new(),
+            tags: BTreeMap::new(),
             created_at: Utc::now(),
             updated_at: None,
             description: None,

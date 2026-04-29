@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use fakecloud_persistence::cache::{BodyCache, BodyKey};
 use fakecloud_persistence::BodyRef;
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
@@ -25,9 +25,9 @@ pub struct S3Object {
     pub etag: String,
     pub size: u64,
     pub last_modified: DateTime<Utc>,
-    pub metadata: HashMap<String, String>,
+    pub metadata: BTreeMap<String, String>,
     pub storage_class: String,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     pub acl_grants: Vec<AclGrant>,
     pub acl_owner_id: Option<String>,
     /// If created from multipart upload, the number of parts.
@@ -79,7 +79,7 @@ pub struct MultipartUpload {
     /// Parts keyed by part number.
     pub parts: BTreeMap<u32, UploadPart>,
     /// Metadata provided at CreateMultipartUpload time.
-    pub metadata: HashMap<String, String>,
+    pub metadata: BTreeMap<String, String>,
     pub content_type: String,
     pub storage_class: String,
     pub sse_algorithm: Option<String>,
@@ -96,15 +96,15 @@ pub struct S3Bucket {
     pub region: String,
     /// Objects keyed by their full key path.
     pub objects: BTreeMap<String, S3Object>,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     pub acl_grants: Vec<AclGrant>,
     pub acl_owner_id: String,
     /// In-progress multipart uploads keyed by upload ID.
-    pub multipart_uploads: HashMap<String, MultipartUpload>,
+    pub multipart_uploads: BTreeMap<String, MultipartUpload>,
     /// Versioning status: None = never enabled, Some("Enabled"), Some("Suspended").
     pub versioning: Option<String>,
     /// Object versions keyed by key, each value is a list of versions.
-    pub object_versions: HashMap<String, Vec<S3Object>>,
+    pub object_versions: BTreeMap<String, Vec<S3Object>>,
     /// Bucket ACL (canned or XML).
     pub acl: Option<String>,
     pub encryption_config: Option<String>,
@@ -119,15 +119,15 @@ pub struct S3Bucket {
     pub object_lock_config: Option<String>,
     pub replication_config: Option<String>,
     pub ownership_controls: Option<String>,
-    pub inventory_configs: HashMap<String, String>,
+    pub inventory_configs: BTreeMap<String, String>,
     /// Whether EventBridge notifications are enabled for this bucket.
     pub eventbridge_enabled: bool,
     /// Per-id analytics configurations (XML body).
-    pub analytics_configs: HashMap<String, String>,
+    pub analytics_configs: BTreeMap<String, String>,
     /// Per-id intelligent-tiering configurations (XML body).
-    pub intelligent_tiering_configs: HashMap<String, String>,
+    pub intelligent_tiering_configs: BTreeMap<String, String>,
     /// Per-id metrics configurations (XML body).
-    pub metrics_configs: HashMap<String, String>,
+    pub metrics_configs: BTreeMap<String, String>,
     /// Request payment configuration (XML body).
     pub request_payment: Option<String>,
     /// Per-bucket ABAC config (XML body) — see PutBucketAbac/GetBucketAbac.
@@ -145,7 +145,7 @@ impl S3Bucket {
             creation_date: Utc::now(),
             region: region.to_string(),
             objects: BTreeMap::new(),
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             acl_grants: vec![AclGrant {
                 grantee_type: "CanonicalUser".to_string(),
                 grantee_id: Some(owner_id.to_string()),
@@ -154,9 +154,9 @@ impl S3Bucket {
                 permission: "FULL_CONTROL".to_string(),
             }],
             acl_owner_id: owner_id.to_string(),
-            multipart_uploads: HashMap::new(),
+            multipart_uploads: BTreeMap::new(),
             versioning: None,
-            object_versions: HashMap::new(),
+            object_versions: BTreeMap::new(),
             acl: None,
             encryption_config: None,
             lifecycle_config: None,
@@ -170,11 +170,11 @@ impl S3Bucket {
             object_lock_config: None,
             replication_config: None,
             ownership_controls: None,
-            inventory_configs: HashMap::new(),
+            inventory_configs: BTreeMap::new(),
             eventbridge_enabled: false,
-            analytics_configs: HashMap::new(),
-            intelligent_tiering_configs: HashMap::new(),
-            metrics_configs: HashMap::new(),
+            analytics_configs: BTreeMap::new(),
+            intelligent_tiering_configs: BTreeMap::new(),
+            metrics_configs: BTreeMap::new(),
             request_payment: None,
             abac_config: None,
             metadata_configuration: None,
@@ -195,7 +195,7 @@ pub struct S3NotificationEvent {
 pub struct S3State {
     pub account_id: String,
     pub region: String,
-    pub buckets: HashMap<String, S3Bucket>,
+    pub buckets: BTreeMap<String, S3Bucket>,
     pub notification_events: Vec<S3NotificationEvent>,
     pub body_cache: Option<Arc<BodyCache>>,
 }
@@ -205,7 +205,7 @@ impl S3State {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            buckets: HashMap::new(),
+            buckets: BTreeMap::new(),
             notification_events: Vec::new(),
             body_cache: None,
         }

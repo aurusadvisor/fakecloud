@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use http::{Method, StatusCode};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -327,7 +327,7 @@ fn rest_api_to_json(api: &RestApi) -> Value {
     }))
 }
 
-fn resource_to_json(r: &Resource, methods: HashMap<String, Value>) -> Value {
+fn resource_to_json(r: &Resource, methods: BTreeMap<String, Value>) -> Value {
     let mut v = strip_nulls(json!({
         "id": r.id,
         "parentId": r.parent_id,
@@ -723,7 +723,7 @@ impl ApiGatewayService {
             path_part: None,
             path: "/".to_string(),
         };
-        let mut res_map = HashMap::new();
+        let mut res_map = BTreeMap::new();
         res_map.insert(root.id.clone(), root);
         state.resources.insert(id, res_map);
         ok_status(StatusCode::CREATED, rest_api_to_json(&api))
@@ -732,7 +732,7 @@ impl ApiGatewayService {
     fn get_rest_api(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -758,7 +758,7 @@ impl ApiGatewayService {
     fn delete_rest_api(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("restApiId").cloned().unwrap_or_default();
         let mut accounts = self.state.write();
@@ -793,7 +793,7 @@ impl ApiGatewayService {
     fn update_rest_api(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("restApiId").cloned().unwrap_or_default();
         let mut accounts = self.state.write();
@@ -811,7 +811,7 @@ impl ApiGatewayService {
     fn put_rest_api(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("restApiId").cloned().unwrap_or_default();
         let mut accounts = self.state.write();
@@ -840,13 +840,13 @@ impl ApiGatewayService {
             minimum_compression_size: None,
             disable_execute_api_endpoint: false,
             root_resource_id: root_id.clone(),
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             import_source: Some(String::from_utf8_lossy(&req.body).to_string()),
         };
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request_account(req));
         state.apis.insert(id.clone(), api.clone());
-        let mut res_map = HashMap::new();
+        let mut res_map = BTreeMap::new();
         res_map.insert(
             root_id.clone(),
             Resource {
@@ -865,7 +865,7 @@ impl ApiGatewayService {
     fn create_resource(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let parent_id = params.get("parentId").cloned().unwrap_or_default();
@@ -904,14 +904,14 @@ impl ApiGatewayService {
         resources.insert(id, resource.clone());
         ok_status(
             StatusCode::CREATED,
-            resource_to_json(&resource, HashMap::new()),
+            resource_to_json(&resource, BTreeMap::new()),
         )
     }
 
     fn get_resource(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params.get("resourceId").cloned().unwrap_or_default();
@@ -933,7 +933,7 @@ impl ApiGatewayService {
     fn get_resources(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -954,7 +954,7 @@ impl ApiGatewayService {
     fn delete_resource(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params.get("resourceId").cloned().unwrap_or_default();
@@ -982,7 +982,7 @@ impl ApiGatewayService {
     fn update_resource(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params.get("resourceId").cloned().unwrap_or_default();
@@ -1002,7 +1002,7 @@ impl ApiGatewayService {
                 }
             }
         });
-        ok(resource_to_json(resource, HashMap::new()))
+        ok(resource_to_json(resource, BTreeMap::new()))
     }
 
     // ── Methods ──
@@ -1010,7 +1010,7 @@ impl ApiGatewayService {
     fn put_method(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let res_id = params.get("resourceId").cloned().unwrap_or_default();
@@ -1081,7 +1081,7 @@ impl ApiGatewayService {
     fn get_method(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = method_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1102,7 +1102,7 @@ impl ApiGatewayService {
     fn delete_method(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = method_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1128,7 +1128,7 @@ impl ApiGatewayService {
     fn update_method(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = method_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1150,7 +1150,7 @@ impl ApiGatewayService {
     fn put_method_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = response_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1174,7 +1174,7 @@ impl ApiGatewayService {
     fn get_method_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = response_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1197,7 +1197,7 @@ impl ApiGatewayService {
     fn delete_method_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = response_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1216,7 +1216,7 @@ impl ApiGatewayService {
     fn update_method_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = response_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1243,8 +1243,8 @@ fn methods_for_resource(
     state: &ApiGatewayState,
     api_id: &str,
     res_id: &str,
-) -> HashMap<String, Value> {
-    let mut out = HashMap::new();
+) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
     let prefix = format!("{api_id}/{res_id}/");
     for (key, m) in &state.methods {
         if let Some(rest) = key.strip_prefix(&prefix) {
@@ -1254,7 +1254,7 @@ fn methods_for_resource(
     out
 }
 
-fn tags_from(body: &Value) -> HashMap<String, String> {
+fn tags_from(body: &Value) -> BTreeMap<String, String> {
     body.get("tags")
         .and_then(Value::as_object)
         .map(|m| {
@@ -1332,7 +1332,7 @@ impl ApiGatewayService {
     fn put_integration(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let res_id = params.get("resourceId").cloned().unwrap_or_default();
@@ -1408,7 +1408,7 @@ impl ApiGatewayService {
     fn get_integration(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = method_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1429,7 +1429,7 @@ impl ApiGatewayService {
     fn delete_integration(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = method_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1447,7 +1447,7 @@ impl ApiGatewayService {
     fn update_integration(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = method_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1483,7 +1483,7 @@ impl ApiGatewayService {
     fn put_integration_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = response_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1507,7 +1507,7 @@ impl ApiGatewayService {
     fn get_integration_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = response_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1530,7 +1530,7 @@ impl ApiGatewayService {
     fn delete_integration_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = response_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1549,7 +1549,7 @@ impl ApiGatewayService {
     fn update_integration_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let key = response_key(
             params.get("restApiId").map(|s| s.as_str()).unwrap_or(""),
@@ -1574,7 +1574,7 @@ impl ApiGatewayService {
     async fn test_invoke_method(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         // The TestInvokeMethod operation drives the data plane through
         // an in-process call instead of an HTTP one. We mock the
@@ -1655,7 +1655,7 @@ impl ApiGatewayService {
     fn test_invoke_authorizer(
         &self,
         _req: &AwsRequest,
-        _params: &HashMap<String, String>,
+        _params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         // Authorizer execution would need a Lambda/Cognito hook;
         // fakecloud emits an Allow stub so callers can prove the
@@ -1692,7 +1692,7 @@ fn serializable_headers(headers: &http::HeaderMap) -> serde_json::Map<String, Va
     out
 }
 
-fn extract_string_map(body: &Value, key: &str) -> HashMap<String, String> {
+fn extract_string_map(body: &Value, key: &str) -> BTreeMap<String, String> {
     body.get(key)
         .and_then(Value::as_object)
         .map(|m| {
@@ -1709,7 +1709,7 @@ impl ApiGatewayService {
     fn create_deployment(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let body = req.json_body();
@@ -1737,7 +1737,7 @@ impl ApiGatewayService {
             .map(|m| {
                 m.iter()
                     .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect::<HashMap<String, String>>()
+                    .collect::<BTreeMap<String, String>>()
             })
             .unwrap_or_default();
         let mut accounts = self.state.write();
@@ -1760,14 +1760,14 @@ impl ApiGatewayService {
                 cache_cluster_enabled: false,
                 cache_cluster_size: None,
                 variables,
-                method_settings: HashMap::new(),
+                method_settings: BTreeMap::new(),
                 created_date: now,
                 last_updated_date: now,
                 tracing_enabled: false,
                 web_acl_arn: None,
                 canary_settings: None,
                 access_log_settings: None,
-                tags: HashMap::new(),
+                tags: BTreeMap::new(),
             };
             state
                 .stages
@@ -1781,7 +1781,7 @@ impl ApiGatewayService {
     fn get_deployment(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params.get("deploymentId").cloned().unwrap_or_default();
@@ -1802,7 +1802,7 @@ impl ApiGatewayService {
     fn get_deployments(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -1817,7 +1817,7 @@ impl ApiGatewayService {
     fn delete_deployment(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params.get("deploymentId").cloned().unwrap_or_default();
@@ -1836,7 +1836,7 @@ impl ApiGatewayService {
     fn update_deployment(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params.get("deploymentId").cloned().unwrap_or_default();
@@ -1900,7 +1900,7 @@ impl ApiGatewayService {
     fn create_stage(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let body = req.json_body();
@@ -1937,7 +1937,7 @@ impl ApiGatewayService {
                 .map(|m| {
                     m.iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect::<HashMap<String, Value>>()
+                        .collect::<BTreeMap<String, Value>>()
                 })
                 .unwrap_or_default(),
             created_date: now,
@@ -1970,7 +1970,7 @@ impl ApiGatewayService {
     fn get_stage(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let name = params.get("stageName").cloned().unwrap_or_default();
@@ -1989,7 +1989,7 @@ impl ApiGatewayService {
     fn get_stages(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -2004,7 +2004,7 @@ impl ApiGatewayService {
     fn delete_stage(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let name = params.get("stageName").cloned().unwrap_or_default();
@@ -2023,7 +2023,7 @@ impl ApiGatewayService {
     fn update_stage(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let name = params.get("stageName").cloned().unwrap_or_default();
@@ -2074,7 +2074,7 @@ impl ApiGatewayService {
     fn create_model(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let body = req.json_body();
@@ -2110,7 +2110,7 @@ impl ApiGatewayService {
     fn get_model(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let name = params.get("modelName").cloned().unwrap_or_default();
@@ -2129,7 +2129,7 @@ impl ApiGatewayService {
     fn get_models(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -2144,7 +2144,7 @@ impl ApiGatewayService {
     fn delete_model(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let name = params.get("modelName").cloned().unwrap_or_default();
@@ -2163,7 +2163,7 @@ impl ApiGatewayService {
     fn update_model(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let name = params.get("modelName").cloned().unwrap_or_default();
@@ -2192,7 +2192,7 @@ impl ApiGatewayService {
     fn get_model_template(
         &self,
         _req: &AwsRequest,
-        _params: &HashMap<String, String>,
+        _params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         ok(json!({"value": "{}"}))
     }
@@ -2204,7 +2204,7 @@ impl ApiGatewayService {
     fn create_request_validator(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let body = req.json_body();
@@ -2226,7 +2226,7 @@ impl ApiGatewayService {
     fn get_request_validator(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params
@@ -2246,7 +2246,7 @@ impl ApiGatewayService {
     fn get_request_validators(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -2261,7 +2261,7 @@ impl ApiGatewayService {
     fn delete_request_validator(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params
@@ -2283,7 +2283,7 @@ impl ApiGatewayService {
     fn update_request_validator(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params
@@ -2314,7 +2314,7 @@ impl ApiGatewayService {
     fn create_authorizer(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let body = req.json_body();
@@ -2378,7 +2378,7 @@ impl ApiGatewayService {
     fn get_authorizer(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params.get("authorizerId").cloned().unwrap_or_default();
@@ -2395,7 +2395,7 @@ impl ApiGatewayService {
     fn get_authorizers(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -2410,7 +2410,7 @@ impl ApiGatewayService {
     fn delete_authorizer(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params.get("authorizerId").cloned().unwrap_or_default();
@@ -2429,7 +2429,7 @@ impl ApiGatewayService {
     fn update_authorizer(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params.get("authorizerId").cloned().unwrap_or_default();
@@ -2518,7 +2518,7 @@ impl ApiGatewayService {
     fn get_api_key(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("apiKeyId").cloned().unwrap_or_default();
         let include_value = req
@@ -2557,7 +2557,7 @@ impl ApiGatewayService {
     fn delete_api_key(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("apiKeyId").cloned().unwrap_or_default();
         let mut accounts = self.state.write();
@@ -2571,7 +2571,7 @@ impl ApiGatewayService {
     fn update_api_key(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("apiKeyId").cloned().unwrap_or_default();
         let mut accounts = self.state.write();
@@ -2642,7 +2642,7 @@ impl ApiGatewayService {
     fn get_usage_plan(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("usagePlanId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -2666,7 +2666,7 @@ impl ApiGatewayService {
     fn delete_usage_plan(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("usagePlanId").cloned().unwrap_or_default();
         let mut accounts = self.state.write();
@@ -2681,7 +2681,7 @@ impl ApiGatewayService {
     fn update_usage_plan(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("usagePlanId").cloned().unwrap_or_default();
         let mut accounts = self.state.write();
@@ -2710,7 +2710,7 @@ impl ApiGatewayService {
     fn create_usage_plan_key(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let plan_id = params.get("usagePlanId").cloned().unwrap_or_default();
         let body = req.json_body();
@@ -2746,7 +2746,7 @@ impl ApiGatewayService {
     fn get_usage_plan_key(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let plan_id = params.get("usagePlanId").cloned().unwrap_or_default();
         let key_id = params.get("keyId").cloned().unwrap_or_default();
@@ -2763,7 +2763,7 @@ impl ApiGatewayService {
     fn get_usage_plan_keys(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let plan_id = params.get("usagePlanId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -2778,7 +2778,7 @@ impl ApiGatewayService {
     fn delete_usage_plan_key(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let plan_id = params.get("usagePlanId").cloned().unwrap_or_default();
         let key_id = params.get("keyId").cloned().unwrap_or_default();
@@ -2797,7 +2797,7 @@ impl ApiGatewayService {
     fn get_usage(
         &self,
         _req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         // Real usage tracking would tie into request counters; fakecloud
         // returns the empty-but-valid AWS response shape so callers
@@ -2833,7 +2833,7 @@ impl ApiGatewayService {
     fn get_vpc_link(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("vpcLinkId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -2857,7 +2857,7 @@ impl ApiGatewayService {
     fn delete_vpc_link(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("vpcLinkId").cloned().unwrap_or_default();
         let mut accounts = self.state.write();
@@ -2871,7 +2871,7 @@ impl ApiGatewayService {
     fn update_vpc_link(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params.get("vpcLinkId").cloned().unwrap_or_default();
         let mut accounts = self.state.write();
@@ -2915,7 +2915,7 @@ impl ApiGatewayService {
     fn get_domain_name(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let d = params.get("domainName").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -2939,7 +2939,7 @@ impl ApiGatewayService {
     fn delete_domain_name(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let d = params.get("domainName").cloned().unwrap_or_default();
         let mut accounts = self.state.write();
@@ -2954,7 +2954,7 @@ impl ApiGatewayService {
     fn update_domain_name(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let d = params.get("domainName").cloned().unwrap_or_default();
         let mut accounts = self.state.write();
@@ -3015,7 +3015,7 @@ impl ApiGatewayService {
     fn delete_dnaa(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = params
             .get("domainNameAccessAssociationArn")
@@ -3032,7 +3032,7 @@ impl ApiGatewayService {
     fn reject_dnaa(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         // Reject deletes (rejects) the association on the receiving
         // account side. The arn arrives as a query string parameter.
@@ -3088,7 +3088,7 @@ impl ApiGatewayService {
                         created_date: chrono::Utc::now(),
                         last_updated_date: chrono::Utc::now(),
                         stage_keys: Vec::new(),
-                        tags: HashMap::new(),
+                        tags: BTreeMap::new(),
                         customer_id: entry
                             .get("customerId")
                             .and_then(Value::as_str)
@@ -3125,7 +3125,7 @@ impl ApiGatewayService {
                     created_date: chrono::Utc::now(),
                     last_updated_date: chrono::Utc::now(),
                     stage_keys: Vec::new(),
-                    tags: HashMap::new(),
+                    tags: BTreeMap::new(),
                     customer_id: None,
                 };
                 state.api_keys.insert(id.clone(), key);
@@ -3145,7 +3145,7 @@ impl ApiGatewayService {
     fn import_documentation_parts(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let body = req.json_body();
@@ -3177,7 +3177,7 @@ impl ApiGatewayService {
     fn create_base_path_mapping(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let domain = params.get("domainName").cloned().unwrap_or_default();
         let body = req.json_body();
@@ -3199,7 +3199,7 @@ impl ApiGatewayService {
     fn get_base_path_mapping(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let d = params.get("domainName").cloned().unwrap_or_default();
         let bp = params.get("basePath").cloned().unwrap_or_default();
@@ -3216,7 +3216,7 @@ impl ApiGatewayService {
     fn get_base_path_mappings(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let d = params.get("domainName").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -3231,7 +3231,7 @@ impl ApiGatewayService {
     fn delete_base_path_mapping(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let d = params.get("domainName").cloned().unwrap_or_default();
         let bp = params.get("basePath").cloned().unwrap_or_default();
@@ -3250,7 +3250,7 @@ impl ApiGatewayService {
     fn update_base_path_mapping(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let d = params.get("domainName").cloned().unwrap_or_default();
         let bp = params.get("basePath").cloned().unwrap_or_default();
@@ -3307,7 +3307,7 @@ impl ApiGatewayService {
     fn get_client_cert(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params
             .get("clientCertificateId")
@@ -3334,7 +3334,7 @@ impl ApiGatewayService {
     fn delete_client_cert(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params
             .get("clientCertificateId")
@@ -3351,7 +3351,7 @@ impl ApiGatewayService {
     fn update_client_cert(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = params
             .get("clientCertificateId")
@@ -3378,7 +3378,7 @@ impl ApiGatewayService {
     fn create_doc_part(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = make_id();
@@ -3399,7 +3399,7 @@ impl ApiGatewayService {
     fn get_doc_part(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params
@@ -3419,7 +3419,7 @@ impl ApiGatewayService {
     fn get_doc_parts(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -3434,7 +3434,7 @@ impl ApiGatewayService {
     fn delete_doc_part(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params
@@ -3456,7 +3456,7 @@ impl ApiGatewayService {
     fn update_doc_part(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params
@@ -3483,7 +3483,7 @@ impl ApiGatewayService {
     fn create_doc_version(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let body = req.json_body();
@@ -3512,7 +3512,7 @@ impl ApiGatewayService {
     fn get_doc_version(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let v = params
@@ -3532,7 +3532,7 @@ impl ApiGatewayService {
     fn get_doc_versions(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -3547,7 +3547,7 @@ impl ApiGatewayService {
     fn delete_doc_version(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let v = params
@@ -3569,7 +3569,7 @@ impl ApiGatewayService {
     fn update_doc_version(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let v = params
@@ -3596,7 +3596,7 @@ impl ApiGatewayService {
     fn put_gateway_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let response_type = params.get("responseType").cloned().unwrap_or_default();
@@ -3620,7 +3620,7 @@ impl ApiGatewayService {
     fn get_gateway_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let t = params.get("responseType").cloned().unwrap_or_default();
@@ -3637,7 +3637,7 @@ impl ApiGatewayService {
     fn get_gateway_responses(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -3652,7 +3652,7 @@ impl ApiGatewayService {
     fn delete_gateway_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let t = params.get("responseType").cloned().unwrap_or_default();
@@ -3671,7 +3671,7 @@ impl ApiGatewayService {
     fn update_gateway_response(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let t = params.get("responseType").cloned().unwrap_or_default();
@@ -3695,7 +3695,7 @@ impl ApiGatewayService {
     fn get_export(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
@@ -3727,7 +3727,7 @@ impl ApiGatewayService {
     fn get_sdk(
         &self,
         _req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let sdk_type = params.get("sdkType").cloned().unwrap_or_default();
         // AWS returns a binary blob (a zip archive) for GetSdk. fakecloud
@@ -3745,7 +3745,7 @@ impl ApiGatewayService {
     fn tag_resource(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = params.get("resourceArn").cloned().unwrap_or_default();
         let body = req.json_body();
@@ -3765,7 +3765,7 @@ impl ApiGatewayService {
     fn untag_resource(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = params.get("resourceArn").cloned().unwrap_or_default();
         let body = req.json_body();
@@ -3786,7 +3786,7 @@ impl ApiGatewayService {
     fn get_tags(
         &self,
         req: &AwsRequest,
-        params: &HashMap<String, String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = params.get("resourceArn").cloned().unwrap_or_default();
         let accounts = self.state.read();

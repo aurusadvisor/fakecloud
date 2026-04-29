@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -603,7 +603,7 @@ struct CreateAssociationInput {
     targets: Vec<Value>,
     instance_id: Option<String>,
     schedule_expression: Option<String>,
-    parameters: HashMap<String, Vec<String>>,
+    parameters: BTreeMap<String, Vec<String>>,
     association_name: Option<String>,
     document_version: Option<String>,
     output_location: Option<Value>,
@@ -617,7 +617,7 @@ struct CreateAssociationInput {
     target_locations: Vec<Value>,
     schedule_offset: Option<i64>,
     target_maps: Vec<Value>,
-    tags: HashMap<String, String>,
+    tags: BTreeMap<String, String>,
 }
 
 impl CreateAssociationInput {
@@ -660,7 +660,7 @@ impl CreateAssociationInput {
             .ok_or_else(|| missing("Name"))?
             .to_string();
 
-        let parameters: HashMap<String, Vec<String>> = body["Parameters"]
+        let parameters: BTreeMap<String, Vec<String>> = body["Parameters"]
             .as_object()
             .map(|obj| {
                 obj.iter()
@@ -688,7 +688,7 @@ impl CreateAssociationInput {
             })
             .unwrap_or_default();
 
-        let tags: HashMap<String, String> = body["Tags"]
+        let tags: BTreeMap<String, String> = body["Tags"]
             .as_array()
             .map(|arr| {
                 arr.iter()

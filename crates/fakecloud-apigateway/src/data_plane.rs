@@ -16,7 +16,7 @@
 
 use http::{Method, StatusCode};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
@@ -31,9 +31,9 @@ use crate::state::Integration;
 struct DataPlaneMatch {
     api_id: String,
     integration: Integration,
-    path_params: HashMap<String, String>,
+    path_params: BTreeMap<String, String>,
     resource_path: String,
-    stage_vars: HashMap<String, String>,
+    stage_vars: BTreeMap<String, String>,
 }
 
 pub async fn handle(
@@ -175,17 +175,17 @@ fn bad_gateway(msg: impl Into<String>) -> AwsServiceError {
 fn match_resource_path(
     template: &str,
     path_segments: &[String],
-) -> Option<HashMap<String, String>> {
+) -> Option<BTreeMap<String, String>> {
     // Root resource: only an empty (or missing) remaining path matches.
     if template == "/" {
         return if path_segments.is_empty() {
-            Some(HashMap::new())
+            Some(BTreeMap::new())
         } else {
             None
         };
     }
     let template_segments: Vec<&str> = template.split('/').filter(|s| !s.is_empty()).collect();
-    let mut params = HashMap::new();
+    let mut params = BTreeMap::new();
     let mut t = 0;
     let mut p = 0;
     while t < template_segments.len() {

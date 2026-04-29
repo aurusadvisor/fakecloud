@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -39,7 +39,7 @@ impl SnsDelivery for SnsDeliveryImpl {
             topic_arn: topic_arn.to_string(),
             message: message.to_string(),
             subject: subject.map(|s| s.to_string()),
-            message_attributes: HashMap::new(),
+            message_attributes: BTreeMap::new(),
             message_group_id: None,
             message_dedup_id: None,
             timestamp: Utc::now(),
@@ -239,7 +239,7 @@ mod tests {
         let topic = SnsTopic {
             topic_arn: arn.clone(),
             name: name.to_string(),
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             tags: Vec::new(),
             is_fifo: false,
             created_at: Utc::now(),
@@ -260,7 +260,7 @@ mod tests {
             protocol: protocol.to_string(),
             endpoint: endpoint.to_string(),
             owner: ACCOUNT.to_string(),
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             confirmed,
             confirmation_token: None,
         }

@@ -988,6 +988,7 @@ impl AwsService for S3Service {
         resource_arn: &str,
     ) -> Option<std::collections::HashMap<String, String>> {
         s3_resource_tags(&self.state, resource_arn)
+            .map(|m| m.into_iter().collect::<std::collections::HashMap<_, _>>())
     }
 
     fn request_tags_from(
@@ -996,6 +997,7 @@ impl AwsService for S3Service {
         action: &str,
     ) -> Option<std::collections::HashMap<String, String>> {
         s3_request_tags(request, action)
+            .map(|m| m.into_iter().collect::<std::collections::HashMap<_, _>>())
     }
 }
 
@@ -1033,9 +1035,9 @@ fn s3_condition_keys(
 fn s3_resource_tags(
     state: &SharedS3State,
     resource_arn: &str,
-) -> Option<std::collections::HashMap<String, String>> {
+) -> Option<std::collections::BTreeMap<String, String>> {
     if resource_arn == "*" {
-        return Some(std::collections::HashMap::new());
+        return Some(std::collections::BTreeMap::new());
     }
     // S3 ARNs: arn:aws:s3:::bucket or arn:aws:s3:::bucket/key
     let after_prefix = resource_arn.strip_prefix("arn:aws:s3:::")?;
@@ -1058,7 +1060,7 @@ fn s3_resource_tags(
             versions.last().map(|v| v.tags.clone())
         } else {
             // Object doesn't exist yet (e.g. PutObject creating it)
-            Some(std::collections::HashMap::new())
+            Some(std::collections::BTreeMap::new())
         }
     } else {
         // Bucket-level
@@ -1075,7 +1077,7 @@ fn s3_resource_tags(
 fn s3_request_tags(
     request: &AwsRequest,
     action: &str,
-) -> Option<std::collections::HashMap<String, String>> {
+) -> Option<std::collections::BTreeMap<String, String>> {
     match action {
         "PutObject" | "CopyObject" | "CreateMultipartUpload" => {
             // Tags come via x-amz-tagging header
@@ -1083,7 +1085,7 @@ fn s3_request_tags(
                 let tags = parse_url_encoded_tags(tagging.to_str().unwrap_or(""));
                 Some(tags.into_iter().collect())
             } else {
-                Some(std::collections::HashMap::new())
+                Some(std::collections::BTreeMap::new())
             }
         }
         "PutBucketTagging" | "PutObjectTagging" => {
@@ -1092,7 +1094,7 @@ fn s3_request_tags(
             let tags = parse_tagging_xml(body);
             Some(tags.into_iter().collect())
         }
-        _ => Some(std::collections::HashMap::new()),
+        _ => Some(std::collections::BTreeMap::new()),
     }
 }
 
@@ -2051,8 +2053,8 @@ pub(crate) use fakecloud_aws::xml::xml_escape;
 
 pub(crate) fn extract_user_metadata(
     headers: &HeaderMap,
-) -> std::collections::HashMap<String, String> {
-    let mut meta = std::collections::HashMap::new();
+) -> std::collections::BTreeMap<String, String> {
+    let mut meta = std::collections::BTreeMap::new();
     for (name, value) in headers {
         if let Some(key) = name.as_str().strip_prefix("x-amz-meta-") {
             if let Ok(v) = value.to_str() {

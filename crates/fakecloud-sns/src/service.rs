@@ -3,7 +3,7 @@ use base64::Engine;
 use chrono::Utc;
 use http::StatusCode;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -604,7 +604,7 @@ impl SnsService {
         let topic_arn = Arn::new("sns", &req.region, &state.account_id, &name).to_string();
 
         if !state.topics.contains_key(&topic_arn) {
-            let mut attributes = HashMap::new();
+            let mut attributes = BTreeMap::new();
             // Set default policy
             attributes.insert(
                 "Policy".to_string(),
@@ -1715,7 +1715,7 @@ impl SnsService {
         phone: &str,
         message: String,
         subject: Option<String>,
-        message_attributes: HashMap<String, MessageAttribute>,
+        message_attributes: BTreeMap<String, MessageAttribute>,
         message_group_id: Option<String>,
         message_dedup_id: Option<String>,
     ) -> Result<AwsResponse, AwsServiceError> {
@@ -1777,7 +1777,7 @@ impl SnsService {
         &self,
         endpoint_arn: &str,
         message: &str,
-        message_attributes: &HashMap<String, MessageAttribute>,
+        message_attributes: &BTreeMap<String, MessageAttribute>,
         request_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let acct = endpoint_arn.split(':').nth(4).unwrap_or("");
@@ -2379,7 +2379,7 @@ impl SnsService {
                 name,
                 platform,
                 attributes,
-                endpoints: HashMap::new(),
+                endpoints: BTreeMap::new(),
             },
         );
 
@@ -3452,7 +3452,7 @@ struct TopicFanoutContext<'a> {
     sqs_message: &'a str,
     default_message: &'a str,
     envelope_attrs: &'a serde_json::Map<String, Value>,
-    message_attributes: &'a HashMap<String, MessageAttribute>,
+    message_attributes: &'a BTreeMap<String, MessageAttribute>,
     message_group_id: Option<&'a str>,
     message_dedup_id: Option<&'a str>,
 }
@@ -3460,7 +3460,7 @@ struct TopicFanoutContext<'a> {
 fn collect_topic_subscribers(
     state: &crate::state::SnsState,
     topic_arn: &str,
-    message_attributes: &HashMap<String, MessageAttribute>,
+    message_attributes: &BTreeMap<String, MessageAttribute>,
     message: &str,
 ) -> TopicSubscribers {
     let confirmed_for_topic = |s: &&SnsSubscription| {
@@ -3528,7 +3528,7 @@ fn collect_topic_subscribers(
 /// Build the `MessageAttributes` object used inside an SNS notification
 /// envelope from the typed SNS message attributes.
 fn build_envelope_attrs(
-    message_attributes: &HashMap<String, MessageAttribute>,
+    message_attributes: &BTreeMap<String, MessageAttribute>,
 ) -> serde_json::Map<String, Value> {
     let mut envelope_attrs = serde_json::Map::new();
     for (key, attr) in message_attributes {
@@ -3548,8 +3548,8 @@ fn build_envelope_attrs(
     envelope_attrs
 }
 
-fn parse_message_attributes(req: &AwsRequest) -> HashMap<String, MessageAttribute> {
-    let mut attrs = HashMap::new();
+fn parse_message_attributes(req: &AwsRequest) -> BTreeMap<String, MessageAttribute> {
+    let mut attrs = BTreeMap::new();
     for n in 1..=10 {
         let name_key = format!("MessageAttributes.entry.{n}.Name");
         let data_type_key = format!("MessageAttributes.entry.{n}.Value.DataType");
@@ -3584,8 +3584,8 @@ fn parse_message_attributes(req: &AwsRequest) -> HashMap<String, MessageAttribut
 fn parse_batch_message_attributes(
     req: &AwsRequest,
     member_idx: usize,
-) -> HashMap<String, MessageAttribute> {
-    let mut attrs = HashMap::new();
+) -> BTreeMap<String, MessageAttribute> {
+    let mut attrs = BTreeMap::new();
     for n in 1..=10 {
         let prefix =
             format!("PublishBatchRequestEntries.member.{member_idx}.MessageAttributes.entry.{n}");
@@ -3654,8 +3654,8 @@ fn parse_tag_keys(req: &AwsRequest) -> Vec<String> {
 }
 
 /// Parse Attributes.entry.N.key/value pairs (used by CreateTopic, Subscribe, etc.)
-fn parse_entries(req: &AwsRequest, prefix: &str) -> HashMap<String, String> {
-    let mut attrs = HashMap::new();
+fn parse_entries(req: &AwsRequest, prefix: &str) -> BTreeMap<String, String> {
+    let mut attrs = BTreeMap::new();
     for n in 1..=50 {
         let key_param = format!("{prefix}.entry.{n}.key");
         let val_param = format!("{prefix}.entry.{n}.value");
@@ -3743,7 +3743,7 @@ fn validate_sms_endpoint(endpoint: &str) -> Result<(), AwsServiceError> {
 /// Check if a message's attributes match the subscription's FilterPolicy.
 fn matches_filter_policy(
     sub: &SnsSubscription,
-    message_attributes: &HashMap<String, MessageAttribute>,
+    message_attributes: &BTreeMap<String, MessageAttribute>,
     message_body: &str,
 ) -> bool {
     let filter_json = match sub.attributes.get("FilterPolicy") {
@@ -4539,7 +4539,7 @@ mod tests {
                     topic_arn: topic_arn.to_string(),
                     name: "test-topic".to_string(),
                     attributes: {
-                        let mut m = std::collections::HashMap::new();
+                        let mut m = std::collections::BTreeMap::new();
                         // Set an intentionally broken JSON policy
                         m.insert("Policy".to_string(), "not valid json {{{".to_string());
                         m
@@ -5770,14 +5770,14 @@ mod tests {
             protocol: "sqs".to_string(),
             endpoint: "arn:aws:sqs:us-east-1:123456789012:q".to_string(),
             owner: "123456789012".to_string(),
-            attributes: HashMap::from([(
+            attributes: BTreeMap::from([(
                 "FilterPolicy".to_string(),
                 "not valid json {{[".to_string(),
             )]),
             confirmed: true,
             confirmation_token: None,
         };
-        let attrs = HashMap::new();
+        let attrs = BTreeMap::new();
         assert!(
             !matches_filter_policy(&sub, &attrs, "hello"),
             "malformed FilterPolicy JSON must not match (fail closed)"
