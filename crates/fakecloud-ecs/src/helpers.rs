@@ -40,6 +40,14 @@ pub(crate) fn is_mutating(action: &str) -> bool {
             | "SubmitTaskStateChange"
             | "SubmitAttachmentStateChanges"
             | "StopServiceDeployment"
+            | "RegisterDaemonTaskDefinition"
+            | "DeleteDaemonTaskDefinition"
+            | "CreateDaemon"
+            | "UpdateDaemon"
+            | "DeleteDaemon"
+            | "CreateExpressGatewayService"
+            | "UpdateExpressGatewayService"
+            | "DeleteExpressGatewayService"
     )
 }
 

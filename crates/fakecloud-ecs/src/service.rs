@@ -77,6 +77,22 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListServiceDeployments",
     "DescribeServiceDeployments",
     "DescribeServiceRevisions",
+    "RegisterDaemonTaskDefinition",
+    "DescribeDaemonTaskDefinition",
+    "DeleteDaemonTaskDefinition",
+    "ListDaemonTaskDefinitions",
+    "CreateDaemon",
+    "DescribeDaemon",
+    "UpdateDaemon",
+    "DeleteDaemon",
+    "ListDaemons",
+    "DescribeDaemonDeployments",
+    "ListDaemonDeployments",
+    "DescribeDaemonRevisions",
+    "CreateExpressGatewayService",
+    "DescribeExpressGatewayService",
+    "UpdateExpressGatewayService",
+    "DeleteExpressGatewayService",
 ];
 
 pub struct EcsService {
@@ -226,6 +242,22 @@ impl AwsService for EcsService {
             "ListServiceDeployments" => self.list_service_deployments(&request),
             "DescribeServiceDeployments" => self.describe_service_deployments(&request),
             "DescribeServiceRevisions" => self.describe_service_revisions(&request),
+            "RegisterDaemonTaskDefinition" => self.register_daemon_task_definition(&request),
+            "DescribeDaemonTaskDefinition" => self.describe_daemon_task_definition(&request),
+            "DeleteDaemonTaskDefinition" => self.delete_daemon_task_definition(&request),
+            "ListDaemonTaskDefinitions" => self.list_daemon_task_definitions(&request),
+            "CreateDaemon" => self.create_daemon(&request),
+            "DescribeDaemon" => self.describe_daemon(&request),
+            "UpdateDaemon" => self.update_daemon(&request),
+            "DeleteDaemon" => self.delete_daemon(&request),
+            "ListDaemons" => self.list_daemons(&request),
+            "DescribeDaemonDeployments" => self.describe_daemon_deployments(&request),
+            "ListDaemonDeployments" => self.list_daemon_deployments(&request),
+            "DescribeDaemonRevisions" => self.describe_daemon_revisions(&request),
+            "CreateExpressGatewayService" => self.create_express_gateway_service(&request),
+            "DescribeExpressGatewayService" => self.describe_express_gateway_service(&request),
+            "UpdateExpressGatewayService" => self.update_express_gateway_service(&request),
+            "DeleteExpressGatewayService" => self.delete_express_gateway_service(&request),
             _ => Err(AwsServiceError::action_not_implemented(
                 "ecs",
                 &request.action,
@@ -278,6 +310,12 @@ mod service_services_resource;
 
 #[path = "service_container_instances_etc.rs"]
 mod service_container_instances_etc;
+
+#[path = "service_daemons.rs"]
+mod service_daemons;
+
+#[path = "service_express_gateway.rs"]
+mod service_express_gateway;
 
 #[path = "helpers.rs"]
 mod helpers;

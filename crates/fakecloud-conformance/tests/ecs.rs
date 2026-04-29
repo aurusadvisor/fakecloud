@@ -1534,3 +1534,343 @@ async fn ecs_describe_service_revisions() {
         .unwrap();
     resp.service_revisions();
 }
+
+// ── Daemon + ExpressGatewayService conformance (2026 ops) ───────────────
+
+async fn create_default_cluster(client: &aws_sdk_ecs::Client) {
+    client
+        .create_cluster()
+        .cluster_name("default")
+        .send()
+        .await
+        .unwrap();
+}
+
+async fn register_daemon_td_arn(client: &aws_sdk_ecs::Client, family: &str) -> String {
+    use aws_sdk_ecs::types::DaemonContainerDefinition;
+    let container = DaemonContainerDefinition::builder()
+        .name("agent")
+        .image("nginx:latest")
+        .build()
+        .unwrap();
+    let resp = client
+        .register_daemon_task_definition()
+        .family(family)
+        .container_definitions(container)
+        .send()
+        .await
+        .unwrap();
+    resp.daemon_task_definition_arn().unwrap().to_string()
+}
+
+#[test_action("ecs", "RegisterDaemonTaskDefinition", checksum = "d0a5705c")]
+#[tokio::test]
+async fn ecs_register_daemon_task_definition() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    let arn = register_daemon_td_arn(&client, "daemon-conf-register").await;
+    assert!(arn.contains(":daemon-task-definition/"));
+}
+
+#[test_action("ecs", "DescribeDaemonTaskDefinition", checksum = "ae657c0d")]
+#[tokio::test]
+async fn ecs_describe_daemon_task_definition() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    let arn = register_daemon_td_arn(&client, "daemon-conf-desc").await;
+    let resp = client
+        .describe_daemon_task_definition()
+        .daemon_task_definition(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.daemon_task_definition().is_some());
+}
+
+#[test_action("ecs", "DeleteDaemonTaskDefinition", checksum = "cbd6b909")]
+#[tokio::test]
+async fn ecs_delete_daemon_task_definition() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    let arn = register_daemon_td_arn(&client, "daemon-conf-del").await;
+    let resp = client
+        .delete_daemon_task_definition()
+        .daemon_task_definition(&arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.daemon_task_definition_arn().is_some());
+}
+
+#[test_action("ecs", "ListDaemonTaskDefinitions", checksum = "b6ebee95")]
+#[tokio::test]
+async fn ecs_list_daemon_task_definitions() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    register_daemon_td_arn(&client, "daemon-conf-list").await;
+    let resp = client.list_daemon_task_definitions().send().await.unwrap();
+    assert!(!resp.daemon_task_definitions().is_empty());
+}
+
+async fn create_daemon_with_arn(client: &aws_sdk_ecs::Client, name: &str) -> String {
+    let arn = register_daemon_td_arn(client, name).await;
+    let resp = client
+        .create_daemon()
+        .daemon_name(name)
+        .daemon_task_definition_arn(arn)
+        .capacity_provider_arns("FARGATE")
+        .send()
+        .await
+        .unwrap();
+    resp.daemon_arn().unwrap().to_string()
+}
+
+#[test_action("ecs", "CreateDaemon", checksum = "8b96e9bf")]
+#[tokio::test]
+async fn ecs_create_daemon() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    let arn = create_daemon_with_arn(&client, "conf-create").await;
+    assert!(arn.contains(":daemon/"));
+}
+
+#[test_action("ecs", "DescribeDaemon", checksum = "af1141c6")]
+#[tokio::test]
+async fn ecs_describe_daemon() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    let arn = create_daemon_with_arn(&client, "conf-desc-d").await;
+    let resp = client
+        .describe_daemon()
+        .daemon_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.daemon().is_some());
+}
+
+#[test_action("ecs", "UpdateDaemon", checksum = "87f1f95b")]
+#[tokio::test]
+async fn ecs_update_daemon() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    let arn = create_daemon_with_arn(&client, "conf-upd").await;
+    let new_td = register_daemon_td_arn(&client, "conf-upd").await;
+    let resp = client
+        .update_daemon()
+        .daemon_arn(arn)
+        .daemon_task_definition_arn(new_td)
+        .capacity_provider_arns("FARGATE")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.daemon_arn().is_some());
+}
+
+#[test_action("ecs", "DeleteDaemon", checksum = "b10fefb1")]
+#[tokio::test]
+async fn ecs_delete_daemon() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    let arn = create_daemon_with_arn(&client, "conf-del-d").await;
+    let resp = client.delete_daemon().daemon_arn(arn).send().await.unwrap();
+    assert!(resp.daemon_arn().is_some());
+}
+
+#[test_action("ecs", "ListDaemons", checksum = "7f97207d")]
+#[tokio::test]
+async fn ecs_list_daemons() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    create_daemon_with_arn(&client, "conf-list-d").await;
+    let resp = client.list_daemons().send().await.unwrap();
+    assert!(!resp.daemon_summaries_list().is_empty());
+}
+
+async fn create_daemon_get_deployment(
+    client: &aws_sdk_ecs::Client,
+    name: &str,
+) -> (String, String) {
+    let td = register_daemon_td_arn(client, name).await;
+    let resp = client
+        .create_daemon()
+        .daemon_name(name)
+        .daemon_task_definition_arn(td)
+        .capacity_provider_arns("FARGATE")
+        .send()
+        .await
+        .unwrap();
+    (
+        resp.daemon_arn().unwrap().to_string(),
+        resp.deployment_arn().unwrap().to_string(),
+    )
+}
+
+#[test_action("ecs", "DescribeDaemonDeployments", checksum = "d0f1127a")]
+#[tokio::test]
+async fn ecs_describe_daemon_deployments() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    let (_d, dep) = create_daemon_get_deployment(&client, "conf-desc-deps").await;
+    let resp = client
+        .describe_daemon_deployments()
+        .daemon_deployment_arns(dep)
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.daemon_deployments().is_empty());
+}
+
+#[test_action("ecs", "ListDaemonDeployments", checksum = "842a7d48")]
+#[tokio::test]
+async fn ecs_list_daemon_deployments() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    let (d_arn, _) = create_daemon_get_deployment(&client, "conf-list-deps").await;
+    let resp = client
+        .list_daemon_deployments()
+        .daemon_arn(d_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.daemon_deployments().is_empty());
+}
+
+#[test_action("ecs", "DescribeDaemonRevisions", checksum = "4eb9e0f0")]
+#[tokio::test]
+async fn ecs_describe_daemon_revisions() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    let (_d, dep) = create_daemon_get_deployment(&client, "conf-desc-revs").await;
+    let resp = client
+        .describe_daemon_revisions()
+        .daemon_revision_arns(dep)
+        .send()
+        .await
+        .unwrap();
+    assert!(!resp.daemon_revisions().is_empty());
+}
+
+fn primary_eg_container() -> aws_sdk_ecs::types::ExpressGatewayContainer {
+    aws_sdk_ecs::types::ExpressGatewayContainer::builder()
+        .image("nginx:latest")
+        .build()
+        .unwrap()
+}
+
+#[test_action("ecs", "CreateExpressGatewayService", checksum = "af2d07b8")]
+#[tokio::test]
+async fn ecs_create_express_gateway_service() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    let resp = client
+        .create_express_gateway_service()
+        .execution_role_arn("arn:aws:iam::000000000000:role/execution")
+        .infrastructure_role_arn("arn:aws:iam::000000000000:role/infra")
+        .service_name("eg-conf-create")
+        .primary_container(primary_eg_container())
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.service().is_some());
+}
+
+#[test_action("ecs", "DescribeExpressGatewayService", checksum = "a9f14d47")]
+#[tokio::test]
+async fn ecs_describe_express_gateway_service() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    let created = client
+        .create_express_gateway_service()
+        .execution_role_arn("arn:aws:iam::000000000000:role/execution")
+        .infrastructure_role_arn("arn:aws:iam::000000000000:role/infra")
+        .service_name("eg-conf-desc")
+        .primary_container(primary_eg_container())
+        .send()
+        .await
+        .unwrap();
+    let eg_arn = created
+        .service()
+        .unwrap()
+        .service_arn()
+        .unwrap()
+        .to_string();
+    let resp = client
+        .describe_express_gateway_service()
+        .service_arn(eg_arn.clone())
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.service().is_some());
+}
+
+#[test_action("ecs", "UpdateExpressGatewayService", checksum = "e7d45f06")]
+#[tokio::test]
+async fn ecs_update_express_gateway_service() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    let created = client
+        .create_express_gateway_service()
+        .execution_role_arn("arn:aws:iam::000000000000:role/execution")
+        .infrastructure_role_arn("arn:aws:iam::000000000000:role/infra")
+        .service_name("eg-conf-upd")
+        .primary_container(primary_eg_container())
+        .send()
+        .await
+        .unwrap();
+    let eg_arn = created
+        .service()
+        .unwrap()
+        .service_arn()
+        .unwrap()
+        .to_string();
+    let resp = client
+        .update_express_gateway_service()
+        .service_arn(eg_arn.clone())
+        .cpu("512")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.service().is_some());
+}
+
+#[test_action("ecs", "DeleteExpressGatewayService", checksum = "d9132bdf")]
+#[tokio::test]
+async fn ecs_delete_express_gateway_service() {
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    create_default_cluster(&client).await;
+    let created = client
+        .create_express_gateway_service()
+        .execution_role_arn("arn:aws:iam::000000000000:role/execution")
+        .infrastructure_role_arn("arn:aws:iam::000000000000:role/infra")
+        .service_name("eg-conf-del")
+        .primary_container(primary_eg_container())
+        .send()
+        .await
+        .unwrap();
+    let eg_arn = created
+        .service()
+        .unwrap()
+        .service_arn()
+        .unwrap()
+        .to_string();
+    let resp = client
+        .delete_express_gateway_service()
+        .service_arn(eg_arn.clone())
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.service().is_some());
+}

@@ -72,6 +72,28 @@ pub struct EcsState {
     /// Task sets keyed by `cluster/service/task-set-id`.
     #[serde(default)]
     pub task_sets: BTreeMap<String, TaskSet>,
+    /// Daemon task definitions keyed by `family` -> `revision` -> definition.
+    /// Same shape as `task_definitions` but isolated since daemon defs use
+    /// the dedicated `RegisterDaemonTaskDefinition` op and have their own
+    /// revision counter.
+    #[serde(default)]
+    pub daemon_task_definitions: BTreeMap<String, BTreeMap<i32, DaemonTaskDefinition>>,
+    /// Per-family monotonic revision counter for daemon task defs.
+    #[serde(default)]
+    pub next_daemon_revision: BTreeMap<String, i32>,
+    /// Daemons keyed by `cluster/daemon-name`. Daemons are cluster-scoped
+    /// and run one task per matching capacity provider per AWS spec.
+    #[serde(default)]
+    pub daemons: BTreeMap<String, Daemon>,
+    /// Daemon deployment history keyed by deployment ARN. Each
+    /// CreateDaemon / UpdateDaemon mints a new deployment record.
+    #[serde(default)]
+    pub daemon_deployments: BTreeMap<String, DaemonDeployment>,
+    /// Express Gateway services keyed by `cluster/service-name`. The
+    /// 2026 Express Gateway feature is a serverless container service
+    /// with built-in load balancing and autoscaling.
+    #[serde(default)]
+    pub express_gateway_services: BTreeMap<String, ExpressGatewayService>,
 }
 
 impl EcsState {
@@ -91,6 +113,11 @@ impl EcsState {
             attributes: BTreeMap::new(),
             capacity_providers: BTreeMap::new(),
             task_sets: BTreeMap::new(),
+            daemon_task_definitions: BTreeMap::new(),
+            next_daemon_revision: BTreeMap::new(),
+            daemons: BTreeMap::new(),
+            daemon_deployments: BTreeMap::new(),
+            express_gateway_services: BTreeMap::new(),
         }
     }
 
@@ -107,6 +134,11 @@ impl EcsState {
         self.attributes.clear();
         self.capacity_providers.clear();
         self.task_sets.clear();
+        self.daemon_task_definitions.clear();
+        self.next_daemon_revision.clear();
+        self.daemons.clear();
+        self.daemon_deployments.clear();
+        self.express_gateway_services.clear();
     }
 
     /// Services are uniquely identified by `(cluster, name)` within an
@@ -587,6 +619,162 @@ pub struct TaskSet {
     pub capacity_provider_strategy: Vec<Value>,
     #[serde(default)]
     pub tags: Vec<TagEntry>,
+}
+
+/// Daemon task definition. Same structural shape as a regular
+/// TaskDefinition but registered via `RegisterDaemonTaskDefinition` and
+/// kept in a separate per-family revision counter.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DaemonTaskDefinition {
+    pub family: String,
+    pub revision: i32,
+    pub task_definition_arn: String,
+    pub status: String,
+    pub container_definitions: Vec<Value>,
+    pub task_role_arn: Option<String>,
+    pub execution_role_arn: Option<String>,
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+    #[serde(default)]
+    pub volumes: Vec<Value>,
+    pub registered_at: DateTime<Utc>,
+    pub deregistered_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub tags: Vec<TagEntry>,
+}
+
+/// Daemon resource. Daemons run one task per matching capacity
+/// provider in the cluster. Modeled after the ECS Service struct
+/// since the lifecycle / status / deployment story is parallel.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Daemon {
+    pub daemon_name: String,
+    pub daemon_arn: String,
+    pub cluster_arn: String,
+    pub cluster_name: String,
+    pub daemon_task_definition_arn: String,
+    pub status: String,
+    pub deployment_arn: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub capacity_provider_arns: Vec<String>,
+    pub deployment_configuration: Option<Value>,
+    pub propagate_tags: Option<String>,
+    pub enable_ecs_managed_tags: bool,
+    pub enable_execute_command: bool,
+    pub client_token: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<TagEntry>,
+    /// Revision history of deployment ARNs in chronological order.
+    #[serde(default)]
+    pub deployment_history: Vec<String>,
+}
+
+/// Single deployment record. Created on every CreateDaemon /
+/// UpdateDaemon and retained so DescribeDaemonDeployments and
+/// DescribeDaemonRevisions have something to return.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DaemonDeployment {
+    pub deployment_arn: String,
+    pub daemon_arn: String,
+    pub daemon_name: String,
+    pub cluster_arn: String,
+    pub task_definition_arn: String,
+    pub status: String,
+    pub revision: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// 2026 Express Gateway service — serverless container service with
+/// integrated load balancing, health checks, and autoscaling.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExpressGatewayService {
+    pub service_name: String,
+    pub service_arn: String,
+    pub cluster_arn: String,
+    pub cluster_name: String,
+    pub status: String,
+    pub execution_role_arn: String,
+    pub infrastructure_role_arn: String,
+    pub task_role_arn: Option<String>,
+    pub primary_container: Value,
+    pub network_configuration: Option<Value>,
+    pub health_check_path: Option<String>,
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+    pub scaling_target: Option<Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub tags: Vec<TagEntry>,
+}
+
+impl EcsState {
+    /// Composite key for daemon storage (`cluster_name/daemon_name`).
+    pub fn daemon_key(cluster: &str, name: &str) -> String {
+        format!("{}/{}", cluster, name)
+    }
+
+    /// Composite key for express-gateway storage (`cluster_name/service_name`).
+    pub fn express_gateway_key(cluster: &str, name: &str) -> String {
+        format!("{}/{}", cluster, name)
+    }
+
+    /// Allocate the next monotonic revision for a daemon task family.
+    pub fn allocate_daemon_revision(&mut self, family: &str) -> i32 {
+        let entry = self
+            .next_daemon_revision
+            .entry(family.to_string())
+            .or_insert(0);
+        *entry += 1;
+        *entry
+    }
+
+    /// Build a daemon ARN for a (cluster, name) pair under this account/region.
+    pub fn daemon_arn(&self, cluster: &str, name: &str) -> String {
+        fakecloud_aws::arn::Arn::new(
+            "ecs",
+            &self.region,
+            &self.account_id,
+            &format!("daemon/{}/{}", cluster, name),
+        )
+        .to_string()
+    }
+
+    /// Build an express-gateway service ARN.
+    pub fn express_gateway_arn(&self, cluster: &str, name: &str) -> String {
+        fakecloud_aws::arn::Arn::new(
+            "ecs",
+            &self.region,
+            &self.account_id,
+            &format!("express-gateway-service/{}/{}", cluster, name),
+        )
+        .to_string()
+    }
+
+    /// Build a daemon task definition ARN for a `family:revision` pair.
+    pub fn daemon_task_definition_arn(&self, family: &str, revision: i32) -> String {
+        fakecloud_aws::arn::Arn::new(
+            "ecs",
+            &self.region,
+            &self.account_id,
+            &format!("daemon-task-definition/{}:{}", family, revision),
+        )
+        .to_string()
+    }
+
+    /// Build a daemon deployment ARN.
+    pub fn daemon_deployment_arn(&self, daemon_name: &str, deployment_id: &str) -> String {
+        fakecloud_aws::arn::Arn::new(
+            "ecs",
+            &self.region,
+            &self.account_id,
+            &format!("daemon-deployment/{}/{}", daemon_name, deployment_id),
+        )
+        .to_string()
+    }
 }
 
 #[cfg(test)]
