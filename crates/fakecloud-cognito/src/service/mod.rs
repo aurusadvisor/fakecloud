@@ -10,7 +10,7 @@ mod resource_servers;
 mod user_pools;
 mod users;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -949,8 +949,8 @@ fn parse_admin_create_user_config(val: &Value) -> Option<AdminCreateUserConfig> 
     })
 }
 
-fn parse_tags(val: &Value) -> std::collections::HashMap<String, String> {
-    let mut tags = std::collections::HashMap::new();
+fn parse_tags(val: &Value) -> std::collections::BTreeMap<String, String> {
+    let mut tags = std::collections::BTreeMap::new();
     if let Some(obj) = val.as_object() {
         for (k, v) in obj {
             if let Some(s) = v.as_str() {
@@ -1062,7 +1062,7 @@ fn validate_provider_type(provider_type: &str) -> Result<(), AwsServiceError> {
     Ok(())
 }
 
-fn parse_string_map(val: &Value) -> HashMap<String, String> {
+fn parse_string_map(val: &Value) -> BTreeMap<String, String> {
     val.as_object()
         .map(|obj| {
             obj.iter()
@@ -2022,11 +2022,11 @@ mod tests {
             password: None,
             temporary_password: None,
             confirmation_code: None,
-            attribute_verification_codes: HashMap::new(),
+            attribute_verification_codes: BTreeMap::new(),
             mfa_preferences: None,
             totp_secret: None,
             totp_verified: false,
-            devices: HashMap::new(),
+            devices: BTreeMap::new(),
             linked_providers: Vec::new(),
         };
 
@@ -2056,11 +2056,11 @@ mod tests {
             password: None,
             temporary_password: None,
             confirmation_code: None,
-            attribute_verification_codes: HashMap::new(),
+            attribute_verification_codes: BTreeMap::new(),
             mfa_preferences: None,
             totp_secret: None,
             totp_verified: false,
-            devices: HashMap::new(),
+            devices: BTreeMap::new(),
             linked_providers: Vec::new(),
         };
 
@@ -2087,11 +2087,11 @@ mod tests {
             password: None,
             temporary_password: None,
             confirmation_code: None,
-            attribute_verification_codes: HashMap::new(),
+            attribute_verification_codes: BTreeMap::new(),
             mfa_preferences: None,
             totp_secret: None,
             totp_verified: false,
-            devices: HashMap::new(),
+            devices: BTreeMap::new(),
             linked_providers: Vec::new(),
         };
 
@@ -3531,7 +3531,7 @@ mod tests {
                 "dev-key-1".to_string(),
                 Device {
                     device_key: "dev-key-1".to_string(),
-                    device_attributes: HashMap::new(),
+                    device_attributes: BTreeMap::new(),
                     device_create_date: Utc::now(),
                     device_last_modified_date: Utc::now(),
                     device_last_authenticated_date: None,

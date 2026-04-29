@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -30,63 +30,63 @@ pub struct CognitoState {
     pub account_id: String,
     pub region: String,
     #[serde(default)]
-    pub user_pools: HashMap<String, UserPool>,
+    pub user_pools: BTreeMap<String, UserPool>,
     #[serde(default)]
-    pub user_pool_clients: HashMap<String, UserPoolClient>,
+    pub user_pool_clients: BTreeMap<String, UserPoolClient>,
     /// pool_id -> (username -> User)
     #[serde(default)]
-    pub users: HashMap<String, HashMap<String, User>>,
+    pub users: BTreeMap<String, BTreeMap<String, User>>,
     /// refresh_token -> RefreshTokenData
     #[serde(default)]
-    pub refresh_tokens: HashMap<String, RefreshTokenData>,
+    pub refresh_tokens: BTreeMap<String, RefreshTokenData>,
     /// session_token -> SessionData
     #[serde(default)]
-    pub sessions: HashMap<String, SessionData>,
+    pub sessions: BTreeMap<String, SessionData>,
     /// access_token -> AccessTokenData
     #[serde(default)]
-    pub access_tokens: HashMap<String, AccessTokenData>,
+    pub access_tokens: BTreeMap<String, AccessTokenData>,
     /// pool_id -> (group_name -> Group)
     #[serde(default)]
-    pub groups: HashMap<String, HashMap<String, Group>>,
+    pub groups: BTreeMap<String, BTreeMap<String, Group>>,
     /// pool_id -> (username -> [group_names])
     #[serde(default)]
-    pub user_groups: HashMap<String, HashMap<String, Vec<String>>>,
+    pub user_groups: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     /// pool_id -> (provider_name -> IdentityProvider)
     #[serde(default)]
-    pub identity_providers: HashMap<String, HashMap<String, IdentityProvider>>,
+    pub identity_providers: BTreeMap<String, BTreeMap<String, IdentityProvider>>,
     /// pool_id -> (identifier -> ResourceServer)
     #[serde(default)]
-    pub resource_servers: HashMap<String, HashMap<String, ResourceServer>>,
+    pub resource_servers: BTreeMap<String, BTreeMap<String, ResourceServer>>,
     /// domain -> UserPoolDomain
     #[serde(default)]
-    pub domains: HashMap<String, UserPoolDomain>,
+    pub domains: BTreeMap<String, UserPoolDomain>,
     /// resource_arn -> tags
     #[serde(default)]
-    pub tags: HashMap<String, HashMap<String, String>>,
+    pub tags: BTreeMap<String, BTreeMap<String, String>>,
     /// pool_id -> (job_id -> UserImportJob)
     #[serde(default)]
-    pub import_jobs: HashMap<String, HashMap<String, UserImportJob>>,
+    pub import_jobs: BTreeMap<String, BTreeMap<String, UserImportJob>>,
     /// Auth events for introspection — not persisted across restarts.
     #[serde(default, skip)]
     pub auth_events: Vec<AuthEvent>,
     /// (pool_id, client_id|"") -> UICustomization JSON
     #[serde(default)]
-    pub ui_customizations: HashMap<String, serde_json::Value>,
+    pub ui_customizations: BTreeMap<String, serde_json::Value>,
     /// pool_id -> LogDeliveryConfiguration JSON
     #[serde(default)]
-    pub log_delivery_configs: HashMap<String, serde_json::Value>,
+    pub log_delivery_configs: BTreeMap<String, serde_json::Value>,
     /// (pool_id, client_id|"") -> RiskConfiguration JSON
     #[serde(default)]
-    pub risk_configurations: HashMap<String, serde_json::Value>,
+    pub risk_configurations: BTreeMap<String, serde_json::Value>,
     /// branding_id -> ManagedLoginBranding JSON
     #[serde(default)]
-    pub managed_login_brandings: HashMap<String, serde_json::Value>,
+    pub managed_login_brandings: BTreeMap<String, serde_json::Value>,
     /// terms_id -> Terms JSON
     #[serde(default)]
-    pub terms: HashMap<String, serde_json::Value>,
+    pub terms: BTreeMap<String, serde_json::Value>,
     /// (pool_id:username) -> WebAuthn credentials
     #[serde(default)]
-    pub webauthn_credentials: HashMap<String, Vec<WebAuthnCredential>>,
+    pub webauthn_credentials: BTreeMap<String, Vec<WebAuthnCredential>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,26 +124,26 @@ impl CognitoState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            user_pools: HashMap::new(),
-            user_pool_clients: HashMap::new(),
-            users: HashMap::new(),
-            refresh_tokens: HashMap::new(),
-            sessions: HashMap::new(),
-            access_tokens: HashMap::new(),
-            groups: HashMap::new(),
-            user_groups: HashMap::new(),
-            identity_providers: HashMap::new(),
-            resource_servers: HashMap::new(),
-            domains: HashMap::new(),
-            tags: HashMap::new(),
-            import_jobs: HashMap::new(),
+            user_pools: BTreeMap::new(),
+            user_pool_clients: BTreeMap::new(),
+            users: BTreeMap::new(),
+            refresh_tokens: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            access_tokens: BTreeMap::new(),
+            groups: BTreeMap::new(),
+            user_groups: BTreeMap::new(),
+            identity_providers: BTreeMap::new(),
+            resource_servers: BTreeMap::new(),
+            domains: BTreeMap::new(),
+            tags: BTreeMap::new(),
+            import_jobs: BTreeMap::new(),
             auth_events: Vec::new(),
-            ui_customizations: HashMap::new(),
-            log_delivery_configs: HashMap::new(),
-            risk_configurations: HashMap::new(),
-            managed_login_brandings: HashMap::new(),
-            terms: HashMap::new(),
-            webauthn_credentials: HashMap::new(),
+            ui_customizations: BTreeMap::new(),
+            log_delivery_configs: BTreeMap::new(),
+            risk_configurations: BTreeMap::new(),
+            managed_login_brandings: BTreeMap::new(),
+            terms: BTreeMap::new(),
+            webauthn_credentials: BTreeMap::new(),
         }
     }
 
@@ -226,7 +226,7 @@ pub struct UserPool {
     pub email_configuration: Option<EmailConfiguration>,
     pub sms_configuration: Option<SmsConfiguration>,
     pub admin_create_user_config: Option<AdminCreateUserConfig>,
-    pub user_pool_tags: HashMap<String, String>,
+    pub user_pool_tags: BTreeMap<String, String>,
     pub account_recovery_setting: Option<AccountRecoverySetting>,
     pub deletion_protection: Option<String>,
     pub estimated_number_of_users: i64,
@@ -410,11 +410,11 @@ pub struct User {
     pub temporary_password: Option<String>,
     pub confirmation_code: Option<String>,
     /// attribute_name -> verification_code (for GetUserAttributeVerificationCode / VerifyUserAttribute)
-    pub attribute_verification_codes: HashMap<String, String>,
+    pub attribute_verification_codes: BTreeMap<String, String>,
     pub mfa_preferences: Option<MfaPreferences>,
     pub totp_secret: Option<String>,
     pub totp_verified: bool,
-    pub devices: HashMap<String, Device>,
+    pub devices: BTreeMap<String, Device>,
     pub linked_providers: Vec<LinkedProvider>,
 }
 
@@ -448,8 +448,8 @@ pub struct IdentityProvider {
     pub user_pool_id: String,
     pub provider_name: String,
     pub provider_type: String,
-    pub provider_details: HashMap<String, String>,
-    pub attribute_mapping: HashMap<String, String>,
+    pub provider_details: BTreeMap<String, String>,
+    pub attribute_mapping: BTreeMap<String, String>,
     pub idp_identifiers: Vec<String>,
     pub creation_date: DateTime<Utc>,
     pub last_modified_date: DateTime<Utc>,
@@ -486,7 +486,7 @@ pub struct CustomDomainConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Device {
     pub device_key: String,
-    pub device_attributes: HashMap<String, String>,
+    pub device_attributes: BTreeMap<String, String>,
     pub device_create_date: DateTime<Utc>,
     pub device_last_modified_date: DateTime<Utc>,
     pub device_last_authenticated_date: Option<DateTime<Utc>>,
@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn reset_clears_state() {
         let mut state = CognitoState::new("123456789012", "us-east-1");
-        state.tags.insert("arn".to_string(), HashMap::new());
+        state.tags.insert("arn".to_string(), BTreeMap::new());
         state.reset();
         assert!(state.tags.is_empty());
     }

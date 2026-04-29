@@ -542,7 +542,7 @@ impl ResourceProvisioner {
             managed_by: None,
             created_by: None,
             targets: Vec::new(),
-            tags: HashMap::new(),
+            tags: std::collections::BTreeMap::new(),
             last_fired: None,
         };
 

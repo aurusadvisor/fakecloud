@@ -137,6 +137,7 @@ mod tests {
     use crate::state::{EventRule, EventTarget as EbTarget, SharedEventBridgeState};
     use fakecloud_core::delivery::{SnsDelivery, SqsDelivery};
     use parking_lot::RwLock;
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -203,7 +204,7 @@ mod tests {
                 input_transformer: None,
                 sqs_parameters: None,
             }],
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             last_fired: None,
         }
     }

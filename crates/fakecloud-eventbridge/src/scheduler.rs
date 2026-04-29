@@ -344,6 +344,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn parse_rate_minutes() {
@@ -547,7 +548,7 @@ mod tests {
                     input_transformer: None,
                     sqs_parameters: None,
                 }],
-                tags: HashMap::new(),
+                tags: BTreeMap::new(),
                 last_fired: None,
             }
         }

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use fakecloud_aws::arn::Arn;
@@ -347,30 +347,30 @@ pub struct ElastiCacheState {
     pub account_id: String,
     pub region: String,
     pub parameter_groups: Vec<CacheParameterGroup>,
-    pub subnet_groups: HashMap<String, CacheSubnetGroup>,
-    pub reserved_cache_nodes: HashMap<String, ReservedCacheNode>,
+    pub subnet_groups: BTreeMap<String, CacheSubnetGroup>,
+    pub reserved_cache_nodes: BTreeMap<String, ReservedCacheNode>,
     pub reserved_cache_nodes_offerings: Vec<ReservedCacheNodesOffering>,
-    pub cache_clusters: HashMap<String, CacheCluster>,
-    pub replication_groups: HashMap<String, ReplicationGroup>,
-    pub global_replication_groups: HashMap<String, GlobalReplicationGroup>,
-    pub users: HashMap<String, ElastiCacheUser>,
-    pub user_groups: HashMap<String, ElastiCacheUserGroup>,
-    pub snapshots: HashMap<String, CacheSnapshot>,
-    pub serverless_caches: HashMap<String, ServerlessCache>,
-    pub serverless_cache_snapshots: HashMap<String, ServerlessCacheSnapshot>,
-    pub tags: HashMap<String, Vec<(String, String)>>,
+    pub cache_clusters: BTreeMap<String, CacheCluster>,
+    pub replication_groups: BTreeMap<String, ReplicationGroup>,
+    pub global_replication_groups: BTreeMap<String, GlobalReplicationGroup>,
+    pub users: BTreeMap<String, ElastiCacheUser>,
+    pub user_groups: BTreeMap<String, ElastiCacheUserGroup>,
+    pub snapshots: BTreeMap<String, CacheSnapshot>,
+    pub serverless_caches: BTreeMap<String, ServerlessCache>,
+    pub serverless_cache_snapshots: BTreeMap<String, ServerlessCacheSnapshot>,
+    pub tags: BTreeMap<String, Vec<(String, String)>>,
     in_progress_cache_cluster_ids: HashSet<String>,
     in_progress_replication_group_ids: HashSet<String>,
     in_progress_serverless_cache_names: HashSet<String>,
     #[serde(default)]
-    pub security_groups: HashMap<String, CacheSecurityGroup>,
+    pub security_groups: BTreeMap<String, CacheSecurityGroup>,
     #[serde(default)]
-    pub parameter_group_parameters: HashMap<String, Vec<CacheParameter>>,
+    pub parameter_group_parameters: BTreeMap<String, Vec<CacheParameter>>,
     #[serde(default)]
     pub events: Vec<CacheEvent>,
     /// Active migrations keyed by replication group id.
     #[serde(default)]
-    pub migrations: HashMap<String, Migration>,
+    pub migrations: BTreeMap<String, Migration>,
 }
 
 impl ElastiCacheState {
@@ -378,7 +378,7 @@ impl ElastiCacheState {
         let parameter_groups = default_parameter_groups(account_id, region);
         let subnet_groups = default_subnet_groups(account_id, region);
         let users = default_users(account_id, region);
-        let mut tags: HashMap<String, Vec<(String, String)>> = subnet_groups
+        let mut tags: BTreeMap<String, Vec<(String, String)>> = subnet_groups
             .values()
             .map(|g| (g.arn.clone(), Vec::new()))
             .collect();
@@ -390,24 +390,24 @@ impl ElastiCacheState {
             region: region.to_string(),
             parameter_groups,
             subnet_groups,
-            reserved_cache_nodes: HashMap::new(),
+            reserved_cache_nodes: BTreeMap::new(),
             reserved_cache_nodes_offerings: default_reserved_cache_nodes_offerings(),
-            cache_clusters: HashMap::new(),
-            replication_groups: HashMap::new(),
-            global_replication_groups: HashMap::new(),
+            cache_clusters: BTreeMap::new(),
+            replication_groups: BTreeMap::new(),
+            global_replication_groups: BTreeMap::new(),
             users,
-            user_groups: HashMap::new(),
-            snapshots: HashMap::new(),
-            serverless_caches: HashMap::new(),
-            serverless_cache_snapshots: HashMap::new(),
+            user_groups: BTreeMap::new(),
+            snapshots: BTreeMap::new(),
+            serverless_caches: BTreeMap::new(),
+            serverless_cache_snapshots: BTreeMap::new(),
             tags,
             in_progress_cache_cluster_ids: HashSet::new(),
             in_progress_replication_group_ids: HashSet::new(),
             in_progress_serverless_cache_names: HashSet::new(),
-            security_groups: HashMap::new(),
-            parameter_group_parameters: HashMap::new(),
+            security_groups: BTreeMap::new(),
+            parameter_group_parameters: BTreeMap::new(),
             events: Vec::new(),
-            migrations: HashMap::new(),
+            migrations: BTreeMap::new(),
         }
     }
 
@@ -647,7 +647,7 @@ fn default_parameter_groups(account_id: &str, region: &str) -> Vec<CacheParamete
     ]
 }
 
-fn default_subnet_groups(account_id: &str, region: &str) -> HashMap<String, CacheSubnetGroup> {
+fn default_subnet_groups(account_id: &str, region: &str) -> BTreeMap<String, CacheSubnetGroup> {
     let default_group = CacheSubnetGroup {
         cache_subnet_group_name: "default".to_string(),
         cache_subnet_group_description: "Default CacheSubnetGroup".to_string(),
@@ -655,7 +655,7 @@ fn default_subnet_groups(account_id: &str, region: &str) -> HashMap<String, Cach
         subnet_ids: vec!["subnet-00000000".to_string()],
         arn: Arn::new("elasticache", region, account_id, "subnetgroup:default").to_string(),
     };
-    let mut map = HashMap::new();
+    let mut map = BTreeMap::new();
     map.insert("default".to_string(), default_group);
     map
 }
@@ -752,8 +752,8 @@ pub fn default_parameters_for_family(family: &str) -> Vec<EngineDefaultParameter
     }
 }
 
-fn default_users(account_id: &str, region: &str) -> HashMap<String, ElastiCacheUser> {
-    let mut map = HashMap::new();
+fn default_users(account_id: &str, region: &str) -> BTreeMap<String, ElastiCacheUser> {
+    let mut map = BTreeMap::new();
     map.insert(
         "default".to_string(),
         ElastiCacheUser {

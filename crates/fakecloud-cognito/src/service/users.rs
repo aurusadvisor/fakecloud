@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -92,11 +92,11 @@ impl CognitoService {
                 password: None,
                 temporary_password,
                 confirmation_code: None,
-                attribute_verification_codes: HashMap::new(),
+                attribute_verification_codes: BTreeMap::new(),
                 mfa_preferences: None,
                 totp_secret: None,
                 totp_verified: false,
-                devices: HashMap::new(),
+                devices: BTreeMap::new(),
                 linked_providers: Vec::new(),
             };
 
@@ -547,7 +547,7 @@ impl CognitoService {
         // Validate pool exists
         ensure_user_pool_exists(state, pool_id)?;
 
-        let empty = std::collections::HashMap::new();
+        let empty = std::collections::BTreeMap::new();
         let pool_users = state.users.get(pool_id).unwrap_or(&empty);
 
         // Sort users by creation date for consistent pagination

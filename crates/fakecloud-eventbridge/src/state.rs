@@ -3,14 +3,14 @@ use fakecloud_aws::arn::Arn;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventBus {
     pub name: String,
     pub arn: String,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     pub policy: Option<Value>,
     pub description: Option<String>,
     pub kms_key_identifier: Option<String>,
@@ -32,7 +32,7 @@ pub struct EventRule {
     pub managed_by: Option<String>,
     pub created_by: Option<String>,
     pub targets: Vec<EventTarget>,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
     pub last_fired: Option<DateTime<Utc>>,
 }
 
@@ -172,10 +172,10 @@ pub struct StepFunctionExecution {
 mod rule_map_serde {
     use super::{EventRule, RuleKey};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     pub fn serialize<S: Serializer>(
-        map: &HashMap<RuleKey, EventRule>,
+        map: &BTreeMap<RuleKey, EventRule>,
         s: S,
     ) -> Result<S::Ok, S::Error> {
         let entries: Vec<(&String, &String, &EventRule)> = map
@@ -187,7 +187,7 @@ mod rule_map_serde {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(
         d: D,
-    ) -> Result<HashMap<RuleKey, EventRule>, D::Error> {
+    ) -> Result<BTreeMap<RuleKey, EventRule>, D::Error> {
         let entries: Vec<(String, String, EventRule)> = Vec::deserialize(d)?;
         Ok(entries
             .into_iter()
@@ -200,18 +200,18 @@ mod rule_map_serde {
 pub struct EventBridgeState {
     pub account_id: String,
     pub region: String,
-    pub buses: HashMap<String, EventBus>,
+    pub buses: BTreeMap<String, EventBus>,
     #[serde(with = "rule_map_serde")]
-    pub rules: HashMap<RuleKey, EventRule>,
+    pub rules: BTreeMap<RuleKey, EventRule>,
     pub events: Vec<PutEvent>,
-    pub archives: HashMap<String, Archive>,
-    pub connections: HashMap<String, Connection>,
-    pub api_destinations: HashMap<String, ApiDestination>,
-    pub replays: HashMap<String, Replay>,
+    pub archives: BTreeMap<String, Archive>,
+    pub connections: BTreeMap<String, Connection>,
+    pub api_destinations: BTreeMap<String, ApiDestination>,
+    pub replays: BTreeMap<String, Replay>,
     /// Partner event sources: name -> PartnerEventSource
-    pub partner_event_sources: HashMap<String, PartnerEventSource>,
+    pub partner_event_sources: BTreeMap<String, PartnerEventSource>,
     /// Endpoints: name -> Endpoint
-    pub endpoints: HashMap<String, Endpoint>,
+    pub endpoints: BTreeMap<String, Endpoint>,
     /// Recorded Lambda invocations (stub deliveries).
     pub lambda_invocations: Vec<LambdaInvocation>,
     /// Recorded CloudWatch Logs deliveries (stub deliveries).
@@ -225,13 +225,13 @@ impl EventBridgeState {
         let now = Utc::now();
         let default_bus_arn =
             Arn::new("events", region, account_id, "event-bus/default").to_string();
-        let mut buses = HashMap::new();
+        let mut buses = BTreeMap::new();
         buses.insert(
             "default".to_string(),
             EventBus {
                 name: "default".to_string(),
                 arn: default_bus_arn,
-                tags: HashMap::new(),
+                tags: BTreeMap::new(),
                 policy: None,
                 description: None,
                 kms_key_identifier: None,
@@ -245,14 +245,14 @@ impl EventBridgeState {
             account_id: account_id.to_string(),
             region: region.to_string(),
             buses,
-            rules: HashMap::new(),
+            rules: BTreeMap::new(),
             events: Vec::new(),
-            archives: HashMap::new(),
-            connections: HashMap::new(),
-            api_destinations: HashMap::new(),
-            replays: HashMap::new(),
-            partner_event_sources: HashMap::new(),
-            endpoints: HashMap::new(),
+            archives: BTreeMap::new(),
+            connections: BTreeMap::new(),
+            api_destinations: BTreeMap::new(),
+            replays: BTreeMap::new(),
+            partner_event_sources: BTreeMap::new(),
+            endpoints: BTreeMap::new(),
             lambda_invocations: Vec::new(),
             log_deliveries: Vec::new(),
             step_function_executions: Vec::new(),
@@ -291,7 +291,7 @@ impl EventBridgeState {
             EventBus {
                 name: "default".to_string(),
                 arn: default_bus_arn,
-                tags: HashMap::new(),
+                tags: BTreeMap::new(),
                 policy: None,
                 description: None,
                 kms_key_identifier: None,
