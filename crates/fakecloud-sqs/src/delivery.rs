@@ -148,6 +148,7 @@ mod tests {
     use super::*;
     use crate::state::{SharedSqsState, SqsQueue, SqsState};
     use chrono::Utc;
+    use fakecloud_aws::arn::Arn;
     use fakecloud_core::multi_account::MultiAccountState;
     use parking_lot::RwLock;
     use std::collections::VecDeque;
@@ -165,7 +166,7 @@ mod tests {
         SqsQueue {
             queue_name: name.to_string(),
             queue_url: format!("{ENDPOINT}/{ACCOUNT}/{name}"),
-            arn: format!("arn:aws:sqs:{REGION}:{ACCOUNT}:{name}"),
+            arn: Arn::new("sqs", REGION, ACCOUNT, name).to_string(),
             created_at: Utc::now(),
             messages: VecDeque::new(),
             inflight: Vec::new(),
@@ -317,7 +318,7 @@ mod tests {
         let state = make_state_with_queue(queue);
         let delivery = SqsDeliveryImpl::new(state.clone());
         delivery.deliver_to_queue(
-            &format!("arn:aws:sqs:{REGION}:{ACCOUNT}:missing"),
+            &Arn::new("sqs", REGION, ACCOUNT, "missing").to_string(),
             "body",
             &HashMap::new(),
         );

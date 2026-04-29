@@ -127,6 +127,7 @@ mod tests {
     use super::*;
     use crate::state::{RedrivePolicy, SqsMessage, SqsQueue, SqsState};
     use chrono::Duration;
+    use fakecloud_aws::arn::Arn;
     use fakecloud_core::multi_account::MultiAccountState;
     use parking_lot::RwLock;
     use std::collections::{BTreeMap, VecDeque};
@@ -162,7 +163,7 @@ mod tests {
         let mut accts = state.write();
         let s = accts.default_mut();
         let url = format!("http://localhost:4566/123456789012/{name}");
-        let arn = format!("arn:aws:sqs:us-east-1:123456789012:{name}");
+        let arn = Arn::new("sqs", "us-east-1", "123456789012", name).to_string();
         let mut attrs = BTreeMap::new();
         if let Some(r) = retention {
             attrs.insert("MessageRetentionPeriod".to_string(), r.to_string());

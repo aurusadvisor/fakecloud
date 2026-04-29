@@ -85,6 +85,7 @@ impl KinesisDelivery for KinesisDeliveryImpl {
 mod tests {
     use super::*;
     use crate::state::{KinesisShard, KinesisState, KinesisStream, SharedKinesisState};
+    use fakecloud_aws::arn::Arn;
     use parking_lot::RwLock;
     use std::collections::BTreeMap;
 
@@ -103,7 +104,13 @@ mod tests {
             .collect();
         KinesisStream {
             stream_name: name.to_string(),
-            stream_arn: format!("arn:aws:kinesis:us-east-1:123456789012:stream/{name}"),
+            stream_arn: Arn::new(
+                "kinesis",
+                "us-east-1",
+                "123456789012",
+                &format!("stream/{name}"),
+            )
+            .to_string(),
             stream_status: "ACTIVE".to_string(),
             stream_creation_timestamp: Utc::now(),
             retention_period_hours: 24,

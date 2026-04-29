@@ -96,13 +96,20 @@ mod tests {
     use super::*;
     use crate::state::{LambdaFunction, LambdaState};
     use chrono::Utc;
+    use fakecloud_aws::arn::Arn;
     use parking_lot::RwLock;
     use std::collections::BTreeMap;
 
     fn func_with_policy(name: &str, policy: Option<&str>) -> LambdaFunction {
         LambdaFunction {
             function_name: name.to_string(),
-            function_arn: format!("arn:aws:lambda:us-east-1:123456789012:function:{name}"),
+            function_arn: Arn::new(
+                "lambda",
+                "us-east-1",
+                "123456789012",
+                &format!("function:{name}"),
+            )
+            .to_string(),
             runtime: "python3.12".to_string(),
             role: "arn:aws:iam::123456789012:role/r".to_string(),
             handler: "index.handler".to_string(),

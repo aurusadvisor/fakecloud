@@ -1020,6 +1020,7 @@ fn role_name_from_assumed_role_arn(arn: &str) -> Option<&str> {
 #[allow(clippy::cloned_ref_to_slice_refs)]
 mod tests {
     use super::*;
+    use fakecloud_aws::arn::Arn;
     use serde_json::json;
 
     fn principal_user(arn: &str) -> Principal {
@@ -1852,7 +1853,7 @@ mod tests {
 
     fn principal_in(account: &str, user: &str) -> Principal {
         Principal {
-            arn: format!("arn:aws:iam::{account}:user/{user}"),
+            arn: Arn::global("iam", account, &format!("user/{user}")).to_string(),
             user_id: format!("AIDA{user}"),
             account_id: account.into(),
             principal_type: PrincipalType::User,
@@ -1863,7 +1864,7 @@ mod tests {
 
     fn assumed_role_principal(account: &str, role_arn_tail: &str) -> Principal {
         Principal {
-            arn: format!("arn:aws:sts::{account}:assumed-role/{role_arn_tail}"),
+            arn: Arn::global("sts", account, &format!("assumed-role/{role_arn_tail}")).to_string(),
             user_id: "AROAEXAMPLE".into(),
             account_id: account.into(),
             principal_type: PrincipalType::AssumedRole,
@@ -2133,7 +2134,7 @@ mod tests {
                 },
                 {
                     "Effect": "Deny",
-                    "NotPrincipal": {"AWS": format!("arn:aws:iam::{ACCT_A}:user/bob")},
+                    "NotPrincipal": {"AWS": Arn::global("iam", ACCT_A, "user/bob").to_string()},
                     "Action": "s3:GetObject",
                     "Resource": "*"
                 }
@@ -2160,7 +2161,7 @@ mod tests {
         let resource = json!({
             "Statement": [{
                 "Effect": "Allow",
-                "NotPrincipal": {"AWS": format!("arn:aws:iam::{ACCT_A}:user/bob")},
+                "NotPrincipal": {"AWS": Arn::global("iam", ACCT_A, "user/bob").to_string()},
                 "Action": "s3:GetObject",
                 "Resource": "*"
             }]
@@ -2205,7 +2206,7 @@ mod tests {
         let resource = json!({
             "Statement": [{
                 "Effect": "Allow",
-                "NotPrincipal": {"AWS": format!("arn:aws:iam::{ACCT_A}:root")},
+                "NotPrincipal": {"AWS": Arn::global("iam", ACCT_A, "root").to_string()},
                 "Action": "s3:GetObject",
                 "Resource": "*"
             }]
@@ -2229,7 +2230,7 @@ mod tests {
                 },
                 {
                     "Effect": "Deny",
-                    "NotPrincipal": {"AWS": format!("arn:aws:iam::{ACCT_A}:root")},
+                    "NotPrincipal": {"AWS": Arn::global("iam", ACCT_A, "root").to_string()},
                     "Action": "s3:GetObject",
                     "Resource": "*"
                 }
@@ -2277,8 +2278,8 @@ mod tests {
             "Statement": [{
                 "Effect": "Deny",
                 "NotPrincipal": {"AWS": [
-                    format!("arn:aws:iam::{ACCT_A}:user/alice"),
-                    format!("arn:aws:iam::{ACCT_A}:user/bob")
+                    Arn::global("iam", ACCT_A, "user/alice").to_string(),
+                    Arn::global("iam", ACCT_A, "user/bob").to_string()
                 ]},
                 "Action": "s3:GetObject",
                 "Resource": "*"

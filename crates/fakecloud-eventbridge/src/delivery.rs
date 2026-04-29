@@ -135,6 +135,7 @@ impl EventBridgeDelivery for EventBridgeDeliveryImpl {
 mod tests {
     use super::*;
     use crate::state::{EventRule, EventTarget as EbTarget, SharedEventBridgeState};
+    use fakecloud_aws::arn::Arn;
     use fakecloud_core::delivery::{SnsDelivery, SqsDelivery};
     use parking_lot::RwLock;
     use std::collections::BTreeMap;
@@ -187,7 +188,13 @@ mod tests {
     fn make_rule(name: &str, pattern: Option<&str>, target_arn: &str) -> EventRule {
         EventRule {
             name: name.to_string(),
-            arn: format!("arn:aws:events:us-east-1:123456789012:rule/{name}"),
+            arn: Arn::new(
+                "events",
+                "us-east-1",
+                "123456789012",
+                &format!("rule/{name}"),
+            )
+            .to_string(),
             event_bus_name: "default".to_string(),
             event_pattern: pattern.map(|s| s.to_string()),
             schedule_expression: None,

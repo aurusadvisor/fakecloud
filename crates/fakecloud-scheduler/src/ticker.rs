@@ -206,6 +206,7 @@ mod tests {
     use super::*;
     use crate::state::{FlexibleTimeWindow, Schedule, SharedSchedulerState, Target};
     use chrono::Utc;
+    use fakecloud_aws::arn::Arn;
     use fakecloud_core::delivery::{SqsDelivery, SqsDeliveryError, SqsMessageAttribute};
     use parking_lot::RwLock;
     use std::collections::HashMap;
@@ -227,7 +228,13 @@ mod tests {
         s.schedules.insert(
             ("default".to_string(), name.to_string()),
             Schedule {
-                arn: format!("arn:aws:scheduler:us-east-1:{ACCOUNT}:schedule/default/{name}"),
+                arn: Arn::new(
+                    "scheduler",
+                    "us-east-1",
+                    ACCOUNT,
+                    &format!("schedule/default/{name}"),
+                )
+                .to_string(),
                 name: name.to_string(),
                 group_name: "default".to_string(),
                 schedule_expression: expr.to_string(),

@@ -559,12 +559,13 @@ pub const IAM_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fakecloud_aws::arn::Arn;
 
     fn iam_user(name: &str, account_id: &str) -> IamUser {
         IamUser {
             user_name: name.to_string(),
             user_id: format!("AIDA{}", name.to_uppercase()),
-            arn: format!("arn:aws:iam::{}:user/{}", account_id, name),
+            arn: Arn::global("iam", account_id, &format!("user/{name}")).to_string(),
             path: "/".to_string(),
             created_at: Utc::now(),
             tags: Vec::new(),

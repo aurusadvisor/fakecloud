@@ -64,6 +64,7 @@ pub fn process_ttl_expirations_at(state: &SharedDynamoDbState, now_epoch: i64) -
 mod tests {
     use super::*;
     use crate::state::*;
+    use fakecloud_aws::arn::Arn;
     use parking_lot::RwLock;
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
@@ -78,7 +79,13 @@ mod tests {
     fn make_table(name: &str, ttl_enabled: bool, ttl_attribute: Option<&str>) -> DynamoTable {
         DynamoTable {
             name: name.to_string(),
-            arn: format!("arn:aws:dynamodb:us-east-1:123456789012:table/{}", name),
+            arn: Arn::new(
+                "dynamodb",
+                "us-east-1",
+                "123456789012",
+                &format!("table/{name}"),
+            )
+            .to_string(),
             table_id: format!("{name}-id"),
             key_schema: vec![KeySchemaElement {
                 attribute_name: "pk".to_string(),

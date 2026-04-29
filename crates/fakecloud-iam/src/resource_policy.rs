@@ -54,6 +54,7 @@ impl ResourcePolicyProvider for StsResourcePolicyProvider {
 mod tests {
     use super::*;
     use crate::state::{IamRole, IamState};
+    use fakecloud_aws::arn::Arn;
     use fakecloud_core::multi_account::MultiAccountState;
     use parking_lot::RwLock;
 
@@ -69,7 +70,7 @@ mod tests {
             IamRole {
                 role_name: role_name.to_string(),
                 role_id: "AROATEST".to_string(),
-                arn: format!("arn:aws:iam::{account_id}:role/{role_name}"),
+                arn: Arn::global("iam", account_id, &format!("role/{role_name}")).to_string(),
                 path: "/".to_string(),
                 assume_role_policy_document: trust_policy.to_string(),
                 created_at: chrono::Utc::now(),
