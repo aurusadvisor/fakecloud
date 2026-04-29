@@ -342,8 +342,7 @@ async fn cloudfront_list_tags_for_resource() {
         .await
         .unwrap();
     let arn = create.distribution().unwrap().arn().to_string();
-    let _ = cf
-        .list_tags_for_resource()
+    cf.list_tags_for_resource()
         .resource(&arn)
         .send()
         .await
@@ -382,8 +381,7 @@ async fn cloudfront_list_conflicting_aliases() {
         .await
         .unwrap();
     let id = create.distribution().unwrap().id().to_string();
-    let _ = cf
-        .list_conflicting_aliases()
+    cf.list_conflicting_aliases()
         .distribution_id(&id)
         .alias("foo.example.com")
         .send()

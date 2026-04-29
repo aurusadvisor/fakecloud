@@ -1322,7 +1322,7 @@ async fn elasticache_parameter_group_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .describe_cache_parameters()
         .cache_parameter_group_name("pg1")
         .send()
@@ -1375,7 +1375,7 @@ async fn elasticache_security_group_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .describe_cache_security_groups()
         .cache_security_group_name("sg1")
         .send()
@@ -1431,7 +1431,7 @@ async fn elasticache_cluster_modify_reboot_list() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_allowed_node_type_modifications()
         .cache_cluster_id("c1")
         .send()
@@ -1457,7 +1457,7 @@ async fn elasticache_modify_replication_group_shard_configuration() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .modify_replication_group_shard_configuration()
         .replication_group_id("rg1")
         .node_group_count(2)
@@ -1507,7 +1507,7 @@ async fn elasticache_global_node_group_ops() {
         .global_replication_group_id()
         .unwrap()
         .to_string();
-    let _ = client
+    client
         .increase_node_groups_in_global_replication_group()
         .global_replication_group_id(&global_id)
         .node_group_count(2)
@@ -1515,7 +1515,7 @@ async fn elasticache_global_node_group_ops() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .decrease_node_groups_in_global_replication_group()
         .global_replication_group_id(&global_id)
         .node_group_count(1)
@@ -1523,7 +1523,7 @@ async fn elasticache_global_node_group_ops() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .rebalance_slots_in_global_replication_group()
         .global_replication_group_id(&global_id)
         .apply_immediately(true)
@@ -1547,7 +1547,7 @@ async fn elasticache_modify_user() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .modify_user()
         .user_id("u1")
         .access_string("on ~* +@read")
@@ -1579,7 +1579,7 @@ async fn elasticache_modify_user_group() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .modify_user_group()
         .user_group_id("ug1")
         .user_ids_to_remove("u2")
@@ -1609,7 +1609,7 @@ async fn elasticache_purchase_reserved_cache_nodes_offering() {
         .reserved_cache_nodes_offering_id()
         .unwrap()
         .to_string();
-    let _ = client
+    client
         .purchase_reserved_cache_nodes_offering()
         .reserved_cache_nodes_offering_id(&id)
         .send()
@@ -1626,17 +1626,17 @@ async fn elasticache_purchase_reserved_cache_nodes_offering() {
 async fn elasticache_events_and_updates() {
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
-    let _ = client.describe_events().send().await.unwrap();
-    let _ = client.describe_service_updates().send().await.unwrap();
-    let _ = client.describe_update_actions().send().await.unwrap();
-    let _ = client
+    client.describe_events().send().await.unwrap();
+    client.describe_service_updates().send().await.unwrap();
+    client.describe_update_actions().send().await.unwrap();
+    client
         .batch_apply_update_action()
         .service_update_name("svc-update-1")
         .replication_group_ids("rg")
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .batch_stop_update_action()
         .service_update_name("svc-update-1")
         .replication_group_ids("rg")
@@ -1666,7 +1666,7 @@ async fn elasticache_copy_snapshot() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .copy_snapshot()
         .source_snapshot_name("snap1")
         .target_snapshot_name("snap1-copy")
@@ -1701,14 +1701,14 @@ async fn elasticache_serverless_cache_snapshot_copy_export() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .copy_serverless_cache_snapshot()
         .source_serverless_cache_snapshot_name("scs1")
         .target_serverless_cache_snapshot_name("scs1-copy")
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .export_serverless_cache_snapshot()
         .serverless_cache_snapshot_name("scs1")
         .s3_bucket_name("dest-bucket")
@@ -1733,7 +1733,7 @@ async fn elasticache_migration_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .test_migration()
         .replication_group_id("mg1")
         .customer_node_endpoint_list(
@@ -1745,7 +1745,7 @@ async fn elasticache_migration_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .start_migration()
         .replication_group_id("mg1")
         .customer_node_endpoint_list(
@@ -1757,7 +1757,7 @@ async fn elasticache_migration_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .complete_migration()
         .replication_group_id("mg1")
         .send()

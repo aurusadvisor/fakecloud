@@ -1168,7 +1168,7 @@ async fn logs_import_tasks() {
     let resp = client.describe_import_tasks().send().await.unwrap();
     assert!(!resp.imports().is_empty());
 
-    let _ = client
+    client
         .describe_import_task_batches()
         .import_id(&import_id)
         .send()

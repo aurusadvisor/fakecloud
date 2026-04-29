@@ -348,7 +348,7 @@ async fn ssm_update_document() {
 async fn ssm_list_documents() {
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
-    let _ = client.list_documents().send().await.unwrap();
+    client.list_documents().send().await.unwrap();
 }
 
 // -- Document permissions --
@@ -378,7 +378,7 @@ async fn ssm_document_permissions() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .describe_document_permission()
         .name("conf-doc-perm")
         .permission_type(aws_sdk_ssm::types::DocumentPermissionType::Share)
@@ -408,8 +408,8 @@ async fn ssm_commands() {
         .unwrap();
     let cmd_id = send.command().unwrap().command_id().unwrap().to_string();
 
-    let _ = client.list_commands().send().await.unwrap();
-    let _ = client.list_command_invocations().send().await.unwrap();
+    client.list_commands().send().await.unwrap();
+    client.list_command_invocations().send().await.unwrap();
     let _ = client.cancel_command().command_id(&cmd_id).send().await;
 }
 
@@ -462,9 +462,9 @@ async fn ssm_maintenance_window_lifecycle() {
         .unwrap();
     let mw_id = create.window_id().unwrap().to_string();
 
-    let _ = client.describe_maintenance_windows().send().await.unwrap();
+    client.describe_maintenance_windows().send().await.unwrap();
 
-    let _ = client
+    client
         .get_maintenance_window()
         .window_id(&mw_id)
         .send()
@@ -524,7 +524,7 @@ async fn ssm_maintenance_window_targets() {
         .unwrap();
     let target_id = reg.window_target_id().unwrap().to_string();
 
-    let _ = client
+    client
         .describe_maintenance_window_targets()
         .window_id(&mw_id)
         .send()
@@ -574,7 +574,7 @@ async fn ssm_maintenance_window_tasks() {
         .unwrap();
     let task_id = reg.window_task_id().unwrap().to_string();
 
-    let _ = client
+    client
         .describe_maintenance_window_tasks()
         .window_id(&mw_id)
         .send()
@@ -609,9 +609,9 @@ async fn ssm_patch_baseline_lifecycle() {
         .unwrap();
     let baseline_id = create.baseline_id().unwrap().to_string();
 
-    let _ = client.describe_patch_baselines().send().await.unwrap();
+    client.describe_patch_baselines().send().await.unwrap();
 
-    let _ = client
+    client
         .get_patch_baseline()
         .baseline_id(&baseline_id)
         .send()
@@ -653,14 +653,14 @@ async fn ssm_patch_groups() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_patch_baseline_for_patch_group()
         .patch_group("conf-group")
         .send()
         .await
         .unwrap();
 
-    let _ = client.describe_patch_groups().send().await.unwrap();
+    client.describe_patch_groups().send().await.unwrap();
 
     client
         .deregister_patch_baseline_for_patch_group()
@@ -705,7 +705,7 @@ async fn ssm_association_lifecycle() {
         .unwrap()
         .to_string();
 
-    let _ = client
+    client
         .describe_association()
         .association_id(&assoc_id)
         .send()
@@ -720,9 +720,9 @@ async fn ssm_association_lifecycle() {
         .await
         .unwrap();
 
-    let _ = client.list_associations().send().await.unwrap();
+    client.list_associations().send().await.unwrap();
 
-    let _ = client
+    client
         .list_association_versions()
         .association_id(&assoc_id)
         .send()
@@ -948,7 +948,7 @@ async fn ssm_ops_item_lifecycle() {
         .await
         .unwrap();
 
-    let _ = client.describe_ops_items().send().await.unwrap();
+    client.describe_ops_items().send().await.unwrap();
 
     client
         .delete_ops_item()
@@ -1001,7 +1001,7 @@ async fn ssm_list_document_metadata_history() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .list_document_metadata_history()
         .name("conf-doc-meta")
         .metadata(aws_sdk_ssm::types::DocumentMetadataEnum::DocumentReviews)
@@ -1112,7 +1112,7 @@ async fn ssm_get_connection_status() {
 async fn ssm_get_calendar_state() {
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
-    let _ = client
+    client
         .get_calendar_state()
         .calendar_names("arn:aws:ssm:us-east-1:123456789012:document/cal")
         .send()
@@ -1125,7 +1125,7 @@ async fn ssm_get_calendar_state() {
 async fn ssm_describe_patch_group_state() {
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
-    let _ = client
+    client
         .describe_patch_group_state()
         .patch_group("conf-group")
         .send()
@@ -1138,7 +1138,7 @@ async fn ssm_describe_patch_group_state() {
 async fn ssm_describe_patch_properties() {
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
-    let _ = client
+    client
         .describe_patch_properties()
         .operating_system(aws_sdk_ssm::types::OperatingSystem::Windows)
         .property(aws_sdk_ssm::types::PatchProperty::Product)
@@ -1196,7 +1196,7 @@ async fn ssm_service_settings() {
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
 
-    let _ = client
+    client
         .get_service_setting()
         .setting_id("/ssm/parameter-store/high-throughput-enabled")
         .send()
