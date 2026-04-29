@@ -221,6 +221,7 @@ fn resolve_target_body(
 mod tests {
     use super::*;
     use crate::state::EventRule;
+    use fakecloud_aws::arn::Arn;
     use parking_lot::RwLock;
     use std::collections::BTreeMap;
 
@@ -244,7 +245,13 @@ mod tests {
             key,
             EventRule {
                 name: name.to_string(),
-                arn: format!("arn:aws:events:us-east-1:123456789012:rule/{bus}/{name}"),
+                arn: Arn::new(
+                    "events",
+                    "us-east-1",
+                    "123456789012",
+                    &format!("rule/{bus}/{name}"),
+                )
+                .to_string(),
                 event_bus_name: bus.to_string(),
                 event_pattern: None,
                 schedule_expression: Some("rate(1 minute)".to_string()),

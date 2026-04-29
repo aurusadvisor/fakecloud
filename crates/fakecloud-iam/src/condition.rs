@@ -566,12 +566,15 @@ pub fn evaluate_condition_block(block: &CompiledCondition, ctx: &ConditionContex
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fakecloud_aws::arn::Arn;
     use serde_json::json;
 
     fn ctx_user(name: &str) -> ConditionContext {
         ConditionContext {
             aws_username: Some(name.to_string()),
-            aws_principal_arn: Some(format!("arn:aws:iam::123456789012:user/{name}")),
+            aws_principal_arn: Some(
+                Arn::global("iam", "123456789012", &format!("user/{name}")).to_string(),
+            ),
             aws_principal_account: Some("123456789012".to_string()),
             aws_principal_type: Some("User".to_string()),
             aws_userid: Some("AIDAEXAMPLE".to_string()),

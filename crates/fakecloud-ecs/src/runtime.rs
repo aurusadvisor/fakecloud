@@ -868,6 +868,7 @@ pub async fn sleep(duration: Duration) {
 mod tests {
     use super::*;
     use crate::state::{EcsState, Task};
+    use fakecloud_aws::arn::Arn;
     use fakecloud_core::multi_account::MultiAccountState;
     use parking_lot::RwLock;
     use std::sync::Arc;
@@ -891,7 +892,13 @@ mod tests {
 
     fn make_task(task_id: &str) -> Task {
         Task {
-            task_arn: format!("arn:aws:ecs:us-east-1:000000000000:task/default/{task_id}"),
+            task_arn: Arn::new(
+                "ecs",
+                "us-east-1",
+                "000000000000",
+                &format!("task/default/{task_id}"),
+            )
+            .to_string(),
             task_id: task_id.into(),
             cluster_arn: "arn:aws:ecs:us-east-1:000000000000:cluster/default".into(),
             cluster_name: "default".into(),

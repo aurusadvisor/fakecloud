@@ -662,13 +662,15 @@ fn word_boundary_match(text: &str, word: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fakecloud_aws::arn::Arn;
     use parking_lot::RwLock;
     use std::sync::Arc;
 
     fn empty_guardrail(id: &str) -> Guardrail {
         Guardrail {
             guardrail_id: id.to_string(),
-            guardrail_arn: format!("arn:aws:bedrock:us-east-1:123:guardrail/{id}"),
+            guardrail_arn: Arn::new("bedrock", "us-east-1", "123", &format!("guardrail/{id}"))
+                .to_string(),
             name: id.to_string(),
             description: String::new(),
             status: "READY".to_string(),

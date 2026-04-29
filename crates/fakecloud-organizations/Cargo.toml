@@ -20,4 +20,5 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
+fakecloud-aws = { workspace = true }
 tokio = { workspace = true }

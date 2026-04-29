@@ -1094,6 +1094,7 @@ fn group_name_from_tag_arn(arn: &str) -> Result<String, AwsServiceError> {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use fakecloud_aws::arn::Arn;
     use http::HeaderMap;
     use parking_lot::RwLock;
     use std::collections::HashMap;
@@ -1148,7 +1149,7 @@ mod tests {
             "ScheduleExpression": "rate(1 minute)",
             "FlexibleTimeWindow": { "Mode": "OFF" },
             "Target": {
-                "Arn": format!("arn:aws:sqs:us-east-1:111122223333:{name_hint}-q"),
+                "Arn": Arn::new("sqs", "us-east-1", "111122223333", &format!("{name_hint}-q")).to_string(),
                 "RoleArn": "arn:aws:iam::111122223333:role/scheduler"
             }
         })

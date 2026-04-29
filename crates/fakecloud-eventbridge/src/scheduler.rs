@@ -454,6 +454,7 @@ mod tests {
         use crate::state::{
             EventBridgeState, EventRule, EventTarget as EbTarget, RuleKey, SharedEventBridgeState,
         };
+        use fakecloud_aws::arn::Arn;
         use fakecloud_core::delivery::{
             EventBridgeDelivery, KinesisDelivery, SnsDelivery, SqsDelivery, StepFunctionsDelivery,
         };
@@ -531,7 +532,13 @@ mod tests {
         fn make_rule(name: &str, schedule: &str, target_arn: &str) -> EventRule {
             EventRule {
                 name: name.to_string(),
-                arn: format!("arn:aws:events:us-east-1:123456789012:rule/{name}"),
+                arn: Arn::new(
+                    "events",
+                    "us-east-1",
+                    "123456789012",
+                    &format!("rule/{name}"),
+                )
+                .to_string(),
                 event_bus_name: "default".to_string(),
                 event_pattern: None,
                 schedule_expression: Some(schedule.to_string()),

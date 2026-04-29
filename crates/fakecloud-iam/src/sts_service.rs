@@ -1465,7 +1465,8 @@ mod tests {
     }
 
     fn create_role_in_state(state: &SharedIamState, name: &str) -> String {
-        let arn = format!("arn:aws:iam::123456789012:role/{name}");
+        let arn = fakecloud_aws::arn::Arn::global("iam", "123456789012", &format!("role/{name}"))
+            .to_string();
         let mut accounts = state.write();
         let s = accounts.get_or_create("123456789012");
         s.roles.insert(

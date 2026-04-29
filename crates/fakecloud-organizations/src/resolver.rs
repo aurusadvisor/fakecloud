@@ -185,6 +185,7 @@ fn slr_role_name(arn: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::state::OrganizationState;
+    use fakecloud_aws::arn::Arn;
     use parking_lot::RwLock;
 
     fn shared(org: OrganizationState) -> SharedOrganizationsState {
@@ -193,7 +194,7 @@ mod tests {
 
     fn user_principal(account: &str) -> Principal {
         Principal {
-            arn: format!("arn:aws:iam::{}:user/alice", account),
+            arn: Arn::global("iam", account, "user/alice").to_string(),
             user_id: "AIDATEST".to_string(),
             account_id: account.to_string(),
             principal_type: PrincipalType::User,

@@ -266,12 +266,19 @@ pub fn get_template_response(template_body: &str, request_id: &str) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use fakecloud_aws::arn::Arn;
     use std::collections::BTreeMap;
 
     fn make_stack(name: &str) -> Stack {
         Stack {
             name: name.to_string(),
-            stack_id: format!("arn:aws:cloudformation:us-east-1:123456789012:stack/{name}/abc123"),
+            stack_id: Arn::new(
+                "cloudformation",
+                "us-east-1",
+                "123456789012",
+                &format!("stack/{name}/abc123"),
+            )
+            .to_string(),
             template: "{}".to_string(),
             status: "CREATE_COMPLETE".to_string(),
             resources: vec![],

@@ -191,6 +191,7 @@ fn random_iv() -> [u8; 12] {
 mod tests {
     use std::sync::Arc;
 
+    use fakecloud_aws::arn::Arn;
     use fakecloud_core::multi_account::MultiAccountState;
     use parking_lot::RwLock;
 
@@ -204,7 +205,8 @@ mod tests {
             "http://localhost:4566",
         )));
         let key_id = "00000000-0000-0000-0000-000000000001".to_string();
-        let arn = format!("arn:aws:kms:us-east-1:123456789012:key/{key_id}");
+        let arn =
+            Arn::new("kms", "us-east-1", "123456789012", &format!("key/{key_id}")).to_string();
         {
             let mut accounts = state.write();
             let s = accounts.get_or_create("123456789012");

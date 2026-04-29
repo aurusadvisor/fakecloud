@@ -226,6 +226,7 @@ mod tests {
     use super::*;
     use crate::state::{SharedSnsState, SnsState, SnsSubscription, SnsTopic};
     use chrono::Utc;
+    use fakecloud_aws::arn::Arn;
     use fakecloud_core::multi_account::MultiAccountState;
     use parking_lot::RwLock;
     use std::collections::{BTreeMap, HashMap};
@@ -235,7 +236,7 @@ mod tests {
     const ENDPOINT: &str = "http://localhost:4566";
 
     fn make_topic(name: &str) -> (SnsTopic, String) {
-        let arn = format!("arn:aws:sns:{REGION}:{ACCOUNT}:{name}");
+        let arn = Arn::new("sns", REGION, ACCOUNT, name).to_string();
         let topic = SnsTopic {
             topic_arn: arn.clone(),
             name: name.to_string(),
@@ -304,7 +305,7 @@ mod tests {
         let bus = Arc::new(DeliveryBus::new());
         let delivery = SnsDeliveryImpl::new(state.clone(), bus);
         delivery.publish_to_topic(
-            &format!("arn:aws:sns:{REGION}:{ACCOUNT}:unknown"),
+            &Arn::new("sns", REGION, ACCOUNT, "unknown").to_string(),
             "body",
             None,
         );
@@ -360,7 +361,7 @@ mod tests {
     #[tokio::test]
     async fn publish_records_lambda_invocation() {
         let (topic, arn) = make_topic("t1");
-        let fn_arn = format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:myFn");
+        let fn_arn = Arn::new("lambda", REGION, ACCOUNT, "function:myFn").to_string();
         let sub = make_subscription(&arn, "lambda", &fn_arn, true);
         let state = make_state(vec![topic], vec![sub]);
         let bus = Arc::new(DeliveryBus::new());
@@ -413,7 +414,7 @@ mod tests {
 
         let recorder = Arc::new(Recorder::default());
         let (topic, arn) = make_topic("t1");
-        let q_arn = format!("arn:aws:sqs:{REGION}:{ACCOUNT}:q1");
+        let q_arn = Arn::new("sqs", REGION, ACCOUNT, "q1").to_string();
         let sub = make_subscription(&arn, "sqs", &q_arn, true);
         let state = make_state(vec![topic], vec![sub]);
         let bus = Arc::new(DeliveryBus::new().with_sqs(recorder.clone()));

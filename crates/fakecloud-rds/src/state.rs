@@ -558,8 +558,8 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        default_engine_versions, default_orderable_options, default_parameter_groups, DbInstance,
-        RdsState,
+        default_engine_versions, default_orderable_options, default_parameter_groups, Arn,
+        DbInstance, RdsState,
     };
 
     #[test]
@@ -692,7 +692,7 @@ mod tests {
         let created_at = Utc::now();
         DbInstance {
             db_instance_identifier: id.to_string(),
-            db_instance_arn: format!("arn:aws:rds:us-east-1:123:db:{id}"),
+            db_instance_arn: Arn::new("rds", "us-east-1", "123", &format!("db:{id}")).to_string(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),
