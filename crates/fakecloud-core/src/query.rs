@@ -40,10 +40,7 @@ pub fn query_metadata_only_xml(action: &str, namespace: &str, request_id: &str) 
 ///
 /// Returns `None` if the parameter is missing or empty.
 pub fn optional_param(params: &HashMap<String, String>, name: &str) -> Option<String> {
-    params
-        .get(name)
-        .cloned()
-        .filter(|value| !value.is_empty())
+    params.get(name).cloned().filter(|value| !value.is_empty())
 }
 
 /// Extract a required parameter from a query parameter map.
