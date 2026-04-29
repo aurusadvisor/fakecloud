@@ -6,6 +6,7 @@ use http::StatusCode;
 use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_aws::xml::xml_escape;
+use fakecloud_core::query::{optional_query_param, required_query_param};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
@@ -334,12 +335,12 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let engine = optional_param(request, "Engine");
-        let engine_version = optional_param(request, "EngineVersion");
-        let family = optional_param(request, "CacheParameterGroupFamily");
-        let default_only = parse_optional_bool(optional_param(request, "DefaultOnly").as_deref())?;
+        let engine = optional_query_param(request, "Engine");
+        let engine_version = optional_query_param(request, "EngineVersion");
+        let family = optional_query_param(request, "CacheParameterGroupFamily");
+        let default_only = parse_optional_bool(optional_query_param(request, "DefaultOnly").as_deref())?;
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let mut versions = filter_engine_versions(
             &default_engine_versions(),
@@ -375,9 +376,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let group_name = optional_param(request, "CacheParameterGroupName");
+        let group_name = optional_query_param(request, "CacheParameterGroupName");
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -424,15 +425,15 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let reserved_cache_node_id = optional_param(request, "ReservedCacheNodeId");
+        let reserved_cache_node_id = optional_query_param(request, "ReservedCacheNodeId");
         let reserved_cache_nodes_offering_id =
-            optional_param(request, "ReservedCacheNodesOfferingId");
-        let cache_node_type = optional_param(request, "CacheNodeType");
-        let duration = parse_reserved_duration_filter(optional_param(request, "Duration"))?;
-        let product_description = optional_param(request, "ProductDescription");
-        let offering_type = optional_param(request, "OfferingType");
+            optional_query_param(request, "ReservedCacheNodesOfferingId");
+        let cache_node_type = optional_query_param(request, "CacheNodeType");
+        let duration = parse_reserved_duration_filter(optional_query_param(request, "Duration"))?;
+        let product_description = optional_query_param(request, "ProductDescription");
+        let offering_type = optional_query_param(request, "OfferingType");
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -495,13 +496,13 @@ impl ElastiCacheService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let reserved_cache_nodes_offering_id =
-            optional_param(request, "ReservedCacheNodesOfferingId");
-        let cache_node_type = optional_param(request, "CacheNodeType");
-        let duration = parse_reserved_duration_filter(optional_param(request, "Duration"))?;
-        let product_description = optional_param(request, "ProductDescription");
-        let offering_type = optional_param(request, "OfferingType");
+            optional_query_param(request, "ReservedCacheNodesOfferingId");
+        let cache_node_type = optional_query_param(request, "CacheNodeType");
+        let duration = parse_reserved_duration_filter(optional_query_param(request, "Duration"))?;
+        let product_description = optional_query_param(request, "ProductDescription");
+        let offering_type = optional_query_param(request, "OfferingType");
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -563,9 +564,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let family = required_param(request, "CacheParameterGroupFamily")?;
+        let family = required_query_param(request, "CacheParameterGroupFamily")?;
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let params = default_parameters_for_family(&family);
         let (page, next_marker) = paginate(&params, marker.as_deref(), max_records);
@@ -596,8 +597,8 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheSubnetGroupName")?;
-        let description = required_param(request, "CacheSubnetGroupDescription")?;
+        let name = required_query_param(request, "CacheSubnetGroupName")?;
+        let description = required_query_param(request, "CacheSubnetGroupDescription")?;
         let subnet_ids = parse_member_list(&request.query_params, "SubnetIds", "SubnetIdentifier");
 
         if subnet_ids.is_empty() {
@@ -656,9 +657,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let group_name = optional_param(request, "CacheSubnetGroupName");
+        let group_name = optional_query_param(request, "CacheSubnetGroupName");
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -710,7 +711,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheSubnetGroupName")?;
+        let name = required_query_param(request, "CacheSubnetGroupName")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -743,8 +744,8 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheSubnetGroupName")?;
-        let description = optional_param(request, "CacheSubnetGroupDescription");
+        let name = required_query_param(request, "CacheSubnetGroupName")?;
+        let description = optional_query_param(request, "CacheSubnetGroupDescription");
         let subnet_ids = parse_member_list(&request.query_params, "SubnetIds", "SubnetIdentifier");
 
         let mut accounts = self.state.write();
@@ -782,8 +783,8 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let cache_cluster_id = required_param(request, "CacheClusterId")?;
-        let engine = optional_param(request, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
+        let cache_cluster_id = required_query_param(request, "CacheClusterId")?;
+        let engine = optional_query_param(request, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
         validate_engine(&engine)?;
 
         let default_version = match engine.as_str() {
@@ -792,10 +793,10 @@ impl ElastiCacheService {
             _ => "7.1",
         };
         let engine_version =
-            optional_param(request, "EngineVersion").unwrap_or_else(|| default_version.to_string());
-        let cache_node_type = optional_param(request, "CacheNodeType")
+            optional_query_param(request, "EngineVersion").unwrap_or_else(|| default_version.to_string());
+        let cache_node_type = optional_query_param(request, "CacheNodeType")
             .unwrap_or_else(|| "cache.t3.micro".to_string());
-        let num_cache_nodes = match optional_param(request, "NumCacheNodes") {
+        let num_cache_nodes = match optional_query_param(request, "NumCacheNodes") {
             Some(v) => {
                 let n = v.parse::<i32>().map_err(|_| {
                     AwsServiceError::aws_error(
@@ -816,10 +817,10 @@ impl ElastiCacheService {
             None => 1,
         };
         let cache_subnet_group_name =
-            optional_param(request, "CacheSubnetGroupName").or_else(|| Some("default".to_string()));
-        let replication_group_id = optional_param(request, "ReplicationGroupId");
+            optional_query_param(request, "CacheSubnetGroupName").or_else(|| Some("default".to_string()));
+        let replication_group_id = optional_query_param(request, "ReplicationGroupId");
         let auto_minor_version_upgrade =
-            parse_optional_bool(optional_param(request, "AutoMinorVersionUpgrade").as_deref())?
+            parse_optional_bool(optional_query_param(request, "AutoMinorVersionUpgrade").as_deref())?
                 .unwrap_or(true);
 
         let (preferred_availability_zone, arn) = {
@@ -864,7 +865,7 @@ impl ElastiCacheService {
                 }
             }
 
-            let preferred_availability_zone = optional_param(request, "PreferredAvailabilityZone")
+            let preferred_availability_zone = optional_query_param(request, "PreferredAvailabilityZone")
                 .unwrap_or_else(|| format!("{}a", state.region));
             let arn = format!(
                 "arn:aws:elasticache:{}:{}:cluster:{}",
@@ -945,12 +946,12 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let cache_cluster_id = optional_param(request, "CacheClusterId");
+        let cache_cluster_id = optional_query_param(request, "CacheClusterId");
         let show_cache_node_info =
-            parse_optional_bool(optional_param(request, "ShowCacheNodeInfo").as_deref())?
+            parse_optional_bool(optional_query_param(request, "ShowCacheNodeInfo").as_deref())?
                 .unwrap_or(false);
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -1000,7 +1001,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let cache_cluster_id = required_param(request, "CacheClusterId")?;
+        let cache_cluster_id = required_query_param(request, "CacheClusterId")?;
 
         let cluster = {
             let mut accounts = self.state.write();
@@ -1044,9 +1045,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let replication_group_id = required_param(request, "ReplicationGroupId")?;
-        let description = required_param(request, "ReplicationGroupDescription")?;
-        let engine = optional_param(request, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
+        let replication_group_id = required_query_param(request, "ReplicationGroupId")?;
+        let description = required_query_param(request, "ReplicationGroupDescription")?;
+        let engine = optional_query_param(request, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
         validate_engine(&engine)?;
         reject_memcached_for(&engine, "Replication groups")?;
         let default_version = if engine == ENGINE_VALKEY {
@@ -1055,10 +1056,10 @@ impl ElastiCacheService {
             "7.1"
         };
         let engine_version =
-            optional_param(request, "EngineVersion").unwrap_or_else(|| default_version.to_string());
-        let cache_node_type = optional_param(request, "CacheNodeType")
+            optional_query_param(request, "EngineVersion").unwrap_or_else(|| default_version.to_string());
+        let cache_node_type = optional_query_param(request, "CacheNodeType")
             .unwrap_or_else(|| "cache.t3.micro".to_string());
-        let num_cache_clusters = match optional_param(request, "NumCacheClusters") {
+        let num_cache_clusters = match optional_query_param(request, "NumCacheClusters") {
             Some(v) => {
                 let n = v.parse::<i32>().map_err(|_| {
                     AwsServiceError::aws_error(
@@ -1079,7 +1080,7 @@ impl ElastiCacheService {
             None => 1,
         };
         let automatic_failover =
-            parse_optional_bool(optional_param(request, "AutomaticFailoverEnabled").as_deref())?
+            parse_optional_bool(optional_query_param(request, "AutomaticFailoverEnabled").as_deref())?
                 .unwrap_or(false);
         // Reserve the ID under a write lock before starting the container.
         {
@@ -1175,10 +1176,10 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let suffix = required_param(request, "GlobalReplicationGroupIdSuffix")?;
-        let primary_replication_group_id = required_param(request, "PrimaryReplicationGroupId")?;
+        let suffix = required_query_param(request, "GlobalReplicationGroupIdSuffix")?;
+        let primary_replication_group_id = required_query_param(request, "PrimaryReplicationGroupId")?;
         let description =
-            optional_param(request, "GlobalReplicationGroupDescription").unwrap_or_default();
+            optional_query_param(request, "GlobalReplicationGroupDescription").unwrap_or_default();
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -1260,11 +1261,11 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let global_replication_group_id = optional_param(request, "GlobalReplicationGroupId");
+        let global_replication_group_id = optional_query_param(request, "GlobalReplicationGroupId");
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
         let show_member_info =
-            parse_optional_bool(optional_param(request, "ShowMemberInfo").as_deref())?
+            parse_optional_bool(optional_query_param(request, "ShowMemberInfo").as_deref())?
                 .unwrap_or(false);
 
         let accounts = self.state.read();
@@ -1326,9 +1327,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let group_id = optional_param(request, "ReplicationGroupId");
+        let group_id = optional_query_param(request, "ReplicationGroupId");
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -1381,7 +1382,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let global_replication_group_id = required_param(request, "GlobalReplicationGroupId")?;
+        let global_replication_group_id = required_query_param(request, "GlobalReplicationGroupId")?;
         let retain_primary = parse_required_bool(request, "RetainPrimaryReplicationGroup")?;
 
         let mut accounts = self.state.write();
@@ -1432,7 +1433,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let replication_group_id = required_param(request, "ReplicationGroupId")?;
+        let replication_group_id = required_query_param(request, "ReplicationGroupId")?;
 
         let group = {
             let mut accounts = self.state.write();
@@ -1474,23 +1475,23 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let serverless_cache_name = required_param(request, "ServerlessCacheName")?;
-        let engine = required_param(request, "Engine")?;
+        let serverless_cache_name = required_query_param(request, "ServerlessCacheName")?;
+        let engine = required_query_param(request, "Engine")?;
         validate_serverless_engine(&engine)?;
 
-        let description = optional_param(request, "Description").unwrap_or_default();
-        let major_engine_version = optional_param(request, "MajorEngineVersion")
+        let description = optional_query_param(request, "Description").unwrap_or_default();
+        let major_engine_version = optional_query_param(request, "MajorEngineVersion")
             .unwrap_or_else(|| default_major_engine_version(&engine).to_string());
         let full_engine_version = default_full_engine_version(&engine, &major_engine_version)?;
         let cache_usage_limits = parse_cache_usage_limits(request)?;
         let security_group_ids =
             parse_query_list_param(request, "SecurityGroupIds", "SecurityGroupId");
         let subnet_ids = parse_query_list_param(request, "SubnetIds", "SubnetId");
-        let kms_key_id = optional_param(request, "KmsKeyId");
-        let user_group_id = optional_param(request, "UserGroupId");
+        let kms_key_id = optional_query_param(request, "KmsKeyId");
+        let user_group_id = optional_query_param(request, "UserGroupId");
         let snapshot_retention_limit =
             optional_non_negative_i32_param(request, "SnapshotRetentionLimit")?;
-        let daily_snapshot_time = optional_param(request, "DailySnapshotTime");
+        let daily_snapshot_time = optional_query_param(request, "DailySnapshotTime");
         let tags = parse_tags(request)?;
 
         let (arn, endpoint_address) = {
@@ -1611,9 +1612,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let serverless_cache_name = optional_param(request, "ServerlessCacheName");
+        let serverless_cache_name = optional_query_param(request, "ServerlessCacheName");
         let max_results = optional_usize_param(request, "MaxResults")?;
-        let next_token = optional_param(request, "NextToken");
+        let next_token = optional_query_param(request, "NextToken");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -1658,7 +1659,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let serverless_cache_name = required_param(request, "ServerlessCacheName")?;
+        let serverless_cache_name = required_query_param(request, "ServerlessCacheName")?;
 
         let cache = {
             let mut accounts = self.state.write();
@@ -1699,15 +1700,15 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let serverless_cache_name = required_param(request, "ServerlessCacheName")?;
-        let description = optional_param(request, "Description");
+        let serverless_cache_name = required_query_param(request, "ServerlessCacheName")?;
+        let description = optional_query_param(request, "Description");
         let cache_usage_limits = parse_cache_usage_limits(request)?;
         let security_group_ids =
             parse_query_list_param(request, "SecurityGroupIds", "SecurityGroupId");
-        let user_group_id = optional_param(request, "UserGroupId");
+        let user_group_id = optional_query_param(request, "UserGroupId");
         let snapshot_retention_limit =
             optional_non_negative_i32_param(request, "SnapshotRetentionLimit")?;
-        let daily_snapshot_time = optional_param(request, "DailySnapshotTime");
+        let daily_snapshot_time = optional_query_param(request, "DailySnapshotTime");
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -1774,10 +1775,10 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let serverless_cache_name = required_param(request, "ServerlessCacheName")?;
+        let serverless_cache_name = required_query_param(request, "ServerlessCacheName")?;
         let serverless_cache_snapshot_name =
-            required_param(request, "ServerlessCacheSnapshotName")?;
-        let kms_key_id = optional_param(request, "KmsKeyId");
+            required_query_param(request, "ServerlessCacheSnapshotName")?;
+        let kms_key_id = optional_query_param(request, "KmsKeyId");
         let tags = parse_tags(request)?;
 
         let mut accounts = self.state.write();
@@ -1845,11 +1846,11 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let serverless_cache_name = optional_param(request, "ServerlessCacheName");
-        let serverless_cache_snapshot_name = optional_param(request, "ServerlessCacheSnapshotName");
-        let snapshot_type = optional_param(request, "SnapshotType");
+        let serverless_cache_name = optional_query_param(request, "ServerlessCacheName");
+        let serverless_cache_snapshot_name = optional_query_param(request, "ServerlessCacheSnapshotName");
+        let snapshot_type = optional_query_param(request, "SnapshotType");
         let max_results = optional_usize_param(request, "MaxResults")?;
-        let next_token = optional_param(request, "NextToken");
+        let next_token = optional_query_param(request, "NextToken");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -1929,7 +1930,7 @@ impl ElastiCacheService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let serverless_cache_snapshot_name =
-            required_param(request, "ServerlessCacheSnapshotName")?;
+            required_query_param(request, "ServerlessCacheSnapshotName")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -1959,9 +1960,9 @@ impl ElastiCacheService {
     }
 
     fn create_snapshot(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let snapshot_name = required_param(request, "SnapshotName")?;
-        let replication_group_id = optional_param(request, "ReplicationGroupId");
-        let cache_cluster_id = optional_param(request, "CacheClusterId");
+        let snapshot_name = required_query_param(request, "SnapshotName")?;
+        let replication_group_id = optional_query_param(request, "ReplicationGroupId");
+        let cache_cluster_id = optional_query_param(request, "CacheClusterId");
 
         if replication_group_id.is_none() && cache_cluster_id.is_none() {
             return Err(AwsServiceError::aws_error(
@@ -2059,11 +2060,11 @@ impl ElastiCacheService {
     }
 
     fn describe_snapshots(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let snapshot_name = optional_param(request, "SnapshotName");
-        let replication_group_id = optional_param(request, "ReplicationGroupId");
-        let cache_cluster_id = optional_param(request, "CacheClusterId");
+        let snapshot_name = optional_query_param(request, "SnapshotName");
+        let replication_group_id = optional_query_param(request, "ReplicationGroupId");
+        let cache_cluster_id = optional_query_param(request, "CacheClusterId");
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -2125,7 +2126,7 @@ impl ElastiCacheService {
     }
 
     fn delete_snapshot(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let snapshot_name = required_param(request, "SnapshotName")?;
+        let snapshot_name = required_query_param(request, "SnapshotName")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -2155,14 +2156,14 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let replication_group_id = required_param(request, "ReplicationGroupId")?;
+        let replication_group_id = required_query_param(request, "ReplicationGroupId")?;
 
-        let new_description = optional_param(request, "ReplicationGroupDescription");
-        let new_cache_node_type = optional_param(request, "CacheNodeType");
-        let new_engine_version = optional_param(request, "EngineVersion");
+        let new_description = optional_query_param(request, "ReplicationGroupDescription");
+        let new_cache_node_type = optional_query_param(request, "CacheNodeType");
+        let new_engine_version = optional_query_param(request, "EngineVersion");
         let new_automatic_failover =
-            parse_optional_bool(optional_param(request, "AutomaticFailoverEnabled").as_deref())?;
-        let new_snapshot_retention_limit = optional_param(request, "SnapshotRetentionLimit")
+            parse_optional_bool(optional_query_param(request, "AutomaticFailoverEnabled").as_deref())?;
+        let new_snapshot_retention_limit = optional_query_param(request, "SnapshotRetentionLimit")
             .map(|v| {
                 let val = v.parse::<i32>().map_err(|_| {
                     AwsServiceError::aws_error(
@@ -2181,7 +2182,7 @@ impl ElastiCacheService {
                 Ok(val)
             })
             .transpose()?;
-        let new_snapshot_window = optional_param(request, "SnapshotWindow");
+        let new_snapshot_window = optional_query_param(request, "SnapshotWindow");
         let user_group_ids_to_add =
             parse_member_list(&request.query_params, "UserGroupIdsToAdd", "member");
         let user_group_ids_to_remove =
@@ -2253,14 +2254,14 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let global_replication_group_id = required_param(request, "GlobalReplicationGroupId")?;
+        let global_replication_group_id = required_query_param(request, "GlobalReplicationGroupId")?;
         let _apply_immediately = parse_required_bool(request, "ApplyImmediately")?;
-        let new_description = optional_param(request, "GlobalReplicationGroupDescription");
-        let new_cache_node_type = optional_param(request, "CacheNodeType");
-        let new_engine = optional_param(request, "Engine");
-        let new_engine_version = optional_param(request, "EngineVersion");
+        let new_description = optional_query_param(request, "GlobalReplicationGroupDescription");
+        let new_cache_node_type = optional_query_param(request, "CacheNodeType");
+        let new_engine = optional_query_param(request, "Engine");
+        let new_engine_version = optional_query_param(request, "EngineVersion");
         let new_automatic_failover =
-            parse_optional_bool(optional_param(request, "AutomaticFailoverEnabled").as_deref())?;
+            parse_optional_bool(optional_query_param(request, "AutomaticFailoverEnabled").as_deref())?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -2338,8 +2339,8 @@ impl ElastiCacheService {
     }
 
     fn increase_replica_count(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let replication_group_id = required_param(request, "ReplicationGroupId")?;
-        let apply_str = required_param(request, "ApplyImmediately")?;
+        let replication_group_id = required_query_param(request, "ReplicationGroupId")?;
+        let apply_str = required_query_param(request, "ApplyImmediately")?;
         let _apply_immediately = parse_optional_bool(Some(&apply_str))?.ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -2351,7 +2352,7 @@ impl ElastiCacheService {
             )
         })?;
 
-        let new_replica_count = optional_param(request, "NewReplicaCount")
+        let new_replica_count = optional_query_param(request, "NewReplicaCount")
             .map(|v| {
                 v.parse::<i32>().map_err(|_| {
                     AwsServiceError::aws_error(
@@ -2431,8 +2432,8 @@ impl ElastiCacheService {
     }
 
     fn decrease_replica_count(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let replication_group_id = required_param(request, "ReplicationGroupId")?;
-        let apply_str = required_param(request, "ApplyImmediately")?;
+        let replication_group_id = required_query_param(request, "ReplicationGroupId")?;
+        let apply_str = required_query_param(request, "ApplyImmediately")?;
         let _apply_immediately = parse_optional_bool(Some(&apply_str))?.ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -2444,7 +2445,7 @@ impl ElastiCacheService {
             )
         })?;
 
-        let new_replica_count = optional_param(request, "NewReplicaCount")
+        let new_replica_count = optional_query_param(request, "NewReplicaCount")
             .map(|v| {
                 v.parse::<i32>().map_err(|_| {
                     AwsServiceError::aws_error(
@@ -2524,8 +2525,8 @@ impl ElastiCacheService {
     }
 
     fn test_failover(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let replication_group_id = required_param(request, "ReplicationGroupId")?;
-        let node_group_id = required_param(request, "NodeGroupId")?;
+        let replication_group_id = required_query_param(request, "ReplicationGroupId")?;
+        let node_group_id = required_query_param(request, "NodeGroupId")?;
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -2568,9 +2569,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let global_replication_group_id = required_param(request, "GlobalReplicationGroupId")?;
-        let replication_group_id = required_param(request, "ReplicationGroupId")?;
-        let replication_group_region = required_param(request, "ReplicationGroupRegion")?;
+        let global_replication_group_id = required_query_param(request, "GlobalReplicationGroupId")?;
+        let replication_group_id = required_query_param(request, "ReplicationGroupId")?;
+        let replication_group_region = required_query_param(request, "ReplicationGroupRegion")?;
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -2622,9 +2623,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let global_replication_group_id = required_param(request, "GlobalReplicationGroupId")?;
-        let primary_region = required_param(request, "PrimaryRegion")?;
-        let primary_replication_group_id = required_param(request, "PrimaryReplicationGroupId")?;
+        let global_replication_group_id = required_query_param(request, "GlobalReplicationGroupId")?;
+        let primary_region = required_query_param(request, "PrimaryRegion")?;
+        let primary_replication_group_id = required_query_param(request, "PrimaryReplicationGroupId")?;
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -2673,18 +2674,18 @@ impl ElastiCacheService {
     }
 
     fn create_user(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_id = required_param(request, "UserId")?;
-        let user_name = required_param(request, "UserName")?;
-        let engine = required_param(request, "Engine")?;
-        let access_string = required_param(request, "AccessString")?;
+        let user_id = required_query_param(request, "UserId")?;
+        let user_name = required_query_param(request, "UserName")?;
+        let engine = required_query_param(request, "Engine")?;
+        let access_string = required_query_param(request, "AccessString")?;
 
         validate_engine(&engine)?;
 
         let no_password_required =
-            parse_optional_bool(optional_param(request, "NoPasswordRequired").as_deref())?
+            parse_optional_bool(optional_query_param(request, "NoPasswordRequired").as_deref())?
                 .unwrap_or(false);
         let passwords = parse_member_list(&request.query_params, "Passwords", "member");
-        let auth_mode_type = optional_param(request, "AuthenticationMode.Type");
+        let auth_mode_type = optional_query_param(request, "AuthenticationMode.Type");
 
         let (authentication_type, password_count) = if no_password_required {
             if !passwords.is_empty() {
@@ -2782,9 +2783,9 @@ impl ElastiCacheService {
     }
 
     fn describe_users(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_id = optional_param(request, "UserId");
+        let user_id = optional_query_param(request, "UserId");
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -2828,7 +2829,7 @@ impl ElastiCacheService {
     }
 
     fn delete_user(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_id = required_param(request, "UserId")?;
+        let user_id = required_query_param(request, "UserId")?;
 
         if user_id == "default" {
             return Err(AwsServiceError::aws_error(
@@ -2867,8 +2868,8 @@ impl ElastiCacheService {
     }
 
     fn create_user_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_group_id = required_param(request, "UserGroupId")?;
-        let engine = required_param(request, "Engine")?;
+        let user_group_id = required_query_param(request, "UserGroupId")?;
+        let engine = required_query_param(request, "Engine")?;
 
         validate_engine(&engine)?;
 
@@ -2949,9 +2950,9 @@ impl ElastiCacheService {
     }
 
     fn describe_user_groups(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_group_id = optional_param(request, "UserGroupId");
+        let user_group_id = optional_query_param(request, "UserGroupId");
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -2995,7 +2996,7 @@ impl ElastiCacheService {
     }
 
     fn delete_user_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let user_group_id = required_param(request, "UserGroupId")?;
+        let user_group_id = required_query_param(request, "UserGroupId")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -3028,7 +3029,7 @@ impl ElastiCacheService {
     }
 
     fn add_tags_to_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let resource_name = required_param(request, "ResourceName")?;
+        let resource_name = required_query_param(request, "ResourceName")?;
         let tags = parse_tags(request)?;
 
         let mut accounts = self.state.write();
@@ -3056,7 +3057,7 @@ impl ElastiCacheService {
     }
 
     fn list_tags_for_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let resource_name = required_param(request, "ResourceName")?;
+        let resource_name = required_query_param(request, "ResourceName")?;
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -3085,7 +3086,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let resource_name = required_param(request, "ResourceName")?;
+        let resource_name = required_query_param(request, "ResourceName")?;
         let tag_keys = parse_tag_keys(request)?;
 
         let mut accounts = self.state.write();
@@ -3112,8 +3113,8 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheSecurityGroupName")?;
-        let description = required_param(request, "Description")?;
+        let name = required_query_param(request, "CacheSecurityGroupName")?;
+        let description = required_query_param(request, "Description")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -3150,7 +3151,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheSecurityGroupName")?;
+        let name = required_query_param(request, "CacheSecurityGroupName")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         state.security_groups.remove(&name).ok_or_else(|| {
@@ -3170,9 +3171,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = optional_param(request, "CacheSecurityGroupName");
+        let name = optional_query_param(request, "CacheSecurityGroupName");
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -3225,9 +3226,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheSecurityGroupName")?;
-        let ec2_name = required_param(request, "EC2SecurityGroupName")?;
-        let ec2_owner = required_param(request, "EC2SecurityGroupOwnerId")?;
+        let name = required_query_param(request, "CacheSecurityGroupName")?;
+        let ec2_name = required_query_param(request, "EC2SecurityGroupName")?;
+        let ec2_owner = required_query_param(request, "EC2SecurityGroupOwnerId")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -3271,9 +3272,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheSecurityGroupName")?;
-        let ec2_name = required_param(request, "EC2SecurityGroupName")?;
-        let ec2_owner = required_param(request, "EC2SecurityGroupOwnerId")?;
+        let name = required_query_param(request, "CacheSecurityGroupName")?;
+        let ec2_name = required_query_param(request, "EC2SecurityGroupName")?;
+        let ec2_owner = required_query_param(request, "EC2SecurityGroupOwnerId")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let sg = state.security_groups.get_mut(&name).ok_or_else(|| {
@@ -3310,9 +3311,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheParameterGroupName")?;
-        let family = required_param(request, "CacheParameterGroupFamily")?;
-        let description = required_param(request, "Description")?;
+        let name = required_query_param(request, "CacheParameterGroupName")?;
+        let family = required_query_param(request, "CacheParameterGroupFamily")?;
+        let description = required_query_param(request, "Description")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -3350,7 +3351,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheParameterGroupName")?;
+        let name = required_query_param(request, "CacheParameterGroupName")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let before = state.parameter_groups.len();
@@ -3375,7 +3376,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheParameterGroupName")?;
+        let name = required_query_param(request, "CacheParameterGroupName")?;
         let updates = collect_indexed_pairs(
             request,
             "ParameterNameValues.member",
@@ -3430,9 +3431,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheParameterGroupName")?;
+        let name = required_query_param(request, "CacheParameterGroupName")?;
         let reset_all =
-            parse_optional_bool(optional_param(request, "ResetAllParameters").as_deref())?
+            parse_optional_bool(optional_query_param(request, "ResetAllParameters").as_deref())?
                 .unwrap_or(false);
         let to_reset = collect_member_field(request, "ParameterNameValues.member", "ParameterName");
         let mut accounts = self.state.write();
@@ -3467,9 +3468,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = required_param(request, "CacheParameterGroupName")?;
+        let name = required_query_param(request, "CacheParameterGroupName")?;
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
@@ -3508,11 +3509,11 @@ impl ElastiCacheService {
     // ── Cluster lifecycle extras ──
 
     fn modify_cache_cluster(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_param(request, "CacheClusterId")?;
-        let new_node_count = optional_param(request, "NumCacheNodes")
+        let id = required_query_param(request, "CacheClusterId")?;
+        let new_node_count = optional_query_param(request, "NumCacheNodes")
             .as_deref()
             .and_then(|v| v.parse::<i32>().ok());
-        let new_node_type = optional_param(request, "CacheNodeType");
+        let new_node_type = optional_query_param(request, "CacheNodeType");
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -3542,7 +3543,7 @@ impl ElastiCacheService {
     }
 
     fn reboot_cache_cluster(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_param(request, "CacheClusterId")?;
+        let id = required_query_param(request, "CacheClusterId")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let cluster = state.cache_clusters.get_mut(&id).ok_or_else(|| {
@@ -3597,9 +3598,9 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_param(request, "ReplicationGroupId")?;
-        let _node_group_count = required_param(request, "NodeGroupCount")?;
-        let _apply = required_param(request, "ApplyImmediately")?;
+        let id = required_query_param(request, "ReplicationGroupId")?;
+        let _node_group_count = required_query_param(request, "NodeGroupCount")?;
+        let _apply = required_query_param(request, "ApplyImmediately")?;
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
@@ -3648,7 +3649,7 @@ impl ElastiCacheService {
         request: &AwsRequest,
         action: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_param(request, "GlobalReplicationGroupId")?;
+        let id = required_query_param(request, "GlobalReplicationGroupId")?;
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
@@ -3673,8 +3674,8 @@ impl ElastiCacheService {
     // ── Users / User groups (modify) ──
 
     fn modify_user(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_param(request, "UserId")?;
-        let access_string = optional_param(request, "AccessString");
+        let id = required_query_param(request, "UserId")?;
+        let access_string = optional_query_param(request, "AccessString");
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let user = state.users.get_mut(&id).ok_or_else(|| {
@@ -3696,7 +3697,7 @@ impl ElastiCacheService {
     }
 
     fn modify_user_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_param(request, "UserGroupId")?;
+        let id = required_query_param(request, "UserGroupId")?;
         let to_add = collect_indexed_strings(request, "UserIdsToAdd.member");
         let to_remove = collect_indexed_strings(request, "UserIdsToRemove.member");
         let mut accounts = self.state.write();
@@ -3728,8 +3729,8 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let offering_id = required_param(request, "ReservedCacheNodesOfferingId")?;
-        let id = optional_param(request, "ReservedCacheNodeId").unwrap_or_else(|| {
+        let offering_id = required_query_param(request, "ReservedCacheNodesOfferingId")?;
+        let id = optional_query_param(request, "ReservedCacheNodeId").unwrap_or_else(|| {
             format!(
                 "ri-{}",
                 std::time::SystemTime::now()
@@ -3738,7 +3739,7 @@ impl ElastiCacheService {
                     .unwrap_or(0)
             )
         });
-        let count = optional_param(request, "CacheNodeCount")
+        let count = optional_query_param(request, "CacheNodeCount")
             .as_deref()
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(1);
@@ -3792,7 +3793,7 @@ impl ElastiCacheService {
 
     fn describe_events(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let max_records = optional_usize_param(request, "MaxRecords")?;
-        let marker = optional_param(request, "Marker");
+        let marker = optional_query_param(request, "Marker");
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
@@ -3865,7 +3866,7 @@ impl ElastiCacheService {
         action: &str,
         new_status: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let svc_update = required_param(request, "ServiceUpdateName")?;
+        let svc_update = required_query_param(request, "ServiceUpdateName")?;
         let cluster_ids = collect_indexed_strings(request, "CacheClusterIds.member");
         let group_ids = collect_indexed_strings(request, "ReplicationGroupIds.member");
         let processed: Vec<String> = cluster_ids
@@ -3896,8 +3897,8 @@ impl ElastiCacheService {
     // ── Snapshots ──
 
     fn copy_snapshot(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let source = required_param(request, "SourceSnapshotName")?;
-        let target = required_param(request, "TargetSnapshotName")?;
+        let source = required_query_param(request, "SourceSnapshotName")?;
+        let target = required_query_param(request, "TargetSnapshotName")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let mut snap = state.snapshots.get(&source).cloned().ok_or_else(|| {
@@ -3933,8 +3934,8 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let source = required_param(request, "SourceServerlessCacheSnapshotName")?;
-        let target = required_param(request, "TargetServerlessCacheSnapshotName")?;
+        let source = required_query_param(request, "SourceServerlessCacheSnapshotName")?;
+        let target = required_query_param(request, "TargetServerlessCacheSnapshotName")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         if state.serverless_cache_snapshots.contains_key(&target) {
@@ -3973,8 +3974,8 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let snap_name = required_param(request, "ServerlessCacheSnapshotName")?;
-        let bucket = required_param(request, "S3BucketName")?;
+        let snap_name = required_query_param(request, "ServerlessCacheSnapshotName")?;
+        let bucket = required_query_param(request, "S3BucketName")?;
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
@@ -4007,7 +4008,7 @@ impl ElastiCacheService {
     }
 
     fn complete_migration(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_param(request, "ReplicationGroupId")?;
+        let id = required_query_param(request, "ReplicationGroupId")?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let migration = state.migrations.get_mut(&id).ok_or_else(|| {
@@ -4047,7 +4048,7 @@ impl ElastiCacheService {
         action: &str,
         status: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let id = required_param(request, "ReplicationGroupId")?;
+        let id = required_query_param(request, "ReplicationGroupId")?;
         // AWS Query protocol nests indexed members under .{index}.{Field},
         // not .{Field}.{index}.
         let endpoint_addr =
@@ -4096,16 +4097,8 @@ impl ElastiCacheService {
 
 // Helpers
 
-fn optional_param(req: &AwsRequest, name: &str) -> Option<String> {
-    fakecloud_core::query::optional_query_param(req, name)
-}
-
-fn required_param(req: &AwsRequest, name: &str) -> Result<String, AwsServiceError> {
-    fakecloud_core::query::required_query_param(req, name)
-}
-
 fn parse_required_bool(req: &AwsRequest, name: &str) -> Result<bool, AwsServiceError> {
-    parse_optional_bool(Some(&required_param(req, name)?))?.ok_or_else(|| {
+    parse_optional_bool(Some(&required_query_param(req, name)?))?.ok_or_else(|| {
         AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "InvalidParameterValue",
@@ -4265,7 +4258,7 @@ fn optional_non_negative_i32_param(
     req: &AwsRequest,
     name: &str,
 ) -> Result<Option<i32>, AwsServiceError> {
-    optional_param(req, name)
+    optional_query_param(req, name)
         .map(|v| {
             let parsed = v.parse::<i32>().map_err(|_| {
                 AwsServiceError::aws_error(
@@ -4293,7 +4286,7 @@ fn parse_cache_usage_limits(
         optional_non_negative_i32_param(req, "CacheUsageLimits.DataStorage.Maximum")?;
     let data_storage_minimum =
         optional_non_negative_i32_param(req, "CacheUsageLimits.DataStorage.Minimum")?;
-    let data_storage_unit = optional_param(req, "CacheUsageLimits.DataStorage.Unit");
+    let data_storage_unit = optional_query_param(req, "CacheUsageLimits.DataStorage.Unit");
     let ecpu_maximum =
         optional_non_negative_i32_param(req, "CacheUsageLimits.ECPUPerSecond.Maximum")?;
     let ecpu_minimum =
@@ -4389,7 +4382,7 @@ fn parse_query_list_param(req: &AwsRequest, param: &str, member_name: &str) -> V
 }
 
 fn optional_usize_param(req: &AwsRequest, name: &str) -> Result<Option<usize>, AwsServiceError> {
-    optional_param(req, name)
+    optional_query_param(req, name)
         .map(|v| {
             v.parse::<usize>().map_err(|_| {
                 AwsServiceError::aws_error(
@@ -4438,8 +4431,8 @@ fn parse_tags(req: &AwsRequest) -> Result<Vec<(String, String)>, AwsServiceError
     for index in 1.. {
         let key_name = format!("Tags.Tag.{index}.Key");
         let value_name = format!("Tags.Tag.{index}.Value");
-        let key = optional_param(req, &key_name);
-        let value = optional_param(req, &value_name);
+        let key = optional_query_param(req, &key_name);
+        let value = optional_query_param(req, &value_name);
         match (key, value) {
             (Some(k), Some(v)) => tags.push((k, v)),
             (None, None) => break,
@@ -4459,7 +4452,7 @@ fn parse_tag_keys(req: &AwsRequest) -> Result<Vec<String>, AwsServiceError> {
     let mut keys = Vec::new();
     for index in 1.. {
         let key_name = format!("TagKeys.member.{index}");
-        match optional_param(req, &key_name) {
+        match optional_query_param(req, &key_name) {
             Some(key) => keys.push(key),
             None => break,
         }

@@ -14,7 +14,8 @@ use crate::state::{
     ServiceLastAccessedJob, ServiceSpecificCredential,
 };
 
-use super::{empty_response, parse_tags, required_param, tags_xml, IamService};
+use fakecloud_core::query::required_param;
+use super::{empty_response, parse_tags, tags_xml, IamService};
 
 use fakecloud_aws::xml::xml_escape;
 

@@ -6,8 +6,9 @@ use fakecloud_core::validation::*;
 
 use crate::state::IamInstanceProfile;
 
+use fakecloud_core::query::required_param;
 use super::{
-    empty_response, generate_id, parse_tag_keys, parse_tags, required_param, tags_xml, url_encode,
+    empty_response, generate_id, parse_tag_keys, parse_tags, tags_xml, url_encode,
     IamService,
 };
 

@@ -1139,13 +1139,6 @@ fn url_encode(s: &str) -> String {
     result
 }
 
-fn required_param(
-    params: &std::collections::HashMap<String, String>,
-    name: &str,
-) -> Result<String, AwsServiceError> {
-    fakecloud_core::query::required_param(params, name)
-}
-
 /// Resolve the calling user when UserName is not provided.
 /// Returns the first user found or a default "default" name.
 fn resolve_calling_user(state: &crate::state::IamState, _account_id: &str) -> String {
