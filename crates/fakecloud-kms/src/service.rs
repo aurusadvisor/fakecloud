@@ -2330,7 +2330,7 @@ impl KmsService {
                     true
                 }
             })
-            .map(grant_to_json)
+            .map(|g| grant_to_json(g, &req.account_id))
             .collect();
 
         Ok(AwsResponse::json(
@@ -2372,7 +2372,7 @@ impl KmsService {
                     .as_deref()
                     .is_some_and(|rp| rp == retiring_principal)
             })
-            .map(grant_to_json)
+            .map(|g| grant_to_json(g, &req.account_id))
             .collect();
 
         let start = if let Some(m) = marker {
@@ -3517,13 +3517,13 @@ fn fmt_enum_set(items: &[String]) -> String {
     format!("[{}]", inner.join(", "))
 }
 
-fn grant_to_json(grant: &KmsGrant) -> Value {
+fn grant_to_json(grant: &KmsGrant, account_id: &str) -> Value {
     let mut v = json!({
         "KeyId": grant.key_id,
         "GrantId": grant.grant_id,
         "GranteePrincipal": grant.grantee_principal,
         "Operations": grant.operations,
-        "IssuingAccount": format!("arn:aws:iam::root"),
+        "IssuingAccount": fakecloud_aws::arn::Arn::global("iam", account_id, "root").to_string(),
         "CreationDate": grant.creation_date,
     });
 
