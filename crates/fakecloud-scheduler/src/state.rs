@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fakecloud_core::multi_account::{AccountState, MultiAccountState};
@@ -91,7 +91,7 @@ pub struct ScheduleGroup {
     pub state: String, // ACTIVE | DELETING
     pub creation_date: DateTime<Utc>,
     pub last_modification_date: DateTime<Utc>,
-    pub tags: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
 }
 
 /// Composite key: (group_name, schedule_name). Schedules are unique
@@ -103,23 +103,23 @@ pub struct SchedulerState {
     pub account_id: String,
     pub region: String,
     #[serde(default)]
-    pub groups: HashMap<String, ScheduleGroup>,
+    pub groups: BTreeMap<String, ScheduleGroup>,
     // JSON can't represent a tuple-keyed map, so we (de)serialize
     // schedules as a flat Vec<Schedule> and rebuild the in-memory
     // `(group, name)` index on read. Pre-refactor versions silently
     // dropped the entire map during save — the regression that broke
     // schedule-survives-restart.
     #[serde(default, with = "schedules_vec_serde")]
-    pub schedules: HashMap<ScheduleKey, Schedule>,
+    pub schedules: BTreeMap<ScheduleKey, Schedule>,
 }
 
 mod schedules_vec_serde {
     use super::{Schedule, ScheduleKey};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     pub fn serialize<S: Serializer>(
-        schedules: &HashMap<ScheduleKey, Schedule>,
+        schedules: &BTreeMap<ScheduleKey, Schedule>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         let mut sorted: Vec<&Schedule> = schedules.values().collect();
@@ -133,7 +133,7 @@ mod schedules_vec_serde {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<HashMap<ScheduleKey, Schedule>, D::Error> {
+    ) -> Result<BTreeMap<ScheduleKey, Schedule>, D::Error> {
         let v: Vec<Schedule> = Vec::deserialize(deserializer)?;
         Ok(v.into_iter()
             .map(|s| ((s.group_name.clone(), s.name.clone()), s))
@@ -144,7 +144,7 @@ mod schedules_vec_serde {
 impl SchedulerState {
     pub fn new(account_id: &str, region: &str) -> Self {
         let now = Utc::now();
-        let mut groups = HashMap::new();
+        let mut groups = BTreeMap::new();
         groups.insert(
             DEFAULT_GROUP.to_string(),
             ScheduleGroup {
@@ -153,14 +153,14 @@ impl SchedulerState {
                 state: "ACTIVE".to_string(),
                 creation_date: now,
                 last_modification_date: now,
-                tags: HashMap::new(),
+                tags: BTreeMap::new(),
             },
         );
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
             groups,
-            schedules: HashMap::new(),
+            schedules: BTreeMap::new(),
         }
     }
 
@@ -176,7 +176,7 @@ impl SchedulerState {
                 state: "ACTIVE".to_string(),
                 creation_date: now,
                 last_modification_date: now,
-                tags: HashMap::new(),
+                tags: BTreeMap::new(),
             },
         );
     }
@@ -271,7 +271,7 @@ mod tests {
                 state: "ACTIVE".to_string(),
                 creation_date: Utc::now(),
                 last_modification_date: Utc::now(),
-                tags: HashMap::new(),
+                tags: BTreeMap::new(),
             },
         );
         s.reset();
