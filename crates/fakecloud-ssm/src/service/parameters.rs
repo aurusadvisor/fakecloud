@@ -487,7 +487,7 @@ impl SsmService {
 
         let value = version.secret_string.as_deref().unwrap_or("").to_string();
 
-        let arn = format!("arn:aws:ssm:{region}:{}:parameter{}", account_id, raw_name);
+        let arn = Arn::new("ssm", region, account_id, &format!("parameter{raw_name}")).to_string();
 
         Ok(AwsResponse::ok_json(json!({
             "Parameter": {

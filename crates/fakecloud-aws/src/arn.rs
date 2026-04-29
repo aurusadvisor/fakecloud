@@ -27,6 +27,41 @@ impl Arn {
     pub fn global(service: &str, account_id: &str, resource: &str) -> Self {
         Self::new(service, "", account_id, resource)
     }
+
+    /// Create an S3 ARN — no region, no account.
+    /// Format: `arn:aws:s3:::resource`.
+    pub fn s3(resource: &str) -> Self {
+        Self {
+            partition: "aws".to_string(),
+            service: "s3".to_string(),
+            region: String::new(),
+            account_id: String::new(),
+            resource: resource.to_string(),
+        }
+    }
+
+    /// Override the partition (default `aws`). Use for `aws-cn` / `aws-us-gov`.
+    pub fn with_partition(mut self, partition: &str) -> Self {
+        self.partition = partition.to_string();
+        self
+    }
+}
+
+/// Map an AWS region name to its partition. Mirrors the AWS SDK's
+/// region-to-partition lookup so synthesized ARNs in cn/gov-cloud
+/// regions emit the correct partition prefix.
+pub fn partition_for(region: &str) -> &'static str {
+    if region.starts_with("cn-") {
+        "aws-cn"
+    } else if region.starts_with("us-gov-") {
+        "aws-us-gov"
+    } else if region.starts_with("us-iso-") {
+        "aws-iso"
+    } else if region.starts_with("us-isob-") {
+        "aws-iso-b"
+    } else {
+        "aws"
+    }
 }
 
 impl fmt::Display for Arn {
@@ -77,5 +112,30 @@ mod tests {
     fn global_arn() {
         let arn = Arn::global("iam", "123456789012", "user/admin");
         assert_eq!(arn.to_string(), "arn:aws:iam::123456789012:user/admin");
+    }
+
+    #[test]
+    fn s3_arn() {
+        let arn = Arn::s3("my-bucket");
+        assert_eq!(arn.to_string(), "arn:aws:s3:::my-bucket");
+        let object = Arn::s3("my-bucket/key.txt");
+        assert_eq!(object.to_string(), "arn:aws:s3:::my-bucket/key.txt");
+    }
+
+    #[test]
+    fn with_partition_overrides() {
+        let arn = Arn::new("sqs", "cn-north-1", "123", "q").with_partition("aws-cn");
+        assert_eq!(arn.to_string(), "arn:aws-cn:sqs:cn-north-1:123:q");
+    }
+
+    #[test]
+    fn partition_for_region() {
+        assert_eq!(partition_for("us-east-1"), "aws");
+        assert_eq!(partition_for("eu-west-1"), "aws");
+        assert_eq!(partition_for("cn-north-1"), "aws-cn");
+        assert_eq!(partition_for("cn-northwest-1"), "aws-cn");
+        assert_eq!(partition_for("us-gov-west-1"), "aws-us-gov");
+        assert_eq!(partition_for("us-iso-east-1"), "aws-iso");
+        assert_eq!(partition_for("us-isob-east-1"), "aws-iso-b");
     }
 }
