@@ -1778,11 +1778,16 @@ async fn ses_get_dedicated_ip_pool() {
 async fn ses_get_deliverability_dashboard_options() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;
-    let _ = client
+    let resp = client
         .get_deliverability_dashboard_options()
         .send()
         .await
         .unwrap();
+    // Smithy GetDeliverabilityDashboardOptions returns DashboardEnabled,
+    // SubscriptionExpiryDate, AccountStatus. Confirm the typed shape decodes.
+    let _ = resp.dashboard_enabled();
+    let _ = resp.subscription_expiry_date();
+    let _ = resp.account_status();
 }
 
 #[test_action("ses", "PutDeliverabilityDashboardOption", checksum = "baea4aa5")]
@@ -1833,7 +1838,9 @@ async fn ses_create_deliverability_test_report() {
         .send()
         .await
         .unwrap();
-    let _ = resp.report_id();
+    // Smithy CreateDeliverabilityTestReport returns ReportId + DeliverabilityTestStatus.
+    assert!(!resp.report_id().is_empty());
+    let _ = resp.deliverability_test_status();
 }
 
 #[test_action("ses", "GetDeliverabilityTestReport", checksum = "cfdaf3ed")]
@@ -1864,12 +1871,18 @@ async fn ses_get_deliverability_test_report() {
         .unwrap()
         .report_id()
         .to_string();
-    let _ = client
+    let resp = client
         .get_deliverability_test_report()
         .report_id(&report_id)
         .send()
         .await
         .unwrap();
+    // Smithy GetDeliverabilityTestReport returns DeliverabilityTestReport (must
+    // be Some — we just created one), OverallPlacement, IspPlacements, Message,
+    // Tags. Confirm the typed shape decodes.
+    assert!(resp.deliverability_test_report().is_some());
+    let _ = resp.overall_placement();
+    let _ = resp.isp_placements();
 }
 
 #[test_action("ses", "ListDeliverabilityTestReports", checksum = "2ff6966f")]
@@ -1877,11 +1890,14 @@ async fn ses_get_deliverability_test_report() {
 async fn ses_list_deliverability_test_reports() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;
-    let _ = client
+    let resp = client
         .list_deliverability_test_reports()
         .send()
         .await
         .unwrap();
+    // Smithy ListDeliverabilityTestReports returns DeliverabilityTestReports
+    // (required) + NextToken (optional).
+    let _ = resp.deliverability_test_reports();
 }
 
 #[test_action("ses", "GetBlacklistReports", checksum = "748e9215")]
@@ -1889,12 +1905,14 @@ async fn ses_list_deliverability_test_reports() {
 async fn ses_get_blacklist_reports() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;
-    let _ = client
+    let resp = client
         .get_blacklist_reports()
         .blacklist_item_names("198.51.100.1")
         .send()
         .await
         .unwrap();
+    // Smithy GetBlacklistReports returns BlacklistReport (required map).
+    let _ = resp.blacklist_report();
 }
 
 #[test_action("ses", "GetDomainDeliverabilityCampaign", checksum = "1e2c07e5")]
@@ -1902,12 +1920,14 @@ async fn ses_get_blacklist_reports() {
 async fn ses_get_domain_deliverability_campaign() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;
-    let _ = client
+    let resp = client
         .get_domain_deliverability_campaign()
         .campaign_id("camp-1")
         .send()
         .await
         .unwrap();
+    // Smithy GetDomainDeliverabilityCampaign returns DomainDeliverabilityCampaign (required).
+    assert!(resp.domain_deliverability_campaign().is_some());
 }
 
 #[test_action("ses", "GetDomainStatisticsReport", checksum = "03a79f80")]
@@ -1915,7 +1935,7 @@ async fn ses_get_domain_deliverability_campaign() {
 async fn ses_get_domain_statistics_report() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;
-    let _ = client
+    let resp = client
         .get_domain_statistics_report()
         .domain("example.com")
         .start_date(aws_sdk_sesv2::primitives::DateTime::from_secs(0))
@@ -1923,6 +1943,9 @@ async fn ses_get_domain_statistics_report() {
         .send()
         .await
         .unwrap();
+    // Smithy GetDomainStatisticsReport returns OverallVolume + DailyVolumes.
+    assert!(resp.overall_volume().is_some());
+    let _ = resp.daily_volumes();
 }
 
 #[test_action("ses", "ListDomainDeliverabilityCampaigns", checksum = "4abf00ca")]
@@ -1930,7 +1953,7 @@ async fn ses_get_domain_statistics_report() {
 async fn ses_list_domain_deliverability_campaigns() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;
-    let _ = client
+    let resp = client
         .list_domain_deliverability_campaigns()
         .start_date(aws_sdk_sesv2::primitives::DateTime::from_secs(0))
         .end_date(aws_sdk_sesv2::primitives::DateTime::from_secs(1))
@@ -1938,6 +1961,8 @@ async fn ses_list_domain_deliverability_campaigns() {
         .send()
         .await
         .unwrap();
+    // Smithy ListDomainDeliverabilityCampaigns returns DomainDeliverabilityCampaigns + NextToken.
+    let _ = resp.domain_deliverability_campaigns();
 }
 
 #[test_action("ses", "GetEmailAddressInsights", checksum = "c0b9de1c")]
@@ -1945,12 +1970,15 @@ async fn ses_list_domain_deliverability_campaigns() {
 async fn ses_get_email_address_insights() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;
-    let _ = client
+    let resp = client
         .get_email_address_insights()
         .email_address("test@example.com")
         .send()
         .await
         .unwrap();
+    // Smithy GetEmailAddressInsights returns MailboxValidation. Touch the
+    // typed field to verify the response shape decoded.
+    let _ = resp.mailbox_validation();
 }
 
 #[test_action("ses", "GetMessageInsights", checksum = "d1a5d397")]
@@ -1972,5 +2000,7 @@ async fn ses_get_message_insights() {
 async fn ses_list_recommendations() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;
-    let _ = client.list_recommendations().send().await.unwrap();
+    let resp = client.list_recommendations().send().await.unwrap();
+    // Smithy ListRecommendations returns Recommendations + NextToken.
+    let _ = resp.recommendations();
 }
