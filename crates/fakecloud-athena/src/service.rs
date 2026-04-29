@@ -1859,7 +1859,13 @@ fn capacity_reservation_arn(account_id: &str, region: &str, name: &str) -> Strin
     } else {
         region
     };
-    Arn::new("athena", region, account_id, &format!("capacity-reservation/{name}")).to_string()
+    Arn::new(
+        "athena",
+        region,
+        account_id,
+        &format!("capacity-reservation/{name}"),
+    )
+    .to_string()
 }
 
 fn parse_string_list(value: Option<&Value>) -> Vec<String> {

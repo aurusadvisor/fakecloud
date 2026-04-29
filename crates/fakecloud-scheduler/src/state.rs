@@ -204,13 +204,25 @@ pub struct SchedulerSnapshot {
 /// Build an EventBridge Scheduler schedule ARN.
 /// Format: `arn:aws:scheduler:<region>:<account>:schedule/<group>/<name>`.
 pub fn schedule_arn(region: &str, account_id: &str, group: &str, name: &str) -> String {
-    Arn::new("scheduler", region, account_id, &format!("schedule/{group}/{name}")).to_string()
+    Arn::new(
+        "scheduler",
+        region,
+        account_id,
+        &format!("schedule/{group}/{name}"),
+    )
+    .to_string()
 }
 
 /// Build a schedule-group ARN.
 /// Format: `arn:aws:scheduler:<region>:<account>:schedule-group/<group>`.
 pub fn group_arn(region: &str, account_id: &str, group: &str) -> String {
-    Arn::new("scheduler", region, account_id, &format!("schedule-group/{group}")).to_string()
+    Arn::new(
+        "scheduler",
+        region,
+        account_id,
+        &format!("schedule-group/{group}"),
+    )
+    .to_string()
 }
 
 #[cfg(test)]
