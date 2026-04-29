@@ -9,6 +9,7 @@ use parking_lot::RwLock;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
@@ -828,7 +829,13 @@ fn synth_scalable_target_arn(account_id: &str, region: &str) -> String {
     };
     let id = Uuid::new_v4().simple().to_string();
     let id = &id[..10];
-    format!("arn:aws:application-autoscaling:{region}:{account_id}:scalable-target/{id}")
+    Arn::new(
+        "application-autoscaling",
+        region,
+        account_id,
+        &format!("scalable-target/{id}"),
+    )
+    .to_string()
 }
 
 fn synth_policy_arn(

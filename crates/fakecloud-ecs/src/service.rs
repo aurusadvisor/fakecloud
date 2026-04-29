@@ -6,6 +6,7 @@ use http::StatusCode;
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex as AsyncMutex;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
@@ -954,11 +955,9 @@ impl EcsService {
             runtime_platform: body.get("runtimePlatform").cloned(),
             requires_attributes: Vec::new(),
             registered_at: Utc::now(),
-            registered_by: request
-                .principal
-                .as_ref()
-                .map(|p| p.arn.clone())
-                .or(Some(format!("arn:aws:iam::{}:root", state.account_id))),
+            registered_by: request.principal.as_ref().map(|p| p.arn.clone()).or(Some(
+                Arn::global("iam", &state.account_id, "root").to_string(),
+            )),
             deregistered_at: None,
             tags: tags.clone(),
             enable_fault_injection: body.get("enableFaultInjection").and_then(|v| v.as_bool()),
@@ -1468,7 +1467,7 @@ impl EcsService {
         let principal_arn = opt_str(&body, "principalArn")
             .map(String::from)
             .or_else(|| request.principal.as_ref().map(|p| p.arn.clone()))
-            .unwrap_or_else(|| format!("arn:aws:iam::{}:root", request.account_id));
+            .unwrap_or_else(|| Arn::global("iam", &request.account_id, "root").to_string());
         let account = request.account_id.clone();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&account);
@@ -1503,7 +1502,7 @@ impl EcsService {
             "setting": {
                 "name": name,
                 "value": value,
-                "principalArn": format!("arn:aws:iam::{}:root", state.account_id),
+                "principalArn": Arn::global("iam", &state.account_id, "root").to_string(),
             }
         })))
     }
@@ -1514,7 +1513,7 @@ impl EcsService {
         let principal_arn = opt_str(&body, "principalArn")
             .map(String::from)
             .or_else(|| request.principal.as_ref().map(|p| p.arn.clone()))
-            .unwrap_or_else(|| format!("arn:aws:iam::{}:root", request.account_id));
+            .unwrap_or_else(|| Arn::global("iam", &request.account_id, "root").to_string());
         let account = request.account_id.clone();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&account);
@@ -1546,7 +1545,7 @@ impl EcsService {
         let Some(state) = accounts.get(&account) else {
             return Ok(AwsResponse::ok_json(json!({"settings": []})));
         };
-        let root_arn = format!("arn:aws:iam::{}:root", state.account_id);
+        let root_arn = Arn::global("iam", &state.account_id, "root").to_string();
         let mut settings: Vec<Value> = Vec::new();
 
         if effective_only {
@@ -2195,7 +2194,7 @@ impl EcsService {
             .principal
             .as_ref()
             .map(|p| p.arn.clone())
-            .unwrap_or_else(|| format!("arn:aws:iam::{}:root", request.account_id));
+            .unwrap_or_else(|| Arn::global("iam", &request.account_id, "root").to_string());
 
         let (service_json, spawn_task_ids) = {
             let mut accounts = self.state.write();
@@ -2313,7 +2312,7 @@ impl EcsService {
             .principal
             .as_ref()
             .map(|p| p.arn.clone())
-            .unwrap_or_else(|| format!("arn:aws:iam::{}:root", request.account_id));
+            .unwrap_or_else(|| Arn::global("iam", &request.account_id, "root").to_string());
         let runtime = self.runtime.clone();
 
         let (service_json, spawn_ids, stop_ids) = {

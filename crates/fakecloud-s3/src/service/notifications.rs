@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::delivery::DeliveryBus;
 
 use crate::state::{S3NotificationEvent, SharedS3State};
@@ -400,7 +401,7 @@ pub(crate) fn build_s3_event_notification(
             "s3": {
                 "bucket": {
                     "name": bucket_name,
-                    "arn": format!("arn:aws:s3:::{}", bucket_name)
+                    "arn": Arn::s3(bucket_name).to_string()
                 },
                 "object": {
                     "key": key,

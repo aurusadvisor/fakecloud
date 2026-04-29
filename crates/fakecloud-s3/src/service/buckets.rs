@@ -3,6 +3,7 @@ use base64::Engine as _;
 use http::{HeaderMap, StatusCode};
 
 use bytes::Bytes;
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::persistence::bucket_meta_snapshot;
@@ -299,7 +300,7 @@ impl S3Service {
         headers.insert("location", format!("/{bucket}").parse().unwrap());
         headers.insert(
             "x-amz-bucket-arn",
-            format!("arn:aws:s3:::{bucket}").parse().unwrap(),
+            Arn::s3(bucket).to_string().parse().unwrap(),
         );
         Ok(AwsResponse {
             status: StatusCode::OK,

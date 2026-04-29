@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_sdk::types;
 
 // Make pub so main.rs can construct it
@@ -491,7 +492,7 @@ pub(crate) fn create_admin_in_account(
             .replace('-', "")
             .to_uppercase()[..16]
     );
-    let arn = format!("arn:aws:iam::{}:user/{}", account_id, user_name);
+    let arn = Arn::global("iam", account_id, &format!("user/{user_name}")).to_string();
     let akid = format!(
         "FKIA{}",
         &uuid::Uuid::new_v4()

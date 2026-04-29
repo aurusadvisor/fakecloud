@@ -6,6 +6,7 @@ use chrono::{DateTime, Timelike, Utc};
 use http::{HeaderMap, Method, StatusCode};
 use md5::{Digest, Md5};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_kms::state::SharedKmsState;
@@ -125,7 +126,7 @@ impl S3Service {
             return Ok(bytes::Bytes::copy_from_slice(plaintext));
         };
         let key = kms_key_id.filter(|k| !k.is_empty()).unwrap_or("aws/s3");
-        let bucket_arn = format!("arn:aws:s3:::{bucket}");
+        let bucket_arn = Arn::s3(bucket).to_string();
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("aws:s3:arn".to_string(), bucket_arn);
         match hook.encrypt(account_id, region, key, plaintext, "s3.amazonaws.com", ctx) {
@@ -165,7 +166,7 @@ impl S3Service {
             Ok(s) => s,
             Err(_) => return Ok(bytes::Bytes::copy_from_slice(ciphertext)),
         };
-        let bucket_arn = format!("arn:aws:s3:::{bucket}");
+        let bucket_arn = Arn::s3(bucket).to_string();
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("aws:s3:arn".to_string(), bucket_arn);
         match hook.decrypt(account_id, envelope, "s3.amazonaws.com", ctx) {
@@ -1457,12 +1458,12 @@ fn s3_resource_for(action: &'static str, bucket: Option<&str>, key: Option<&str>
     };
     if OBJECT_ACTIONS.contains(&action) {
         match key {
-            Some(k) if !k.is_empty() => format!("arn:aws:s3:::{}/{}", bucket, k),
-            _ => format!("arn:aws:s3:::{}/*", bucket),
+            Some(k) if !k.is_empty() => Arn::s3(&format!("{bucket}/{k}")).to_string(),
+            _ => Arn::s3(&format!("{bucket}/*")).to_string(),
         }
     } else {
         // Bucket-level actions (ListObjectsV2, GetBucketTagging, ...).
-        format!("arn:aws:s3:::{}", bucket)
+        Arn::s3(bucket).to_string()
     }
 }
 

@@ -27,6 +27,24 @@ impl Arn {
     pub fn global(service: &str, account_id: &str, resource: &str) -> Self {
         Self::new(service, "", account_id, resource)
     }
+
+    /// Create an S3 ARN — no region, no account.
+    /// Format: `arn:aws:s3:::resource`.
+    pub fn s3(resource: &str) -> Self {
+        Self {
+            partition: "aws".to_string(),
+            service: "s3".to_string(),
+            region: String::new(),
+            account_id: String::new(),
+            resource: resource.to_string(),
+        }
+    }
+
+    /// Override the partition (default `aws`). Use for `aws-cn` / `aws-us-gov`.
+    pub fn with_partition(mut self, partition: &str) -> Self {
+        self.partition = partition.to_string();
+        self
+    }
 }
 
 impl fmt::Display for Arn {
@@ -77,5 +95,19 @@ mod tests {
     fn global_arn() {
         let arn = Arn::global("iam", "123456789012", "user/admin");
         assert_eq!(arn.to_string(), "arn:aws:iam::123456789012:user/admin");
+    }
+
+    #[test]
+    fn s3_arn() {
+        let arn = Arn::s3("my-bucket");
+        assert_eq!(arn.to_string(), "arn:aws:s3:::my-bucket");
+        let object = Arn::s3("my-bucket/key.txt");
+        assert_eq!(object.to_string(), "arn:aws:s3:::my-bucket/key.txt");
+    }
+
+    #[test]
+    fn with_partition_overrides() {
+        let arn = Arn::new("sqs", "cn-north-1", "123", "q").with_partition("aws-cn");
+        assert_eq!(arn.to_string(), "arn:aws-cn:sqs:cn-north-1:123:q");
     }
 }
