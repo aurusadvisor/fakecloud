@@ -24,6 +24,7 @@ pub fn generate(traits: &ShapeTraits) -> Vec<TestVariant> {
             input: example.input.clone(),
             expectation: Expectation::Success,
             expected_output: None,
+            followup: None,
         })
         .collect()
 }

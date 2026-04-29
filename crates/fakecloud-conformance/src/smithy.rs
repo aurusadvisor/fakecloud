@@ -595,6 +595,153 @@ pub fn effective_shape_type(model: &ServiceModel, shape_id: &str) -> Option<Shap
     }
 }
 
+/// A round-trip pair: a mutating op (`Create*`/`Put*`/`Update*`) and a
+/// matching read op (`Get*`/`Describe*`) that retrieves the same resource,
+/// linked by the identifier the user supplies on both inputs.
+#[derive(Debug, Clone)]
+pub struct RoundTripPair {
+    /// The mutating operation (`Create*`/`Put*`/`Update*`).
+    pub writer: Operation,
+    /// The corresponding read operation (`Get*`/`Describe*`).
+    pub reader: Operation,
+    /// Member name shared between writer's *input* and reader's *input* —
+    /// the resource identifier. The same value flows into both requests
+    /// without the round-trip strategy needing to parse the writer's
+    /// response.
+    pub id_source_field: String,
+}
+
+/// Discover Create/Put/Update -> Get/Describe pairs by walking the service
+/// model. The match is structural with a name hint:
+///
+/// 1. The writer's name starts with `Create`, `Put`, or `Update`.
+/// 2. The reader's name starts with `Get` or `Describe` AND its remaining
+///    suffix overlaps with the writer's suffix (the noun the writer
+///    creates appears in the reader's name — e.g. `CreateFunction` <->
+///    `GetFunctionConfiguration`).
+/// 3. There exists at least one structure member that appears on both
+///    writer.input AND reader.input by the same name and primitive-
+///    compatible target shape — this is the resource identifier the
+///    user supplies on both calls.
+///
+/// When multiple readers qualify, prefer the one whose suffix is shortest
+/// (closest to the bare resource — `GetFunction` over
+/// `GetFunctionConfiguration` when both exist). Pairs that fail #3 are
+/// skipped: they typically need cross-resource state (e.g. `CreateAlias`
+/// needs a function) and the strategy can't drive them from schema alone.
+pub fn find_round_trip_pairs(model: &ServiceModel) -> Vec<RoundTripPair> {
+    let mut pairs = Vec::new();
+    for writer in &model.operations {
+        let writer_suffix = match strip_writer_prefix(&writer.name) {
+            Some(s) => s,
+            None => continue,
+        };
+        let writer_input_members =
+            structure_members_for(model, writer.input_shape.as_deref().unwrap_or(""));
+        if writer_input_members.is_empty() {
+            continue;
+        }
+
+        let mut candidates: Vec<(&Operation, &str)> = Vec::new();
+        for reader in &model.operations {
+            let reader_suffix = match strip_reader_prefix(&reader.name) {
+                Some(s) => s,
+                None => continue,
+            };
+            let name_match = reader_suffix.starts_with(writer_suffix)
+                || writer_suffix.starts_with(reader_suffix);
+            if !name_match {
+                continue;
+            }
+            candidates.push((reader, reader_suffix));
+        }
+        candidates.sort_by_key(|(_, suf)| suf.len());
+
+        for (reader, _) in candidates {
+            let reader_input_members =
+                structure_members_for(model, reader.input_shape.as_deref().unwrap_or(""));
+            let binding = writer_input_members.iter().find(|wm| {
+                reader_input_members.iter().any(|rm| {
+                    rm.name == wm.name && primitive_compatible(model, &rm.target, &wm.target)
+                })
+            });
+            if let Some(bind) = binding {
+                pairs.push(RoundTripPair {
+                    writer: writer.clone(),
+                    reader: reader.clone(),
+                    id_source_field: bind.name.clone(),
+                });
+                break;
+            }
+        }
+    }
+    pairs
+}
+
+fn strip_writer_prefix(name: &str) -> Option<&str> {
+    for prefix in ["Create", "Put", "Update"] {
+        if let Some(suffix) = name.strip_prefix(prefix) {
+            if !suffix.is_empty() {
+                return Some(suffix);
+            }
+        }
+    }
+    None
+}
+
+fn strip_reader_prefix(name: &str) -> Option<&str> {
+    for prefix in ["Get", "Describe"] {
+        if let Some(suffix) = name.strip_prefix(prefix) {
+            if !suffix.is_empty() {
+                return Some(suffix);
+            }
+        }
+    }
+    None
+}
+
+fn structure_members_for(model: &ServiceModel, shape_id: &str) -> Vec<Member> {
+    if shape_id.is_empty() {
+        return Vec::new();
+    }
+    match effective_shape_type(model, shape_id) {
+        Some(ShapeType::Structure { members }) => members,
+        _ => Vec::new(),
+    }
+}
+
+/// Two shapes are "primitive compatible" if they resolve to the same
+/// JSON-level type bucket. Used to bind identifier members across writer
+/// and reader inputs even when the shape IDs differ — Lambda's
+/// `CreateFunctionRequest.FunctionName` (`FunctionName` shape) and
+/// `GetFunctionRequest.FunctionName` (`NamespacedFunctionName` shape)
+/// are both strings, so the round-trip identifier round-trips fine even
+/// though Smithy declares them as distinct typedefs.
+pub fn primitive_compatible(model: &ServiceModel, a: &str, b: &str) -> bool {
+    fn bucket(t: &ShapeType) -> u8 {
+        match t {
+            ShapeType::String { .. } | ShapeType::Enum { .. } => 1,
+            ShapeType::Integer | ShapeType::Long | ShapeType::IntEnum { .. } => 2,
+            ShapeType::Float | ShapeType::Double => 3,
+            ShapeType::Boolean => 4,
+            ShapeType::Blob => 5,
+            ShapeType::Timestamp => 6,
+            ShapeType::List { .. } => 7,
+            ShapeType::Map { .. } => 8,
+            ShapeType::Structure { .. } => 9,
+            ShapeType::Union { .. } => 10,
+            _ => 0,
+        }
+    }
+    match (
+        effective_shape_type(model, a),
+        effective_shape_type(model, b),
+    ) {
+        (Some(ta), Some(tb)) => bucket(&ta) != 0 && bucket(&ta) == bucket(&tb),
+        _ => false,
+    }
+}
+
 /// Load the service map from service-map.json.
 pub fn load_service_map(models_dir: &Path) -> Result<HashMap<String, ServiceMapEntry>, String> {
     let path = models_dir.join("service-map.json");
@@ -759,5 +906,40 @@ mod tests {
             fn_name.traits.http_label || target_traits.http_label,
             "FunctionName carries @httpLabel"
         );
+    }
+
+    #[test]
+    fn round_trip_pairs_discover_lambda_create_get() {
+        // The whole point of #853: CreateFunction <-> GetFunction(Configuration)
+        // must be discovered automatically from the Smithy graph.
+        let dir = models_dir();
+        let model = parse_model(&dir.join("lambda.json")).unwrap();
+        let pairs = find_round_trip_pairs(&model);
+        let lambda_pair = pairs
+            .iter()
+            .find(|p| p.writer.name == "CreateFunction")
+            .expect("CreateFunction must pair with a reader");
+        assert!(
+            matches!(
+                lambda_pair.reader.name.as_str(),
+                "GetFunction" | "GetFunctionConfiguration"
+            ),
+            "got reader {}",
+            lambda_pair.reader.name
+        );
+        assert_eq!(lambda_pair.id_source_field, "FunctionName");
+    }
+
+    #[test]
+    fn round_trip_pairs_discover_dynamodb_create_describe() {
+        let dir = models_dir();
+        let model = parse_model(&dir.join("dynamodb.json")).unwrap();
+        let pairs = find_round_trip_pairs(&model);
+        let table_pair = pairs
+            .iter()
+            .find(|p| p.writer.name == "CreateTable")
+            .expect("CreateTable must pair with DescribeTable");
+        assert_eq!(table_pair.reader.name, "DescribeTable");
+        assert_eq!(table_pair.id_source_field, "TableName");
     }
 }

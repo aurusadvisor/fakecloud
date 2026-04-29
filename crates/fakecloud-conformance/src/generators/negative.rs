@@ -41,6 +41,7 @@ pub fn generate(
             input: Value::Object(obj),
             expectation: Expectation::AnyError,
             expected_output: None,
+            followup: None,
         });
     }
 
@@ -69,6 +70,7 @@ pub fn generate(
                         input,
                         expectation: Expectation::AnyError,
                         expected_output: None,
+                        followup: None,
                     });
                 }
             }
@@ -90,6 +92,7 @@ pub fn generate(
                         input,
                         expectation: Expectation::AnyError,
                         expected_output: None,
+                        followup: None,
                     });
                 }
             }
@@ -110,6 +113,7 @@ pub fn generate(
                             input,
                             expectation: Expectation::AnyError,
                             expected_output: None,
+                            followup: None,
                         });
                     }
                 }
@@ -132,6 +136,7 @@ pub fn generate(
                             input,
                             expectation: Expectation::AnyError,
                             expected_output: None,
+                            followup: None,
                         });
                     }
                 }
@@ -160,6 +165,7 @@ pub fn generate(
                 input,
                 expectation: Expectation::AnyError,
                 expected_output: None,
+                followup: None,
             });
         }
     }

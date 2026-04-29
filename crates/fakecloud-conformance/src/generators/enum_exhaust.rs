@@ -49,6 +49,7 @@ pub fn generate(
                     input,
                     expectation: Expectation::Success,
                     expected_output: None,
+                    followup: None,
                 }
             })
             .collect();
@@ -76,6 +77,7 @@ pub fn generate(
                 input,
                 expectation: Expectation::Success,
                 expected_output: None,
+                followup: None,
             });
         }
     } else {
@@ -92,6 +94,7 @@ pub fn generate(
                     input,
                     expectation: Expectation::Success,
                     expected_output: None,
+                    followup: None,
                 });
             }
         }

@@ -56,6 +56,7 @@ pub fn generate(
                         input,
                         expectation: Expectation::Success,
                         expected_output: None,
+                        followup: None,
                     });
                 }
                 if let Some(max) = merged.length_max {
@@ -73,6 +74,7 @@ pub fn generate(
                             input,
                             expectation: Expectation::Success,
                             expected_output: None,
+                            followup: None,
                         });
                     }
                 }
@@ -90,6 +92,7 @@ pub fn generate(
                             input,
                             expectation: Expectation::Success,
                             expected_output: None,
+                            followup: None,
                         });
                     }
                 }
@@ -113,6 +116,7 @@ pub fn generate(
                             input,
                             expectation: Expectation::Success,
                             expected_output: None,
+                            followup: None,
                         });
                     }
                 }
@@ -135,6 +139,7 @@ pub fn generate(
                             input,
                             expectation: Expectation::Success,
                             expected_output: None,
+                            followup: None,
                         });
                     }
                     if let Some(max) = merged.range_max {
@@ -149,6 +154,7 @@ pub fn generate(
                             input,
                             expectation: Expectation::Success,
                             expected_output: None,
+                            followup: None,
                         });
                     }
                     if let (Some(min), Some(max)) = (merged.range_min, merged.range_max) {
@@ -163,6 +169,7 @@ pub fn generate(
                             input,
                             expectation: Expectation::Success,
                             expected_output: None,
+                            followup: None,
                         });
                     }
                 }

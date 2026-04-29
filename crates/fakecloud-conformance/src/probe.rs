@@ -206,6 +206,21 @@ pub fn probe_variant_with_model(
                             .extend(shape_validator::diff_against_example(&actual, documented));
                     }
                 }
+                // Strategy 8 (`round_trip`): chase the Create with the
+                // discovered Get/Describe, assert each input field echoed.
+                // Only meaningful when we have a model to find the followup
+                // operation in.
+                if let (Some(followup), Some((model, _))) = (variant.followup.as_ref(), model_info)
+                {
+                    all_violations.extend(run_round_trip_followup(
+                        client,
+                        endpoint,
+                        service_name,
+                        variant,
+                        followup,
+                        model,
+                    ));
+                }
                 if !all_violations.is_empty() {
                     let msg = all_violations
                         .iter()
@@ -1232,6 +1247,104 @@ fn truncate(s: &str, max: usize) -> &str {
             .unwrap_or(0);
         &s[..boundary]
     }
+}
+
+/// After a Create/Put/Update variant succeeds, fire its discovered
+/// Get/Describe followup and assert each input field that was set on the
+/// Create echoes through the Get response. Returns a list of violations
+/// (empty if everything echoed cleanly or the followup couldn't be
+/// reached for benign reasons; reports HTTP errors as a single violation
+/// so harness operators can spot pairs that need bespoke handling).
+fn run_round_trip_followup(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    service_name: &str,
+    create_variant: &TestVariant,
+    followup: &crate::generators::RoundTripFollowup,
+    model: &ServiceModel,
+) -> Vec<shape_validator::ShapeViolation> {
+    let mut violations = Vec::new();
+
+    // The resource identifier we used on Create is the same value we
+    // need to feed into Get/Describe. Read it straight off the variant's
+    // own input — no need to parse the Create response, which avoids
+    // false negatives on services whose Create output wraps the
+    // identifier in a sub-structure.
+    let create_obj = match create_variant.input.as_object() {
+        Some(o) => o,
+        None => return violations,
+    };
+    let id_value = match create_obj.get(&followup.id_field) {
+        Some(v) if !v.is_null() => v.clone(),
+        _ => return violations,
+    };
+
+    let mut get_input = serde_json::Map::new();
+    get_input.insert(followup.id_field.clone(), id_value);
+    let get_variant = TestVariant {
+        name: format!("{}__followup_get", create_variant.name),
+        strategy: crate::generators::Strategy::RoundTrip,
+        input: serde_json::Value::Object(get_input),
+        expectation: crate::generators::Expectation::Success,
+        expected_output: None,
+        followup: None,
+    };
+
+    // Resolve the Get op's output shape so the recursive probe can keep
+    // shape validation on. Without it the followup is still useful (we
+    // still echo-check) but skipped if the op isn't in the model.
+    let get_op = match model
+        .operations
+        .iter()
+        .find(|o| o.name == followup.get_operation)
+    {
+        Some(op) => op,
+        None => return violations,
+    };
+    let get_output_shape = match get_op.output_shape.as_deref() {
+        Some(s) => s,
+        None => return violations,
+    };
+
+    // Recurse via the public probe entry. The Get variant has no
+    // `followup`, so this terminates after one extra hop.
+    let get_result = probe_variant_with_model(
+        client,
+        endpoint,
+        service_name,
+        &followup.get_operation,
+        &get_variant,
+        Some((model, get_output_shape)),
+    );
+
+    // Only echo-check on a clean 2xx with a parseable body. A 4xx/5xx on
+    // the followup is its own signal — surface as a single violation
+    // rather than fabricate a misleading echo failure.
+    if !(200..300).contains(&get_result.http_status) {
+        violations.push(shape_validator::ShapeViolation::RoundTripFieldNotEchoed {
+            field: format!("(followup {})", followup.get_operation),
+            sent: serde_json::Value::String(format!("HTTP {}", get_result.http_status)),
+            received: None,
+        });
+        return violations;
+    }
+    let get_body: serde_json::Value = match serde_json::from_str(&get_result.response_body) {
+        Ok(v) => v,
+        Err(_) => return violations,
+    };
+
+    // Pull each echo field from the Create variant's input and compare
+    // against the Get output.
+    for (input_field, output_field) in &followup.echo_fields {
+        let sent = match create_obj.get(input_field) {
+            Some(v) => v,
+            None => continue,
+        };
+        if let Some(v) = shape_validator::echo_check(output_field, sent, &get_body) {
+            violations.push(v);
+        }
+    }
+    violations
 }
 
 #[cfg(test)]
