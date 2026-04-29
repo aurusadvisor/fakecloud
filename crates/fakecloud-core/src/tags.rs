@@ -6,9 +6,52 @@
 //! helpers to parse, apply, remove, and serialise those tags so that
 //! individual service crates don't have to duplicate the logic.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::{json, Value};
+
+/// Common interface across tag-storage maps so the helpers in this module
+/// work uniformly for `HashMap` and `BTreeMap`. State migrating to
+/// `BTreeMap` for deterministic pagination order keeps using the same
+/// helpers without copying values into a temporary `HashMap`.
+pub trait MutableTagMap {
+    fn insert(&mut self, key: String, value: String);
+    fn remove(&mut self, key: &str);
+}
+
+impl MutableTagMap for HashMap<String, String> {
+    fn insert(&mut self, key: String, value: String) {
+        HashMap::insert(self, key, value);
+    }
+    fn remove(&mut self, key: &str) {
+        HashMap::remove(self, key);
+    }
+}
+
+impl MutableTagMap for BTreeMap<String, String> {
+    fn insert(&mut self, key: String, value: String) {
+        BTreeMap::insert(self, key, value);
+    }
+    fn remove(&mut self, key: &str) {
+        BTreeMap::remove(self, key);
+    }
+}
+
+pub trait ReadableTagMap {
+    fn iter_tags(&self) -> Box<dyn Iterator<Item = (&String, &String)> + '_>;
+}
+
+impl ReadableTagMap for HashMap<String, String> {
+    fn iter_tags(&self) -> Box<dyn Iterator<Item = (&String, &String)> + '_> {
+        Box::new(self.iter())
+    }
+}
+
+impl ReadableTagMap for BTreeMap<String, String> {
+    fn iter_tags(&self) -> Box<dyn Iterator<Item = (&String, &String)> + '_> {
+        Box::new(self.iter())
+    }
+}
 
 /// Parse a JSON tags array and insert each tag into `existing_tags`.
 ///
@@ -20,8 +63,8 @@ use serde_json::{json, Value};
 /// Tags with missing or non-string key/value pairs are silently skipped.
 ///
 /// Returns `Err(field_name)` if the field is present but not an array.
-pub fn apply_tags(
-    existing_tags: &mut HashMap<String, String>,
+pub fn apply_tags<M: MutableTagMap>(
+    existing_tags: &mut M,
     body: &Value,
     tags_field: &str,
     key_field: &str,
@@ -48,8 +91,8 @@ pub fn apply_tags(
 /// plain string.
 ///
 /// Returns `Err(field_name)` if the field is present but not an array.
-pub fn remove_tags(
-    existing_tags: &mut HashMap<String, String>,
+pub fn remove_tags<M: MutableTagMap>(
+    existing_tags: &mut M,
     body: &Value,
     keys_field: &str,
 ) -> Result<(), String> {
@@ -70,12 +113,12 @@ pub fn remove_tags(
 /// Convert a tag map into a sorted JSON array of `{key_field: k, value_field: v}` objects.
 ///
 /// The output is sorted by key so that responses are deterministic.
-pub fn tags_to_json(
-    tags: &HashMap<String, String>,
+pub fn tags_to_json<M: ReadableTagMap + ?Sized>(
+    tags: &M,
     key_field: &str,
     value_field: &str,
 ) -> Vec<Value> {
-    let mut sorted: Vec<(&String, &String)> = tags.iter().collect();
+    let mut sorted: Vec<(&String, &String)> = tags.iter_tags().collect();
     sorted.sort_by_key(|(k, _)| (*k).clone());
     sorted
         .into_iter()
