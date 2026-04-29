@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,8 +18,8 @@ pub struct LambdaFunction {
     pub code_size: i64,
     pub version: String,
     pub last_modified: DateTime<Utc>,
-    pub tags: HashMap<String, String>,
-    pub environment: HashMap<String, String>,
+    pub tags: BTreeMap<String, String>,
+    pub environment: BTreeMap<String, String>,
     pub architectures: Vec<String>,
     pub package_type: String,
     pub code_zip: Option<Vec<u8>>,
@@ -89,57 +89,57 @@ pub struct LambdaState {
     pub account_id: String,
     pub region: String,
     #[serde(default)]
-    pub functions: HashMap<String, LambdaFunction>,
+    pub functions: BTreeMap<String, LambdaFunction>,
     #[serde(default)]
-    pub event_source_mappings: HashMap<String, EventSourceMapping>,
+    pub event_source_mappings: BTreeMap<String, EventSourceMapping>,
     /// Recorded invocations from cross-service integrations — not persisted.
     #[serde(default, skip)]
     pub invocations: Vec<LambdaInvocation>,
     /// Per-function aliases keyed by `{function}:{alias}`.
     #[serde(default)]
-    pub aliases: HashMap<String, FunctionAlias>,
+    pub aliases: BTreeMap<String, FunctionAlias>,
     /// Published versions per function (function_name -> Vec<version>).
     #[serde(default)]
-    pub function_versions: HashMap<String, Vec<String>>,
+    pub function_versions: BTreeMap<String, Vec<String>>,
     /// Layers keyed by name.
     #[serde(default)]
-    pub layers: HashMap<String, Layer>,
+    pub layers: BTreeMap<String, Layer>,
     /// Function URL configs keyed by function name.
     #[serde(default)]
-    pub function_url_configs: HashMap<String, FunctionUrlConfig>,
+    pub function_url_configs: BTreeMap<String, FunctionUrlConfig>,
     /// Reserved concurrency configs keyed by function name.
     #[serde(default)]
-    pub function_concurrency: HashMap<String, i64>,
+    pub function_concurrency: BTreeMap<String, i64>,
     /// Provisioned concurrency configs keyed by `{function}:{qualifier}`.
     #[serde(default)]
-    pub provisioned_concurrency: HashMap<String, ProvisionedConcurrencyConfig>,
+    pub provisioned_concurrency: BTreeMap<String, ProvisionedConcurrencyConfig>,
     /// Code signing configs keyed by id.
     #[serde(default)]
-    pub code_signing_configs: HashMap<String, CodeSigningConfig>,
+    pub code_signing_configs: BTreeMap<String, CodeSigningConfig>,
     /// Function-to-code-signing-config association keyed by function name.
     #[serde(default)]
-    pub function_code_signing: HashMap<String, String>,
+    pub function_code_signing: BTreeMap<String, String>,
     /// Event invoke configs keyed by `{function}:{qualifier}`.
     #[serde(default)]
-    pub event_invoke_configs: HashMap<String, EventInvokeConfig>,
+    pub event_invoke_configs: BTreeMap<String, EventInvokeConfig>,
     /// Runtime management configs keyed by `{function}:{qualifier}`.
     #[serde(default)]
-    pub runtime_management: HashMap<String, RuntimeManagementConfig>,
+    pub runtime_management: BTreeMap<String, RuntimeManagementConfig>,
     /// Scaling configs keyed by event source mapping uuid.
     #[serde(default)]
-    pub scaling_configs: HashMap<String, FunctionScalingConfig>,
+    pub scaling_configs: BTreeMap<String, FunctionScalingConfig>,
     /// Recursion configs keyed by function name.
     #[serde(default)]
-    pub recursion_configs: HashMap<String, String>,
+    pub recursion_configs: BTreeMap<String, String>,
     /// Tags keyed by resource ARN.
     #[serde(default)]
-    pub tags: HashMap<String, Vec<(String, String)>>,
+    pub tags: BTreeMap<String, Vec<(String, String)>>,
     /// Capacity providers keyed by name.
     #[serde(default)]
-    pub capacity_providers: HashMap<String, CapacityProvider>,
+    pub capacity_providers: BTreeMap<String, CapacityProvider>,
     /// Durable executions keyed by id.
     #[serde(default)]
-    pub durable_executions: HashMap<String, DurableExecution>,
+    pub durable_executions: BTreeMap<String, DurableExecution>,
     /// Account settings (single per-account record).
     #[serde(default)]
     pub account_settings: Option<AccountSettings>,
@@ -254,24 +254,24 @@ impl LambdaState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            functions: HashMap::new(),
-            event_source_mappings: HashMap::new(),
+            functions: BTreeMap::new(),
+            event_source_mappings: BTreeMap::new(),
             invocations: Vec::new(),
-            aliases: HashMap::new(),
-            function_versions: HashMap::new(),
-            layers: HashMap::new(),
-            function_url_configs: HashMap::new(),
-            function_concurrency: HashMap::new(),
-            provisioned_concurrency: HashMap::new(),
-            code_signing_configs: HashMap::new(),
-            function_code_signing: HashMap::new(),
-            event_invoke_configs: HashMap::new(),
-            runtime_management: HashMap::new(),
-            scaling_configs: HashMap::new(),
-            recursion_configs: HashMap::new(),
-            tags: HashMap::new(),
-            capacity_providers: HashMap::new(),
-            durable_executions: HashMap::new(),
+            aliases: BTreeMap::new(),
+            function_versions: BTreeMap::new(),
+            layers: BTreeMap::new(),
+            function_url_configs: BTreeMap::new(),
+            function_concurrency: BTreeMap::new(),
+            provisioned_concurrency: BTreeMap::new(),
+            code_signing_configs: BTreeMap::new(),
+            function_code_signing: BTreeMap::new(),
+            event_invoke_configs: BTreeMap::new(),
+            runtime_management: BTreeMap::new(),
+            scaling_configs: BTreeMap::new(),
+            recursion_configs: BTreeMap::new(),
+            tags: BTreeMap::new(),
+            capacity_providers: BTreeMap::new(),
+            durable_executions: BTreeMap::new(),
             account_settings: None,
         }
     }

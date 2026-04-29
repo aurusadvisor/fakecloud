@@ -401,7 +401,7 @@ fn require_str<'a>(body: &'a Value, field: &str) -> Result<&'a str, AwsServiceEr
 
 /// Build a delivery destination configuration JSON object, ensuring
 /// `destinationResourceArn` is always present as a string (Smithy requirement).
-fn dd_config_json(config: &std::collections::HashMap<String, String>) -> Value {
+fn dd_config_json(config: &std::collections::BTreeMap<String, String>) -> Value {
     let mut m: serde_json::Map<String, Value> =
         config.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
     m.entry("destinationResourceArn".to_string())

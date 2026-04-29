@@ -49,7 +49,7 @@ impl LogsService {
             }
         }
 
-        let config: std::collections::HashMap<String, String> = body
+        let config: std::collections::BTreeMap<String, String> = body
             ["deliveryDestinationConfiguration"]
             .as_object()
             .map(|m| {
@@ -59,7 +59,7 @@ impl LogsService {
             })
             .unwrap_or_default();
 
-        let tags: std::collections::HashMap<String, String> = body["tags"]
+        let tags: std::collections::BTreeMap<String, String> = body["tags"]
             .as_object()
             .map(|m| {
                 m.iter()
@@ -402,7 +402,7 @@ impl LogsService {
         validate_string_length("name", &name, 1, 60)?;
         validate_string_length("logType", &log_type, 1, 255)?;
 
-        let tags: std::collections::HashMap<String, String> = body["tags"]
+        let tags: std::collections::BTreeMap<String, String> = body["tags"]
             .as_object()
             .map(|m| {
                 m.iter()
@@ -627,7 +627,7 @@ impl LogsService {
         validate_string_length("deliverySourceName", &delivery_source_name, 1, 60)?;
         validate_optional_string_length("fieldDelimiter", body["fieldDelimiter"].as_str(), 0, 5)?;
 
-        let tags: std::collections::HashMap<String, String> = body["tags"]
+        let tags: std::collections::BTreeMap<String, String> = body["tags"]
             .as_object()
             .map(|m| {
                 m.iter()

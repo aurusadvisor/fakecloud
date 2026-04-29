@@ -97,7 +97,7 @@ mod tests {
     use crate::state::{LambdaFunction, LambdaState};
     use chrono::Utc;
     use parking_lot::RwLock;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn func_with_policy(name: &str, policy: Option<&str>) -> LambdaFunction {
         LambdaFunction {
@@ -113,8 +113,8 @@ mod tests {
             code_size: 0,
             version: "$LATEST".to_string(),
             last_modified: Utc::now(),
-            tags: HashMap::new(),
-            environment: HashMap::new(),
+            tags: BTreeMap::new(),
+            environment: BTreeMap::new(),
             architectures: Vec::new(),
             package_type: "Zip".to_string(),
             code_zip: None,

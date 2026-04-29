@@ -49,7 +49,7 @@ impl LogsService {
         validate_string_length("targetArn", &target_arn, 1, 2048)?;
         validate_string_length("roleArn", &role_arn, 1, 2048)?;
 
-        let tags: std::collections::HashMap<String, String> = body["tags"]
+        let tags: std::collections::BTreeMap<String, String> = body["tags"]
             .as_object()
             .map(|m| {
                 m.iter()

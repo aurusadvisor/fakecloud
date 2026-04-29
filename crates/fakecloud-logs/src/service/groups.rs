@@ -73,7 +73,7 @@ impl LogsService {
                 retention_in_days: None,
                 kms_key_id,
                 tags,
-                log_streams: std::collections::HashMap::new(),
+                log_streams: std::collections::BTreeMap::new(),
                 stored_bytes: 0,
                 subscription_filters: Vec::new(),
                 data_protection_policy: None,
