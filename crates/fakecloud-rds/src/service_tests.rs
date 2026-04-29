@@ -1,0 +1,1510 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use bytes::Bytes;
+use chrono::Utc;
+use http::{HeaderMap, Method};
+use parking_lot::RwLock;
+use uuid::Uuid;
+
+use super::{
+    db_instance_xml, default_db_name, default_parameter_group, default_port_for_engine,
+    filter_engine_versions, filter_orderable_options, license_model_for_engine, merge_tags,
+    optional_i32_param, parse_tag_keys, parse_tags, validate_create_request, RdsService,
+    RdsSourceType,
+};
+use crate::state::{default_engine_versions, default_orderable_options, DbInstance, RdsTag};
+use fakecloud_core::delivery::DeliveryBus;
+use fakecloud_core::service::{AwsRequest, AwsService, AwsServiceError};
+
+#[test]
+fn default_port_matches_aws_for_each_engine() {
+    assert_eq!(default_port_for_engine("postgres"), 5432);
+    assert_eq!(default_port_for_engine("mysql"), 3306);
+    assert_eq!(default_port_for_engine("mariadb"), 3306);
+    assert_eq!(default_port_for_engine("oracle-ee"), 1521);
+    assert_eq!(default_port_for_engine("oracle-se2"), 1521);
+    assert_eq!(default_port_for_engine("sqlserver-ee"), 1433);
+    assert_eq!(default_port_for_engine("sqlserver-ex"), 1433);
+    assert_eq!(default_port_for_engine("db2-se"), 50000);
+    assert_eq!(default_port_for_engine("db2-ae"), 50000);
+}
+
+#[test]
+fn default_parameter_group_uses_engine_major_version() {
+    assert_eq!(
+        default_parameter_group("postgres", "16.3"),
+        "default.postgres16"
+    );
+    assert_eq!(
+        default_parameter_group("mysql", "8.0.35"),
+        "default.mysql8.0"
+    );
+    assert_eq!(
+        default_parameter_group("oracle-ee", "23.0.0"),
+        "default.oracle-ee-23"
+    );
+    assert_eq!(
+        default_parameter_group("sqlserver-ex", "16.00.4085.2.v1"),
+        "default.sqlserver-ex-16"
+    );
+    assert_eq!(
+        default_parameter_group("db2-se", "11.5.9.0.sb00000000.r1"),
+        "default.db2-se-11.5"
+    );
+}
+
+#[test]
+fn license_model_reflects_engine_class() {
+    assert_eq!(license_model_for_engine("postgres"), "postgresql-license");
+    assert_eq!(license_model_for_engine("mysql"), "general-public-license");
+    assert_eq!(license_model_for_engine("oracle-ee"), "license-included");
+    assert_eq!(license_model_for_engine("sqlserver-se"), "license-included");
+    assert_eq!(license_model_for_engine("db2-ae"), "bring-your-own-license");
+}
+
+#[test]
+fn default_db_name_picks_per_engine_default() {
+    assert_eq!(default_db_name("postgres"), "postgres");
+    assert_eq!(default_db_name("mysql"), "mysql");
+    assert_eq!(default_db_name("oracle-ee"), "ORCL");
+    assert_eq!(default_db_name("sqlserver-ex"), "master");
+    assert_eq!(default_db_name("db2-se"), "BLUDB");
+}
+
+#[test]
+fn validate_create_request_accepts_new_engines() {
+    for (engine, version, port) in [
+        ("oracle-ee", "23.0.0", 1521),
+        ("sqlserver-ex", "16.00.4085.2.v1", 1433),
+        ("db2-se", "11.5.9.0.sb00000000.r1", 50000),
+    ] {
+        validate_create_request("test-db", 20, "db.t3.micro", engine, version, port)
+            .expect("engine should be accepted");
+    }
+}
+
+#[test]
+fn validate_create_request_rejects_unsupported_engine_version() {
+    let err = validate_create_request("test-db", 20, "db.t3.micro", "oracle-ee", "12.0.0", 1521)
+        .expect_err("12.x is not in the supported list");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("EngineVersion"), "unexpected: {msg}");
+}
+
+#[test]
+fn filter_engine_versions_matches_requested_engine() {
+    let versions = default_engine_versions();
+
+    let filtered = filter_engine_versions(&versions, &Some("postgres".to_string()), &None, &None);
+
+    assert_eq!(filtered.len(), 4); // All postgres versions
+    assert!(filtered.iter().all(|v| v.engine == "postgres"));
+}
+
+#[test]
+fn filter_orderable_options_respects_instance_class() {
+    let options = default_orderable_options();
+
+    let filtered = filter_orderable_options(
+        &options,
+        &Some("postgres".to_string()),
+        &Some("16.3".to_string()),
+        &Some("db.t3.micro".to_string()),
+        &None,
+        Some(true),
+    );
+
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].db_instance_class, "db.t3.micro");
+}
+
+#[test]
+fn validate_create_request_rejects_unsupported_engine() {
+    let error = validate_create_request("test-db", 20, "db.t3.micro", "mysql", "16.3", 5432)
+        .expect_err("unsupported engine");
+
+    assert_eq!(error.code(), "InvalidParameterValue");
+}
+
+#[test]
+fn optional_i32_param_rejects_invalid_integer() {
+    let request = request("CreateDBInstance", &[("Port", "not-a-number")]);
+
+    let error = optional_i32_param(&request, "Port").expect_err("invalid port");
+
+    assert_eq!(error.code(), "InvalidParameterValue");
+}
+
+#[test]
+fn db_instance_xml_renders_endpoint_and_status() {
+    let created_at = Utc::now();
+    let instance = DbInstance {
+        db_instance_identifier: "test-db".to_string(),
+        db_instance_arn: "arn:aws:rds:us-east-1:123456789012:db:test-db".to_string(),
+        db_instance_class: "db.t3.micro".to_string(),
+        engine: "postgres".to_string(),
+        engine_version: "16.3".to_string(),
+        db_instance_status: "available".to_string(),
+        master_username: "admin".to_string(),
+        db_name: Some("appdb".to_string()),
+        endpoint_address: "127.0.0.1".to_string(),
+        port: 15432,
+        allocated_storage: 20,
+        publicly_accessible: true,
+        deletion_protection: false,
+        created_at,
+        dbi_resource_id: format!("db-{}", Uuid::new_v4().simple()),
+        master_user_password: "secret123".to_string(),
+        container_id: "container".to_string(),
+        host_port: 15432,
+        tags: Vec::new(),
+        read_replica_source_db_instance_identifier: None,
+        read_replica_db_instance_identifiers: Vec::new(),
+        vpc_security_group_ids: vec!["sg-12345678".to_string()],
+        db_parameter_group_name: Some("default.postgres16".to_string()),
+        backup_retention_period: 1,
+        preferred_backup_window: "03:00-04:00".to_string(),
+        latest_restorable_time: Some(created_at),
+        option_group_name: None,
+        multi_az: false,
+        pending_modified_values: None,
+    };
+
+    let xml = db_instance_xml(&instance, Some("creating"));
+
+    assert!(xml.contains("<DBInstanceIdentifier>test-db</DBInstanceIdentifier>"));
+    assert!(xml.contains("<DBInstanceStatus>creating</DBInstanceStatus>"));
+    assert!(xml.contains("<Address>127.0.0.1</Address><Port>15432</Port>"));
+}
+
+#[test]
+fn parse_tags_reads_rds_query_shape() {
+    let request = request(
+        "AddTagsToResource",
+        &[
+            ("Tags.Tag.1.Key", "env"),
+            ("Tags.Tag.1.Value", "dev"),
+            ("Tags.Tag.2.Key", "team"),
+            ("Tags.Tag.2.Value", "core"),
+        ],
+    );
+
+    let tags = parse_tags(&request).expect("tags");
+
+    assert_eq!(
+        tags,
+        vec![
+            RdsTag {
+                key: "env".to_string(),
+                value: "dev".to_string(),
+            },
+            RdsTag {
+                key: "team".to_string(),
+                value: "core".to_string(),
+            }
+        ]
+    );
+}
+
+#[test]
+fn parse_tag_keys_reads_member_shape() {
+    let request = request(
+        "RemoveTagsFromResource",
+        &[("TagKeys.member.1", "env"), ("TagKeys.member.2", "team")],
+    );
+
+    let tag_keys = parse_tag_keys(&request).expect("tag keys");
+
+    assert_eq!(tag_keys, vec!["env".to_string(), "team".to_string()]);
+}
+
+#[test]
+fn merge_tags_updates_existing_values() {
+    let mut tags = vec![RdsTag {
+        key: "env".to_string(),
+        value: "dev".to_string(),
+    }];
+
+    merge_tags(
+        &mut tags,
+        &[
+            RdsTag {
+                key: "env".to_string(),
+                value: "prod".to_string(),
+            },
+            RdsTag {
+                key: "team".to_string(),
+                value: "core".to_string(),
+            },
+        ],
+    );
+
+    assert_eq!(tags.len(), 2);
+    assert_eq!(tags[0].value, "prod");
+    assert_eq!(tags[1].key, "team");
+}
+
+#[tokio::test]
+async fn describe_engine_versions_returns_xml_body() {
+    let service = RdsService::new(Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    )));
+    let request = request("DescribeDBEngineVersions", &[("Engine", "postgres")]);
+
+    let response = service.handle(request).await.expect("response");
+    let body = String::from_utf8(response.body.expect_bytes().to_vec()).expect("utf8");
+
+    assert!(body.contains("<DescribeDBEngineVersionsResponse"));
+    assert!(body.contains("<Engine>postgres</Engine>"));
+    assert!(body.contains("<DBParameterGroupFamily>postgres16</DBParameterGroupFamily>"));
+}
+
+fn request(action: &str, params: &[(&str, &str)]) -> AwsRequest {
+    let mut query_params = HashMap::from([("Action".to_string(), action.to_string())]);
+    for (key, value) in params {
+        query_params.insert((*key).to_string(), (*value).to_string());
+    }
+
+    AwsRequest {
+        service: "rds".to_string(),
+        action: action.to_string(),
+        region: "us-east-1".to_string(),
+        account_id: "123456789012".to_string(),
+        request_id: "test-request-id".to_string(),
+        headers: HeaderMap::new(),
+        query_params,
+        body: Bytes::new(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: vec![],
+        raw_path: "/".to_string(),
+        raw_query: String::new(),
+        method: Method::POST,
+        is_query_protocol: true,
+        access_key_id: None,
+        principal: None,
+    }
+}
+
+// ── Helpers for handler tests ────────────────────────────────────
+
+fn make_service() -> RdsService {
+    RdsService::new(Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    )))
+}
+
+#[derive(Default)]
+struct CapturedEvent {
+    source: String,
+    detail_type: String,
+    detail: String,
+}
+
+#[derive(Default)]
+struct RecordingEb {
+    events: std::sync::Mutex<Vec<CapturedEvent>>,
+}
+
+impl fakecloud_core::delivery::EventBridgeDelivery for RecordingEb {
+    fn put_event(&self, source: &str, detail_type: &str, detail: &str, _bus: &str) {
+        self.events.lock().unwrap().push(CapturedEvent {
+            source: source.to_string(),
+            detail_type: detail_type.to_string(),
+            detail: detail.to_string(),
+        });
+    }
+}
+
+fn make_service_with_recorder() -> (RdsService, Arc<RecordingEb>) {
+    let recorder = Arc::new(RecordingEb::default());
+    let bus = Arc::new(DeliveryBus::new().with_eventbridge(recorder.clone()));
+    let svc = RdsService::new(Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    )))
+    .with_delivery_bus(bus);
+    (svc, recorder)
+}
+
+#[test]
+fn emit_event_emits_aws_rds_event_via_bus() {
+    let (svc, rec) = make_service_with_recorder();
+    svc.emit_event(
+        RdsSourceType::DbInstance,
+        "my-db",
+        "arn:aws:rds:us-east-1:123456789012:db:my-db",
+        "RDS-EVENT-0005",
+        &["creation"],
+        "DB instance created",
+    );
+    let events = rec.events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    let e = &events[0];
+    assert_eq!(e.source, "aws.rds");
+    assert_eq!(e.detail_type, "RDS DB Instance Event");
+    let detail: serde_json::Value = serde_json::from_str(&e.detail).unwrap();
+    assert_eq!(detail["EventID"], "RDS-EVENT-0005");
+    assert_eq!(detail["SourceType"], "DB_INSTANCE");
+    assert_eq!(detail["SourceIdentifier"], "my-db");
+    assert_eq!(detail["Message"], "DB instance created");
+    assert_eq!(detail["EventCategories"][0], "creation");
+}
+
+#[test]
+fn emit_event_no_op_without_bus() {
+    let svc = make_service();
+    svc.emit_event(
+        RdsSourceType::DbSnapshot,
+        "snap",
+        "arn:aws:rds:us-east-1:123456789012:snapshot:snap",
+        "RDS-EVENT-0042",
+        &["creation"],
+        "Manual snapshot created",
+    );
+}
+
+#[test]
+fn rds_source_type_detail_type_mapping() {
+    assert_eq!(
+        RdsSourceType::DbInstance.detail_type(),
+        "RDS DB Instance Event"
+    );
+    assert_eq!(
+        RdsSourceType::DbSnapshot.detail_type(),
+        "RDS DB Snapshot Event"
+    );
+    assert_eq!(
+        RdsSourceType::DbParameterGroup.detail_type(),
+        "RDS DB Parameter Group Event"
+    );
+}
+
+fn body_of(resp: fakecloud_core::service::AwsResponse) -> String {
+    String::from_utf8(resp.body.expect_bytes().to_vec()).expect("utf8")
+}
+
+fn seed_instance(svc: &RdsService, identifier: &str) -> String {
+    let arn = format!("arn:aws:rds:us-east-1:123456789012:db:{identifier}");
+    let mut accounts = svc.state.write();
+    let state = accounts.default_mut();
+    state.instances.insert(
+        identifier.to_string(),
+        DbInstance {
+            db_instance_identifier: identifier.to_string(),
+            db_instance_arn: arn.clone(),
+            db_instance_class: "db.t3.micro".to_string(),
+            engine: "postgres".to_string(),
+            engine_version: "16.3".to_string(),
+            db_instance_status: "available".to_string(),
+            master_username: "admin".to_string(),
+            db_name: Some("appdb".to_string()),
+            endpoint_address: "127.0.0.1".to_string(),
+            port: 15432,
+            allocated_storage: 20,
+            publicly_accessible: true,
+            deletion_protection: false,
+            created_at: Utc::now(),
+            dbi_resource_id: format!("db-{}", Uuid::new_v4().simple()),
+            master_user_password: "secret".to_string(),
+            container_id: "container".to_string(),
+            host_port: 15432,
+            tags: Vec::new(),
+            read_replica_source_db_instance_identifier: None,
+            read_replica_db_instance_identifiers: Vec::new(),
+            vpc_security_group_ids: vec!["sg-12345678".to_string()],
+            db_parameter_group_name: Some("default.postgres16".to_string()),
+            backup_retention_period: 1,
+            preferred_backup_window: "03:00-04:00".to_string(),
+            latest_restorable_time: None,
+            option_group_name: None,
+            multi_az: false,
+            pending_modified_values: None,
+        },
+    );
+    arn
+}
+
+fn assert_code<T>(result: Result<T, AwsServiceError>, expected_code: &str) -> AwsServiceError {
+    match result {
+        Ok(_) => panic!("expected error {expected_code}, got Ok"),
+        Err(e) => {
+            assert_eq!(e.code(), expected_code, "wrong error code");
+            e
+        }
+    }
+}
+
+// ── Tag operations ───────────────────────────────────────────────
+
+#[test]
+fn add_tags_requires_resource_name() {
+    let svc = make_service();
+    let req = request("AddTagsToResource", &[]);
+    assert_code(svc.add_tags_to_resource(&req), "MissingParameter");
+}
+
+#[test]
+fn add_tags_requires_at_least_one_tag() {
+    let svc = make_service();
+    let arn = seed_instance(&svc, "db1");
+    let req = request("AddTagsToResource", &[("ResourceName", arn.as_str())]);
+    assert_code(svc.add_tags_to_resource(&req), "MissingParameter");
+}
+
+#[test]
+fn add_tags_appends_then_list_tags_returns_them() {
+    let svc = make_service();
+    let arn = seed_instance(&svc, "db1");
+    let add_req = request(
+        "AddTagsToResource",
+        &[
+            ("ResourceName", arn.as_str()),
+            ("Tags.Tag.1.Key", "env"),
+            ("Tags.Tag.1.Value", "dev"),
+        ],
+    );
+    svc.add_tags_to_resource(&add_req).unwrap();
+
+    let list_req = request("ListTagsForResource", &[("ResourceName", arn.as_str())]);
+    let body = body_of(svc.list_tags_for_resource(&list_req).unwrap());
+    assert!(body.contains("<Key>env</Key>"));
+    assert!(body.contains("<Value>dev</Value>"));
+}
+
+#[test]
+fn list_tags_rejects_filters_param() {
+    let svc = make_service();
+    let arn = seed_instance(&svc, "db1");
+    let req = request(
+        "ListTagsForResource",
+        &[
+            ("ResourceName", arn.as_str()),
+            ("Filters.Filter.1.Name", "x"),
+        ],
+    );
+    assert_code(svc.list_tags_for_resource(&req), "InvalidParameterValue");
+}
+
+#[test]
+fn list_tags_unknown_arn_errors() {
+    let svc = make_service();
+    let req = request(
+        "ListTagsForResource",
+        &[("ResourceName", "arn:aws:rds:us-east-1:123456789012:db:nope")],
+    );
+    assert_code(svc.list_tags_for_resource(&req), "DBInstanceNotFound");
+}
+
+#[test]
+fn remove_tags_strips_only_listed_keys() {
+    let svc = make_service();
+    let arn = seed_instance(&svc, "db1");
+    {
+        let mut __a = svc.state.write();
+        let state = __a.default_mut();
+        let inst = state.instances.get_mut("db1").unwrap();
+        inst.tags = vec![
+            RdsTag {
+                key: "env".to_string(),
+                value: "dev".to_string(),
+            },
+            RdsTag {
+                key: "team".to_string(),
+                value: "core".to_string(),
+            },
+        ];
+    }
+    let req = request(
+        "RemoveTagsFromResource",
+        &[("ResourceName", arn.as_str()), ("TagKeys.member.1", "env")],
+    );
+    svc.remove_tags_from_resource(&req).unwrap();
+
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    let tags = &state.instances.get("db1").unwrap().tags;
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].key, "team");
+}
+
+#[test]
+fn remove_tags_requires_keys() {
+    let svc = make_service();
+    let arn = seed_instance(&svc, "db1");
+    let req = request("RemoveTagsFromResource", &[("ResourceName", arn.as_str())]);
+    assert_code(svc.remove_tags_from_resource(&req), "MissingParameter");
+}
+
+// ── DB Subnet Groups ─────────────────────────────────────────────
+
+fn create_subnet_group(svc: &RdsService, name: &str) {
+    let req = request(
+        "CreateDBSubnetGroup",
+        &[
+            ("DBSubnetGroupName", name),
+            ("DBSubnetGroupDescription", "test"),
+            ("SubnetIds.SubnetIdentifier.1", "subnet-aaa"),
+            ("SubnetIds.SubnetIdentifier.2", "subnet-bbb"),
+        ],
+    );
+    svc.create_db_subnet_group(&req).unwrap();
+}
+
+#[test]
+fn create_db_subnet_group_requires_two_subnets() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBSubnetGroup",
+        &[
+            ("DBSubnetGroupName", "sg1"),
+            ("DBSubnetGroupDescription", "t"),
+            ("SubnetIds.SubnetIdentifier.1", "subnet-aaa"),
+        ],
+    );
+    assert_code(
+        svc.create_db_subnet_group(&req),
+        "DBSubnetGroupDoesNotCoverEnoughAZs",
+    );
+}
+
+#[test]
+fn create_db_subnet_group_rejects_empty_subnets() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBSubnetGroup",
+        &[
+            ("DBSubnetGroupName", "sg1"),
+            ("DBSubnetGroupDescription", "t"),
+        ],
+    );
+    assert_code(svc.create_db_subnet_group(&req), "InvalidParameterValue");
+}
+
+#[test]
+fn create_db_subnet_group_rejects_duplicates() {
+    let svc = make_service();
+    create_subnet_group(&svc, "sg1");
+    let req = request(
+        "CreateDBSubnetGroup",
+        &[
+            ("DBSubnetGroupName", "sg1"),
+            ("DBSubnetGroupDescription", "t"),
+            ("SubnetIds.SubnetIdentifier.1", "subnet-x"),
+            ("SubnetIds.SubnetIdentifier.2", "subnet-y"),
+        ],
+    );
+    assert_code(
+        svc.create_db_subnet_group(&req),
+        "DBSubnetGroupAlreadyExists",
+    );
+}
+
+#[test]
+fn describe_db_subnet_groups_by_name_or_list() {
+    let svc = make_service();
+    create_subnet_group(&svc, "sg-alpha");
+    create_subnet_group(&svc, "sg-beta");
+
+    let by_name = request(
+        "DescribeDBSubnetGroups",
+        &[("DBSubnetGroupName", "sg-alpha")],
+    );
+    let body = body_of(svc.describe_db_subnet_groups(&by_name).unwrap());
+    assert!(body.contains("sg-alpha"));
+    assert!(!body.contains("sg-beta"));
+
+    let list_all = request("DescribeDBSubnetGroups", &[]);
+    let body = body_of(svc.describe_db_subnet_groups(&list_all).unwrap());
+    assert!(body.contains("sg-alpha"));
+    assert!(body.contains("sg-beta"));
+}
+
+#[test]
+fn describe_db_subnet_groups_unknown_name_errors() {
+    let svc = make_service();
+    let req = request("DescribeDBSubnetGroups", &[("DBSubnetGroupName", "ghost")]);
+    assert_code(
+        svc.describe_db_subnet_groups(&req),
+        "DBSubnetGroupNotFoundFault",
+    );
+}
+
+#[test]
+fn delete_db_subnet_group_unknown_errors() {
+    let svc = make_service();
+    let req = request("DeleteDBSubnetGroup", &[("DBSubnetGroupName", "ghost")]);
+    assert_code(
+        svc.delete_db_subnet_group(&req),
+        "DBSubnetGroupNotFoundFault",
+    );
+}
+
+#[test]
+fn delete_db_subnet_group_removes_entry() {
+    let svc = make_service();
+    create_subnet_group(&svc, "sg1");
+    let req = request("DeleteDBSubnetGroup", &[("DBSubnetGroupName", "sg1")]);
+    svc.delete_db_subnet_group(&req).unwrap();
+    assert!(svc.state.read().default_ref().subnet_groups.is_empty());
+}
+
+#[test]
+fn modify_db_subnet_group_updates_subnet_ids() {
+    let svc = make_service();
+    create_subnet_group(&svc, "sg1");
+    let req = request(
+        "ModifyDBSubnetGroup",
+        &[
+            ("DBSubnetGroupName", "sg1"),
+            ("SubnetIds.SubnetIdentifier.1", "subnet-new1"),
+            ("SubnetIds.SubnetIdentifier.2", "subnet-new2"),
+        ],
+    );
+    svc.modify_db_subnet_group(&req).unwrap();
+
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    let sg = state.subnet_groups.get("sg1").unwrap();
+    assert_eq!(sg.subnet_ids, vec!["subnet-new1", "subnet-new2"]);
+}
+
+// ── DB Parameter Groups ──────────────────────────────────────────
+
+fn create_param_group(svc: &RdsService, name: &str) {
+    let req = request(
+        "CreateDBParameterGroup",
+        &[
+            ("DBParameterGroupName", name),
+            ("DBParameterGroupFamily", "postgres16"),
+            ("Description", "test"),
+        ],
+    );
+    svc.create_db_parameter_group(&req).unwrap();
+}
+
+#[test]
+fn create_db_parameter_group_rejects_unknown_family() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBParameterGroup",
+        &[
+            ("DBParameterGroupName", "pg1"),
+            ("DBParameterGroupFamily", "oracle19"),
+            ("Description", "t"),
+        ],
+    );
+    assert_code(svc.create_db_parameter_group(&req), "InvalidParameterValue");
+}
+
+#[test]
+fn create_db_parameter_group_rejects_duplicates() {
+    let svc = make_service();
+    create_param_group(&svc, "pg1");
+    let req = request(
+        "CreateDBParameterGroup",
+        &[
+            ("DBParameterGroupName", "pg1"),
+            ("DBParameterGroupFamily", "postgres16"),
+            ("Description", "t"),
+        ],
+    );
+    assert_code(
+        svc.create_db_parameter_group(&req),
+        "DBParameterGroupAlreadyExists",
+    );
+}
+
+#[test]
+fn describe_db_parameter_groups_by_name_or_list() {
+    let svc = make_service();
+    create_param_group(&svc, "pg-alpha");
+    create_param_group(&svc, "pg-beta");
+    let by_name = request(
+        "DescribeDBParameterGroups",
+        &[("DBParameterGroupName", "pg-alpha")],
+    );
+    let body = body_of(svc.describe_db_parameter_groups(&by_name).unwrap());
+    assert!(body.contains("pg-alpha"));
+    assert!(!body.contains("pg-beta"));
+    let list = request("DescribeDBParameterGroups", &[]);
+    let body = body_of(svc.describe_db_parameter_groups(&list).unwrap());
+    assert!(body.contains("pg-alpha"));
+    assert!(body.contains("pg-beta"));
+}
+
+#[test]
+fn describe_db_parameter_groups_unknown_name_errors() {
+    let svc = make_service();
+    let req = request(
+        "DescribeDBParameterGroups",
+        &[("DBParameterGroupName", "ghost")],
+    );
+    assert_code(
+        svc.describe_db_parameter_groups(&req),
+        "DBParameterGroupNotFound",
+    );
+}
+
+#[test]
+fn delete_db_parameter_group_rejects_default_groups() {
+    let svc = make_service();
+    let req = request(
+        "DeleteDBParameterGroup",
+        &[("DBParameterGroupName", "default.postgres16")],
+    );
+    assert_code(svc.delete_db_parameter_group(&req), "InvalidParameterValue");
+}
+
+#[test]
+fn delete_db_parameter_group_unknown_errors() {
+    let svc = make_service();
+    let req = request(
+        "DeleteDBParameterGroup",
+        &[("DBParameterGroupName", "ghost")],
+    );
+    assert_code(
+        svc.delete_db_parameter_group(&req),
+        "DBParameterGroupNotFound",
+    );
+}
+
+#[test]
+fn delete_db_parameter_group_removes_entry() {
+    let svc = make_service();
+    create_param_group(&svc, "pg1");
+    let req = request("DeleteDBParameterGroup", &[("DBParameterGroupName", "pg1")]);
+    svc.delete_db_parameter_group(&req).unwrap();
+    assert!(!svc
+        .state
+        .read()
+        .default_ref()
+        .parameter_groups
+        .contains_key("pg1"));
+}
+
+#[test]
+fn modify_db_parameter_group_updates_description() {
+    let svc = make_service();
+    create_param_group(&svc, "pg1");
+    let req = request(
+        "ModifyDBParameterGroup",
+        &[
+            ("DBParameterGroupName", "pg1"),
+            ("Description", "shiny new"),
+        ],
+    );
+    svc.modify_db_parameter_group(&req).unwrap();
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    assert_eq!(
+        state.parameter_groups.get("pg1").unwrap().description,
+        "shiny new"
+    );
+}
+
+#[test]
+fn modify_db_parameter_group_unknown_errors() {
+    let svc = make_service();
+    let req = request(
+        "ModifyDBParameterGroup",
+        &[("DBParameterGroupName", "ghost"), ("Description", "x")],
+    );
+    assert_code(
+        svc.modify_db_parameter_group(&req),
+        "DBParameterGroupNotFound",
+    );
+}
+
+// ── DescribeDBInstances ──────────────────────────────────────────
+
+#[test]
+fn describe_db_instances_by_id_returns_only_one() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+    let req = request("DescribeDBInstances", &[("DBInstanceIdentifier", "db1")]);
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>db2</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_instances_unknown_id_errors() {
+    let svc = make_service();
+    let req = request("DescribeDBInstances", &[("DBInstanceIdentifier", "ghost")]);
+    assert_code(svc.describe_db_instances(&req), "DBInstanceNotFound");
+}
+
+#[test]
+fn describe_db_instances_lists_all_when_unbounded() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+    seed_instance(&svc, "db3");
+    let req = request("DescribeDBInstances", &[]);
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    for id in ["db1", "db2", "db3"] {
+        assert!(body.contains(&format!(
+            "<DBInstanceIdentifier>{id}</DBInstanceIdentifier>"
+        )));
+    }
+}
+
+// ── ModifyDBInstance ─────────────────────────────────────────────
+
+#[test]
+fn modify_db_instance_requires_at_least_one_change() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request("ModifyDBInstance", &[("DBInstanceIdentifier", "db1")]);
+    assert_code(svc.modify_db_instance(&req), "InvalidParameterCombination");
+}
+
+#[test]
+fn modify_db_instance_unknown_errors() {
+    let svc = make_service();
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "ghost"),
+            ("DBInstanceClass", "db.t3.small"),
+        ],
+    );
+    assert_code(svc.modify_db_instance(&req), "DBInstanceNotFound");
+}
+
+#[test]
+fn modify_db_instance_apply_immediately_updates_class() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("DBInstanceClass", "db.t3.small"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    svc.modify_db_instance(&req).unwrap();
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    assert_eq!(
+        state.instances.get("db1").unwrap().db_instance_class,
+        "db.t3.small"
+    );
+}
+
+#[test]
+fn modify_db_instance_pending_when_not_apply_immediately() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("DBInstanceClass", "db.t3.small"),
+            ("ApplyImmediately", "false"),
+        ],
+    );
+    svc.modify_db_instance(&req).unwrap();
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    let inst = state.instances.get("db1").unwrap();
+    assert_eq!(inst.db_instance_class, "db.t3.micro");
+    assert_eq!(
+        inst.pending_modified_values
+            .as_ref()
+            .unwrap()
+            .db_instance_class
+            .as_deref(),
+        Some("db.t3.small"),
+    );
+}
+
+// ── Snapshots (sync ops only) ────────────────────────────────────
+
+fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
+    let mut __a = svc.state.write();
+    let state = __a.default_mut();
+    let arn = state.db_snapshot_arn(snapshot_id);
+    state.snapshots.insert(
+        snapshot_id.to_string(),
+        crate::state::DbSnapshot {
+            db_snapshot_identifier: snapshot_id.to_string(),
+            db_snapshot_arn: arn,
+            db_instance_identifier: instance_id.to_string(),
+            snapshot_create_time: Utc::now(),
+            engine: "postgres".to_string(),
+            engine_version: "16.3".to_string(),
+            allocated_storage: 20,
+            status: "available".to_string(),
+            port: 5432,
+            master_username: "admin".to_string(),
+            db_name: Some("appdb".to_string()),
+            dbi_resource_id: format!("db-{}", Uuid::new_v4().simple()),
+            snapshot_type: "manual".to_string(),
+            master_user_password: "secret".to_string(),
+            tags: Vec::new(),
+            dump_data: Vec::new(),
+        },
+    );
+}
+
+#[test]
+fn delete_db_snapshot_removes_entry() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    let req = request("DeleteDBSnapshot", &[("DBSnapshotIdentifier", "snap1")]);
+    svc.delete_db_snapshot(&req).unwrap();
+    assert!(svc.state.read().default_ref().snapshots.is_empty());
+}
+
+#[test]
+fn delete_db_snapshot_unknown_errors() {
+    let svc = make_service();
+    let req = request("DeleteDBSnapshot", &[("DBSnapshotIdentifier", "ghost")]);
+    assert_code(svc.delete_db_snapshot(&req), "DBSnapshotNotFound");
+}
+
+#[test]
+fn describe_db_snapshots_rejects_both_filters() {
+    let svc = make_service();
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("DBSnapshotIdentifier", "s"), ("DBInstanceIdentifier", "i")],
+    );
+    assert_code(
+        svc.describe_db_snapshots(&req),
+        "InvalidParameterCombination",
+    );
+}
+
+#[test]
+fn describe_db_snapshots_by_id_or_instance() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    seed_snapshot(&svc, "snap2", "db2");
+
+    let by_id = request("DescribeDBSnapshots", &[("DBSnapshotIdentifier", "snap1")]);
+    let body = body_of(svc.describe_db_snapshots(&by_id).unwrap());
+    assert!(body.contains("snap1"));
+    assert!(!body.contains("snap2"));
+
+    let by_instance = request("DescribeDBSnapshots", &[("DBInstanceIdentifier", "db2")]);
+    let body = body_of(svc.describe_db_snapshots(&by_instance).unwrap());
+    assert!(body.contains("snap2"));
+    assert!(!body.contains("snap1"));
+
+    let list_all = request("DescribeDBSnapshots", &[]);
+    let body = body_of(svc.describe_db_snapshots(&list_all).unwrap());
+    assert!(body.contains("snap1"));
+    assert!(body.contains("snap2"));
+}
+
+#[test]
+fn describe_db_snapshots_unknown_id_errors() {
+    let svc = make_service();
+    let req = request("DescribeDBSnapshots", &[("DBSnapshotIdentifier", "ghost")]);
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+}
+
+// ── Error branch tests ──
+
+#[test]
+fn describe_db_instances_not_found() {
+    let svc = make_service();
+    let req = request("DescribeDBInstances", &[("DBInstanceIdentifier", "ghost")]);
+    assert_code(svc.describe_db_instances(&req), "DBInstanceNotFound");
+}
+
+#[tokio::test]
+async fn delete_db_instance_not_found() {
+    let svc = make_service();
+    let req = request(
+        "DeleteDBInstance",
+        &[
+            ("DBInstanceIdentifier", "ghost"),
+            ("SkipFinalSnapshot", "true"),
+        ],
+    );
+    assert_code(svc.delete_db_instance(&req).await, "DBInstanceNotFound");
+}
+
+#[test]
+fn modify_db_instance_not_found() {
+    let svc = make_service();
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "ghost"),
+            ("AllocatedStorage", "20"),
+        ],
+    );
+    // Validation fires before existence check
+    assert_code(svc.modify_db_instance(&req), "InvalidParameterCombination");
+}
+
+#[tokio::test]
+async fn reboot_db_instance_not_found() {
+    let svc = make_service();
+    let req = request("RebootDBInstance", &[("DBInstanceIdentifier", "ghost")]);
+    assert_code(svc.reboot_db_instance(&req).await, "DBInstanceNotFound");
+}
+
+#[tokio::test]
+async fn create_db_snapshot_instance_not_found() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "ghost"),
+            ("DBSnapshotIdentifier", "snap1"),
+        ],
+    );
+    assert_code(svc.create_db_snapshot(&req).await, "InvalidParameterValue");
+}
+
+#[tokio::test]
+async fn restore_db_instance_snapshot_not_found() {
+    let svc = make_service();
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored"),
+            ("DBSnapshotIdentifier", "ghost-snap"),
+        ],
+    );
+    assert_code(
+        svc.restore_db_instance_from_db_snapshot(&req).await,
+        "InvalidParameterValue",
+    );
+}
+
+#[tokio::test]
+async fn create_db_instance_read_replica_source_not_found() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBInstanceReadReplica",
+        &[
+            ("DBInstanceIdentifier", "replica"),
+            ("SourceDBInstanceIdentifier", "ghost"),
+        ],
+    );
+    assert_code(
+        svc.create_db_instance_read_replica(&req).await,
+        "InvalidParameterValue",
+    );
+}
+
+#[test]
+fn describe_db_engine_versions_basic() {
+    let svc = make_service();
+    let req = request("DescribeDBEngineVersions", &[]);
+    let resp = svc.describe_db_engine_versions(&req).unwrap();
+    let body = body_of(resp);
+    assert!(body.contains("<DBEngineVersions>"));
+}
+
+#[test]
+fn describe_orderable_db_instance_options_basic() {
+    let svc = make_service();
+    let req = request("DescribeOrderableDBInstanceOptions", &[("Engine", "mysql")]);
+    let resp = svc.describe_orderable_db_instance_options(&req).unwrap();
+    let body = body_of(resp);
+    assert!(body.contains("<OrderableDBInstanceOptions>"));
+}
+
+#[test]
+fn describe_db_parameter_group_not_found() {
+    let svc = make_service();
+    let req = request(
+        "DescribeDBParameterGroups",
+        &[("DBParameterGroupName", "ghost")],
+    );
+    assert_code(
+        svc.describe_db_parameter_groups(&req),
+        "DBParameterGroupNotFound",
+    );
+}
+
+#[test]
+fn delete_db_parameter_group_not_found() {
+    let svc = make_service();
+    let req = request(
+        "DeleteDBParameterGroup",
+        &[("DBParameterGroupName", "ghost")],
+    );
+    assert_code(
+        svc.delete_db_parameter_group(&req),
+        "DBParameterGroupNotFound",
+    );
+}
+
+#[test]
+fn describe_db_subnet_group_not_found() {
+    let svc = make_service();
+    let req = request("DescribeDBSubnetGroups", &[("DBSubnetGroupName", "ghost")]);
+    assert_code(
+        svc.describe_db_subnet_groups(&req),
+        "DBSubnetGroupNotFoundFault",
+    );
+}
+
+#[test]
+fn delete_db_subnet_group_not_found() {
+    let svc = make_service();
+    let req = request("DeleteDBSubnetGroup", &[("DBSubnetGroupName", "ghost")]);
+    assert_code(
+        svc.delete_db_subnet_group(&req),
+        "DBSubnetGroupNotFoundFault",
+    );
+}
+
+#[test]
+fn add_tags_resource_not_found() {
+    let svc = make_service();
+    let req = request(
+        "AddTagsToResource",
+        &[
+            ("ResourceName", "arn:aws:rds:us-east-1:123:db:ghost"),
+            ("Tags.member.1.Key", "k"),
+            ("Tags.member.1.Value", "v"),
+        ],
+    );
+    assert_code(svc.add_tags_to_resource(&req), "MissingParameter");
+}
+
+#[test]
+fn list_tags_resource_not_found() {
+    let svc = make_service();
+    let req = request(
+        "ListTagsForResource",
+        &[("ResourceName", "arn:aws:rds:us-east-1:123:db:ghost")],
+    );
+    assert_code(svc.list_tags_for_resource(&req), "DBInstanceNotFound");
+}
+
+// ── snapshot operations ──
+
+#[tokio::test]
+async fn create_db_snapshot_missing_id_errors() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBSnapshot",
+        &[("DBInstanceIdentifier", "nonexistent")],
+    );
+    assert_code(svc.create_db_snapshot(&req).await, "MissingParameter");
+}
+
+#[tokio::test]
+async fn create_db_snapshot_unknown_instance_errors() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBSnapshot",
+        &[
+            ("DBSnapshotIdentifier", "snap1"),
+            ("DBInstanceIdentifier", "ghost"),
+        ],
+    );
+    assert!(svc.create_db_snapshot(&req).await.is_err());
+}
+
+// ── delete_db_instance ──
+
+#[tokio::test]
+async fn delete_db_instance_missing_id_errors() {
+    let svc = make_service();
+    let req = request("DeleteDBInstance", &[]);
+    assert_code(svc.delete_db_instance(&req).await, "MissingParameter");
+}
+
+// ── reboot_db_instance ──
+
+#[tokio::test]
+async fn reboot_db_instance_missing_id_errors() {
+    let svc = make_service();
+    let req = request("RebootDBInstance", &[]);
+    assert_code(svc.reboot_db_instance(&req).await, "MissingParameter");
+}
+
+// ── create_db_instance validation ──
+
+#[tokio::test]
+async fn create_db_instance_missing_id_errors() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBInstance",
+        &[
+            ("Engine", "postgres"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("AllocatedStorage", "20"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "secretpass"),
+        ],
+    );
+    assert!(svc.create_db_instance(&req).await.is_err());
+}
+
+#[tokio::test]
+async fn create_db_instance_unsupported_engine_errors() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("Engine", "mongodb"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("AllocatedStorage", "20"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "secretpass"),
+        ],
+    );
+    assert!(svc.create_db_instance(&req).await.is_err());
+}
+
+// ── restore_db_instance_from_db_snapshot ──
+
+#[tokio::test]
+async fn restore_db_instance_missing_ids_errors() {
+    let svc = make_service();
+    let req = request("RestoreDBInstanceFromDBSnapshot", &[]);
+    assert!(svc
+        .restore_db_instance_from_db_snapshot(&req)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn restore_db_instance_unknown_snapshot_errors() {
+    let svc = make_service();
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored"),
+            ("DBSnapshotIdentifier", "missing"),
+        ],
+    );
+    assert!(svc
+        .restore_db_instance_from_db_snapshot(&req)
+        .await
+        .is_err());
+}
+
+// ── create_db_instance_read_replica ──
+
+#[tokio::test]
+async fn create_read_replica_missing_source_errors() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBInstanceReadReplica",
+        &[("DBInstanceIdentifier", "replica1")],
+    );
+    assert!(svc.create_db_instance_read_replica(&req).await.is_err());
+}
+
+#[tokio::test]
+async fn create_read_replica_unknown_source_errors() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBInstanceReadReplica",
+        &[
+            ("DBInstanceIdentifier", "replica1"),
+            ("SourceDBInstanceIdentifier", "ghost"),
+        ],
+    );
+    assert!(svc.create_db_instance_read_replica(&req).await.is_err());
+}
+
+// ── describe_db_snapshots with filters ──
+
+#[test]
+fn describe_db_snapshots_by_snapshot_id_only() {
+    let svc = make_service();
+    seed_snapshot(&svc, "s1", "inst1");
+    let req = request("DescribeDBSnapshots", &[("DBSnapshotIdentifier", "s1")]);
+    let resp = svc.describe_db_snapshots(&req).unwrap();
+    let b = body_of(resp);
+    assert!(b.contains("<DBSnapshotIdentifier>s1</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_snapshots_by_instance_id_returns_matching() {
+    let svc = make_service();
+    seed_snapshot(&svc, "s1", "inst1");
+    seed_snapshot(&svc, "s2", "inst2");
+    let req = request("DescribeDBSnapshots", &[("DBInstanceIdentifier", "inst1")]);
+    let resp = svc.describe_db_snapshots(&req).unwrap();
+    let b = body_of(resp);
+    assert!(b.contains("s1"));
+    assert!(!b.contains("<DBSnapshotIdentifier>s2</DBSnapshotIdentifier>"));
+}
+
+// ── modify_db_parameter_group ──
+
+#[test]
+fn modify_db_parameter_group_missing_name() {
+    let svc = make_service();
+    let req = request("ModifyDBParameterGroup", &[]);
+    assert!(svc.modify_db_parameter_group(&req).is_err());
+}
+
+// ── modify_db_subnet_group ──
+
+#[test]
+fn modify_db_subnet_group_unknown_errors() {
+    let svc = make_service();
+    let req = request(
+        "ModifyDBSubnetGroup",
+        &[
+            ("DBSubnetGroupName", "ghost"),
+            ("SubnetIds.SubnetIdentifier.1", "subnet-a"),
+            ("SubnetIds.SubnetIdentifier.2", "subnet-b"),
+        ],
+    );
+    assert!(svc.modify_db_subnet_group(&req).is_err());
+}
+
+// ── describe_db_instances ──
+
+#[test]
+fn describe_db_instances_empty_returns_xml() {
+    let svc = make_service();
+    let req = request("DescribeDBInstances", &[]);
+    let resp = svc.describe_db_instances(&req).unwrap();
+    let b = body_of(resp);
+    assert!(b.contains("DescribeDBInstancesResult"));
+}
+
+#[test]
+fn describe_db_snapshots_empty_returns_empty_list() {
+    let svc = make_service();
+    let req = request("DescribeDBSnapshots", &[]);
+    let resp = svc.describe_db_snapshots(&req).unwrap();
+    let b = body_of(resp);
+    assert!(b.contains("DescribeDBSnapshotsResult"));
+}
+
+#[test]
+fn add_tags_unknown_resource_errors() {
+    let svc = make_service();
+    let req = request(
+        "AddTagsToResource",
+        &[
+            ("ResourceName", "arn:aws:rds:us-east-1:123:db:ghost"),
+            ("Tags.member.1.Key", "k"),
+            ("Tags.member.1.Value", "v"),
+        ],
+    );
+    assert!(svc.add_tags_to_resource(&req).is_err());
+}
+
+#[test]
+fn remove_tags_unknown_resource_errors() {
+    let svc = make_service();
+    let req = request(
+        "RemoveTagsFromResource",
+        &[
+            ("ResourceName", "arn:aws:rds:us-east-1:123:db:ghost"),
+            ("TagKeys.member.1", "k"),
+        ],
+    );
+    assert!(svc.remove_tags_from_resource(&req).is_err());
+}
+
+#[test]
+fn create_db_parameter_group_missing_name_errors() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBParameterGroup",
+        &[
+            ("DBParameterGroupFamily", "postgres16"),
+            ("Description", "d"),
+        ],
+    );
+    assert!(svc.create_db_parameter_group(&req).is_err());
+}
+
+#[test]
+fn create_db_subnet_group_missing_desc_errors() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBSubnetGroup",
+        &[
+            ("DBSubnetGroupName", "sg1"),
+            ("SubnetIds.SubnetIdentifier.1", "subnet-a"),
+            ("SubnetIds.SubnetIdentifier.2", "subnet-b"),
+        ],
+    );
+    assert!(svc.create_db_subnet_group(&req).is_err());
+}
+
+#[tokio::test]
+async fn create_db_instance_missing_class_errors() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "miss-class"),
+            ("Engine", "postgres"),
+            ("AllocatedStorage", "20"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "secretpass"),
+        ],
+    );
+    assert!(svc.create_db_instance(&req).await.is_err());
+}
+
+#[tokio::test]
+async fn create_db_instance_missing_master_username_errors() {
+    let svc = make_service();
+    let req = request(
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "miss-mu"),
+            ("Engine", "postgres"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("AllocatedStorage", "20"),
+            ("MasterUserPassword", "secretpass"),
+        ],
+    );
+    assert!(svc.create_db_instance(&req).await.is_err());
+}
+
+#[test]
+fn modify_db_instance_missing_id_errors() {
+    let svc = make_service();
+    let req = request("ModifyDBInstance", &[]);
+    assert!(svc.modify_db_instance(&req).is_err());
+}
+
+#[test]
+fn modify_db_parameter_group_unknown_pg_errors() {
+    let svc = make_service();
+    let req = request(
+        "ModifyDBParameterGroup",
+        &[
+            ("DBParameterGroupName", "ghost"),
+            ("Parameters.member.1.ParameterName", "p"),
+            ("Parameters.member.1.ParameterValue", "v"),
+            ("Parameters.member.1.ApplyMethod", "immediate"),
+        ],
+    );
+    assert!(svc.modify_db_parameter_group(&req).is_err());
+}
+
+#[test]
+fn describe_db_parameter_groups_unknown_errors() {
+    let svc = make_service();
+    let req = request(
+        "DescribeDBParameterGroups",
+        &[("DBParameterGroupName", "ghost")],
+    );
+    assert!(svc.describe_db_parameter_groups(&req).is_err());
+}
+
+#[test]
+fn describe_db_subnet_groups_unknown_errors() {
+    let svc = make_service();
+    let req = request("DescribeDBSubnetGroups", &[("DBSubnetGroupName", "ghost")]);
+    assert!(svc.describe_db_subnet_groups(&req).is_err());
+}
