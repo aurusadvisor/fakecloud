@@ -410,7 +410,12 @@ async fn ssm_commands() {
 
     client.list_commands().send().await.unwrap();
     client.list_command_invocations().send().await.unwrap();
-    let _ = client.cancel_command().command_id(&cmd_id).send().await;
+    client
+        .cancel_command()
+        .command_id(&cmd_id)
+        .send()
+        .await
+        .ok();
 }
 
 // -- GetCommandInvocation --
@@ -430,12 +435,13 @@ async fn ssm_get_command_invocation() {
         .unwrap();
     let cmd_id = send.command().unwrap().command_id().unwrap().to_string();
 
-    let _ = client
+    client
         .get_command_invocation()
         .command_id(&cmd_id)
         .instance_id("i-00000000000000001")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- Maintenance windows --

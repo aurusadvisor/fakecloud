@@ -378,11 +378,12 @@ async fn sfn_stop_execution() {
         .unwrap();
 
     // Try to stop; may already be complete due to fast execution
-    let _ = client
+    client
         .stop_execution()
         .execution_arn(start.execution_arn())
         .send()
-        .await;
+        .await
+        .ok();
 
     // Just verify describe works after stop attempt
     let desc = client

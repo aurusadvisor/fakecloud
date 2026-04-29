@@ -52,17 +52,19 @@ async fn apigateway_v1_rest_api_lifecycle() {
 
     // PutRestApi (overwrite via OpenAPI body) and ImportRestApi share the
     // wire path with create; the SDK accepts an empty body for the test.
-    let _ = client
+    client
         .put_rest_api()
         .rest_api_id(&api_id)
         .body(aws_sdk_apigateway::primitives::Blob::new(b"{}".to_vec()))
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .import_rest_api()
         .body(aws_sdk_apigateway::primitives::Blob::new(b"{}".to_vec()))
         .send()
-        .await;
+        .await
+        .ok();
 
     client
         .delete_rest_api()
@@ -412,12 +414,13 @@ async fn apigateway_v1_deployment_lifecycle() {
         .await
         .unwrap();
     // Delete the auto-created stage first so the deployment is removable.
-    let _ = client
+    client
         .delete_stage()
         .rest_api_id(&api_id)
         .stage_name("v1")
         .send()
-        .await;
+        .await
+        .ok();
     client
         .delete_deployment()
         .rest_api_id(&api_id)
@@ -475,18 +478,20 @@ async fn apigateway_v1_stage_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .flush_stage_cache()
         .rest_api_id(&api_id)
         .stage_name("prod")
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .flush_stage_authorizers_cache()
         .rest_api_id(&api_id)
         .stage_name("prod")
         .send()
-        .await;
+        .await
+        .ok();
     client
         .delete_stage()
         .rest_api_id(&api_id)
@@ -537,12 +542,13 @@ async fn apigateway_v1_model_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_model_template()
         .rest_api_id(&api_id)
         .model_name("Pet")
         .send()
-        .await;
+        .await
+        .ok();
     client
         .delete_model()
         .rest_api_id(&api_id)
@@ -751,19 +757,21 @@ async fn apigateway_v1_usage_plan_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_usage()
         .usage_plan_id(&plan_id)
         .start_date("1970-01-01")
         .end_date("2030-01-01")
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .update_usage()
         .usage_plan_id(&plan_id)
         .key_id(&key_id)
         .send()
-        .await;
+        .await
+        .ok();
 
     client
         .delete_usage_plan_key()
@@ -978,29 +986,33 @@ async fn apigateway_v1_documentation_lifecycle() {
         .await
         .unwrap();
     let part_id = part.id().unwrap_or("p").to_string();
-    let _ = client
+    client
         .get_documentation_part()
         .rest_api_id(&api_id)
         .documentation_part_id(&part_id)
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .get_documentation_parts()
         .rest_api_id(&api_id)
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .update_documentation_part()
         .rest_api_id(&api_id)
         .documentation_part_id(&part_id)
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .delete_documentation_part()
         .rest_api_id(&api_id)
         .documentation_part_id(&part_id)
         .send()
-        .await;
+        .await
+        .ok();
 
     client
         .create_documentation_version()
@@ -1009,29 +1021,33 @@ async fn apigateway_v1_documentation_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_documentation_version()
         .rest_api_id(&api_id)
         .documentation_version("v1")
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .get_documentation_versions()
         .rest_api_id(&api_id)
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .update_documentation_version()
         .rest_api_id(&api_id)
         .documentation_version("v1")
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .delete_documentation_version()
         .rest_api_id(&api_id)
         .documentation_version("v1")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 #[test_action("apigateway", "PutGatewayResponse", checksum = "c96306ee")]
@@ -1046,35 +1062,40 @@ async fn apigateway_v1_gateway_response_lifecycle() {
     let (api_id, _) = create_api(&client, "conf-gw-resp").await;
 
     let kind = aws_sdk_apigateway::types::GatewayResponseType::Default4Xx;
-    let _ = client
+    client
         .put_gateway_response()
         .rest_api_id(&api_id)
         .response_type(kind.clone())
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .get_gateway_response()
         .rest_api_id(&api_id)
         .response_type(kind.clone())
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .get_gateway_responses()
         .rest_api_id(&api_id)
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .update_gateway_response()
         .rest_api_id(&api_id)
         .response_type(kind.clone())
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .delete_gateway_response()
         .rest_api_id(&api_id)
         .response_type(kind)
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 #[test_action("apigateway", "GetExport", checksum = "a1c3bfc1")]
@@ -1094,22 +1115,24 @@ async fn apigateway_v1_export_sdk() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_export()
         .rest_api_id(&api_id)
         .stage_name("v1")
         .export_type("oas30")
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .get_sdk()
         .rest_api_id(&api_id)
         .stage_name("v1")
         .sdk_type("javascript")
         .send()
-        .await;
-    let _ = client.get_sdk_type().id("javascript").send().await;
-    let _ = client.get_sdk_types().send().await;
+        .await
+        .ok();
+    client.get_sdk_type().id("javascript").send().await.ok();
+    client.get_sdk_types().send().await.ok();
 }
 
 #[test_action("apigateway", "TagResource", checksum = "52ab0aa6")]
@@ -1122,19 +1145,21 @@ async fn apigateway_v1_tags() {
     let (api_id, _) = create_api(&client, "conf-tags").await;
     let arn = format!("arn:aws:apigateway:us-east-1::/restapis/{api_id}");
 
-    let _ = client
+    client
         .tag_resource()
         .resource_arn(&arn)
         .tags("env", "prod")
         .send()
-        .await;
-    let _ = client.get_tags().resource_arn(&arn).send().await;
-    let _ = client
+        .await
+        .ok();
+    client.get_tags().resource_arn(&arn).send().await.ok();
+    client
         .untag_resource()
         .resource_arn(&arn)
         .tag_keys("env")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 #[test_action("apigateway", "TestInvokeMethod", checksum = "67cdacdd")]
@@ -1164,13 +1189,14 @@ async fn apigateway_v1_test_invoke() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .test_invoke_method()
         .rest_api_id(&api_id)
         .resource_id(&res_id)
         .http_method("GET")
         .send()
-        .await;
+        .await
+        .ok();
 
     let auth = client
         .create_authorizer()
@@ -1181,12 +1207,13 @@ async fn apigateway_v1_test_invoke() {
         .await
         .unwrap();
     let auth_id = auth.id().unwrap().to_string();
-    let _ = client
+    client
         .test_invoke_authorizer()
         .rest_api_id(&api_id)
         .authorizer_id(auth_id)
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 #[test_action("apigateway", "GetAccount", checksum = "92977b09")]
@@ -1195,8 +1222,8 @@ async fn apigateway_v1_test_invoke() {
 async fn apigateway_v1_account() {
     let server = TestServer::start().await;
     let client = server.apigateway_client().await;
-    let _ = client.get_account().send().await;
-    let _ = client.update_account().send().await;
+    client.get_account().send().await.ok();
+    client.update_account().send().await.ok();
 }
 
 #[test_action(
@@ -1235,18 +1262,24 @@ async fn apigateway_v1_domain_name_access_associations() {
         .unwrap_or_default()
         .to_string();
 
-    let _ = client.get_domain_name_access_associations().send().await;
-    let _ = client
+    client
+        .get_domain_name_access_associations()
+        .send()
+        .await
+        .ok();
+    client
         .reject_domain_name_access_association()
         .domain_name_access_association_arn(&arn)
         .domain_name_arn("arn:aws:apigateway:us-east-1::/domainnames/private.conf.example.com")
         .send()
-        .await;
-    let _ = client
+        .await
+        .ok();
+    client
         .delete_domain_name_access_association()
         .domain_name_access_association_arn(arn)
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 #[test_action("apigateway", "ImportApiKeys", checksum = "0115480d")]
@@ -1257,12 +1290,13 @@ async fn apigateway_v1_import_api_keys() {
     let body = aws_sdk_apigateway::primitives::Blob::new(
         b"key-name,key-value,description,true\n".to_vec(),
     );
-    let _ = client
+    client
         .import_api_keys()
         .body(body)
         .format(aws_sdk_apigateway::types::ApiKeysFormat::Csv)
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 #[test_action("apigateway", "ImportDocumentationParts", checksum = "1b14cc44")]
@@ -1274,10 +1308,11 @@ async fn apigateway_v1_import_documentation_parts() {
     let body = aws_sdk_apigateway::primitives::Blob::new(
         br#"{"documentationParts": [{"location": {"type": "API"}, "properties": "{}"}]}"#.to_vec(),
     );
-    let _ = client
+    client
         .import_documentation_parts()
         .rest_api_id(&api_id)
         .body(body)
         .send()
-        .await;
+        .await
+        .ok();
 }

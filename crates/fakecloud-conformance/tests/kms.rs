@@ -985,12 +985,13 @@ async fn kms_replicate_key() {
 
     // ReplicateKey may succeed or return an error depending on impl;
     // we just verify the API call is accepted
-    let _ = client
+    client
         .replicate_key()
         .key_id(&key_id)
         .replica_region("eu-west-1")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 #[test_action("kms", "GenerateDataKeyPair", checksum = "abecf576")]

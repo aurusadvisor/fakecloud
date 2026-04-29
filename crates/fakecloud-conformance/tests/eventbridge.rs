@@ -1111,11 +1111,12 @@ async fn eb_cancel_replay() {
         .unwrap();
 
     // Cancel may succeed or fail depending on replay state; we just verify the call works
-    let _ = client
+    client
         .cancel_replay()
         .replay_name("cancel-replay")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // ---------------------------------------------------------------------------

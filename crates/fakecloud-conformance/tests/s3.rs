@@ -454,7 +454,7 @@ async fn s3_object_retention() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .put_object_retention()
         .bucket("conf-oret")
         .key("ret.txt")
@@ -465,14 +465,16 @@ async fn s3_object_retention() {
                 .build(),
         )
         .send()
-        .await;
+        .await
+        .ok();
 
-    let _ = client
+    client
         .get_object_retention()
         .bucket("conf-oret")
         .key("ret.txt")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 #[test_action("s3", "PutObjectLegalHold", checksum = "4707c231")]
@@ -497,7 +499,7 @@ async fn s3_object_legal_hold() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .put_object_legal_hold()
         .bucket("conf-olh")
         .key("hold.txt")
@@ -507,14 +509,16 @@ async fn s3_object_legal_hold() {
                 .build(),
         )
         .send()
-        .await;
+        .await
+        .ok();
 
-    let _ = client
+    client
         .get_object_legal_hold()
         .bucket("conf-olh")
         .key("hold.txt")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- Bucket tagging --
@@ -1058,7 +1062,7 @@ async fn s3_object_lock_configuration() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .put_object_lock_configuration()
         .bucket("conf-olock")
         .object_lock_configuration(
@@ -1067,13 +1071,15 @@ async fn s3_object_lock_configuration() {
                 .build(),
         )
         .send()
-        .await;
+        .await
+        .ok();
 
-    let _ = client
+    client
         .get_object_lock_configuration()
         .bucket("conf-olock")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- Bucket replication --
@@ -1106,7 +1112,7 @@ async fn s3_bucket_replication() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .put_bucket_replication()
         .bucket("conf-repl")
         .replication_configuration(
@@ -1128,19 +1134,22 @@ async fn s3_bucket_replication() {
                 .unwrap(),
         )
         .send()
-        .await;
+        .await
+        .ok();
 
-    let _ = client
+    client
         .get_bucket_replication()
         .bucket("conf-repl")
         .send()
-        .await;
+        .await
+        .ok();
 
-    let _ = client
+    client
         .delete_bucket_replication()
         .bucket("conf-repl")
         .send()
-        .await;
+        .await
+        .ok();
 }
 
 // -- Bucket ownership controls --
