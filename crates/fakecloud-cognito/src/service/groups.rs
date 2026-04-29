@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -172,7 +172,7 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
-        let empty = std::collections::HashMap::new();
+        let empty = std::collections::BTreeMap::new();
         let pool_groups = state.groups.get(pool_id).unwrap_or(&empty);
 
         let mut groups: Vec<&Group> = pool_groups.values().collect();
@@ -342,7 +342,7 @@ impl CognitoService {
             ));
         }
 
-        let empty_user_groups: HashMap<String, Vec<String>> = HashMap::new();
+        let empty_user_groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let empty_group_list: Vec<String> = Vec::new();
         let user_group_names = state
             .user_groups
@@ -351,7 +351,7 @@ impl CognitoService {
             .get(username)
             .unwrap_or(&empty_group_list);
 
-        let empty_groups: HashMap<String, Group> = HashMap::new();
+        let empty_groups: BTreeMap<String, Group> = BTreeMap::new();
         let pool_groups = state.groups.get(pool_id).unwrap_or(&empty_groups);
 
         // Collect and sort groups by creation date
@@ -418,7 +418,7 @@ impl CognitoService {
             ));
         }
 
-        let empty_user_groups: HashMap<String, Vec<String>> = HashMap::new();
+        let empty_user_groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let pool_user_groups = state.user_groups.get(pool_id).unwrap_or(&empty_user_groups);
 
         // Find all usernames that belong to this group
@@ -429,7 +429,7 @@ impl CognitoService {
             .collect();
         usernames_in_group.sort();
 
-        let empty_users = std::collections::HashMap::new();
+        let empty_users = std::collections::BTreeMap::new();
         let pool_users = state.users.get(pool_id).unwrap_or(&empty_users);
 
         // Sort by creation date for consistent pagination

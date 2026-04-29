@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -365,7 +365,7 @@ impl CognitoService {
             })?;
 
         let now = Utc::now();
-        let mut device_attributes = HashMap::new();
+        let mut device_attributes = BTreeMap::new();
         if let Some(name) = device_name {
             device_attributes.insert("device_name".to_string(), name.to_string());
         }
@@ -711,7 +711,7 @@ impl CognitoService {
         let body = req.json_body();
         let resource_arn = require_str(&body, "ResourceArn")?;
 
-        let tags: HashMap<String, String> = body["Tags"]
+        let tags: BTreeMap<String, String> = body["Tags"]
             .as_object()
             .map(|m| {
                 m.iter()

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -202,7 +202,7 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
-        let empty = HashMap::new();
+        let empty = BTreeMap::new();
         let pool_providers = state.identity_providers.get(pool_id).unwrap_or(&empty);
 
         let mut providers: Vec<&IdentityProvider> = pool_providers.values().collect();
@@ -257,7 +257,7 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
-        let empty = HashMap::new();
+        let empty = BTreeMap::new();
         let pool_providers = state.identity_providers.get(pool_id).unwrap_or(&empty);
 
         let idp = pool_providers

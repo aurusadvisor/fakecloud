@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,50 +312,50 @@ pub struct SesState {
     pub account_id: String,
     pub region: String,
     #[serde(default)]
-    pub identities: HashMap<String, EmailIdentity>,
+    pub identities: BTreeMap<String, EmailIdentity>,
     #[serde(default)]
-    pub configuration_sets: HashMap<String, ConfigurationSet>,
+    pub configuration_sets: BTreeMap<String, ConfigurationSet>,
     #[serde(default)]
-    pub templates: HashMap<String, EmailTemplate>,
+    pub templates: BTreeMap<String, EmailTemplate>,
     #[serde(default, skip_serializing)]
     pub sent_emails: Vec<SentEmail>,
-    pub contact_lists: HashMap<String, ContactList>,
-    pub contacts: HashMap<String, HashMap<String, Contact>>,
+    pub contact_lists: BTreeMap<String, ContactList>,
+    pub contacts: BTreeMap<String, BTreeMap<String, Contact>>,
     /// Tags keyed by resource ARN, value is key→value tag map.
-    pub tags: HashMap<String, HashMap<String, String>>,
+    pub tags: BTreeMap<String, BTreeMap<String, String>>,
     /// Suppression list: email → suppressed destination info.
-    pub suppressed_destinations: HashMap<String, SuppressedDestination>,
+    pub suppressed_destinations: BTreeMap<String, SuppressedDestination>,
     /// Event destinations: config set name → list of event destinations.
-    pub event_destinations: HashMap<String, Vec<EventDestination>>,
+    pub event_destinations: BTreeMap<String, Vec<EventDestination>>,
     /// Identity policies: identity name → policy name → policy JSON document.
-    pub identity_policies: HashMap<String, HashMap<String, String>>,
+    pub identity_policies: BTreeMap<String, BTreeMap<String, String>>,
     /// Custom verification email templates: template name → template.
-    pub custom_verification_email_templates: HashMap<String, CustomVerificationEmailTemplate>,
+    pub custom_verification_email_templates: BTreeMap<String, CustomVerificationEmailTemplate>,
     /// Dedicated IP pools: pool name → pool.
-    pub dedicated_ip_pools: HashMap<String, DedicatedIpPool>,
+    pub dedicated_ip_pools: BTreeMap<String, DedicatedIpPool>,
     /// Dedicated IPs: IP address → dedicated IP info.
-    pub dedicated_ips: HashMap<String, DedicatedIp>,
+    pub dedicated_ips: BTreeMap<String, DedicatedIp>,
     /// Multi-region endpoints: endpoint name → endpoint.
-    pub multi_region_endpoints: HashMap<String, MultiRegionEndpoint>,
+    pub multi_region_endpoints: BTreeMap<String, MultiRegionEndpoint>,
     /// Account-level settings (sending, suppression, VDM, details).
     pub account_settings: AccountSettings,
     /// Import jobs: job_id → ImportJob.
-    pub import_jobs: HashMap<String, ImportJob>,
+    pub import_jobs: BTreeMap<String, ImportJob>,
     /// Export jobs: job_id → ExportJob.
-    pub export_jobs: HashMap<String, ExportJob>,
+    pub export_jobs: BTreeMap<String, ExportJob>,
     /// Tenants: tenant_name → Tenant.
-    pub tenants: HashMap<String, Tenant>,
+    pub tenants: BTreeMap<String, Tenant>,
     /// Tenant resource associations: tenant_name → Vec<resource_arn>.
-    pub tenant_resource_associations: HashMap<String, Vec<TenantResourceAssociation>>,
+    pub tenant_resource_associations: BTreeMap<String, Vec<TenantResourceAssociation>>,
     /// Reputation entities: "type/reference" → ReputationEntity.
-    pub reputation_entities: HashMap<String, ReputationEntityState>,
+    pub reputation_entities: BTreeMap<String, ReputationEntityState>,
     // ── SES v1 Receipt Rule state ──
     /// Receipt rule sets: name → rule set.
-    pub receipt_rule_sets: HashMap<String, ReceiptRuleSet>,
+    pub receipt_rule_sets: BTreeMap<String, ReceiptRuleSet>,
     /// Which rule set is active (by name).
     pub active_receipt_rule_set: Option<String>,
     /// Receipt filters: name → filter.
-    pub receipt_filters: HashMap<String, ReceiptFilter>,
+    pub receipt_filters: BTreeMap<String, ReceiptFilter>,
     /// Inbound emails processed by the introspection endpoint.
     #[serde(default, skip_serializing)]
     pub inbound_emails: Vec<InboundEmail>,
@@ -364,7 +364,7 @@ pub struct SesState {
     pub deliverability_dashboard: DeliverabilityDashboard,
     /// Deliverability test reports keyed by ReportId.
     #[serde(default)]
-    pub deliverability_test_reports: HashMap<String, DeliverabilityTestReport>,
+    pub deliverability_test_reports: BTreeMap<String, DeliverabilityTestReport>,
     /// VDM recommendations (read-only, lazily seeded once on first read).
     #[serde(default)]
     pub vdm_recommendations: Vec<VdmRecommendation>,
@@ -423,20 +423,20 @@ impl SesState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            identities: HashMap::new(),
-            configuration_sets: HashMap::new(),
-            templates: HashMap::new(),
+            identities: BTreeMap::new(),
+            configuration_sets: BTreeMap::new(),
+            templates: BTreeMap::new(),
             sent_emails: Vec::new(),
-            contact_lists: HashMap::new(),
-            contacts: HashMap::new(),
-            tags: HashMap::new(),
-            suppressed_destinations: HashMap::new(),
-            event_destinations: HashMap::new(),
-            identity_policies: HashMap::new(),
-            custom_verification_email_templates: HashMap::new(),
-            dedicated_ip_pools: HashMap::new(),
-            dedicated_ips: HashMap::new(),
-            multi_region_endpoints: HashMap::new(),
+            contact_lists: BTreeMap::new(),
+            contacts: BTreeMap::new(),
+            tags: BTreeMap::new(),
+            suppressed_destinations: BTreeMap::new(),
+            event_destinations: BTreeMap::new(),
+            identity_policies: BTreeMap::new(),
+            custom_verification_email_templates: BTreeMap::new(),
+            dedicated_ip_pools: BTreeMap::new(),
+            dedicated_ips: BTreeMap::new(),
+            multi_region_endpoints: BTreeMap::new(),
             account_settings: AccountSettings {
                 sending_enabled: true,
                 dedicated_ip_auto_warmup_enabled: false,
@@ -444,17 +444,17 @@ impl SesState {
                 vdm_attributes: None,
                 details: None,
             },
-            import_jobs: HashMap::new(),
-            export_jobs: HashMap::new(),
-            tenants: HashMap::new(),
-            tenant_resource_associations: HashMap::new(),
-            reputation_entities: HashMap::new(),
-            receipt_rule_sets: HashMap::new(),
+            import_jobs: BTreeMap::new(),
+            export_jobs: BTreeMap::new(),
+            tenants: BTreeMap::new(),
+            tenant_resource_associations: BTreeMap::new(),
+            reputation_entities: BTreeMap::new(),
+            receipt_rule_sets: BTreeMap::new(),
             active_receipt_rule_set: None,
-            receipt_filters: HashMap::new(),
+            receipt_filters: BTreeMap::new(),
             inbound_emails: Vec::new(),
             deliverability_dashboard: DeliverabilityDashboard::default(),
-            deliverability_test_reports: HashMap::new(),
+            deliverability_test_reports: BTreeMap::new(),
             vdm_recommendations: Vec::new(),
         }
     }

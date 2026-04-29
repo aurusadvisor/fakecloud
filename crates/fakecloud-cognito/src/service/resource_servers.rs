@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use http::StatusCode;
 use serde_json::{json, Value};
@@ -174,7 +174,7 @@ impl CognitoService {
 
         ensure_user_pool_exists(state, pool_id)?;
 
-        let empty = HashMap::new();
+        let empty = BTreeMap::new();
         let pool_servers = state.resource_servers.get(pool_id).unwrap_or(&empty);
 
         let mut servers: Vec<&ResourceServer> = pool_servers.values().collect();

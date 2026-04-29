@@ -751,7 +751,7 @@ mod tests {
                     email_configuration: None,
                     sms_configuration: None,
                     admin_create_user_config: None,
-                    user_pool_tags: std::collections::HashMap::new(),
+                    user_pool_tags: std::collections::BTreeMap::new(),
                     account_recovery_setting: None,
                     deletion_protection: None,
                     estimated_number_of_users: 0,

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -52,7 +52,7 @@ impl SesV2Service {
                 last_updated_at: now,
             },
         );
-        state.contacts.insert(name, HashMap::new());
+        state.contacts.insert(name, BTreeMap::new());
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }

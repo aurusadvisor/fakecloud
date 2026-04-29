@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -328,8 +328,8 @@ impl AwsService for EventBridgeService {
     }
 }
 
-fn parse_tags(body: &Value) -> HashMap<String, String> {
-    let mut tags = HashMap::new();
+fn parse_tags(body: &Value) -> BTreeMap<String, String> {
+    let mut tags = BTreeMap::new();
     if let Some(arr) = body["Tags"].as_array() {
         for tag in arr {
             if let (Some(key), Some(val)) = (tag["Key"].as_str(), tag["Value"].as_str()) {
@@ -2390,7 +2390,7 @@ impl EventBridgeService {
             managed_by: Some("prod.vhs.events.aws.internal".to_string()),
             created_by: Some(state.account_id.clone()),
             targets: vec![archive_target],
-            tags: HashMap::new(),
+            tags: BTreeMap::new(),
             last_fired: None,
         };
         let key = (bus_name, rule_name);
@@ -3499,7 +3499,7 @@ impl EventBridgeService {
 fn find_tags_mut<'a>(
     state: &'a mut crate::state::EventBridgeState,
     arn: &str,
-) -> Result<&'a mut HashMap<String, String>, AwsServiceError> {
+) -> Result<&'a mut BTreeMap<String, String>, AwsServiceError> {
     // Check buses
     for bus in state.buses.values_mut() {
         if bus.arn == arn {
@@ -3540,7 +3540,7 @@ fn find_tags_mut<'a>(
 fn find_tags<'a>(
     state: &'a crate::state::EventBridgeState,
     arn: &str,
-) -> Result<&'a HashMap<String, String>, AwsServiceError> {
+) -> Result<&'a BTreeMap<String, String>, AwsServiceError> {
     for bus in state.buses.values() {
         if bus.arn == arn {
             return Ok(&bus.tags);

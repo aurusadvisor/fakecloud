@@ -222,6 +222,7 @@ mod tests {
     use super::*;
     use crate::state::EventRule;
     use parking_lot::RwLock;
+    use std::collections::BTreeMap;
 
     fn make_state() -> SharedEventBridgeState {
         Arc::new(RwLock::new(
@@ -253,7 +254,7 @@ mod tests {
                 managed_by: None,
                 created_by: None,
                 targets,
-                tags: HashMap::new(),
+                tags: BTreeMap::new(),
                 last_fired: None,
             },
         );
