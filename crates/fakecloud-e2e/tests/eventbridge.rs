@@ -205,13 +205,8 @@ async fn eb_schedule_fires_to_sqs() {
         .unwrap();
 
     // Poll SQS until scheduler delivers at least one message (rate(1 second))
-    let messages = helpers::sqs_receive_at_least(
-        &sqs,
-        queue_url,
-        1,
-        std::time::Duration::from_secs(10),
-    )
-    .await;
+    let messages =
+        helpers::sqs_receive_at_least(&sqs, queue_url, 1, std::time::Duration::from_secs(10)).await;
     assert!(
         !messages.is_empty(),
         "expected at least one scheduled event message in SQS"
