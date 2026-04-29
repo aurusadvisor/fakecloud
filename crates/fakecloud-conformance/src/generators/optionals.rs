@@ -32,6 +32,7 @@ pub fn generate(
         input: required_input,
         expectation: Expectation::Success,
         expected_output: None,
+        followup: None,
     });
 
     // All-fields variant (only when there are 2+ optional fields, otherwise it
@@ -44,6 +45,7 @@ pub fn generate(
             input: full_input,
             expectation: Expectation::Success,
             expected_output: None,
+            followup: None,
         });
     }
 
@@ -70,6 +72,7 @@ pub fn generate(
             input,
             expectation: Expectation::Success,
             expected_output: None,
+            followup: None,
         });
     }
 

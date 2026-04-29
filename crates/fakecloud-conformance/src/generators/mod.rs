@@ -5,6 +5,7 @@ pub mod examples_diff;
 pub mod negative;
 pub mod optionals;
 pub mod proptest_gen;
+pub mod round_trip;
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -28,6 +29,26 @@ pub struct TestVariant {
     /// matching JSON type) in the actual response. Catches "optional in
     /// Smithy but AWS always emits" bugs (see #816).
     pub expected_output: Option<Value>,
+    /// Optional second-step probe instructions (e.g. follow Create with Get
+    /// and assert each input field echoes in the output). Set by the
+    /// `round_trip` strategy. Catches silent-input-drop bugs (#853).
+    pub followup: Option<RoundTripFollowup>,
+}
+
+/// Instructs the probe layer to fire a second request after the variant's
+/// own Create/Put/Update succeeds, then verify that selected input fields
+/// were preserved in the resource's GET response.
+#[derive(Debug, Clone)]
+pub struct RoundTripFollowup {
+    /// Operation to invoke against fakecloud after the variant succeeds.
+    pub get_operation: String,
+    /// Member name shared between the writer's input and the reader's
+    /// input. The probe pulls the identifier value out of the variant's
+    /// own input by this name and re-uses it for the reader's input.
+    pub id_field: String,
+    /// (input_field, output_field) pairs that must echo verbatim from the
+    /// Create input into the Get output.
+    pub echo_fields: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +67,8 @@ pub enum Strategy {
     Negative,
     /// Strategy 7: Documented `@examples` output diff against live response
     ExamplesDiff,
+    /// Strategy 8: Auto-discovered Create->Get round-trip echo
+    RoundTrip,
 }
 
 impl std::fmt::Display for Strategy {
@@ -58,6 +81,7 @@ impl std::fmt::Display for Strategy {
             Strategy::Examples => write!(f, "examples"),
             Strategy::Negative => write!(f, "negative"),
             Strategy::ExamplesDiff => write!(f, "examples_diff"),
+            Strategy::RoundTrip => write!(f, "round_trip"),
         }
     }
 }
@@ -268,6 +292,7 @@ pub fn generate_all_variants(
                 input: Value::Object(serde_json::Map::new()),
                 expectation: Expectation::Success,
                 expected_output: None,
+                followup: None,
             }]
         }
     };
@@ -296,6 +321,9 @@ pub fn generate_all_variants(
 
     // Strategy 6: Negative testing
     variants.extend(negative::generate(model, input_shape_id, overrides));
+
+    // Strategy 8: auto-discovered Create/Put/Update -> Get/Describe round-trip echo
+    variants.extend(round_trip::generate(model, operation_name, overrides));
 
     variants
 }

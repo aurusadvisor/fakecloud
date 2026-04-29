@@ -32,6 +32,14 @@ pub enum ShapeViolation {
         path: String,
         reason: ExamplesDivergenceReason,
     },
+    /// An input field on a Create/Put/Update operation did not echo into
+    /// the corresponding Get/Describe response. Catches silent-input-drop
+    /// bugs (#853 Lambda Layers).
+    RoundTripFieldNotEchoed {
+        field: String,
+        sent: serde_json::Value,
+        received: Option<serde_json::Value>,
+    },
 }
 
 /// What went wrong when diffing a response against a documented `@examples` output.
@@ -78,7 +86,55 @@ impl std::fmt::Display for ShapeViolation {
                     path, expected, got
                 ),
             },
+            ShapeViolation::RoundTripFieldNotEchoed {
+                field,
+                sent,
+                received,
+            } => match received {
+                Some(r) => write!(
+                    f,
+                    "round-trip mismatch for '{}': sent {}, got {}",
+                    field, sent, r
+                ),
+                None => write!(
+                    f,
+                    "round-trip drop for '{}': sent {}, got nothing back",
+                    field, sent
+                ),
+            },
         }
+    }
+}
+
+/// Compare a value sent on a Create/Put/Update input against the value
+/// returned for the same-named field on the corresponding Get/Describe
+/// output. Used by the `round_trip` strategy.
+///
+/// Equality is `serde_json::Value` deep-equality. The intent is to catch
+/// fakecloud silently dropping a field at the input layer or at the
+/// storage layer; the diff is binary. Treat `null` and "field absent"
+/// the same on the output side because some protocols omit nulls.
+pub fn echo_check(
+    field: &str,
+    sent: &serde_json::Value,
+    output: &serde_json::Value,
+) -> Option<ShapeViolation> {
+    let received = match output {
+        serde_json::Value::Object(map) => map.get(field),
+        _ => None,
+    };
+    match received {
+        Some(serde_json::Value::Null) | None => Some(ShapeViolation::RoundTripFieldNotEchoed {
+            field: field.to_string(),
+            sent: sent.clone(),
+            received: None,
+        }),
+        Some(v) if v == sent => None,
+        Some(v) => Some(ShapeViolation::RoundTripFieldNotEchoed {
+            field: field.to_string(),
+            sent: sent.clone(),
+            received: Some(v.clone()),
+        }),
     }
 }
 
