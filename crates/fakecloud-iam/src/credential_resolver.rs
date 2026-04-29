@@ -57,9 +57,6 @@ impl CredentialResolver for IamCredentialResolver {
     }
 }
 
-// Prevent rustc from warning on the unused import when the module is
-// included via `lib.rs` without tests referencing it.
-#[allow(dead_code)]
 fn _assert_impl<T: CredentialResolver>() {}
 const _: fn() = || {
     _assert_impl::<IamCredentialResolver>();

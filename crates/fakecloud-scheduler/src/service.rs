@@ -1087,11 +1087,6 @@ fn group_name_from_tag_arn(arn: &str) -> Result<String, AwsServiceError> {
     }
 }
 
-// Silence unused-import warnings for Arc in case refactors move
-// state handling around.
-#[allow(dead_code)]
-fn _type_check(_: Arc<()>) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

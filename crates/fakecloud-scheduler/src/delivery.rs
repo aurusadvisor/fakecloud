@@ -218,7 +218,6 @@ mod tests {
     use crate::state::{DeadLetterConfig, FlexibleTimeWindow, Schedule, Target};
     use chrono::Utc;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     type RecordedCall = (String, String, HashMap<String, SqsMessageAttribute>);
@@ -454,11 +453,5 @@ mod tests {
         let sched = make_schedule("arn:aws:ec2:us-east-1:1:instance/foo", None, None);
         assert!(deliver_target(&bus, &sched).is_ok());
         assert!(recorder.calls.lock().unwrap().is_empty());
-    }
-
-    // Silence unused warning on AtomicUsize import when we expand later.
-    #[allow(dead_code)]
-    fn _placeholder(_: AtomicUsize) {
-        let _ = Ordering::SeqCst;
     }
 }
