@@ -337,14 +337,19 @@ async fn scheduler_at_one_shot_delete_removes_schedule_after_fire() {
         .expect("one-shot should fire within 10s");
     assert_eq!(msg.body.unwrap(), "{\"one\":\"shot\"}");
 
-    // Give the ticker a beat to apply the DELETE post-fire action.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let err = sched
-        .get_schedule()
-        .name("once-delete")
-        .send()
-        .await
-        .expect_err("schedule should be deleted after firing");
+    // Poll for the DELETE post-fire action to take effect rather than
+    // sleeping a fixed duration. Still bounded by a 10s deadline.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let err = loop {
+        let result = sched.get_schedule().name("once-delete").send().await;
+        if let Err(e) = result {
+            break e;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("schedule was not deleted within 10s after firing");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
     assert!(format!("{err:?}").contains("ResourceNotFound"));
 }
 

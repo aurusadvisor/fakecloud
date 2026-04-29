@@ -95,16 +95,23 @@ async fn fire_schedule_endpoint_triggers_sqs_delivery() {
         .await
         .unwrap();
 
-    // Wait a tick so the first-bootstrap auto-fire goes to the queue,
-    // then drain it.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    sqs.receive_message()
-        .queue_url(&q_url)
-        .max_number_of_messages(10)
-        .wait_time_seconds(1)
-        .send()
-        .await
-        .unwrap();
+    // Drain any first-bootstrap auto-fire from the queue. Long-polls
+    // up to 1s per round so the bootstrap message has time to land,
+    // then loops until the queue stays empty for one round.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let resp = sqs
+            .receive_message()
+            .queue_url(&q_url)
+            .max_number_of_messages(10)
+            .wait_time_seconds(1)
+            .send()
+            .await
+            .unwrap();
+        if resp.messages().is_empty() || std::time::Instant::now() >= deadline {
+            break;
+        }
+    }
 
     // Now drive the introspection endpoint.
     let resp = reqwest::Client::new()
