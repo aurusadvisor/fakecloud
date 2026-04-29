@@ -1,6 +1,6 @@
 //! Route 53 REST-XML service implementation.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -1398,8 +1398,8 @@ impl Route53Service {
             .unwrap_or(100);
         let state = self.state.read();
         // Group by policy id; emit only the latest version of each.
-        let mut latest: HashMap<String, StoredTrafficPolicy> = HashMap::new();
-        let mut counts: HashMap<String, i64> = HashMap::new();
+        let mut latest: BTreeMap<String, StoredTrafficPolicy> = BTreeMap::new();
+        let mut counts: BTreeMap<String, i64> = BTreeMap::new();
         if let Some(account) = state.accounts.get(DEFAULT_ACCOUNT) {
             for p in account.traffic_policies.values() {
                 let entry = latest.entry(p.id.clone()).or_insert_with(|| p.clone());
@@ -2323,7 +2323,7 @@ impl Route53Service {
             arn: arn.clone(),
             version: 1,
             caller_reference: cfg.caller_reference,
-            locations: HashMap::new(),
+            locations: BTreeMap::new(),
         };
         account.cidr_collections.insert(id.clone(), stored.clone());
         drop(state);
@@ -3978,7 +3978,7 @@ impl Route53Service {
         }
         let state = self.state.read();
         let account = state.accounts.get(DEFAULT_ACCOUNT);
-        let mut sets: Vec<(String, HashMap<String, String>)> = Vec::new();
+        let mut sets: Vec<(String, BTreeMap<String, String>)> = Vec::new();
         for id in &cfg.resource_ids.resource_id {
             if let Some(a) = account {
                 if !tag_target_exists(a, &res_type, id) {
@@ -4091,7 +4091,7 @@ fn push_resource_tag_set(
     out: &mut String,
     res_type: &str,
     res_id: &str,
-    bag: &HashMap<String, String>,
+    bag: &BTreeMap<String, String>,
 ) {
     out.push_str("<ResourceTagSet>");
     out.push_str(&format!("<ResourceType>{}</ResourceType>", esc(res_type)));

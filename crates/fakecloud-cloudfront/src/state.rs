@@ -1,6 +1,6 @@
 //! In-memory state for CloudFront resources.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -27,7 +27,7 @@ pub type SharedCloudFrontState = Arc<RwLock<CloudFrontAccounts>>;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CloudFrontAccounts {
-    pub accounts: HashMap<String, AccountState>,
+    pub accounts: BTreeMap<String, AccountState>,
 }
 
 impl CloudFrontAccounts {
@@ -50,33 +50,33 @@ impl CloudFrontAccounts {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AccountState {
-    pub distributions: HashMap<String, StoredDistribution>,
-    pub invalidations: HashMap<String, StoredInvalidation>,
+    pub distributions: BTreeMap<String, StoredDistribution>,
+    pub invalidations: BTreeMap<String, StoredInvalidation>,
     /// Tags keyed by ARN.
-    pub tags: HashMap<String, Vec<Tag>>,
-    pub origin_access_controls: HashMap<String, StoredOriginAccessControl>,
-    pub cache_policies: HashMap<String, StoredCachePolicy>,
-    pub origin_request_policies: HashMap<String, StoredOriginRequestPolicy>,
-    pub response_headers_policies: HashMap<String, StoredResponseHeadersPolicy>,
-    pub continuous_deployment_policies: HashMap<String, StoredContinuousDeploymentPolicy>,
-    pub functions: HashMap<String, StoredFunction>,
-    pub public_keys: HashMap<String, StoredPublicKey>,
-    pub key_groups: HashMap<String, StoredKeyGroup>,
-    pub key_value_stores: HashMap<String, StoredKeyValueStore>,
-    pub origin_access_identities: HashMap<String, StoredOriginAccessIdentity>,
+    pub tags: BTreeMap<String, Vec<Tag>>,
+    pub origin_access_controls: BTreeMap<String, StoredOriginAccessControl>,
+    pub cache_policies: BTreeMap<String, StoredCachePolicy>,
+    pub origin_request_policies: BTreeMap<String, StoredOriginRequestPolicy>,
+    pub response_headers_policies: BTreeMap<String, StoredResponseHeadersPolicy>,
+    pub continuous_deployment_policies: BTreeMap<String, StoredContinuousDeploymentPolicy>,
+    pub functions: BTreeMap<String, StoredFunction>,
+    pub public_keys: BTreeMap<String, StoredPublicKey>,
+    pub key_groups: BTreeMap<String, StoredKeyGroup>,
+    pub key_value_stores: BTreeMap<String, StoredKeyValueStore>,
+    pub origin_access_identities: BTreeMap<String, StoredOriginAccessIdentity>,
     /// Per-distribution monitoring subscription, keyed by distribution id.
-    pub monitoring_subscriptions: HashMap<String, StoredMonitoringSubscription>,
-    pub streaming_distributions: HashMap<String, StoredStreamingDistribution>,
-    pub field_level_encryptions: HashMap<String, StoredFieldLevelEncryption>,
-    pub field_level_encryption_profiles: HashMap<String, StoredFieldLevelEncryptionProfile>,
+    pub monitoring_subscriptions: BTreeMap<String, StoredMonitoringSubscription>,
+    pub streaming_distributions: BTreeMap<String, StoredStreamingDistribution>,
+    pub field_level_encryptions: BTreeMap<String, StoredFieldLevelEncryption>,
+    pub field_level_encryption_profiles: BTreeMap<String, StoredFieldLevelEncryptionProfile>,
     /// Realtime log configs keyed by ARN.
-    pub realtime_log_configs: HashMap<String, StoredRealtimeLogConfig>,
-    pub vpc_origins: HashMap<String, StoredVpcOrigin>,
-    pub anycast_ip_lists: HashMap<String, StoredAnycastIpList>,
-    pub trust_stores: HashMap<String, StoredTrustStore>,
+    pub realtime_log_configs: BTreeMap<String, StoredRealtimeLogConfig>,
+    pub vpc_origins: BTreeMap<String, StoredVpcOrigin>,
+    pub anycast_ip_lists: BTreeMap<String, StoredAnycastIpList>,
+    pub trust_stores: BTreeMap<String, StoredTrustStore>,
     /// Resource policies keyed by resource ARN.
-    pub resource_policies: HashMap<String, StoredResourcePolicy>,
-    pub connection_groups: HashMap<String, StoredConnectionGroup>,
+    pub resource_policies: BTreeMap<String, StoredResourcePolicy>,
+    pub connection_groups: BTreeMap<String, StoredConnectionGroup>,
 }
 
 impl CloudFrontAccounts {
