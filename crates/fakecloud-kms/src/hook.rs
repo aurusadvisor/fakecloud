@@ -17,7 +17,7 @@
 //! Encryption context, key policy enforcement, and KMS-managed key
 //! rotation come in follow-up PRs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -316,7 +316,7 @@ fn provision_aws_managed_key(
         key_manager: "AWS".to_string(),
         key_state: "Enabled".to_string(),
         deletion_date: None,
-        tags: HashMap::new(),
+        tags: BTreeMap::new(),
         policy,
         key_rotation_enabled: true,
         origin: "AWS_KMS".to_string(),

@@ -45,7 +45,7 @@ impl IamService {
             path,
             created_at: Utc::now(),
             members: Vec::new(),
-            inline_policies: std::collections::HashMap::new(),
+            inline_policies: std::collections::BTreeMap::new(),
             attached_policies: Vec::new(),
         };
 

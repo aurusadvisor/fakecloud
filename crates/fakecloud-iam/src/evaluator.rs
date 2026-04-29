@@ -1686,7 +1686,7 @@ mod tests {
                 permissions_boundary: None,
             },
         );
-        let mut inline = std::collections::HashMap::new();
+        let mut inline = std::collections::BTreeMap::new();
         inline.insert(
             "AllowGet".to_string(),
             r#"{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#
@@ -1742,7 +1742,7 @@ mod tests {
                 permissions_boundary: None,
             },
         );
-        let mut inline = std::collections::HashMap::new();
+        let mut inline = std::collections::BTreeMap::new();
         inline.insert(
             "AllowGet".to_string(),
             r#"{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#
@@ -1812,7 +1812,7 @@ mod tests {
                 path: "/".into(),
                 created_at: Utc::now(),
                 members: vec!["alice".into()],
-                inline_policies: std::collections::HashMap::new(),
+                inline_policies: std::collections::BTreeMap::new(),
                 attached_policies: vec![policy_arn],
             },
         );
