@@ -14,6 +14,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
@@ -119,7 +120,7 @@ impl RdsService {
             // ── DB Clusters ──
             "CreateDBCluster" => {
                 let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let arn = format!("arn:aws:rds:{region}:{aid}:cluster:{id}");
+                let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
                 let entry = json!({
                     "DBClusterIdentifier": id, "DBClusterArn": arn,
                     "Status": "available", "Engine": get_param(req, "Engine").unwrap_or_else(|| "aurora-postgresql".to_string()),
@@ -135,7 +136,7 @@ impl RdsService {
             }
             "DeleteDBCluster" => {
                 let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let arn = format!("arn:aws:rds:{region}:{aid}:cluster:{id}");
+                let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 if let Some(m) = state.extras.get_mut("clusters") { m.remove(&id); }
@@ -143,7 +144,7 @@ impl RdsService {
             }
             "ModifyDBCluster" | "RebootDBCluster" | "StartDBCluster" | "StopDBCluster" | "FailoverDBCluster" | "BacktrackDBCluster" | "PromoteReadReplicaDBCluster" => {
                 let id = get_param(req, "DBClusterIdentifier").unwrap_or_else(|| "default".to_string());
-                let arn = format!("arn:aws:rds:{region}:{aid}:cluster:{id}");
+                let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
                 Ok(xml_response(action.as_str(), db_cluster_xml(&id, &arn), &rid))
             }
             "DescribeDBClusters" => {
@@ -160,7 +161,7 @@ impl RdsService {
             "CreateDBClusterSnapshot" | "CopyDBClusterSnapshot" => {
                 let id = get_param(req, "DBClusterSnapshotIdentifier").or_else(|| get_param(req, "TargetDBClusterSnapshotIdentifier"))
                     .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
-                let arn = format!("arn:aws:rds:{region}:{aid}:cluster-snapshot:{id}");
+                let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
                 let cluster = get_param(req, "DBClusterIdentifier").unwrap_or_else(|| "default".to_string());
                 let entry = json!({"DBClusterSnapshotIdentifier": id, "DBClusterSnapshotArn": arn, "DBClusterIdentifier": cluster, "Status": "available"});
                 let mut accounts = write_state!();
@@ -170,7 +171,7 @@ impl RdsService {
             }
             "DeleteDBClusterSnapshot" => {
                 let id = get_param(req, "DBClusterSnapshotIdentifier").ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
-                let arn = format!("arn:aws:rds:{region}:{aid}:cluster-snapshot:{id}");
+                let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 if let Some(m) = state.extras.get_mut("cluster_snapshots") { m.remove(&id); }
@@ -189,7 +190,7 @@ impl RdsService {
             "CreateDBClusterParameterGroup" | "CopyDBClusterParameterGroup" => {
                 let name = get_param(req, "DBClusterParameterGroupName").or_else(|| get_param(req, "TargetDBClusterParameterGroupIdentifier"))
                     .ok_or_else(|| missing("DBClusterParameterGroupName"))?;
-                let arn = format!("arn:aws:rds:{region}:{aid}:cluster-pg:{name}");
+                let arn = Arn::new("rds", region, &aid, &format!("cluster-pg:{name}")).to_string();
                 let family = get_param(req, "DBParameterGroupFamily").unwrap_or_else(|| "aurora-postgresql15".to_string());
                 let entry = json!({"DBClusterParameterGroupName": name, "DBClusterParameterGroupArn": arn, "DBParameterGroupFamily": family, "Description": get_param(req, "Description").unwrap_or_default()});
                 let mut accounts = write_state!();
@@ -240,7 +241,7 @@ impl RdsService {
             // ── DB Proxies ──
             "CreateDBProxy" => {
                 let name = get_param(req, "DBProxyName").ok_or_else(|| missing("DBProxyName"))?;
-                let arn = format!("arn:aws:rds:{region}:{aid}:db-proxy:{name}");
+                let arn = Arn::new("rds", region, &aid, &format!("db-proxy:{name}")).to_string();
                 let entry = json!({"DBProxyName": name, "DBProxyArn": arn, "Status": "available", "EngineFamily": get_param(req, "EngineFamily").unwrap_or_else(|| "POSTGRESQL".to_string())});
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
@@ -301,7 +302,7 @@ impl RdsService {
             "CreateOptionGroup" | "CopyOptionGroup" => {
                 let name = get_param(req, "OptionGroupName").or_else(|| get_param(req, "TargetOptionGroupIdentifier"))
                     .ok_or_else(|| missing("OptionGroupName"))?;
-                let arn = format!("arn:aws:rds:{region}:{aid}:og:{name}");
+                let arn = Arn::new("rds", region, &aid, &format!("og:{name}")).to_string();
                 let entry = json!({"OptionGroupName": name, "OptionGroupArn": arn, "EngineName": get_param(req, "EngineName").unwrap_or_else(|| "mysql".to_string()), "MajorEngineVersion": get_param(req, "MajorEngineVersion").unwrap_or_else(|| "8.0".to_string())});
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
@@ -345,7 +346,7 @@ impl RdsService {
             // ── Global clusters ──
             "CreateGlobalCluster" => {
                 let id = get_param(req, "GlobalClusterIdentifier").ok_or_else(|| missing("GlobalClusterIdentifier"))?;
-                let arn = format!("arn:aws:rds::{aid}:global-cluster:{id}");
+                let arn = Arn::global("rds", &aid, &format!("global-cluster:{id}")).to_string();
                 let entry = json!({"GlobalClusterIdentifier": id, "GlobalClusterArn": arn, "Status": "available"});
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
@@ -365,7 +366,7 @@ impl RdsService {
             // ── Integrations ──
             "CreateIntegration" => {
                 let name = get_param(req, "IntegrationName").ok_or_else(|| missing("IntegrationName"))?;
-                let arn = format!("arn:aws:rds:{region}:{aid}:integration:{name}");
+                let arn = Arn::new("rds", region, &aid, &format!("integration:{name}")).to_string();
                 let entry = json!({"IntegrationName": name, "IntegrationArn": arn, "Status": "active"});
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
@@ -478,7 +479,7 @@ impl RdsService {
                             .get(&aid)
                             .and_then(|s| s.instances.get(&id).map(|i| i.db_instance_arn.clone()))
                             .unwrap_or_else(|| {
-                                format!("arn:aws:rds:{region}:{aid}:db:{id}")
+                                Arn::new("rds", region, &aid, &format!("db:{id}")).to_string()
                             })
                     };
                     self.emit_event(

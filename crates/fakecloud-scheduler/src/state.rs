@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::multi_account::{AccountState, MultiAccountState};
 
 /// Default schedule group name, auto-created for every account and
@@ -203,13 +204,25 @@ pub struct SchedulerSnapshot {
 /// Build an EventBridge Scheduler schedule ARN.
 /// Format: `arn:aws:scheduler:<region>:<account>:schedule/<group>/<name>`.
 pub fn schedule_arn(region: &str, account_id: &str, group: &str, name: &str) -> String {
-    format!("arn:aws:scheduler:{region}:{account_id}:schedule/{group}/{name}")
+    Arn::new(
+        "scheduler",
+        region,
+        account_id,
+        &format!("schedule/{group}/{name}"),
+    )
+    .to_string()
 }
 
 /// Build a schedule-group ARN.
 /// Format: `arn:aws:scheduler:<region>:<account>:schedule-group/<group>`.
 pub fn group_arn(region: &str, account_id: &str, group: &str) -> String {
-    format!("arn:aws:scheduler:{region}:{account_id}:schedule-group/{group}")
+    Arn::new(
+        "scheduler",
+        region,
+        account_id,
+        &format!("schedule-group/{group}"),
+    )
+    .to_string()
 }
 
 #[cfg(test)]

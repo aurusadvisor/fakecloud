@@ -2365,7 +2365,7 @@ impl EventBridgeService {
         // Build the archive target with InputTransformer
         let archive_target = EventTarget {
             id: name.clone(),
-            arn: format!("arn:aws:events:{}:::", req.region),
+            arn: Arn::new("events", &req.region, "", "").to_string(),
             input: None,
             input_path: None,
             input_transformer: Some(json!({

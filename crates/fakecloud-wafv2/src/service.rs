@@ -11,6 +11,7 @@ use parking_lot::RwLock;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
@@ -1441,7 +1442,7 @@ impl Wafv2Service {
             .to_string();
         Ok(AwsResponse::ok_json(json!({
             "VersionName": version,
-            "SnsTopicArn": format!("arn:aws:sns:us-east-1::{vendor}-{name}-notifications"),
+            "SnsTopicArn": Arn::new("sns", "us-east-1", "", &format!("{vendor}-{name}-notifications")).to_string(),
             "Capacity": 50,
             "Rules": managed_rule_summaries(&vendor, &name),
             "LabelNamespace": format!("awswaf:managed:{vendor}:{name}:"),
@@ -1463,11 +1464,11 @@ impl Wafv2Service {
             "ManagedRuleSet": {
                 "Name": name,
                 "Id": id,
-                "ARN": format!("arn:aws:wafv2:{}:{}:managedruleset/{name}/{id}", req.region, req.account_id),
+                "ARN": Arn::new("wafv2", &req.region, &req.account_id, &format!("managedruleset/{name}/{id}")).to_string(),
                 "Description": format!("Managed rule set {name}"),
                 "PublishedVersions": {
                     "Version_1.0": {
-                        "AssociatedRuleGroupArn": format!("arn:aws:wafv2:{}:aws:managedrulegroup/{name}", req.region),
+                        "AssociatedRuleGroupArn": Arn::new("wafv2", &req.region, "aws", &format!("managedrulegroup/{name}")).to_string(),
                         "Capacity": 50,
                         "ForecastedLifetime": 90,
                         "PublishTimestamp": Utc::now().timestamp() as f64,
@@ -1764,7 +1765,13 @@ fn synth_arn(
     } else {
         (region, region)
     };
-    format!("arn:aws:wafv2:{region_in_arn}:{account_id}:{scope_seg}/{kind}/{name}/{id}")
+    Arn::new(
+        "wafv2",
+        region_in_arn,
+        account_id,
+        &format!("{scope_seg}/{kind}/{name}/{id}"),
+    )
+    .to_string()
 }
 
 fn parse_string_list(value: Option<&Value>) -> Vec<String> {
