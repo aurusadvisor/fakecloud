@@ -1976,9 +1976,10 @@ async fn ses_get_email_address_insights() {
         .send()
         .await
         .unwrap();
-    // Smithy GetEmailAddressInsights returns MailboxValidation. Touch the
-    // typed field to verify the response shape decoded.
-    let _ = resp.mailbox_validation();
+    // Smithy GetEmailAddressInsights returns MailboxValidation. Assert it
+    // decodes to Some so the test fails if the field is dropped from the
+    // response shape.
+    assert!(resp.mailbox_validation().is_some());
 }
 
 #[test_action("ses", "GetMessageInsights", checksum = "d1a5d397")]
