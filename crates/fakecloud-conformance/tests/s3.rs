@@ -1245,7 +1245,7 @@ async fn s3_bucket_inventory() {
         .await
         .unwrap();
 
-    let _ = client
+    client
         .get_bucket_inventory_configuration()
         .bucket("conf-inv")
         .id("conf-inv-id")
@@ -1290,7 +1290,7 @@ async fn s3_multipart_upload() {
         .unwrap();
     let upload_id = create.upload_id().unwrap().to_string();
 
-    let _ = client
+    client
         .list_multipart_uploads()
         .bucket("conf-mpu")
         .send()
@@ -1311,7 +1311,7 @@ async fn s3_multipart_upload() {
         .unwrap();
     let etag = part.e_tag().unwrap().to_string();
 
-    let _ = client
+    client
         .list_parts()
         .bucket("conf-mpu")
         .key("bigfile.bin")
@@ -1506,14 +1506,14 @@ async fn s3_analytics_configuration_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_bucket_analytics_configuration()
         .bucket("analytics-bkt")
         .id("cfg1")
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_bucket_analytics_configurations()
         .bucket("analytics-bkt")
         .send()
@@ -1578,14 +1578,14 @@ async fn s3_intelligent_tiering_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_bucket_intelligent_tiering_configuration()
         .bucket("it-bkt")
         .id("itcfg")
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_bucket_intelligent_tiering_configurations()
         .bucket("it-bkt")
         .send()
@@ -1626,14 +1626,14 @@ async fn s3_metrics_configuration_lifecycle() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_bucket_metrics_configuration()
         .bucket("metrics-bkt")
         .id("mcfg")
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_bucket_metrics_configurations()
         .bucket("metrics-bkt")
         .send()
@@ -1659,7 +1659,7 @@ async fn s3_list_bucket_inventory_configurations() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_bucket_inventory_configurations()
         .bucket("inv-list-bkt")
         .send()
@@ -1723,7 +1723,7 @@ async fn s3_abac_round_trip() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_bucket_abac()
         .bucket("abac-bkt")
         .send()
@@ -1742,7 +1742,7 @@ async fn s3_get_bucket_policy_status() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_bucket_policy_status()
         .bucket("ps-bkt")
         .send()
@@ -1902,7 +1902,7 @@ async fn s3_get_object_torrent() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .get_object_torrent()
         .bucket("torrent-bkt")
         .key("file")
@@ -1961,7 +1961,7 @@ async fn s3_select_object_content() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .select_object_content()
         .bucket("select-bkt")
         .key("data.csv")
@@ -2060,7 +2060,7 @@ async fn s3_create_session() {
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .create_session()
         .bucket("session-bkt")
         .send()

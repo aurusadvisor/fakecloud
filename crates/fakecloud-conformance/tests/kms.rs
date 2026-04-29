@@ -1050,7 +1050,7 @@ async fn kms_import_key_material_lifecycle() {
         .await
         .unwrap();
     assert!(params.import_token().is_some());
-    let _ = client
+    client
         .import_key_material()
         .key_id(key_id)
         .import_token(aws_sdk_kms::primitives::Blob::new(b"token"))

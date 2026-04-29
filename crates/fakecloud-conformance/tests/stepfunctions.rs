@@ -494,14 +494,14 @@ async fn sfn_activity_lifecycle() {
         .unwrap()
         .activity_arn()
         .to_string();
-    let _ = client
+    client
         .describe_activity()
         .activity_arn(&act)
         .send()
         .await
         .unwrap();
-    let _ = client.list_activities().send().await.unwrap();
-    let _ = client
+    client.list_activities().send().await.unwrap();
+    client
         .get_activity_task()
         .activity_arn(&act)
         .send()
@@ -621,7 +621,7 @@ async fn sfn_version_lifecycle() {
         .unwrap()
         .state_machine_version_arn()
         .to_string();
-    let _ = client
+    client
         .list_state_machine_versions()
         .state_machine_arn(&sm)
         .send()
@@ -668,13 +668,13 @@ async fn sfn_alias_lifecycle() {
         .unwrap()
         .state_machine_alias_arn()
         .to_string();
-    let _ = client
+    client
         .describe_state_machine_alias()
         .state_machine_alias_arn(&alias_arn)
         .send()
         .await
         .unwrap();
-    let _ = client
+    client
         .list_state_machine_aliases()
         .state_machine_arn(&sm)
         .send()
@@ -704,7 +704,7 @@ async fn sfn_map_run_describe_list_update_via_route() {
     // ARN and the service returns empty listings or 404 on Describe.
     let server = TestServer::start().await;
     let client = server.sfn_client().await;
-    let _ = client
+    client
         .list_map_runs()
         .execution_arn("arn:aws:states:us-east-1:123456789012:execution:foo:bar")
         .send()
@@ -807,7 +807,7 @@ async fn sfn_test_state() {
 async fn sfn_validate_state_machine_definition() {
     let server = TestServer::start().await;
     let client = server.sfn_client().await;
-    let _ = client
+    client
         .validate_state_machine_definition()
         .definition(simple_definition())
         .send()
