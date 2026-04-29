@@ -11,7 +11,7 @@
 //! TLS termination, mTLS, and raw NLB TCP are intentionally next-
 //! batch work items. The data-plane doc page enumerates the gap.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -60,9 +60,9 @@ impl Drop for BoundListener {
 struct DataPlane {
     state: SharedElbv2State,
     /// Round-robin index per target group ARN (mod target count).
-    rr_counters: Arc<Mutex<HashMap<String, usize>>>,
+    rr_counters: Arc<Mutex<BTreeMap<String, usize>>>,
     /// Sticky-session map: `AWSALB` cookie value -> `tg_arn|target_id|target_port`.
-    sticky_targets: Arc<Mutex<HashMap<String, String>>>,
+    sticky_targets: Arc<Mutex<BTreeMap<String, String>>>,
     upstream: reqwest::Client,
 }
 
@@ -87,15 +87,15 @@ pub fn spawn_dataplane(state: SharedElbv2State) {
     };
     let dp = DataPlane {
         state,
-        rr_counters: Arc::new(Mutex::new(HashMap::new())),
-        sticky_targets: Arc::new(Mutex::new(HashMap::new())),
+        rr_counters: Arc::new(Mutex::new(BTreeMap::new())),
+        sticky_targets: Arc::new(Mutex::new(BTreeMap::new())),
         upstream,
     };
     tokio::spawn(supervisor_loop(dp));
 }
 
 async fn supervisor_loop(dp: DataPlane) {
-    let mut bindings: HashMap<String, BoundListener> = HashMap::new();
+    let mut bindings: BTreeMap<String, BoundListener> = BTreeMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(SUPERVISOR_TICK_SECS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -104,7 +104,7 @@ async fn supervisor_loop(dp: DataPlane) {
     }
 }
 
-async fn reconcile(dp: &DataPlane, bindings: &mut HashMap<String, BoundListener>) {
+async fn reconcile(dp: &DataPlane, bindings: &mut BTreeMap<String, BoundListener>) {
     // 1. Snapshot the set of ALBs that need a listener and their schemes.
     let want: Vec<(String, String)> = {
         let accs = dp.state.read();
@@ -304,7 +304,7 @@ async fn handle_request(
 struct LbSnapshot {
     listeners: Vec<Listener>,
     rules: Vec<Rule>,
-    target_groups: HashMap<String, TargetGroup>,
+    target_groups: BTreeMap<String, TargetGroup>,
 }
 
 impl LbSnapshot {
@@ -350,7 +350,7 @@ fn snapshot(dp: &DataPlane, lb_arn: &str) -> Option<LbSnapshot> {
                 .filter(|r| listener_arns.contains(&r.listener_arn))
                 .cloned()
                 .collect();
-            let target_groups: HashMap<String, TargetGroup> = st
+            let target_groups: BTreeMap<String, TargetGroup> = st
                 .target_groups
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
@@ -639,7 +639,7 @@ async fn forward_action(
 }
 
 fn round_robin_pick(
-    counters: &Arc<Mutex<HashMap<String, usize>>>,
+    counters: &Arc<Mutex<BTreeMap<String, usize>>>,
     tg_arn: &str,
     n: usize,
 ) -> usize {
@@ -654,7 +654,7 @@ fn round_robin_pick(
 }
 
 fn pick_weighted(
-    counters: &Arc<Mutex<HashMap<String, usize>>>,
+    counters: &Arc<Mutex<BTreeMap<String, usize>>>,
     key: &str,
     target_groups: &[(String, i32)],
     total_weight: usize,

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -42,7 +42,7 @@ pub struct EcrState {
     pub replication_configuration: Option<ReplicationConfiguration>,
     /// Account setting flags keyed by setting name (e.g.,
     /// `BASIC_SCAN_TYPE_VERSION`, `REGISTRY_POLICY_SCOPE`).
-    pub account_settings: HashMap<String, String>,
+    pub account_settings: BTreeMap<String, String>,
     /// Layer upload state machine keyed by `uploadId`. Each entry is
     /// tied to a specific repository.
     #[serde(default)]
@@ -71,7 +71,7 @@ impl EcrState {
             registry_policy: None,
             registry_scanning_configuration: RegistryScanningConfiguration::default(),
             replication_configuration: None,
-            account_settings: HashMap::new(),
+            account_settings: BTreeMap::new(),
             layer_uploads: BTreeMap::new(),
             pull_time_exclusions: BTreeMap::new(),
             pull_through_cache_rules: BTreeMap::new(),

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -9,7 +9,7 @@ pub type SharedElbv2State = Arc<RwLock<Elbv2Accounts>>;
 
 #[derive(Default)]
 pub struct Elbv2Accounts {
-    accounts: HashMap<String, Elbv2State>,
+    accounts: BTreeMap<String, Elbv2State>,
 }
 
 impl Elbv2Accounts {
@@ -39,24 +39,24 @@ impl Elbv2Accounts {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Elbv2State {
     pub account_id: String,
-    pub load_balancers: HashMap<String, LoadBalancer>,
-    pub target_groups: HashMap<String, TargetGroup>,
-    pub listeners: HashMap<String, Listener>,
-    pub rules: HashMap<String, Rule>,
-    pub trust_stores: HashMap<String, TrustStore>,
-    pub resource_policies: HashMap<String, String>,
+    pub load_balancers: BTreeMap<String, LoadBalancer>,
+    pub target_groups: BTreeMap<String, TargetGroup>,
+    pub listeners: BTreeMap<String, Listener>,
+    pub rules: BTreeMap<String, Rule>,
+    pub trust_stores: BTreeMap<String, TrustStore>,
+    pub resource_policies: BTreeMap<String, String>,
 }
 
 impl Elbv2State {
     pub fn new(account_id: &str) -> Self {
         Self {
             account_id: account_id.to_string(),
-            load_balancers: HashMap::new(),
-            target_groups: HashMap::new(),
-            listeners: HashMap::new(),
-            rules: HashMap::new(),
-            trust_stores: HashMap::new(),
-            resource_policies: HashMap::new(),
+            load_balancers: BTreeMap::new(),
+            target_groups: BTreeMap::new(),
+            listeners: BTreeMap::new(),
+            rules: BTreeMap::new(),
+            trust_stores: BTreeMap::new(),
+            resource_policies: BTreeMap::new(),
         }
     }
 }
@@ -81,7 +81,7 @@ pub struct LoadBalancer {
     pub enable_prefix_for_ipv6_source_nat: Option<String>,
     pub ipv4_ipam_pool_id: Option<String>,
     pub tags: Vec<Tag>,
-    pub attributes: HashMap<String, String>,
+    pub attributes: BTreeMap<String, String>,
     pub minimum_capacity_units: Option<i32>,
     /// In-process data plane TCP port assigned by the OS once the
     /// data plane supervisor binds a listener for this LB. `None`
@@ -140,7 +140,7 @@ pub struct TargetGroup {
     pub load_balancer_arns: Vec<String>,
     pub targets: Vec<TargetDescription>,
     pub tags: Vec<Tag>,
-    pub attributes: HashMap<String, String>,
+    pub attributes: BTreeMap<String, String>,
     pub created_time: DateTime<Utc>,
 }
 
@@ -197,7 +197,7 @@ pub struct Listener {
     pub alpn_policy: Vec<String>,
     pub mutual_authentication: Option<MutualAuthentication>,
     pub tags: Vec<Tag>,
-    pub attributes: HashMap<String, String>,
+    pub attributes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,7 +301,7 @@ pub struct TrustStore {
     pub total_revoked_entries: i64,
     pub created_time: DateTime<Utc>,
     pub ca_certificates_bundle: Option<Vec<u8>>,
-    pub revocations: HashMap<i64, TrustStoreRevocation>,
+    pub revocations: BTreeMap<i64, TrustStoreRevocation>,
     pub next_revocation_id: i64,
     pub tags: Vec<Tag>,
 }
