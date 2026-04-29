@@ -6,6 +6,7 @@ use http::StatusCode;
 use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_aws::xml::xml_escape;
+use fakecloud_core::query::query_response_xml;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
@@ -363,8 +364,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeCacheEngineVersions",
+                ELASTICACHE_NS,
                 &format!("<CacheEngineVersions>{members_xml}</CacheEngineVersions>{marker_xml}"),
                 &request.request_id,
             ),
@@ -412,8 +414,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeCacheParameterGroups",
+                ELASTICACHE_NS,
                 &format!("<CacheParameterGroups>{members_xml}</CacheParameterGroups>{marker_xml}"),
                 &request.request_id,
             ),
@@ -482,8 +485,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeReservedCacheNodes",
+                ELASTICACHE_NS,
                 &format!("<ReservedCacheNodes>{members_xml}</ReservedCacheNodes>{marker_xml}"),
                 &request.request_id,
             ),
@@ -549,8 +553,8 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
-                "DescribeReservedCacheNodesOfferings",
+            query_response_xml(
+                "DescribeReservedCacheNodesOfferings", ELASTICACHE_NS,
                 &format!(
                     "<ReservedCacheNodesOfferings>{members_xml}</ReservedCacheNodesOfferings>{marker_xml}"
                 ),
@@ -577,8 +581,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeEngineDefaultParameters",
+                ELASTICACHE_NS,
                 &format!(
                     "<EngineDefaults>\
                      <CacheParameterGroupFamily>{}</CacheParameterGroupFamily>\
@@ -644,8 +649,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "CreateCacheSubnetGroup",
+                ELASTICACHE_NS,
                 &format!("<CacheSubnetGroup>{xml}</CacheSubnetGroup>"),
                 &request.request_id,
             ),
@@ -698,8 +704,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeCacheSubnetGroups",
+                ELASTICACHE_NS,
                 &format!("<CacheSubnetGroups>{members_xml}</CacheSubnetGroups>{marker_xml}"),
                 &request.request_id,
             ),
@@ -735,7 +742,12 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("DeleteCacheSubnetGroup", "", &request.request_id),
+            query_response_xml(
+                "DeleteCacheSubnetGroup",
+                ELASTICACHE_NS,
+                "",
+                &request.request_id,
+            ),
         ))
     }
 
@@ -770,8 +782,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "ModifyCacheSubnetGroup",
+                ELASTICACHE_NS,
                 &format!("<CacheSubnetGroup>{xml}</CacheSubnetGroup>"),
                 &request.request_id,
             ),
@@ -933,8 +946,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "CreateCacheCluster",
+                ELASTICACHE_NS,
                 &format!("<CacheCluster>{xml}</CacheCluster>"),
                 &request.request_id,
             ),
@@ -988,8 +1002,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeCacheClusters",
+                ELASTICACHE_NS,
                 &format!("<CacheClusters>{members_xml}</CacheClusters>{marker_xml}"),
                 &request.request_id,
             ),
@@ -1032,8 +1047,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DeleteCacheCluster",
+                ELASTICACHE_NS,
                 &format!("<CacheCluster>{xml}</CacheCluster>"),
                 &request.request_id,
             ),
@@ -1163,8 +1179,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "CreateReplicationGroup",
+                ELASTICACHE_NS,
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
                 &request.request_id,
             ),
@@ -1248,8 +1265,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "CreateGlobalReplicationGroup",
+                ELASTICACHE_NS,
                 &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
                 &request.request_id,
             ),
@@ -1312,8 +1330,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeGlobalReplicationGroups",
+                ELASTICACHE_NS,
                 &format!(
                     "<GlobalReplicationGroups>{groups_xml}</GlobalReplicationGroups>{marker_xml}"
                 ),
@@ -1369,8 +1388,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeReplicationGroups",
+                ELASTICACHE_NS,
                 &format!("<ReplicationGroups>{members_xml}</ReplicationGroups>{marker_xml}"),
                 &request.request_id,
             ),
@@ -1420,8 +1440,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DeleteGlobalReplicationGroup",
+                ELASTICACHE_NS,
                 &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
                 &request.request_id,
             ),
@@ -1462,8 +1483,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DeleteReplicationGroup",
+                ELASTICACHE_NS,
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
                 &request.request_id,
             ),
@@ -1599,8 +1621,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "CreateServerlessCache",
+                ELASTICACHE_NS,
                 &format!("<ServerlessCache>{xml}</ServerlessCache>"),
                 &request.request_id,
             ),
@@ -1646,8 +1669,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeServerlessCaches",
+                ELASTICACHE_NS,
                 &format!("<ServerlessCaches>{members_xml}</ServerlessCaches>{next_token_xml}"),
                 &request.request_id,
             ),
@@ -1687,8 +1711,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DeleteServerlessCache",
+                ELASTICACHE_NS,
                 &format!("<ServerlessCache>{xml}</ServerlessCache>"),
                 &request.request_id,
             ),
@@ -1762,8 +1787,9 @@ impl ElastiCacheService {
         let xml = serverless_cache_xml(cache);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "ModifyServerlessCache",
+                ELASTICACHE_NS,
                 &format!("<ServerlessCache>{xml}</ServerlessCache>"),
                 &request.request_id,
             ),
@@ -1833,8 +1859,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "CreateServerlessCacheSnapshot",
+                ELASTICACHE_NS,
                 &format!("<ServerlessCacheSnapshot>{xml}</ServerlessCacheSnapshot>"),
                 &request.request_id,
             ),
@@ -1914,8 +1941,8 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
-                "DescribeServerlessCacheSnapshots",
+            query_response_xml(
+                "DescribeServerlessCacheSnapshots", ELASTICACHE_NS,
                 &format!(
                     "<ServerlessCacheSnapshots>{members_xml}</ServerlessCacheSnapshots>{next_token_xml}"
                 ),
@@ -1950,8 +1977,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DeleteServerlessCacheSnapshot",
+                ELASTICACHE_NS,
                 &format!("<ServerlessCacheSnapshot>{xml}</ServerlessCacheSnapshot>"),
                 &request.request_id,
             ),
@@ -2050,8 +2078,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "CreateSnapshot",
+                ELASTICACHE_NS,
                 &format!("<Snapshot>{xml}</Snapshot>"),
                 &request.request_id,
             ),
@@ -2116,8 +2145,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeSnapshots",
+                ELASTICACHE_NS,
                 &format!("<Snapshots>{members_xml}</Snapshots>{marker_xml}"),
                 &request.request_id,
             ),
@@ -2143,8 +2173,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DeleteSnapshot",
+                ELASTICACHE_NS,
                 &format!("<Snapshot>{xml}</Snapshot>"),
                 &request.request_id,
             ),
@@ -2241,8 +2272,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "ModifyReplicationGroup",
+                ELASTICACHE_NS,
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
                 &request.request_id,
             ),
@@ -2329,8 +2361,9 @@ impl ElastiCacheService {
         let xml = global_replication_group_xml(group, true);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "ModifyGlobalReplicationGroup",
+                ELASTICACHE_NS,
                 &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
                 &request.request_id,
             ),
@@ -2422,8 +2455,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "IncreaseReplicaCount",
+                ELASTICACHE_NS,
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
                 &request.request_id,
             ),
@@ -2515,8 +2549,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DecreaseReplicaCount",
+                ELASTICACHE_NS,
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
                 &request.request_id,
             ),
@@ -2556,8 +2591,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "TestFailover",
+                ELASTICACHE_NS,
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
                 &request.request_id,
             ),
@@ -2610,8 +2646,9 @@ impl ElastiCacheService {
         let xml = global_replication_group_xml(group, true);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DisassociateGlobalReplicationGroup",
+                ELASTICACHE_NS,
                 &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
                 &request.request_id,
             ),
@@ -2664,8 +2701,9 @@ impl ElastiCacheService {
         let xml = global_replication_group_xml(group, true);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "FailoverGlobalReplicationGroup",
+                ELASTICACHE_NS,
                 &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
                 &request.request_id,
             ),
@@ -2777,7 +2815,7 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("CreateUser", &xml, &request.request_id),
+            query_response_xml("CreateUser", ELASTICACHE_NS, &xml, &request.request_id),
         ))
     }
 
@@ -2819,8 +2857,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeUsers",
+                ELASTICACHE_NS,
                 &format!("<Users>{members_xml}</Users>{marker_xml}"),
                 &request.request_id,
             ),
@@ -2862,7 +2901,7 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("DeleteUser", &xml, &request.request_id),
+            query_response_xml("DeleteUser", ELASTICACHE_NS, &xml, &request.request_id),
         ))
     }
 
@@ -2944,7 +2983,7 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("CreateUserGroup", &xml, &request.request_id),
+            query_response_xml("CreateUserGroup", ELASTICACHE_NS, &xml, &request.request_id),
         ))
     }
 
@@ -2986,8 +3025,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeUserGroups",
+                ELASTICACHE_NS,
                 &format!("<UserGroups>{members_xml}</UserGroups>{marker_xml}"),
                 &request.request_id,
             ),
@@ -3023,7 +3063,7 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("DeleteUserGroup", &xml, &request.request_id),
+            query_response_xml("DeleteUserGroup", ELASTICACHE_NS, &xml, &request.request_id),
         ))
     }
 
@@ -3047,8 +3087,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "AddTagsToResource",
+                ELASTICACHE_NS,
                 &format!("<TagList>{tag_xml}</TagList>"),
                 &request.request_id,
             ),
@@ -3073,8 +3114,9 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "ListTagsForResource",
+                ELASTICACHE_NS,
                 &format!("<TagList>{tag_xml}</TagList>"),
                 &request.request_id,
             ),
@@ -3102,7 +3144,12 @@ impl ElastiCacheService {
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("RemoveTagsFromResource", "", &request.request_id),
+            query_response_xml(
+                "RemoveTagsFromResource",
+                ELASTICACHE_NS,
+                "",
+                &request.request_id,
+            ),
         ))
     }
 
@@ -3142,7 +3189,12 @@ impl ElastiCacheService {
         );
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("CreateCacheSecurityGroup", &xml, &request.request_id),
+            query_response_xml(
+                "CreateCacheSecurityGroup",
+                ELASTICACHE_NS,
+                &xml,
+                &request.request_id,
+            ),
         ))
     }
 
@@ -3162,7 +3214,12 @@ impl ElastiCacheService {
         })?;
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("DeleteCacheSecurityGroup", "", &request.request_id),
+            query_response_xml(
+                "DeleteCacheSecurityGroup",
+                ELASTICACHE_NS,
+                "",
+                &request.request_id,
+            ),
         ))
     }
 
@@ -3213,8 +3270,9 @@ impl ElastiCacheService {
             .unwrap_or_default();
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeCacheSecurityGroups",
+                ELASTICACHE_NS,
                 &format!("<CacheSecurityGroups>{members}</CacheSecurityGroups>{marker_xml}"),
                 &request.request_id,
             ),
@@ -3259,8 +3317,9 @@ impl ElastiCacheService {
         );
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "AuthorizeCacheSecurityGroupIngress",
+                ELASTICACHE_NS,
                 &xml,
                 &request.request_id,
             ),
@@ -3300,7 +3359,12 @@ impl ElastiCacheService {
         );
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("RevokeCacheSecurityGroupIngress", &xml, &request.request_id),
+            query_response_xml(
+                "RevokeCacheSecurityGroupIngress",
+                ELASTICACHE_NS,
+                &xml,
+                &request.request_id,
+            ),
         ))
     }
 
@@ -3342,7 +3406,12 @@ impl ElastiCacheService {
         let xml = cache_parameter_group_xml(&group);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("CreateCacheParameterGroup", &xml, &request.request_id),
+            query_response_xml(
+                "CreateCacheParameterGroup",
+                ELASTICACHE_NS,
+                &xml,
+                &request.request_id,
+            ),
         ))
     }
 
@@ -3367,7 +3436,12 @@ impl ElastiCacheService {
         state.parameter_group_parameters.remove(&name);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("DeleteCacheParameterGroup", "", &request.request_id),
+            query_response_xml(
+                "DeleteCacheParameterGroup",
+                ELASTICACHE_NS,
+                "",
+                &request.request_id,
+            ),
         ))
     }
 
@@ -3422,7 +3496,12 @@ impl ElastiCacheService {
         );
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("ModifyCacheParameterGroup", &body, &request.request_id),
+            query_response_xml(
+                "ModifyCacheParameterGroup",
+                ELASTICACHE_NS,
+                &body,
+                &request.request_id,
+            ),
         ))
     }
 
@@ -3459,7 +3538,12 @@ impl ElastiCacheService {
         );
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("ResetCacheParameterGroup", &body, &request.request_id),
+            query_response_xml(
+                "ResetCacheParameterGroup",
+                ELASTICACHE_NS,
+                &body,
+                &request.request_id,
+            ),
         ))
     }
 
@@ -3497,8 +3581,8 @@ impl ElastiCacheService {
             .unwrap_or_default();
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
-                "DescribeCacheParameters",
+            query_response_xml(
+                "DescribeCacheParameters", ELASTICACHE_NS,
                 &format!("<Parameters>{members}</Parameters><CacheNodeTypeSpecificParameters/>{marker_xml}"),
                 &request.request_id,
             ),
@@ -3533,8 +3617,9 @@ impl ElastiCacheService {
         let xml = cache_cluster_xml(cluster, true);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "ModifyCacheCluster",
+                ELASTICACHE_NS,
                 &format!("<CacheCluster>{xml}</CacheCluster>"),
                 &request.request_id,
             ),
@@ -3556,8 +3641,9 @@ impl ElastiCacheService {
         let xml = cache_cluster_xml(cluster, true);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "RebootCacheCluster",
+                ELASTICACHE_NS,
                 &format!("<CacheCluster>{xml}</CacheCluster>"),
                 &request.request_id,
             ),
@@ -3583,8 +3669,9 @@ impl ElastiCacheService {
         body.push_str("</ScaleDownModifications>");
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "ListAllowedNodeTypeModifications",
+                ELASTICACHE_NS,
                 &body,
                 &request.request_id,
             ),
@@ -3614,8 +3701,9 @@ impl ElastiCacheService {
         let xml = replication_group_xml(group, &region);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "ModifyReplicationGroupShardConfiguration",
+                ELASTICACHE_NS,
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
                 &request.request_id,
             ),
@@ -3662,8 +3750,9 @@ impl ElastiCacheService {
         let xml = global_replication_group_xml(group, true);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 action,
+                ELASTICACHE_NS,
                 &format!("<GlobalReplicationGroup>{xml}</GlobalReplicationGroup>"),
                 &request.request_id,
             ),
@@ -3691,7 +3780,7 @@ impl ElastiCacheService {
         let xml = user_xml(user);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("ModifyUser", &xml, &request.request_id),
+            query_response_xml("ModifyUser", ELASTICACHE_NS, &xml, &request.request_id),
         ))
     }
 
@@ -3718,7 +3807,7 @@ impl ElastiCacheService {
         let xml = user_group_xml(group);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("ModifyUserGroup", &xml, &request.request_id),
+            query_response_xml("ModifyUserGroup", ELASTICACHE_NS, &xml, &request.request_id),
         ))
     }
 
@@ -3780,8 +3869,9 @@ impl ElastiCacheService {
         let xml = reserved_cache_node_xml(&node);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "PurchaseReservedCacheNodesOffering",
+                ELASTICACHE_NS,
                 &format!("<ReservedCacheNode>{xml}</ReservedCacheNode>"),
                 &request.request_id,
             ),
@@ -3815,8 +3905,9 @@ impl ElastiCacheService {
             .unwrap_or_default();
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "DescribeEvents",
+                ELASTICACHE_NS,
                 &format!("<Events>{members}</Events>{marker_xml}"),
                 &request.request_id,
             ),
@@ -3830,7 +3921,12 @@ impl ElastiCacheService {
         let body = "<ServiceUpdates/>";
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("DescribeServiceUpdates", body, &request.request_id),
+            query_response_xml(
+                "DescribeServiceUpdates",
+                ELASTICACHE_NS,
+                body,
+                &request.request_id,
+            ),
         ))
     }
 
@@ -3841,7 +3937,12 @@ impl ElastiCacheService {
         let body = "<UpdateActions/>";
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap("DescribeUpdateActions", body, &request.request_id),
+            query_response_xml(
+                "DescribeUpdateActions",
+                ELASTICACHE_NS,
+                body,
+                &request.request_id,
+            ),
         ))
     }
 
@@ -3889,7 +3990,7 @@ impl ElastiCacheService {
         );
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(action, &body, &request.request_id),
+            query_response_xml(action, ELASTICACHE_NS, &body, &request.request_id),
         ))
     }
 
@@ -3921,8 +4022,9 @@ impl ElastiCacheService {
         state.snapshots.insert(target, snap);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "CopySnapshot",
+                ELASTICACHE_NS,
                 &format!("<Snapshot>{xml}</Snapshot>"),
                 &request.request_id,
             ),
@@ -3961,8 +4063,9 @@ impl ElastiCacheService {
         state.serverless_cache_snapshots.insert(target, snap);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "CopyServerlessCacheSnapshot",
+                ELASTICACHE_NS,
                 &format!("<ServerlessCacheSnapshot>{xml}</ServerlessCacheSnapshot>"),
                 &request.request_id,
             ),
@@ -3992,8 +4095,9 @@ impl ElastiCacheService {
         let _ = bucket;
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "ExportServerlessCacheSnapshot",
+                ELASTICACHE_NS,
                 &format!("<ServerlessCacheSnapshot>{xml}</ServerlessCacheSnapshot>"),
                 &request.request_id,
             ),
@@ -4029,8 +4133,9 @@ impl ElastiCacheService {
         let xml = replication_group_xml(group, &region);
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 "CompleteMigration",
+                ELASTICACHE_NS,
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
                 &request.request_id,
             ),
@@ -4085,8 +4190,9 @@ impl ElastiCacheService {
         );
         Ok(AwsResponse::xml(
             StatusCode::OK,
-            xml_wrap(
+            query_response_xml(
                 action,
+                ELASTICACHE_NS,
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
                 &request.request_id,
             ),
@@ -4511,10 +4617,6 @@ fn filter_engine_versions(
 }
 
 // XML formatting
-
-fn xml_wrap(action: &str, inner: &str, request_id: &str) -> String {
-    fakecloud_core::query::query_response_xml(action, ELASTICACHE_NS, inner, request_id)
-}
 
 fn engine_version_xml(v: &CacheEngineVersion) -> String {
     format!(
@@ -5489,7 +5591,7 @@ mod tests {
 
     #[test]
     fn xml_wrap_produces_valid_response() {
-        let xml = xml_wrap("TestAction", "<Data>ok</Data>", "req-123");
+        let xml = query_response_xml("TestAction", ELASTICACHE_NS, "<Data>ok</Data>", "req-123");
         assert!(xml.contains("<TestActionResponse"));
         assert!(xml.contains("<TestActionResult>"));
         assert!(xml.contains("<RequestId>req-123</RequestId>"));
