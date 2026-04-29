@@ -69,9 +69,9 @@ pub fn start_build_workflow(
     s.ar_build_workflows
         .insert((policy_arn, workflow_id.clone()), workflow);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({ "buildWorkflowId": workflow_id })).unwrap(),
+        json!({ "buildWorkflowId": workflow_id }),
     ))
 }
 

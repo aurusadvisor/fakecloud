@@ -40,9 +40,9 @@ pub fn create_custom_model_deployment(
     s.custom_model_deployments
         .insert(deployment_arn.clone(), deployment);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({ "customModelDeploymentArn": deployment_arn })).unwrap(),
+        json!({ "customModelDeploymentArn": deployment_arn }),
     ))
 }
 

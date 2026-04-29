@@ -50,9 +50,9 @@ pub fn create_marketplace_model_endpoint(
     s.marketplace_endpoints
         .insert(endpoint_arn.clone(), endpoint);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({ "marketplaceModelEndpointArn": endpoint_arn })).unwrap(),
+        json!({ "marketplaceModelEndpointArn": endpoint_arn }),
     ))
 }
 

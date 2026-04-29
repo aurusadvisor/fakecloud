@@ -55,9 +55,9 @@ pub fn create_inference_profile(
 
     s.inference_profiles.insert(profile_arn.clone(), profile);
 
-    Ok(AwsResponse::json(
+    Ok(AwsResponse::json_value(
         StatusCode::CREATED,
-        serde_json::to_string(&json!({ "inferenceProfileArn": profile_arn })).unwrap(),
+        json!({ "inferenceProfileArn": profile_arn }),
     ))
 }
 
