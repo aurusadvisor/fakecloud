@@ -6,8 +6,8 @@ use fakecloud_core::validation::*;
 
 use crate::state::IamGroup;
 
-use fakecloud_core::query::required_param;
 use super::{empty_response, generate_id, url_encode, IamService};
+use fakecloud_core::query::required_param;
 
 use fakecloud_aws::xml::xml_escape;
 

@@ -448,8 +448,8 @@ impl RdsService {
         let preferred_backup_window = optional_query_param(request, "PreferredBackupWindow")
             .unwrap_or_else(|| "03:00-04:00".to_string());
         let option_group_name = optional_query_param(request, "OptionGroupName");
-        let multi_az =
-            parse_optional_bool(optional_query_param(request, "MultiAZ").as_deref())?.unwrap_or(false);
+        let multi_az = parse_optional_bool(optional_query_param(request, "MultiAZ").as_deref())?
+            .unwrap_or(false);
 
         validate_create_request(
             &db_instance_identifier,
@@ -626,7 +626,8 @@ impl RdsService {
         let skip_final_snapshot =
             parse_optional_bool(optional_query_param(request, "SkipFinalSnapshot").as_deref())?
                 .unwrap_or(false);
-        let final_db_snapshot_identifier = optional_query_param(request, "FinalDBSnapshotIdentifier");
+        let final_db_snapshot_identifier =
+            optional_query_param(request, "FinalDBSnapshotIdentifier");
 
         if skip_final_snapshot && final_db_snapshot_identifier.is_some() {
             return Err(AwsServiceError::aws_error(
@@ -1024,7 +1025,8 @@ impl RdsService {
         let engine = optional_query_param(request, "Engine");
         let engine_version = optional_query_param(request, "EngineVersion");
         let family = optional_query_param(request, "DBParameterGroupFamily");
-        let default_only = parse_optional_bool(optional_query_param(request, "DefaultOnly").as_deref())?;
+        let default_only =
+            parse_optional_bool(optional_query_param(request, "DefaultOnly").as_deref())?;
 
         let mut versions = filter_engine_versions(
             &default_engine_versions(),
@@ -1588,7 +1590,8 @@ impl RdsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
-        let source_db_instance_identifier = required_query_param(request, "SourceDBInstanceIdentifier")?;
+        let source_db_instance_identifier =
+            required_query_param(request, "SourceDBInstanceIdentifier")?;
 
         let runtime = self.runtime.as_ref().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -1759,7 +1762,8 @@ impl RdsService {
 
     fn create_db_subnet_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let db_subnet_group_name = required_query_param(request, "DBSubnetGroupName")?;
-        let db_subnet_group_description = required_query_param(request, "DBSubnetGroupDescription")?;
+        let db_subnet_group_description =
+            required_query_param(request, "DBSubnetGroupDescription")?;
         let subnet_ids = parse_subnet_ids(request)?;
 
         if subnet_ids.is_empty() {

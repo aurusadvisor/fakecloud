@@ -338,7 +338,8 @@ impl ElastiCacheService {
         let engine = optional_query_param(request, "Engine");
         let engine_version = optional_query_param(request, "EngineVersion");
         let family = optional_query_param(request, "CacheParameterGroupFamily");
-        let default_only = parse_optional_bool(optional_query_param(request, "DefaultOnly").as_deref())?;
+        let default_only =
+            parse_optional_bool(optional_query_param(request, "DefaultOnly").as_deref())?;
         let max_records = optional_usize_param(request, "MaxRecords")?;
         let marker = optional_query_param(request, "Marker");
 
@@ -784,7 +785,8 @@ impl ElastiCacheService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let cache_cluster_id = required_query_param(request, "CacheClusterId")?;
-        let engine = optional_query_param(request, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
+        let engine =
+            optional_query_param(request, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
         validate_engine(&engine)?;
 
         let default_version = match engine.as_str() {
@@ -792,8 +794,8 @@ impl ElastiCacheService {
             ENGINE_MEMCACHED => "1.6.22",
             _ => "7.1",
         };
-        let engine_version =
-            optional_query_param(request, "EngineVersion").unwrap_or_else(|| default_version.to_string());
+        let engine_version = optional_query_param(request, "EngineVersion")
+            .unwrap_or_else(|| default_version.to_string());
         let cache_node_type = optional_query_param(request, "CacheNodeType")
             .unwrap_or_else(|| "cache.t3.micro".to_string());
         let num_cache_nodes = match optional_query_param(request, "NumCacheNodes") {
@@ -816,12 +818,13 @@ impl ElastiCacheService {
             }
             None => 1,
         };
-        let cache_subnet_group_name =
-            optional_query_param(request, "CacheSubnetGroupName").or_else(|| Some("default".to_string()));
+        let cache_subnet_group_name = optional_query_param(request, "CacheSubnetGroupName")
+            .or_else(|| Some("default".to_string()));
         let replication_group_id = optional_query_param(request, "ReplicationGroupId");
-        let auto_minor_version_upgrade =
-            parse_optional_bool(optional_query_param(request, "AutoMinorVersionUpgrade").as_deref())?
-                .unwrap_or(true);
+        let auto_minor_version_upgrade = parse_optional_bool(
+            optional_query_param(request, "AutoMinorVersionUpgrade").as_deref(),
+        )?
+        .unwrap_or(true);
 
         let (preferred_availability_zone, arn) = {
             let mut accounts = self.state.write();
@@ -865,8 +868,9 @@ impl ElastiCacheService {
                 }
             }
 
-            let preferred_availability_zone = optional_query_param(request, "PreferredAvailabilityZone")
-                .unwrap_or_else(|| format!("{}a", state.region));
+            let preferred_availability_zone =
+                optional_query_param(request, "PreferredAvailabilityZone")
+                    .unwrap_or_else(|| format!("{}a", state.region));
             let arn = format!(
                 "arn:aws:elasticache:{}:{}:cluster:{}",
                 state.region, state.account_id, cache_cluster_id
@@ -1047,7 +1051,8 @@ impl ElastiCacheService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let replication_group_id = required_query_param(request, "ReplicationGroupId")?;
         let description = required_query_param(request, "ReplicationGroupDescription")?;
-        let engine = optional_query_param(request, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
+        let engine =
+            optional_query_param(request, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
         validate_engine(&engine)?;
         reject_memcached_for(&engine, "Replication groups")?;
         let default_version = if engine == ENGINE_VALKEY {
@@ -1055,8 +1060,8 @@ impl ElastiCacheService {
         } else {
             "7.1"
         };
-        let engine_version =
-            optional_query_param(request, "EngineVersion").unwrap_or_else(|| default_version.to_string());
+        let engine_version = optional_query_param(request, "EngineVersion")
+            .unwrap_or_else(|| default_version.to_string());
         let cache_node_type = optional_query_param(request, "CacheNodeType")
             .unwrap_or_else(|| "cache.t3.micro".to_string());
         let num_cache_clusters = match optional_query_param(request, "NumCacheClusters") {
@@ -1079,9 +1084,10 @@ impl ElastiCacheService {
             }
             None => 1,
         };
-        let automatic_failover =
-            parse_optional_bool(optional_query_param(request, "AutomaticFailoverEnabled").as_deref())?
-                .unwrap_or(false);
+        let automatic_failover = parse_optional_bool(
+            optional_query_param(request, "AutomaticFailoverEnabled").as_deref(),
+        )?
+        .unwrap_or(false);
         // Reserve the ID under a write lock before starting the container.
         {
             let mut accounts = self.state.write();
@@ -1177,7 +1183,8 @@ impl ElastiCacheService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let suffix = required_query_param(request, "GlobalReplicationGroupIdSuffix")?;
-        let primary_replication_group_id = required_query_param(request, "PrimaryReplicationGroupId")?;
+        let primary_replication_group_id =
+            required_query_param(request, "PrimaryReplicationGroupId")?;
         let description =
             optional_query_param(request, "GlobalReplicationGroupDescription").unwrap_or_default();
 
@@ -1382,7 +1389,8 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let global_replication_group_id = required_query_param(request, "GlobalReplicationGroupId")?;
+        let global_replication_group_id =
+            required_query_param(request, "GlobalReplicationGroupId")?;
         let retain_primary = parse_required_bool(request, "RetainPrimaryReplicationGroup")?;
 
         let mut accounts = self.state.write();
@@ -1847,7 +1855,8 @@ impl ElastiCacheService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let serverless_cache_name = optional_query_param(request, "ServerlessCacheName");
-        let serverless_cache_snapshot_name = optional_query_param(request, "ServerlessCacheSnapshotName");
+        let serverless_cache_snapshot_name =
+            optional_query_param(request, "ServerlessCacheSnapshotName");
         let snapshot_type = optional_query_param(request, "SnapshotType");
         let max_results = optional_usize_param(request, "MaxResults")?;
         let next_token = optional_query_param(request, "NextToken");
@@ -2161,8 +2170,9 @@ impl ElastiCacheService {
         let new_description = optional_query_param(request, "ReplicationGroupDescription");
         let new_cache_node_type = optional_query_param(request, "CacheNodeType");
         let new_engine_version = optional_query_param(request, "EngineVersion");
-        let new_automatic_failover =
-            parse_optional_bool(optional_query_param(request, "AutomaticFailoverEnabled").as_deref())?;
+        let new_automatic_failover = parse_optional_bool(
+            optional_query_param(request, "AutomaticFailoverEnabled").as_deref(),
+        )?;
         let new_snapshot_retention_limit = optional_query_param(request, "SnapshotRetentionLimit")
             .map(|v| {
                 let val = v.parse::<i32>().map_err(|_| {
@@ -2254,14 +2264,16 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let global_replication_group_id = required_query_param(request, "GlobalReplicationGroupId")?;
+        let global_replication_group_id =
+            required_query_param(request, "GlobalReplicationGroupId")?;
         let _apply_immediately = parse_required_bool(request, "ApplyImmediately")?;
         let new_description = optional_query_param(request, "GlobalReplicationGroupDescription");
         let new_cache_node_type = optional_query_param(request, "CacheNodeType");
         let new_engine = optional_query_param(request, "Engine");
         let new_engine_version = optional_query_param(request, "EngineVersion");
-        let new_automatic_failover =
-            parse_optional_bool(optional_query_param(request, "AutomaticFailoverEnabled").as_deref())?;
+        let new_automatic_failover = parse_optional_bool(
+            optional_query_param(request, "AutomaticFailoverEnabled").as_deref(),
+        )?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -2569,7 +2581,8 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let global_replication_group_id = required_query_param(request, "GlobalReplicationGroupId")?;
+        let global_replication_group_id =
+            required_query_param(request, "GlobalReplicationGroupId")?;
         let replication_group_id = required_query_param(request, "ReplicationGroupId")?;
         let replication_group_region = required_query_param(request, "ReplicationGroupRegion")?;
 
@@ -2623,9 +2636,11 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let global_replication_group_id = required_query_param(request, "GlobalReplicationGroupId")?;
+        let global_replication_group_id =
+            required_query_param(request, "GlobalReplicationGroupId")?;
         let primary_region = required_query_param(request, "PrimaryRegion")?;
-        let primary_replication_group_id = required_query_param(request, "PrimaryReplicationGroupId")?;
+        let primary_replication_group_id =
+            required_query_param(request, "PrimaryReplicationGroupId")?;
 
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);

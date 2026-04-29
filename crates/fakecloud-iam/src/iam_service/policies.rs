@@ -7,12 +7,11 @@ use fakecloud_core::validation::*;
 use crate::state::{IamPolicy, PolicyVersion};
 use crate::xml_responses;
 
-use fakecloud_core::query::required_param;
 use super::{
     empty_response, generate_id, paginated_tags_response, parse_tag_keys, parse_tags,
-    partition_for_region, url_encode, validate_tags, validate_untag_keys,
-    IamService,
+    partition_for_region, url_encode, validate_tags, validate_untag_keys, IamService,
 };
+use fakecloud_core::query::required_param;
 
 use fakecloud_aws::xml::xml_escape;
 

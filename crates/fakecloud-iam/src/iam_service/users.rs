@@ -8,11 +8,11 @@ use fakecloud_core::validation::*;
 use crate::state::{IamAccessKey, IamState, IamUser, SigningCertificate, SshPublicKey};
 use crate::xml_responses;
 
-use fakecloud_core::query::required_param;
 use super::{
     empty_response, extract_access_key, generate_id, generate_long_id, parse_tag_keys, parse_tags,
     partition_for_region, resolve_calling_user, tags_xml, url_encode, IamService,
 };
+use fakecloud_core::query::required_param;
 
 use fakecloud_aws::xml::xml_escape;
 
