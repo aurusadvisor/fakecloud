@@ -22,8 +22,8 @@ pub mod models;
 pub mod prompt;
 pub mod prompt_routers;
 pub mod resource_policies;
-pub mod service;
-pub mod state;
+pub(crate) mod service;
+pub(crate) mod state;
 pub mod streaming;
 pub mod throughput;
 
@@ -36,3 +36,8 @@ pub mod throughput;
 pub(crate) fn short_uuid() -> String {
     uuid::Uuid::new_v4().to_string()[..8].to_string()
 }
+
+pub use service::BedrockService;
+pub use state::{
+    BedrockSnapshot, FaultRule, ResponseRule, SharedBedrockState, BEDROCK_SNAPSHOT_SCHEMA_VERSION,
+};

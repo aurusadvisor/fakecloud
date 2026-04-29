@@ -16,8 +16,8 @@ use fakecloud_core::validation::*;
 use fakecloud_persistence::SnapshotStore;
 
 use fakecloud_lambda::runtime::ContainerRuntime;
-use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
-use fakecloud_logs::state::SharedLogsState;
+use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
+use fakecloud_logs::SharedLogsState;
 
 use crate::state::{
     ApiDestination, Archive, Connection, Endpoint, EventBridgeSnapshot, EventBridgeState, EventBus,

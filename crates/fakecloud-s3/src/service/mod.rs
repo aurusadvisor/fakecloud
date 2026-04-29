@@ -9,7 +9,7 @@ use md5::{Digest, Md5};
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
-use fakecloud_kms::state::SharedKmsState;
+use fakecloud_kms::SharedKmsState;
 use fakecloud_persistence::{MemoryS3Store, S3Store, StoreError};
 
 use base64::engine::general_purpose::STANDARD as BASE64;

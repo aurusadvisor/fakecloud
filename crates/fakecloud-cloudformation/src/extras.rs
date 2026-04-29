@@ -644,14 +644,14 @@ mod tests {
     use std::sync::Arc;
 
     fn deps() -> CloudFormationDeps {
-        use fakecloud_dynamodb::state::DynamoDbState;
-        use fakecloud_eventbridge::state::EventBridgeState;
-        use fakecloud_iam::state::IamState;
-        use fakecloud_logs::state::LogsState;
-        use fakecloud_s3::state::S3State;
-        use fakecloud_sns::state::SnsState;
-        use fakecloud_sqs::state::SqsState;
-        use fakecloud_ssm::state::SsmState;
+        use fakecloud_dynamodb::DynamoDbState;
+        use fakecloud_eventbridge::EventBridgeState;
+        use fakecloud_iam::IamState;
+        use fakecloud_logs::LogsState;
+        use fakecloud_s3::S3State;
+        use fakecloud_sns::SnsState;
+        use fakecloud_sqs::SqsState;
+        use fakecloud_ssm::SsmState;
 
         fn shared<T: fakecloud_core::multi_account::AccountState>(
         ) -> Arc<RwLock<MultiAccountState<T>>> {

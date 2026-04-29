@@ -3360,7 +3360,7 @@ async fn dynamodb_stream_specification_lifecycle() {
 
 // End-to-end guard for the expression-evaluator bugs fixed in PR #660.
 //
-// The unit corpus at `fakecloud_dynamodb::service::expression_corpus_tests`
+// The unit corpus at `fakecloud_dynamodb::expression_corpus_tests`
 // exercises the grammar at the evaluator boundary. These two tests run the
 // exact SDK-emitted shapes through serde + routing + evaluator, so any
 // regression anywhere in that chain trips the suite.

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use fakecloud_core::delivery::LambdaDelivery;
 use fakecloud_lambda::runtime::ContainerRuntime;
-use fakecloud_lambda::state::SharedLambdaState;
+use fakecloud_lambda::SharedLambdaState;
 
 /// Invokes Lambda functions using the container runtime.
 pub struct LambdaDeliveryImpl {
@@ -89,14 +89,12 @@ impl LambdaDelivery for LambdaDeliveryImpl {
             {
                 let mut accounts = lambda_state.write();
                 let state = accounts.get_or_create(&account_id);
-                state
-                    .invocations
-                    .push(fakecloud_lambda::state::LambdaInvocation {
-                        function_arn: function_arn.clone(),
-                        payload: payload.clone(),
-                        timestamp: chrono::Utc::now(),
-                        source: "aws:lambda:delivery".to_string(),
-                    });
+                state.invocations.push(fakecloud_lambda::LambdaInvocation {
+                    function_arn: function_arn.clone(),
+                    payload: payload.clone(),
+                    timestamp: chrono::Utc::now(),
+                    source: "aws:lambda:delivery".to_string(),
+                });
             }
 
             if func.code_zip.is_none() {

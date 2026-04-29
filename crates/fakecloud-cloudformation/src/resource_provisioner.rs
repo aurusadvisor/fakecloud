@@ -5,17 +5,17 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use fakecloud_core::delivery::DeliveryBus;
-use fakecloud_dynamodb::state::{
+use fakecloud_dynamodb::{
     AttributeDefinition, DynamoTable, KeySchemaElement, OnDemandThroughput, ProvisionedThroughput,
     SharedDynamoDbState,
 };
-use fakecloud_eventbridge::state::{EventRule, SharedEventBridgeState};
-use fakecloud_iam::state::{IamPolicy, IamRole, PolicyVersion, SharedIamState};
-use fakecloud_logs::state::SharedLogsState;
-use fakecloud_s3::state::{S3Bucket, SharedS3State};
-use fakecloud_sns::state::{SharedSnsState, SnsSubscription, SnsTopic};
-use fakecloud_sqs::state::{SharedSqsState, SqsQueue};
-use fakecloud_ssm::state::{SharedSsmState, SsmParameter};
+use fakecloud_eventbridge::{EventRule, SharedEventBridgeState};
+use fakecloud_iam::{IamPolicy, IamRole, PolicyVersion, SharedIamState};
+use fakecloud_logs::SharedLogsState;
+use fakecloud_s3::{S3Bucket, SharedS3State};
+use fakecloud_sns::{SharedSnsState, SnsSubscription, SnsTopic};
+use fakecloud_sqs::{SharedSqsState, SqsQueue};
+use fakecloud_ssm::{SharedSsmState, SsmParameter};
 
 use crate::state::StackResource;
 use crate::template::ResourceDefinition;
@@ -772,7 +772,7 @@ impl ResourceProvisioner {
             state.region, state.account_id, log_group_name
         );
 
-        let log_group = fakecloud_logs::state::LogGroup {
+        let log_group = fakecloud_logs::LogGroup {
             name: log_group_name.to_string(),
             arn: arn.clone(),
             creation_time: Utc::now().timestamp_millis(),
@@ -1054,7 +1054,7 @@ mod tests {
             let state = eb_accounts.default_mut();
             state.buses.insert(
                 "custom-bus".to_string(),
-                fakecloud_eventbridge::state::EventBus {
+                fakecloud_eventbridge::EventBus {
                     name: "custom-bus".to_string(),
                     arn: "arn:aws:events:us-east-1:123456789012:event-bus/custom-bus".to_string(),
                     policy: None,

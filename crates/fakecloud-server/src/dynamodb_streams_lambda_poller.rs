@@ -12,9 +12,9 @@ use chrono::Utc;
 use serde_json::json;
 
 use fakecloud_core::delivery::LambdaDelivery;
-use fakecloud_dynamodb::state::SharedDynamoDbState;
+use fakecloud_dynamodb::SharedDynamoDbState;
 use fakecloud_lambda::filter::FilterSet;
-use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
+use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
 
 /// DynamoDB Streams -> Lambda event source mapping poller.
 pub struct DynamoDbStreamsLambdaPoller {

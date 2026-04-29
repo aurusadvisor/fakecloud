@@ -6,15 +6,15 @@ use std::sync::Arc;
 
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
-use fakecloud_dynamodb::state::SharedDynamoDbState;
-use fakecloud_eventbridge::state::SharedEventBridgeState;
-use fakecloud_iam::state::SharedIamState;
-use fakecloud_logs::state::SharedLogsState;
+use fakecloud_dynamodb::SharedDynamoDbState;
+use fakecloud_eventbridge::SharedEventBridgeState;
+use fakecloud_iam::SharedIamState;
+use fakecloud_logs::SharedLogsState;
 use fakecloud_persistence::SnapshotStore;
-use fakecloud_s3::state::SharedS3State;
-use fakecloud_sns::state::SharedSnsState;
-use fakecloud_sqs::state::SharedSqsState;
-use fakecloud_ssm::state::SharedSsmState;
+use fakecloud_s3::SharedS3State;
+use fakecloud_sns::SharedSnsState;
+use fakecloud_sqs::SharedSqsState;
+use fakecloud_ssm::SharedSsmState;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::resource_provisioner::ResourceProvisioner;

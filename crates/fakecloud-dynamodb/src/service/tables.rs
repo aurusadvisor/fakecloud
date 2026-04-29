@@ -1253,7 +1253,7 @@ impl DynamoDbService {
                         let mut s3 = s3_state.write();
                         let s3_acct = s3.get_or_create(s3_acct_id);
                         if let Some(bucket) = s3_acct.buckets.get_mut(s3_bucket) {
-                            let obj = fakecloud_s3::state::S3Object {
+                            let obj = fakecloud_s3::S3Object {
                                 key: s3_key.clone(),
                                 body: body_ref,
                                 content_type: "application/json".to_string(),

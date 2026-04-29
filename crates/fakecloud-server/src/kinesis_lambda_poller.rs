@@ -14,9 +14,9 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use fakecloud_core::delivery::LambdaDelivery;
-use fakecloud_kinesis::state::SharedKinesisState;
+use fakecloud_kinesis::SharedKinesisState;
 use fakecloud_lambda::filter::FilterSet;
-use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
+use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
 
 #[derive(Clone)]
 struct Mapping {

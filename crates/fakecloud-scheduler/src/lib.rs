@@ -8,7 +8,10 @@
 pub mod delivery;
 pub mod expr;
 pub mod persistence;
-pub mod service;
+pub(crate) mod service;
 pub mod simulation;
-pub mod state;
+pub(crate) mod state;
 pub mod ticker;
+
+pub use service::SchedulerService;
+pub use state::SharedSchedulerState;

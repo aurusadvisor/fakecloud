@@ -1,3 +1,8 @@
 pub mod rotation;
-pub mod service;
-pub mod state;
+pub(crate) mod service;
+pub(crate) mod state;
+
+pub use service::SecretsManagerService;
+pub use state::{
+    SecretsManagerSnapshot, SharedSecretsManagerState, SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION,
+};

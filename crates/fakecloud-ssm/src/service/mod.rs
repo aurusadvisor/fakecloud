@@ -25,7 +25,7 @@ use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{SharedSsmState, SsmSnapshot, SSM_SNAPSHOT_SCHEMA_VERSION};
 
-use fakecloud_secretsmanager::state::SharedSecretsManagerState;
+use fakecloud_secretsmanager::SharedSecretsManagerState;
 
 const PARAMETER_VERSION_LIMIT: i64 = 100;
 

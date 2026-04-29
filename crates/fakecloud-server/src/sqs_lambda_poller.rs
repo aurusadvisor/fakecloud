@@ -25,8 +25,8 @@ use serde_json::{json, Value};
 
 use fakecloud_core::delivery::LambdaDelivery;
 use fakecloud_lambda::filter::FilterSet;
-use fakecloud_lambda::state::{LambdaInvocation, SharedLambdaState};
-use fakecloud_sqs::state::SharedSqsState;
+use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
+use fakecloud_sqs::SharedSqsState;
 
 #[derive(Clone)]
 struct Mapping {

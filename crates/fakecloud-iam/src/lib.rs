@@ -7,6 +7,11 @@ pub mod persistence;
 pub mod policy_evaluator;
 pub mod policy_validation;
 pub mod resource_policy;
-pub mod state;
+pub(crate) mod state;
 pub mod sts_service;
 pub mod xml_responses;
+
+pub use state::{
+    IamAccessKey, IamPolicy, IamRole, IamSnapshot, IamState, IamUser, PolicyVersion,
+    SharedIamState, IAM_SNAPSHOT_SCHEMA_VERSION,
+};

@@ -35,34 +35,34 @@ use reset::ResetState;
 use sqs_lambda_poller::SqsLambdaPoller;
 
 use fakecloud_apigateway::{ApiGatewayFacade, ApiGatewayService};
-use fakecloud_apigatewayv2::service::ApiGatewayV2Service;
-use fakecloud_bedrock::service::BedrockService;
-use fakecloud_cloudformation::service::CloudFormationService;
+use fakecloud_apigatewayv2::ApiGatewayV2Service;
+use fakecloud_bedrock::BedrockService;
+use fakecloud_cloudformation::CloudFormationService;
 use fakecloud_cloudfront::CloudFrontService;
-use fakecloud_cognito::service::CognitoService;
-use fakecloud_dynamodb::service::DynamoDbService;
-use fakecloud_ecr::service::EcrService;
-use fakecloud_ecs::service::EcsService;
-use fakecloud_elasticache::service::ElastiCacheService;
-use fakecloud_elbv2::service::Elbv2Service;
-use fakecloud_eventbridge::service::EventBridgeService;
+use fakecloud_cognito::CognitoService;
+use fakecloud_dynamodb::DynamoDbService;
+use fakecloud_ecr::EcrService;
+use fakecloud_ecs::EcsService;
+use fakecloud_elasticache::ElastiCacheService;
+use fakecloud_elbv2::Elbv2Service;
+use fakecloud_eventbridge::EventBridgeService;
 use fakecloud_iam::iam_service::IamService;
 use fakecloud_iam::sts_service::StsService;
-use fakecloud_kinesis::service::KinesisService;
-use fakecloud_kms::service::KmsService;
-use fakecloud_lambda::service::LambdaService;
-use fakecloud_logs::service::LogsService;
-use fakecloud_organizations::service::OrganizationsService;
-use fakecloud_organizations::state::SharedOrganizationsState;
-use fakecloud_rds::service::RdsService;
-use fakecloud_s3::service::S3Service;
-use fakecloud_scheduler::service::SchedulerService;
-use fakecloud_secretsmanager::service::SecretsManagerService;
-use fakecloud_ses::service::SesV2Service;
-use fakecloud_sns::service::SnsService;
-use fakecloud_sqs::service::SqsService;
-use fakecloud_ssm::service::SsmService;
-use fakecloud_stepfunctions::service::StepFunctionsService;
+use fakecloud_kinesis::KinesisService;
+use fakecloud_kms::KmsService;
+use fakecloud_lambda::LambdaService;
+use fakecloud_logs::LogsService;
+use fakecloud_organizations::OrganizationsService;
+use fakecloud_organizations::SharedOrganizationsState;
+use fakecloud_rds::RdsService;
+use fakecloud_s3::S3Service;
+use fakecloud_scheduler::SchedulerService;
+use fakecloud_secretsmanager::SecretsManagerService;
+use fakecloud_ses::SesV2Service;
+use fakecloud_sns::SnsService;
+use fakecloud_sqs::SqsService;
+use fakecloud_ssm::SsmService;
+use fakecloud_stepfunctions::StepFunctionsService;
 
 #[tokio::main]
 async fn main() {
@@ -141,13 +141,12 @@ async fn main() {
         ),
     ));
     let sns_state = Arc::new(parking_lot::RwLock::new({
-        let mut mas: fakecloud_core::multi_account::MultiAccountState<
-            fakecloud_sns::state::SnsState,
-        > = fakecloud_core::multi_account::MultiAccountState::new(
-            &cli.account_id,
-            &cli.region,
-            &endpoint_url,
-        );
+        let mut mas: fakecloud_core::multi_account::MultiAccountState<fakecloud_sns::SnsState> =
+            fakecloud_core::multi_account::MultiAccountState::new(
+                &cli.account_id,
+                &cli.region,
+                &endpoint_url,
+            );
         mas.default_mut().seed_default_opted_out();
         mas
     }));
@@ -312,7 +311,7 @@ async fn main() {
         ),
     ));
 
-    let ecs_state: fakecloud_ecs::state::SharedEcsState = Arc::new(parking_lot::RwLock::new(
+    let ecs_state: fakecloud_ecs::SharedEcsState = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
             &cli.region,
@@ -362,7 +361,7 @@ async fn main() {
     // a cross-account construct. `None` until CreateOrganization runs.
     let organizations_state: SharedOrganizationsState = Arc::new(parking_lot::RwLock::new(None));
 
-    let scheduler_state: fakecloud_scheduler::state::SharedSchedulerState = Arc::new(
+    let scheduler_state: fakecloud_scheduler::SharedSchedulerState = Arc::new(
         parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
             &cli.region,
@@ -641,18 +640,17 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<
-                        fakecloud_cloudformation::state::CloudFormationSnapshot,
-                    >(&bytes)
-                    {
+                    match serde_json::from_slice::<fakecloud_cloudformation::CloudFormationSnapshot>(
+                        &bytes,
+                    ) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_cloudformation::state::CLOUDFORMATION_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_cloudformation::CLOUDFORMATION_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "cloudformation persistence schema mismatch: on-disk={}, expected={}",
                                     snapshot.schema_version,
-                                    fakecloud_cloudformation::state::CLOUDFORMATION_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_cloudformation::CLOUDFORMATION_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -691,7 +689,7 @@ async fn main() {
         };
     let mut cloudformation_service = CloudFormationService::new(
         cloudformation_state.clone(),
-        fakecloud_cloudformation::service::CloudFormationDeps {
+        fakecloud_cloudformation::CloudFormationDeps {
             sqs: sqs_state.clone(),
             sns: sns_state.clone(),
             ssm: ssm_state.clone(),
@@ -718,15 +716,14 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_sqs::state::SqsSnapshot>(&bytes) {
+                    match serde_json::from_slice::<fakecloud_sqs::SqsSnapshot>(&bytes) {
                         Ok(snapshot) => {
-                            if snapshot.schema_version
-                                > fakecloud_sqs::state::SQS_SNAPSHOT_SCHEMA_VERSION
+                            if snapshot.schema_version > fakecloud_sqs::SQS_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "sqs persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_sqs::state::SQS_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_sqs::SQS_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -783,15 +780,14 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_sns::state::SnsSnapshot>(&bytes) {
+                    match serde_json::from_slice::<fakecloud_sns::SnsSnapshot>(&bytes) {
                         Ok(snapshot) => {
-                            if snapshot.schema_version
-                                > fakecloud_sns::state::SNS_SNAPSHOT_SCHEMA_VERSION
+                            if snapshot.schema_version > fakecloud_sns::SNS_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "sns persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_sns::state::SNS_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_sns::SNS_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -846,17 +842,17 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_eventbridge::state::EventBridgeSnapshot>(
+                    match serde_json::from_slice::<fakecloud_eventbridge::EventBridgeSnapshot>(
                         &bytes,
                     ) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_eventbridge::state::EVENTBRIDGE_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_eventbridge::EVENTBRIDGE_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "eventbridge persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_eventbridge::state::EVENTBRIDGE_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_eventbridge::EVENTBRIDGE_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -928,15 +924,14 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_iam::state::IamSnapshot>(&bytes) {
+                    match serde_json::from_slice::<fakecloud_iam::IamSnapshot>(&bytes) {
                         Ok(snapshot) => {
-                            if snapshot.schema_version
-                                > fakecloud_iam::state::IAM_SNAPSHOT_SCHEMA_VERSION
+                            if snapshot.schema_version > fakecloud_iam::IAM_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "iam persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_iam::state::IAM_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_iam::IAM_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             // v2: multi-account state in `accounts` field
@@ -1005,15 +1000,14 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_ssm::state::SsmSnapshot>(&bytes) {
+                    match serde_json::from_slice::<fakecloud_ssm::SsmSnapshot>(&bytes) {
                         Ok(snapshot) => {
-                            if snapshot.schema_version
-                                > fakecloud_ssm::state::SSM_SNAPSHOT_SCHEMA_VERSION
+                            if snapshot.schema_version > fakecloud_ssm::SSM_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "ssm persistence schema mismatch: on-disk={}, expected={}",
                                     snapshot.schema_version,
-                                    fakecloud_ssm::state::SSM_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_ssm::SSM_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1100,16 +1094,15 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_lambda::state::LambdaSnapshot>(&bytes)
-                    {
+                    match serde_json::from_slice::<fakecloud_lambda::LambdaSnapshot>(&bytes) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_lambda::state::LAMBDA_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_lambda::LAMBDA_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "lambda persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_lambda::state::LAMBDA_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_lambda::LAMBDA_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1172,18 +1165,17 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<
-                        fakecloud_secretsmanager::state::SecretsManagerSnapshot,
-                    >(&bytes)
-                    {
+                    match serde_json::from_slice::<fakecloud_secretsmanager::SecretsManagerSnapshot>(
+                        &bytes,
+                    ) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_secretsmanager::state::SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_secretsmanager::SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "secretsmanager persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_secretsmanager::state::SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_secretsmanager::SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1238,15 +1230,15 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_logs::state::LogsSnapshot>(&bytes) {
+                    match serde_json::from_slice::<fakecloud_logs::LogsSnapshot>(&bytes) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_logs::state::LOGS_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_logs::LOGS_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "logs persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_logs::state::LOGS_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_logs::LOGS_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1301,15 +1293,14 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_kms::state::KmsSnapshot>(&bytes) {
+                    match serde_json::from_slice::<fakecloud_kms::KmsSnapshot>(&bytes) {
                         Ok(snapshot) => {
-                            if snapshot.schema_version
-                                > fakecloud_kms::state::KMS_SNAPSHOT_SCHEMA_VERSION
+                            if snapshot.schema_version > fakecloud_kms::KMS_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "kms persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_kms::state::KMS_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_kms::KMS_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1443,17 +1434,15 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_dynamodb::state::DynamoDbSnapshot>(
-                        &bytes,
-                    ) {
+                    match serde_json::from_slice::<fakecloud_dynamodb::DynamoDbSnapshot>(&bytes) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_dynamodb::state::DYNAMODB_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_dynamodb::DYNAMODB_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "dynamodb persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_dynamodb::state::DYNAMODB_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_dynamodb::DYNAMODB_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1527,15 +1516,14 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_ses::state::SesSnapshot>(&bytes) {
+                    match serde_json::from_slice::<fakecloud_ses::SesSnapshot>(&bytes) {
                         Ok(snapshot) => {
-                            if snapshot.schema_version
-                                > fakecloud_ses::state::SES_SNAPSHOT_SCHEMA_VERSION
+                            if snapshot.schema_version > fakecloud_ses::SES_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "ses persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_ses::state::SES_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_ses::SES_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1607,17 +1595,15 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_cognito::state::CognitoSnapshot>(
-                        &bytes,
-                    ) {
+                    match serde_json::from_slice::<fakecloud_cognito::CognitoSnapshot>(&bytes) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_cognito::state::COGNITO_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_cognito::COGNITO_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "cognito persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_cognito::state::COGNITO_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_cognito::COGNITO_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1671,17 +1657,15 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_kinesis::state::KinesisSnapshot>(
-                        &bytes,
-                    ) {
+                    match serde_json::from_slice::<fakecloud_kinesis::KinesisSnapshot>(&bytes) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_kinesis::state::KINESIS_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_kinesis::KINESIS_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "kinesis persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_kinesis::state::KINESIS_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_kinesis::KINESIS_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1734,15 +1718,14 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_rds::state::RdsSnapshot>(&bytes) {
+                    match serde_json::from_slice::<fakecloud_rds::RdsSnapshot>(&bytes) {
                         Ok(snapshot) => {
-                            if snapshot.schema_version
-                                > fakecloud_rds::state::RDS_SNAPSHOT_SCHEMA_VERSION
+                            if snapshot.schema_version > fakecloud_rds::RDS_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "rds persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_rds::state::RDS_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_rds::RDS_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1842,17 +1825,17 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_elasticache::state::ElastiCacheSnapshot>(
+                    match serde_json::from_slice::<fakecloud_elasticache::ElastiCacheSnapshot>(
                         &bytes,
                     ) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_elasticache::state::ELASTICACHE_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_elasticache::ELASTICACHE_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "elasticache persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_elasticache::state::ELASTICACHE_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_elasticache::ELASTICACHE_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1909,15 +1892,14 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_ecr::state::EcrSnapshot>(&bytes) {
+                    match serde_json::from_slice::<fakecloud_ecr::EcrSnapshot>(&bytes) {
                         Ok(snapshot) => {
-                            if snapshot.schema_version
-                                > fakecloud_ecr::state::ECR_SNAPSHOT_SCHEMA_VERSION
+                            if snapshot.schema_version > fakecloud_ecr::ECR_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "ecr persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_ecr::state::ECR_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_ecr::ECR_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -1962,15 +1944,14 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_ecs::state::EcsSnapshot>(&bytes) {
+                    match serde_json::from_slice::<fakecloud_ecs::EcsSnapshot>(&bytes) {
                         Ok(snapshot) => {
-                            if snapshot.schema_version
-                                > fakecloud_ecs::state::ECS_SNAPSHOT_SCHEMA_VERSION
+                            if snapshot.schema_version > fakecloud_ecs::ECS_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "ecs persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_ecs::state::ECS_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_ecs::ECS_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -2010,8 +1991,8 @@ async fn main() {
     }
     registry.register(Arc::new(ecs_service));
 
-    let elbv2_state: fakecloud_elbv2::state::SharedElbv2State = Arc::new(parking_lot::RwLock::new(
-        fakecloud_elbv2::state::Elbv2Accounts::new(),
+    let elbv2_state: fakecloud_elbv2::SharedElbv2State = Arc::new(parking_lot::RwLock::new(
+        fakecloud_elbv2::Elbv2Accounts::new(),
     ));
     let elbv2_introspection_state = elbv2_state.clone();
     let elbv2_service = Elbv2Service::new(elbv2_state);
@@ -2087,18 +2068,17 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<
-                        fakecloud_stepfunctions::state::StepFunctionsSnapshot,
-                    >(&bytes)
-                    {
+                    match serde_json::from_slice::<fakecloud_stepfunctions::StepFunctionsSnapshot>(
+                        &bytes,
+                    ) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_stepfunctions::state::STEPFUNCTIONS_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_stepfunctions::STEPFUNCTIONS_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "stepfunctions persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_stepfunctions::state::STEPFUNCTIONS_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_stepfunctions::STEPFUNCTIONS_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -2151,18 +2131,17 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<
-                        fakecloud_apigatewayv2::state::ApiGatewayV2Snapshot,
-                    >(&bytes)
-                    {
+                    match serde_json::from_slice::<fakecloud_apigatewayv2::ApiGatewayV2Snapshot>(
+                        &bytes,
+                    ) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_apigatewayv2::state::APIGATEWAYV2_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_apigatewayv2::APIGATEWAYV2_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "apigatewayv2 persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_apigatewayv2::state::APIGATEWAYV2_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_apigatewayv2::APIGATEWAYV2_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -2281,17 +2260,15 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_bedrock::state::BedrockSnapshot>(
-                        &bytes,
-                    ) {
+                    match serde_json::from_slice::<fakecloud_bedrock::BedrockSnapshot>(&bytes) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
-                                > fakecloud_bedrock::state::BEDROCK_SNAPSHOT_SCHEMA_VERSION
+                                > fakecloud_bedrock::BEDROCK_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
                                     "bedrock persistence schema too new: on-disk={}, max supported={}",
                                     snapshot.schema_version,
-                                    fakecloud_bedrock::state::BEDROCK_SNAPSHOT_SCHEMA_VERSION,
+                                    fakecloud_bedrock::BEDROCK_SNAPSHOT_SCHEMA_VERSION,
                                 ));
                             }
                             if let Some(accounts) = snapshot.accounts {
@@ -2668,7 +2645,7 @@ async fn main() {
                     // applied to the in-flight message).
                     let mut extra_headers: Vec<(String, String)> = Vec::new();
                     for (_rule, action) in &actions {
-                        if let fakecloud_ses::state::ReceiptAction::AddHeader {
+                        if let fakecloud_ses::ReceiptAction::AddHeader {
                             header_name,
                             header_value,
                         } = action
@@ -2690,7 +2667,7 @@ async fn main() {
                     // Execute actions for real
                     for (_rule, action) in &actions {
                         match action {
-                            fakecloud_ses::state::ReceiptAction::S3 {
+                            fakecloud_ses::ReceiptAction::S3 {
                                 bucket_name,
                                 object_key_prefix,
                                 ..
@@ -2701,7 +2678,7 @@ async fn main() {
                                 let data = bytes::Bytes::from(augmented_body.clone());
                                 let size = data.len() as u64;
                                 let etag = format!("\"{:x}\"", md5::Md5::digest(&data));
-                                let obj = fakecloud_s3::state::S3Object {
+                                let obj = fakecloud_s3::S3Object {
                                     key: key.clone(),
                                     body: fakecloud_persistence::BodyRef::Memory(data.clone()),
                                     content_type: "text/plain".to_string(),
@@ -2744,7 +2721,7 @@ async fn main() {
                                     );
                                 }
                             }
-                            fakecloud_ses::state::ReceiptAction::Sns { topic_arn, .. } => {
+                            fakecloud_ses::ReceiptAction::Sns { topic_arn, .. } => {
                                 let notification = serde_json::json!({
                                     "notificationType": "Received",
                                     "mail": {
@@ -2769,7 +2746,7 @@ async fn main() {
                                     Some(&body.subject),
                                 );
                             }
-                            fakecloud_ses::state::ReceiptAction::Lambda {
+                            fakecloud_ses::ReceiptAction::Lambda {
                                 function_arn,
                                 invocation_type,
                                 ..
@@ -2830,7 +2807,7 @@ async fn main() {
                                     }
                                 });
                             }
-                            fakecloud_ses::state::ReceiptAction::Bounce {
+                            fakecloud_ses::ReceiptAction::Bounce {
                                 smtp_reply_code,
                                 message,
                                 sender,
@@ -2849,7 +2826,7 @@ async fn main() {
                                     "Your message could not be delivered.\r\n\r\nSMTP code: {smtp_reply_code}\r\nStatus: {}\r\nMessage: {message}\r\n",
                                     status_code.as_deref().unwrap_or("5.0.0")
                                 );
-                                let bounce_record = fakecloud_ses::state::SentEmail {
+                                let bounce_record = fakecloud_ses::SentEmail {
                                     message_id: format!("bounce-{}", uuid::Uuid::new_v4()),
                                     from: sender.clone(),
                                     to: vec![body.from.clone()],
@@ -2895,7 +2872,7 @@ async fn main() {
                                     );
                                 }
                             }
-                            fakecloud_ses::state::ReceiptAction::Stop { topic_arn, .. } => {
+                            fakecloud_ses::ReceiptAction::Stop { topic_arn, .. } => {
                                 if let Some(topic) = topic_arn {
                                     let notification = serde_json::json!({
                                         "notificationType": "ReceiptRuleStop",
@@ -2913,7 +2890,7 @@ async fn main() {
                                 }
                             }
                             // AddHeader is processed inline above
-                            fakecloud_ses::state::ReceiptAction::AddHeader { .. } => {}
+                            fakecloud_ses::ReceiptAction::AddHeader { .. } => {}
                         }
                     }
 
@@ -2922,14 +2899,14 @@ async fn main() {
                         .map(|(rule, action)| types::InboundActionExecuted {
                             rule: rule.clone(),
                             action_type: match action {
-                                fakecloud_ses::state::ReceiptAction::S3 { .. } => "S3",
-                                fakecloud_ses::state::ReceiptAction::Sns { .. } => "SNS",
-                                fakecloud_ses::state::ReceiptAction::Lambda { .. } => "Lambda",
-                                fakecloud_ses::state::ReceiptAction::Bounce { .. } => "Bounce",
-                                fakecloud_ses::state::ReceiptAction::AddHeader { .. } => {
+                                fakecloud_ses::ReceiptAction::S3 { .. } => "S3",
+                                fakecloud_ses::ReceiptAction::Sns { .. } => "SNS",
+                                fakecloud_ses::ReceiptAction::Lambda { .. } => "Lambda",
+                                fakecloud_ses::ReceiptAction::Bounce { .. } => "Bounce",
+                                fakecloud_ses::ReceiptAction::AddHeader { .. } => {
                                     "AddHeader"
                                 }
-                                fakecloud_ses::state::ReceiptAction::Stop { .. } => "Stop",
+                                fakecloud_ses::ReceiptAction::Stop { .. } => "Stop",
                             }
                             .to_string(),
                         })
@@ -3722,9 +3699,9 @@ async fn main() {
                                     })),
                                 );
                             };
-                            let object = fakecloud_s3::state::S3Object {
+                            let object = fakecloud_s3::S3Object {
                                 key: body.key.clone(),
-                                body: fakecloud_s3::state::memory_body(body_bytes),
+                                body: fakecloud_s3::memory_body(body_bytes),
                                 content_type: "application/octet-stream".to_string(),
                                 etag,
                                 size: bytes_uploaded as u64,
@@ -4095,7 +4072,7 @@ async fn main() {
                                     }
                                     (t.task_arn.clone(), t.cluster_arn.clone())
                                 };
-                                state.push_event(fakecloud_ecs::state::LifecycleEvent {
+                                state.push_event(fakecloud_ecs::LifecycleEvent {
                                     at: chrono::Utc::now(),
                                     event_type: "TaskStateChange".into(),
                                     task_arn: Some(task_arn),
@@ -4290,7 +4267,7 @@ async fn main() {
                         }
                         state.task_tokens.insert(
                             token.clone(),
-                            fakecloud_stepfunctions::state::TaskTokenState {
+                            fakecloud_stepfunctions::TaskTokenState {
                                 activity_arn: activity_arn.clone(),
                                 status: "PENDING".to_string(),
                                 output: None,
@@ -4522,7 +4499,7 @@ async fn main() {
                                 );
                             }
                         };
-                        parsed.push(fakecloud_bedrock::state::ResponseRule {
+                        parsed.push(fakecloud_bedrock::ResponseRule {
                             prompt_contains,
                             response,
                         });
@@ -4601,7 +4578,7 @@ async fn main() {
                     let mut accounts = bs.write(); let state = accounts.default_mut();
                     state
                         .fault_rules
-                        .push(fakecloud_bedrock::state::FaultRule {
+                        .push(fakecloud_bedrock::FaultRule {
                             error_type,
                             message,
                             http_status,
@@ -4724,13 +4701,13 @@ struct KmsHookAdapter {
     /// an `aws/<service>` AWS-managed key on first use, so the new key
     /// survives a server restart and the corresponding ciphertext stays
     /// decryptable.
-    state: fakecloud_kms::state::SharedKmsState,
+    state: fakecloud_kms::SharedKmsState,
     snapshot_store: std::sync::OnceLock<Arc<dyn fakecloud_persistence::SnapshotStore>>,
 }
 
 impl KmsHookAdapter {
     fn new(
-        state: fakecloud_kms::state::SharedKmsState,
+        state: fakecloud_kms::SharedKmsState,
         usage: fakecloud_kms::hook::SharedKmsUsageState,
     ) -> Self {
         Self {
@@ -4752,8 +4729,8 @@ impl KmsHookAdapter {
         let Some(store) = self.snapshot_store.get() else {
             return;
         };
-        let snapshot = fakecloud_kms::state::KmsSnapshot {
-            schema_version: fakecloud_kms::state::KMS_SNAPSHOT_SCHEMA_VERSION,
+        let snapshot = fakecloud_kms::KmsSnapshot {
+            schema_version: fakecloud_kms::KMS_SNAPSHOT_SCHEMA_VERSION,
             accounts: Some(self.state.read().clone()),
             state: None,
         };
@@ -4858,7 +4835,7 @@ const PORT_HANDSHAKE_PREFIX: &str = "FAKECLOUD_PORT=";
 /// `SentEmail` to the SES state for the right account so the email is
 /// observable through the standard `/_fakecloud/ses/sent` introspection.
 struct SesEmailDispatcher {
-    state: fakecloud_ses::state::SharedSesState,
+    state: fakecloud_ses::SharedSesState,
 }
 
 impl fakecloud_core::delivery::EmailDispatcher for SesEmailDispatcher {
@@ -4873,7 +4850,7 @@ impl fakecloud_core::delivery::EmailDispatcher for SesEmailDispatcher {
     ) {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(account_id);
-        state.sent_emails.push(fakecloud_ses::state::SentEmail {
+        state.sent_emails.push(fakecloud_ses::SentEmail {
             message_id: format!("cognito-{}", uuid::Uuid::new_v4()),
             from: from.to_string(),
             to: vec![to.to_string()],
@@ -4893,7 +4870,7 @@ impl fakecloud_core::delivery::EmailDispatcher for SesEmailDispatcher {
 /// SMS dispatcher used by Cognito's verification flow: append to the SNS
 /// account's `sms_messages` so test code can assert on what landed.
 struct SnsSmsDispatcher {
-    state: fakecloud_sns::state::SharedSnsState,
+    state: fakecloud_sns::SharedSnsState,
 }
 
 impl fakecloud_core::delivery::SmsDispatcher for SnsSmsDispatcher {

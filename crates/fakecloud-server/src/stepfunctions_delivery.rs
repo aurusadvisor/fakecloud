@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use fakecloud_core::delivery::{DeliveryBus, StepFunctionsDelivery};
-use fakecloud_dynamodb::state::SharedDynamoDbState;
-use fakecloud_stepfunctions::state::SharedStepFunctionsState;
+use fakecloud_dynamodb::SharedDynamoDbState;
+use fakecloud_stepfunctions::SharedStepFunctionsState;
 
 /// Starts Step Functions executions from cross-service delivery (EventBridge, Scheduler).
 pub struct StepFunctionsDeliveryImpl {
@@ -33,7 +33,7 @@ impl StepFunctionsDelivery for StepFunctionsDeliveryImpl {
             state_machine_arn,
             "Step Functions delivery: starting execution"
         );
-        fakecloud_stepfunctions::service::start_execution_from_delivery(
+        fakecloud_stepfunctions::start_execution_from_delivery(
             &self.state,
             &self.delivery,
             &self.dynamodb_state,
