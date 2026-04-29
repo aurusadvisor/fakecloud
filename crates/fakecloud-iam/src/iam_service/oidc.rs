@@ -7,9 +7,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::state::{OidcProvider, SamlProvider, ServerCertificate};
 
 use super::{
-    empty_response, generate_id, paginated_tags_response, parse_tag_keys, parse_tags,
-    required_param, tags_xml, IamService,
+    empty_response, generate_id, paginated_tags_response, parse_tag_keys, parse_tags, tags_xml,
+    IamService,
 };
+use fakecloud_core::query::required_param;
 
 use fakecloud_aws::xml::xml_escape;
 

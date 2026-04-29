@@ -9,7 +9,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::delivery::DeliveryBus;
-use fakecloud_core::query::query_response_xml;
+use fakecloud_core::query::{optional_query_param, query_response_xml, required_query_param};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
@@ -421,35 +421,35 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
+        let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
         let allocated_storage = required_i32_param(request, "AllocatedStorage")?;
-        let db_instance_class = required_param(request, "DBInstanceClass")?;
-        let engine = required_param(request, "Engine")?;
-        let master_username = required_param(request, "MasterUsername")?;
-        let master_user_password = required_param(request, "MasterUserPassword")?;
-        let db_name = optional_param(request, "DBName");
+        let db_instance_class = required_query_param(request, "DBInstanceClass")?;
+        let engine = required_query_param(request, "Engine")?;
+        let master_username = required_query_param(request, "MasterUsername")?;
+        let master_user_password = required_query_param(request, "MasterUserPassword")?;
+        let db_name = optional_query_param(request, "DBName");
         let engine_version =
-            optional_param(request, "EngineVersion").unwrap_or_else(|| "16.3".to_string());
+            optional_query_param(request, "EngineVersion").unwrap_or_else(|| "16.3".to_string());
         let publicly_accessible =
-            parse_optional_bool(optional_param(request, "PubliclyAccessible").as_deref())?
+            parse_optional_bool(optional_query_param(request, "PubliclyAccessible").as_deref())?
                 .unwrap_or(true);
         let deletion_protection =
-            parse_optional_bool(optional_param(request, "DeletionProtection").as_deref())?
+            parse_optional_bool(optional_query_param(request, "DeletionProtection").as_deref())?
                 .unwrap_or(false);
         let port = optional_i32_param(request, "Port")?
             .unwrap_or_else(|| default_port_for_engine(&engine));
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
 
-        let db_parameter_group_name = optional_param(request, "DBParameterGroupName")
+        let db_parameter_group_name = optional_query_param(request, "DBParameterGroupName")
             .or_else(|| Some(default_parameter_group(&engine, &engine_version)));
 
         let backup_retention_period =
             optional_i32_param(request, "BackupRetentionPeriod")?.unwrap_or(1);
-        let preferred_backup_window = optional_param(request, "PreferredBackupWindow")
+        let preferred_backup_window = optional_query_param(request, "PreferredBackupWindow")
             .unwrap_or_else(|| "03:00-04:00".to_string());
-        let option_group_name = optional_param(request, "OptionGroupName");
-        let multi_az =
-            parse_optional_bool(optional_param(request, "MultiAZ").as_deref())?.unwrap_or(false);
+        let option_group_name = optional_query_param(request, "OptionGroupName");
+        let multi_az = parse_optional_bool(optional_query_param(request, "MultiAZ").as_deref())?
+            .unwrap_or(false);
 
         validate_create_request(
             &db_instance_identifier,
@@ -623,11 +623,12 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
+        let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
         let skip_final_snapshot =
-            parse_optional_bool(optional_param(request, "SkipFinalSnapshot").as_deref())?
+            parse_optional_bool(optional_query_param(request, "SkipFinalSnapshot").as_deref())?
                 .unwrap_or(false);
-        let final_db_snapshot_identifier = optional_param(request, "FinalDBSnapshotIdentifier");
+        let final_db_snapshot_identifier =
+            optional_query_param(request, "FinalDBSnapshotIdentifier");
 
         if skip_final_snapshot && final_db_snapshot_identifier.is_some() {
             return Err(AwsServiceError::aws_error(
@@ -824,19 +825,19 @@ impl RdsService {
     }
 
     fn modify_db_instance(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
-        let db_instance_class = optional_param(request, "DBInstanceClass");
+        let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
+        let db_instance_class = optional_query_param(request, "DBInstanceClass");
         let deletion_protection =
-            parse_optional_bool(optional_param(request, "DeletionProtection").as_deref())?;
+            parse_optional_bool(optional_query_param(request, "DeletionProtection").as_deref())?;
         let apply_immediately =
-            parse_optional_bool(optional_param(request, "ApplyImmediately").as_deref())?;
+            parse_optional_bool(optional_query_param(request, "ApplyImmediately").as_deref())?;
 
         // Parse VPC security group IDs - only if at least one is provided
         let vpc_security_group_ids = {
             let mut ids = Vec::new();
             for index in 1.. {
                 let sg_id_name = format!("VpcSecurityGroupIds.VpcSecurityGroupId.{index}");
-                match optional_param(request, &sg_id_name) {
+                match optional_query_param(request, &sg_id_name) {
                     Some(sg_id) => ids.push(sg_id),
                     None => break,
                 }
@@ -925,9 +926,9 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
+        let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
         let force_failover =
-            parse_optional_bool(optional_param(request, "ForceFailover").as_deref())?;
+            parse_optional_bool(optional_query_param(request, "ForceFailover").as_deref())?;
         if force_failover == Some(true) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1025,10 +1026,11 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let engine = optional_param(request, "Engine");
-        let engine_version = optional_param(request, "EngineVersion");
-        let family = optional_param(request, "DBParameterGroupFamily");
-        let default_only = parse_optional_bool(optional_param(request, "DefaultOnly").as_deref())?;
+        let engine = optional_query_param(request, "Engine");
+        let engine_version = optional_query_param(request, "EngineVersion");
+        let family = optional_query_param(request, "DBParameterGroupFamily");
+        let default_only =
+            parse_optional_bool(optional_query_param(request, "DefaultOnly").as_deref())?;
 
         let mut versions = filter_engine_versions(
             &default_engine_versions(),
@@ -1056,9 +1058,9 @@ impl RdsService {
     }
 
     fn describe_db_instances(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let db_instance_identifier = optional_param(request, "DBInstanceIdentifier");
-        let marker = optional_param(request, "Marker");
-        let max_records = optional_param(request, "MaxRecords");
+        let db_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
+        let marker = optional_query_param(request, "Marker");
+        let max_records = optional_query_param(request, "MaxRecords");
 
         let accounts = self.state.read();
         let empty = RdsState::new(&request.account_id, &request.region);
@@ -1133,11 +1135,11 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let engine = optional_param(request, "Engine");
-        let engine_version = optional_param(request, "EngineVersion");
-        let db_instance_class = optional_param(request, "DBInstanceClass");
-        let license_model = optional_param(request, "LicenseModel");
-        let vpc = parse_optional_bool(optional_param(request, "Vpc").as_deref())?;
+        let engine = optional_query_param(request, "Engine");
+        let engine_version = optional_query_param(request, "EngineVersion");
+        let db_instance_class = optional_query_param(request, "DBInstanceClass");
+        let license_model = optional_query_param(request, "LicenseModel");
+        let vpc = parse_optional_bool(optional_query_param(request, "Vpc").as_deref())?;
 
         let options = filter_orderable_options(
             &default_orderable_options(),
@@ -1163,7 +1165,7 @@ impl RdsService {
     }
 
     fn add_tags_to_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let resource_name = required_param(request, "ResourceName")?;
+        let resource_name = required_query_param(request, "ResourceName")?;
         let tags = parse_tags(request)?;
 
         if tags.is_empty() {
@@ -1186,7 +1188,7 @@ impl RdsService {
     }
 
     fn list_tags_for_resource(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let resource_name = required_param(request, "ResourceName")?;
+        let resource_name = required_query_param(request, "ResourceName")?;
         if query_param_prefix_exists(request, "Filters.") {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1216,7 +1218,7 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let resource_name = required_param(request, "ResourceName")?;
+        let resource_name = required_query_param(request, "ResourceName")?;
         let tag_keys = parse_tag_keys(request)?;
 
         if tag_keys.is_empty() {
@@ -1244,8 +1246,8 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_snapshot_identifier = required_param(request, "DBSnapshotIdentifier")?;
-        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
+        let db_snapshot_identifier = required_query_param(request, "DBSnapshotIdentifier")?;
+        let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
 
         let runtime = self.runtime.as_ref().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -1352,10 +1354,10 @@ impl RdsService {
     }
 
     fn describe_db_snapshots(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let db_snapshot_identifier = optional_param(request, "DBSnapshotIdentifier");
-        let db_instance_identifier = optional_param(request, "DBInstanceIdentifier");
-        let marker = optional_param(request, "Marker");
-        let max_records = optional_param(request, "MaxRecords");
+        let db_snapshot_identifier = optional_query_param(request, "DBSnapshotIdentifier");
+        let db_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
+        let marker = optional_query_param(request, "Marker");
+        let max_records = optional_query_param(request, "MaxRecords");
 
         if db_snapshot_identifier.is_some() && db_instance_identifier.is_some() {
             return Err(AwsServiceError::aws_error(
@@ -1444,7 +1446,7 @@ impl RdsService {
     }
 
     fn delete_db_snapshot(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let db_snapshot_identifier = required_param(request, "DBSnapshotIdentifier")?;
+        let db_snapshot_identifier = required_query_param(request, "DBSnapshotIdentifier")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -1480,8 +1482,8 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
-        let db_snapshot_identifier = required_param(request, "DBSnapshotIdentifier")?;
+        let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
+        let db_snapshot_identifier = required_query_param(request, "DBSnapshotIdentifier")?;
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
 
         let runtime = self.require_runtime()?;
@@ -1601,8 +1603,9 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_instance_identifier = required_param(request, "DBInstanceIdentifier")?;
-        let source_db_instance_identifier = required_param(request, "SourceDBInstanceIdentifier")?;
+        let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
+        let source_db_instance_identifier =
+            required_query_param(request, "SourceDBInstanceIdentifier")?;
 
         let runtime = self.runtime.as_ref().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -1773,8 +1776,9 @@ impl RdsService {
     }
 
     fn create_db_subnet_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let db_subnet_group_name = required_param(request, "DBSubnetGroupName")?;
-        let db_subnet_group_description = required_param(request, "DBSubnetGroupDescription")?;
+        let db_subnet_group_name = required_query_param(request, "DBSubnetGroupName")?;
+        let db_subnet_group_description =
+            required_query_param(request, "DBSubnetGroupDescription")?;
         let subnet_ids = parse_subnet_ids(request)?;
 
         if subnet_ids.is_empty() {
@@ -1854,9 +1858,9 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_subnet_group_name = optional_param(request, "DBSubnetGroupName");
-        let marker = optional_param(request, "Marker");
-        let max_records = optional_param(request, "MaxRecords");
+        let db_subnet_group_name = optional_query_param(request, "DBSubnetGroupName");
+        let marker = optional_query_param(request, "Marker");
+        let max_records = optional_query_param(request, "MaxRecords");
 
         let accounts = self.state.read();
         let empty = RdsState::new(&request.account_id, &request.region);
@@ -1920,7 +1924,7 @@ impl RdsService {
     }
 
     fn delete_db_subnet_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let db_subnet_group_name = required_param(request, "DBSubnetGroupName")?;
+        let db_subnet_group_name = required_query_param(request, "DBSubnetGroupName")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -1940,7 +1944,7 @@ impl RdsService {
     }
 
     fn modify_db_subnet_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let db_subnet_group_name = required_param(request, "DBSubnetGroupName")?;
+        let db_subnet_group_name = required_query_param(request, "DBSubnetGroupName")?;
         let subnet_ids = parse_subnet_ids(request)?;
 
         if subnet_ids.is_empty() {
@@ -2012,9 +2016,9 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_parameter_group_name = required_param(request, "DBParameterGroupName")?;
-        let db_parameter_group_family = required_param(request, "DBParameterGroupFamily")?;
-        let description = required_param(request, "Description")?;
+        let db_parameter_group_name = required_query_param(request, "DBParameterGroupName")?;
+        let db_parameter_group_family = required_query_param(request, "DBParameterGroupFamily")?;
+        let description = required_query_param(request, "Description")?;
 
         // Validate parameter group family against supported engines and versions
         let valid_families = [
@@ -2084,9 +2088,9 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_parameter_group_name = optional_param(request, "DBParameterGroupName");
-        let marker = optional_param(request, "Marker");
-        let max_records = optional_param(request, "MaxRecords");
+        let db_parameter_group_name = optional_query_param(request, "DBParameterGroupName");
+        let marker = optional_query_param(request, "Marker");
+        let max_records = optional_query_param(request, "MaxRecords");
 
         let accounts = self.state.read();
         let empty = RdsState::new(&request.account_id, &request.region);
@@ -2161,7 +2165,7 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_parameter_group_name = required_param(request, "DBParameterGroupName")?;
+        let db_parameter_group_name = required_query_param(request, "DBParameterGroupName")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -2196,7 +2200,7 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_parameter_group_name = required_param(request, "DBParameterGroupName")?;
+        let db_parameter_group_name = required_query_param(request, "DBParameterGroupName")?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -2212,7 +2216,7 @@ impl RdsService {
                 )
             })?;
 
-        if let Some(new_description) = optional_param(request, "Description") {
+        if let Some(new_description) = optional_query_param(request, "Description") {
             parameter_group.description = new_description;
         }
 
@@ -2233,16 +2237,8 @@ impl RdsService {
     }
 }
 
-fn optional_param(req: &AwsRequest, name: &str) -> Option<String> {
-    fakecloud_core::query::optional_query_param(req, name)
-}
-
-fn required_param(req: &AwsRequest, name: &str) -> Result<String, AwsServiceError> {
-    fakecloud_core::query::required_query_param(req, name)
-}
-
 fn required_i32_param(req: &AwsRequest, name: &str) -> Result<i32, AwsServiceError> {
-    let value = required_param(req, name)?;
+    let value = required_query_param(req, name)?;
     value.parse::<i32>().map_err(|_| {
         AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
@@ -2253,7 +2249,7 @@ fn required_i32_param(req: &AwsRequest, name: &str) -> Result<i32, AwsServiceErr
 }
 
 fn optional_i32_param(req: &AwsRequest, name: &str) -> Result<Option<i32>, AwsServiceError> {
-    optional_param(req, name)
+    optional_query_param(req, name)
         .map(|value| {
             value.parse::<i32>().map_err(|_| {
                 AwsServiceError::aws_error(
@@ -2271,8 +2267,8 @@ fn parse_tags(req: &AwsRequest) -> Result<Vec<RdsTag>, AwsServiceError> {
     for index in 1.. {
         let key_name = format!("Tags.Tag.{index}.Key");
         let value_name = format!("Tags.Tag.{index}.Value");
-        let key = optional_param(req, &key_name);
-        let value = optional_param(req, &value_name);
+        let key = optional_query_param(req, &key_name);
+        let value = optional_query_param(req, &value_name);
 
         match (key, value) {
             (Some(key), Some(value)) => tags.push(RdsTag { key, value }),
@@ -2294,7 +2290,7 @@ fn parse_tag_keys(req: &AwsRequest) -> Result<Vec<String>, AwsServiceError> {
     let mut keys = Vec::new();
     for index in 1.. {
         let key_name = format!("TagKeys.member.{index}");
-        match optional_param(req, &key_name) {
+        match optional_query_param(req, &key_name) {
             Some(key) => keys.push(key),
             None => break,
         }
@@ -2307,7 +2303,7 @@ fn parse_subnet_ids(req: &AwsRequest) -> Result<Vec<String>, AwsServiceError> {
     let mut subnet_ids = Vec::new();
     for index in 1.. {
         let subnet_id_name = format!("SubnetIds.SubnetIdentifier.{index}");
-        match optional_param(req, &subnet_id_name) {
+        match optional_query_param(req, &subnet_id_name) {
             Some(subnet_id) => subnet_ids.push(subnet_id),
             None => break,
         }
@@ -2320,7 +2316,7 @@ fn parse_vpc_security_group_ids(req: &AwsRequest) -> Vec<String> {
     let mut security_group_ids = Vec::new();
     for index in 1.. {
         let sg_id_name = format!("VpcSecurityGroupIds.VpcSecurityGroupId.{index}");
-        match optional_param(req, &sg_id_name) {
+        match optional_query_param(req, &sg_id_name) {
             Some(sg_id) => security_group_ids.push(sg_id),
             None => break,
         }

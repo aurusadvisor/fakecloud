@@ -7,9 +7,9 @@ use fakecloud_core::validation::*;
 use crate::state::IamInstanceProfile;
 
 use super::{
-    empty_response, generate_id, parse_tag_keys, parse_tags, required_param, tags_xml, url_encode,
-    IamService,
+    empty_response, generate_id, parse_tag_keys, parse_tags, tags_xml, url_encode, IamService,
 };
+use fakecloud_core::query::required_param;
 
 impl IamService {
     pub(super) fn create_instance_profile(

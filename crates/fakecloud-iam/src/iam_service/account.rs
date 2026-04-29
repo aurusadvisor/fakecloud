@@ -6,7 +6,8 @@ use fakecloud_core::validation::*;
 
 use crate::state::{AccountPasswordPolicy, IamState, VirtualMfaDevice};
 
-use super::{empty_response, parse_tags, required_param, tags_xml, url_encode, IamService};
+use super::{empty_response, parse_tags, tags_xml, url_encode, IamService};
+use fakecloud_core::query::required_param;
 
 use fakecloud_aws::xml::xml_escape;
 

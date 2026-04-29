@@ -10,8 +10,9 @@ use crate::xml_responses;
 
 use super::{
     empty_response, extract_access_key, generate_id, generate_long_id, parse_tag_keys, parse_tags,
-    partition_for_region, required_param, resolve_calling_user, tags_xml, url_encode, IamService,
+    partition_for_region, resolve_calling_user, tags_xml, url_encode, IamService,
 };
+use fakecloud_core::query::required_param;
 
 use fakecloud_aws::xml::xml_escape;
 
