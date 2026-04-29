@@ -3,7 +3,7 @@
 //! Wire protocol: AWS Query (form-encoded request, XML response). Endpoint
 //! prefix `elasticloadbalancing`, SigV4 service `elasticloadbalancing`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -592,7 +592,7 @@ impl Elbv2Service {
             ),
             ipv4_ipam_pool_id: optional_query_param(req, "IpamPools.Ipv4IpamPoolId"),
             tags,
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             minimum_capacity_units: optional_query_param(
                 req,
                 "MinimumLoadBalancerCapacity.CapacityUnits",
@@ -1426,7 +1426,7 @@ impl Elbv2Service {
             alpn_policy,
             mutual_authentication: parse_mutual_authentication(req),
             tags,
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
         };
         let listener_xml = render_listener_xml(&listener);
         st.listeners.insert(arn, listener);
@@ -1913,7 +1913,7 @@ impl Elbv2Service {
             total_revoked_entries: 0,
             created_time: Utc::now(),
             ca_certificates_bundle: Some(format!("s3://{bucket}/{key}").into_bytes()),
-            revocations: HashMap::new(),
+            revocations: BTreeMap::new(),
             next_revocation_id: 1,
             tags,
         };
@@ -2231,8 +2231,8 @@ fn trust_store_not_found(arn: &str) -> AwsServiceError {
     )
 }
 
-fn default_lb_attributes(lb_type: &str) -> HashMap<String, String> {
-    let mut m = HashMap::new();
+fn default_lb_attributes(lb_type: &str) -> BTreeMap<String, String> {
+    let mut m = BTreeMap::new();
     m.insert("idle_timeout.timeout_seconds".to_string(), "60".to_string());
     m.insert(
         "deletion_protection.enabled".to_string(),
@@ -2259,7 +2259,10 @@ fn default_lb_attributes(lb_type: &str) -> HashMap<String, String> {
     m
 }
 
-fn merge_lb_attributes(lb_type: &str, stored: &HashMap<String, String>) -> HashMap<String, String> {
+fn merge_lb_attributes(
+    lb_type: &str,
+    stored: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
     let mut m = default_lb_attributes(lb_type);
     for (k, v) in stored {
         m.insert(k.clone(), v.clone());
@@ -2877,7 +2880,7 @@ fn parse_attributes(req: &AwsRequest) -> Vec<(String, String)> {
     out
 }
 
-fn render_attributes_xml(attrs: &HashMap<String, String>) -> String {
+fn render_attributes_xml(attrs: &BTreeMap<String, String>) -> String {
     let entries = attrs
         .iter()
         .map(|(k, v)| {
@@ -2891,8 +2894,8 @@ fn render_attributes_xml(attrs: &HashMap<String, String>) -> String {
     format!("<Attributes>{entries}</Attributes>")
 }
 
-fn default_target_group_attributes() -> HashMap<String, String> {
-    let mut m = HashMap::new();
+fn default_target_group_attributes() -> BTreeMap<String, String> {
+    let mut m = BTreeMap::new();
     m.insert(
         "deregistration_delay.timeout_seconds".to_string(),
         "300".to_string(),
@@ -2985,6 +2988,7 @@ mod tests {
     use bytes::Bytes;
     use http::HeaderMap;
     use parking_lot::RwLock;
+    use std::collections::HashMap;
 
     fn req(action: &str, params: &[(&str, &str)]) -> AwsRequest {
         let mut q = HashMap::new();

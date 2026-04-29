@@ -156,6 +156,7 @@ struct CreateFunctionInput {
     code_zip: Option<Vec<u8>>,
     code_fallback: Vec<u8>,
     image_uri: Option<String>,
+    layer_arns: Vec<String>,
 }
 
 impl CreateFunctionInput {
@@ -237,6 +238,15 @@ impl CreateFunctionInput {
             ));
         }
 
+        let layer_arns: Vec<String> = body["Layers"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(Self {
             function_name,
             runtime: body["Runtime"].as_str().unwrap_or("python3.12").to_string(),
@@ -255,6 +265,7 @@ impl CreateFunctionInput {
             code_zip,
             code_fallback,
             image_uri,
+            layer_arns,
         })
     }
 }
@@ -876,6 +887,10 @@ impl LambdaService {
         }
 
         let mut accounts = self.state.write();
+        // Pre-resolve layer attachments before re-borrowing accounts mutably.
+        // Layer ARNs may live in sibling accounts.
+        let layer_attachments =
+            crate::extras::resolve_layer_attachments(&accounts, input.layer_arns.clone());
         let state = accounts.get_or_create(&req.account_id);
 
         if state.functions.contains_key(&input.function_name) {
@@ -921,6 +936,7 @@ impl LambdaService {
             code_zip: input.code_zip,
             image_uri: input.image_uri,
             policy: None,
+            layers: layer_attachments,
         };
 
         let response = self.function_config_json(&func);
@@ -1030,11 +1046,11 @@ impl LambdaService {
         account_id: &str,
         invocation_type: InvocationType,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let func = {
+        let (func, layer_zips) = {
             let accounts = self.state.read();
             let empty = LambdaState::new(account_id, "");
             let state = accounts.get(account_id).unwrap_or(&empty);
-            state.functions.get(function_name).cloned().ok_or_else(|| {
+            let func = state.functions.get(function_name).cloned().ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "ResourceNotFoundException",
@@ -1043,7 +1059,32 @@ impl LambdaService {
                         state.region, state.account_id, function_name
                     ),
                 )
-            })?
+            })?;
+            // Resolve attached layer ARNs to ZIP bytes under the same read
+            // lock. Layers may live in sibling accounts (cross-account
+            // attach is legal in AWS); fall back to no bytes for unknown
+            // ARNs and warn — invoke proceeds without that layer.
+            let mut layer_zips: Vec<Vec<u8>> = Vec::with_capacity(func.layers.len());
+            for attached in &func.layers {
+                let bytes = crate::extras::parse_layer_version_arn(&attached.arn).and_then(
+                    |(acct, name, ver)| {
+                        accounts
+                            .get(&acct)
+                            .and_then(|s| s.layers.get(&name))
+                            .and_then(|l| l.versions.iter().find(|v| v.version == ver))
+                            .and_then(|v| v.code_zip.clone())
+                    },
+                );
+                match bytes {
+                    Some(b) => layer_zips.push(b),
+                    None => tracing::warn!(
+                        function = %function_name,
+                        layer_arn = %attached.arn,
+                        "attached layer not resolvable; skipping /opt mount for this layer"
+                    ),
+                }
+            }
+            (func, layer_zips)
         };
 
         if func.code_zip.is_none() {
@@ -1080,8 +1121,12 @@ impl LambdaService {
                 let bus = self.delivery_bus.clone();
                 let destination_config = self.lookup_destination_config(&func, account_id);
                 let function_arn = func.function_arn.clone();
+                let layer_zips_async = layer_zips.clone();
                 tokio::spawn(async move {
-                    let result = match runtime.invoke(&func_clone, &payload_vec).await {
+                    let result = match runtime
+                        .invoke(&func_clone, &payload_vec, &layer_zips_async)
+                        .await
+                    {
                         Ok(bytes) => {
                             // Lambda runtime returns 200 even on uncaught
                             // function errors; the body has errorMessage /
@@ -1127,7 +1172,7 @@ impl LambdaService {
                 Ok(resp)
             }
             InvocationType::RequestResponse | InvocationType::DryRun => {
-                match runtime.invoke(&func, payload).await {
+                match runtime.invoke(&func, payload, &layer_zips).await {
                     Ok(response_bytes) => {
                         let mut resp = AwsResponse::json(StatusCode::OK, response_bytes);
                         resp.headers.insert(
@@ -1442,6 +1487,13 @@ impl LambdaService {
                 "ImageUri": uri,
                 "ResolvedImageUri": uri,
             });
+        }
+        if !func.layers.is_empty() {
+            config["Layers"] = json!(func
+                .layers
+                .iter()
+                .map(|l| json!({"Arn": l.arn, "CodeSize": l.code_size}))
+                .collect::<Vec<_>>());
         }
         config
     }

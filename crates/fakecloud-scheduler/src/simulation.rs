@@ -100,7 +100,7 @@ pub fn fire_schedule_response(
 ) -> Result<FireScheduleResponse, String> {
     let target_arn = fire_once(state, delivery, account_id, group, name)?;
     Ok(FireScheduleResponse {
-        schedule_arn: format!("arn:aws:scheduler:{region}:{account_id}:schedule/{group}/{name}"),
+        schedule_arn: crate::state::schedule_arn(region, account_id, group, name),
         target_arn,
     })
 }

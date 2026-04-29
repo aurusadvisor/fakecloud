@@ -9,6 +9,7 @@ use parking_lot::RwLock;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
@@ -1840,7 +1841,7 @@ fn workgroup_arn(account_id: &str, region: &str, name: &str) -> String {
     } else {
         region
     };
-    format!("arn:aws:athena:{region}:{account_id}:workgroup/{name}")
+    Arn::new("athena", region, account_id, &format!("workgroup/{name}")).to_string()
 }
 
 fn datacatalog_arn(account_id: &str, region: &str, name: &str) -> String {
@@ -1849,7 +1850,7 @@ fn datacatalog_arn(account_id: &str, region: &str, name: &str) -> String {
     } else {
         region
     };
-    format!("arn:aws:athena:{region}:{account_id}:datacatalog/{name}")
+    Arn::new("athena", region, account_id, &format!("datacatalog/{name}")).to_string()
 }
 
 fn capacity_reservation_arn(account_id: &str, region: &str, name: &str) -> String {
@@ -1858,7 +1859,13 @@ fn capacity_reservation_arn(account_id: &str, region: &str, name: &str) -> Strin
     } else {
         region
     };
-    format!("arn:aws:athena:{region}:{account_id}:capacity-reservation/{name}")
+    Arn::new(
+        "athena",
+        region,
+        account_id,
+        &format!("capacity-reservation/{name}"),
+    )
+    .to_string()
 }
 
 fn parse_string_list(value: Option<&Value>) -> Vec<String> {

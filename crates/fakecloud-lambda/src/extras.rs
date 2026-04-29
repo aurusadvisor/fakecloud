@@ -6,15 +6,41 @@
 use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
+use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::LambdaService;
 use crate::state::{
-    AccountSettings, CapacityProvider, CodeSigningConfig, DurableExecution, EventInvokeConfig,
-    FunctionAlias, FunctionScalingConfig, FunctionUrlConfig, LambdaState, Layer, LayerVersion,
-    ProvisionedConcurrencyConfig, RuntimeManagementConfig,
+    AccountSettings, AttachedLayer, CapacityProvider, CodeSigningConfig, DurableExecution,
+    EventInvokeConfig, FunctionAlias, FunctionScalingConfig, FunctionUrlConfig, LambdaState, Layer,
+    LayerVersion, ProvisionedConcurrencyConfig, RuntimeManagementConfig,
 };
+
+/// Resolve a layer-version ARN to its current `CodeSize` from the
+/// multi-account state. Returns 0 when the ARN is unparseable, when the
+/// referenced account/layer/version is unknown, or when the version was
+/// published without ZIP content (legacy snapshots).
+pub(crate) fn resolve_layer_attachments(
+    accounts: &fakecloud_core::multi_account::MultiAccountState<LambdaState>,
+    arns: Vec<String>,
+) -> Vec<AttachedLayer> {
+    arns.into_iter()
+        .map(|arn| {
+            let code_size = parse_layer_version_arn(&arn)
+                .and_then(|(acct, name, ver)| {
+                    accounts
+                        .get(&acct)
+                        .and_then(|s| s.layers.get(&name))
+                        .and_then(|l| l.versions.iter().find(|v| v.version == ver))
+                        .map(|v| v.code_size)
+                })
+                .unwrap_or(0);
+            AttachedLayer { arn, code_size }
+        })
+        .collect()
+}
 
 fn missing(name: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
@@ -42,6 +68,40 @@ fn empty() -> Result<AwsResponse, AwsServiceError> {
 
 fn body(req: &AwsRequest) -> Value {
     serde_json::from_slice(&req.body).unwrap_or_else(|_| Value::Object(Default::default()))
+}
+
+/// Build a fakecloud-hosted download URL for a layer version's ZIP. The URL
+/// is reachable on the same authority the SDK used for the original
+/// request, so test harnesses get a working `Location` they can `GET`
+/// directly instead of the placeholder AWS clients otherwise see.
+fn layer_content_url(req: &AwsRequest, account_id: &str, layer_name: &str, version: i64) -> String {
+    let host = req
+        .headers
+        .get(http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost");
+    let scheme = req
+        .headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("http");
+    format!(
+        "{scheme}://{host}/_fakecloud/lambda/layer-content/{account_id}/{layer_name}/{version}.zip"
+    )
+}
+
+/// AWS layer-version ARN: `arn:aws:lambda:<region>:<account>:layer:<name>:<version>`.
+/// Returns `(account_id, layer_name, version)`. Used to resolve cross-account
+/// layer references attached to a function.
+pub fn parse_layer_version_arn(arn: &str) -> Option<(String, String, i64)> {
+    let parts: Vec<&str> = arn.split(':').collect();
+    if parts.len() != 8 || parts[0] != "arn" || parts[2] != "lambda" || parts[5] != "layer" {
+        return None;
+    }
+    let account = parts[4].to_string();
+    let name = parts[6].to_string();
+    let version: i64 = parts[7].parse().ok()?;
+    Some((account, name, version))
 }
 
 fn parse_qualifier(req: &AwsRequest) -> String {
@@ -219,6 +279,15 @@ impl LambdaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
         let mut accounts = self.state.write();
+        // Pre-resolve layer attachments before re-borrowing accounts mutably
+        // for the function. Layer ARNs may live in sibling accounts.
+        let layer_attachments: Option<Vec<AttachedLayer>> = body["Layers"].as_array().map(|arr| {
+            let arns: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            resolve_layer_attachments(&accounts, arns)
+        });
         let state = accounts.get_or_create(&req.account_id);
         let func = state
             .functions
@@ -238,6 +307,9 @@ impl LambdaService {
         }
         if let Some(desc) = body["Description"].as_str() {
             func.description = desc.to_string();
+        }
+        if let Some(attachments) = layer_attachments {
+            func.layers = attachments;
         }
         func.last_modified = Utc::now();
         ok(self.function_config_json(func))
@@ -434,8 +506,36 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
+        let zip_bytes: Option<Vec<u8>> = match body["Content"]["ZipFile"].as_str() {
+            Some(b64) => Some(
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).map_err(
+                    |_| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterValueException",
+                            "Could not decode Content.ZipFile: invalid base64",
+                        )
+                    },
+                )?,
+            ),
+            None => None,
+        };
+        let (code_sha256, code_size) = match zip_bytes.as_deref() {
+            Some(bytes) => {
+                let mut hasher = Sha256::new();
+                hasher.update(bytes);
+                let digest = hasher.finalize();
+                (
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, digest),
+                    bytes.len() as i64,
+                )
+            }
+            None => (String::new(), 0),
+        };
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        let account_id = state.account_id.clone();
         let layer = state
             .layers
             .entry(layer_name.to_string())
@@ -457,6 +557,7 @@ impl LambdaService {
                     .collect()
             })
             .unwrap_or_default();
+        let layer_arn = layer.layer_arn.clone();
         let lv = LayerVersion {
             version: next_version,
             layer_version_arn: version_arn.clone(),
@@ -465,16 +566,25 @@ impl LambdaService {
             compatible_runtimes: runtimes,
             license_info: body["LicenseInfo"].as_str().unwrap_or("").to_string(),
             policy: None,
+            code_zip: zip_bytes,
+            code_sha256: code_sha256.clone(),
+            code_size,
         };
         layer.versions.push(lv.clone());
+        let location = layer_content_url(req, &account_id, layer_name, next_version);
         ok(json!({
-            "LayerArn": layer.layer_arn,
+            "LayerArn": layer_arn,
             "LayerVersionArn": version_arn,
             "Version": next_version,
             "Description": lv.description,
             "CreatedDate": lv.created_date.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string(),
             "CompatibleRuntimes": lv.compatible_runtimes,
             "LicenseInfo": lv.license_info,
+            "Content": {
+                "Location": location,
+                "CodeSha256": code_sha256,
+                "CodeSize": code_size,
+            },
         }))
     }
 
@@ -540,6 +650,7 @@ impl LambdaService {
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| missing("VersionNumber"))?;
         let region = self.region_for(&req.account_id);
+        let location = layer_content_url(req, &req.account_id, &layer_name, version);
         self.with_state_read(&req.account_id, &region, |state| {
             state
                 .layers
@@ -554,9 +665,9 @@ impl LambdaService {
                         "CompatibleRuntimes": v.compatible_runtimes,
                         "LicenseInfo": v.license_info,
                         "Content": {
-                            "Location": "https://example.com/layer.zip",
-                            "CodeSha256": "",
-                            "CodeSize": 0,
+                            "Location": location,
+                            "CodeSha256": v.code_sha256,
+                            "CodeSize": v.code_size,
                         },
                     }))
                 })
@@ -571,15 +682,11 @@ impl LambdaService {
             .or_else(|| req.query_params.get("find"))
             .cloned()
             .unwrap_or_default();
-        // arn:aws:lambda:region:account:layer:name:version
-        let parts: Vec<&str> = arn.rsplitn(3, ':').collect();
-        if parts.len() < 3 {
-            return Err(missing("Arn"));
-        }
-        let version: i64 = parts[0].parse().map_err(|_| missing("Arn"))?;
-        let layer_name = parts[1].to_string();
-        let region = self.region_for(&req.account_id);
-        self.with_state_read(&req.account_id, &region, |state| {
+        let (account_id, layer_name, version) =
+            parse_layer_version_arn(&arn).ok_or_else(|| missing("Arn"))?;
+        let region = self.region_for(&account_id);
+        let location = layer_content_url(req, &account_id, &layer_name, version);
+        self.with_state_read(&account_id, &region, |state| {
             state
                 .layers
                 .get(&layer_name)
@@ -592,6 +699,11 @@ impl LambdaService {
                         "CreatedDate": v.created_date.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string(),
                         "CompatibleRuntimes": v.compatible_runtimes,
                         "LicenseInfo": v.license_info,
+                        "Content": {
+                            "Location": location,
+                            "CodeSha256": v.code_sha256,
+                            "CodeSize": v.code_size,
+                        },
                     }))
                 })
                 .unwrap_or_else(|| Err(not_found("LayerVersion", &arn)))
@@ -1217,7 +1329,7 @@ impl LambdaService {
             .runtime_management
             .insert(format!("{function_name}:{qualifier}"), cfg.clone());
         ok(json!({
-            "FunctionArn": format!("arn:aws:lambda:{}:{}:function:{}:{}", state.region, state.account_id, function_name, qualifier),
+            "FunctionArn": Arn::new("lambda", &state.region, &state.account_id, &format!("function:{function_name}:{qualifier}")).to_string(),
             "UpdateRuntimeOn": cfg.update_runtime_on,
             "RuntimeVersionArn": cfg.runtime_version_arn,
         }))

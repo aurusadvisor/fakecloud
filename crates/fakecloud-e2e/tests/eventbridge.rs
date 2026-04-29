@@ -204,19 +204,9 @@ async fn eb_schedule_fires_to_sqs() {
         .await
         .unwrap();
 
-    // Wait for the scheduler to fire at least once
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    // Receive messages from SQS
-    let resp = sqs
-        .receive_message()
-        .queue_url(queue_url)
-        .max_number_of_messages(10)
-        .send()
-        .await
-        .unwrap();
-
-    let messages = resp.messages();
+    // Poll SQS until scheduler delivers at least one message (rate(1 second))
+    let messages =
+        helpers::sqs_receive_at_least(&sqs, queue_url, 1, std::time::Duration::from_secs(10)).await;
     assert!(
         !messages.is_empty(),
         "expected at least one scheduled event message in SQS"
@@ -972,8 +962,23 @@ async fn eventbridge_archive_replay_delivers_events() {
     // Purge the queue
     let _ = sqs.purge_queue().queue_url(&queue_url).send().await;
 
-    // Small delay for purge to take effect
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Wait for purge to take effect by polling until the queue is empty
+    let purged = helpers::wait_until(std::time::Duration::from_secs(5), || async {
+        let resp = sqs
+            .receive_message()
+            .queue_url(&queue_url)
+            .max_number_of_messages(1)
+            .send()
+            .await
+            .unwrap();
+        if resp.messages().is_empty() {
+            Some(())
+        } else {
+            None
+        }
+    })
+    .await;
+    assert!(purged.is_some(), "queue did not drain after purge");
 
     // Start replay
     let replay_resp = eb
@@ -1337,22 +1342,22 @@ async fn eb_rule_starts_stepfunctions_execution() {
         .await
         .unwrap();
 
-    // Give the async execution a moment to start
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // Verify execution was started
-    let executions = sfn
-        .list_executions()
-        .state_machine_arn(sm_arn)
-        .send()
-        .await
-        .expect("list executions");
-
-    assert_eq!(
-        executions.executions().len(),
-        1,
-        "expected 1 execution started by EventBridge rule"
-    );
+    // Poll until the EventBridge rule triggers a Step Functions execution
+    let executions = helpers::wait_until(std::time::Duration::from_secs(10), || async {
+        let resp = sfn
+            .list_executions()
+            .state_machine_arn(sm_arn)
+            .send()
+            .await
+            .ok()?;
+        if resp.executions().len() == 1 {
+            Some(resp)
+        } else {
+            None
+        }
+    })
+    .await
+    .expect("expected 1 execution started by EventBridge rule");
     let exec = &executions.executions()[0];
     assert_eq!(
         exec.status(),

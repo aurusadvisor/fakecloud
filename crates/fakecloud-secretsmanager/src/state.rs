@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -9,7 +9,7 @@ pub struct Secret {
     pub arn: String,
     pub description: Option<String>,
     pub kms_key_id: Option<String>,
-    pub versions: HashMap<String, SecretVersion>,
+    pub versions: BTreeMap<String, SecretVersion>,
     pub current_version_id: Option<String>,
     pub tags: Vec<(String, String)>,
     pub tags_ever_set: bool,
@@ -43,7 +43,7 @@ pub struct SecretVersion {
 pub struct SecretsManagerState {
     pub account_id: String,
     pub region: String,
-    pub secrets: HashMap<String, Secret>,
+    pub secrets: BTreeMap<String, Secret>,
 }
 
 impl SecretsManagerState {
@@ -51,7 +51,7 @@ impl SecretsManagerState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            secrets: HashMap::new(),
+            secrets: BTreeMap::new(),
         }
     }
 
@@ -104,7 +104,7 @@ mod tests {
                 arn: "arn".to_string(),
                 description: None,
                 kms_key_id: None,
-                versions: HashMap::new(),
+                versions: BTreeMap::new(),
                 current_version_id: None,
                 tags: vec![],
                 tags_ever_set: false,

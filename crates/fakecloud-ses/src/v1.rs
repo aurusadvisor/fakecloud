@@ -6,6 +6,7 @@ use chrono::Utc;
 use http::StatusCode;
 use std::collections::HashMap;
 
+use fakecloud_core::query::{query_metadata_only_xml, query_response_xml};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
@@ -16,14 +17,9 @@ use crate::state::{
 /// XML namespace for SES v1 responses.
 const SES_NS: &str = "http://ses.amazonaws.com/doc/2010-12-01/";
 
-/// Wrap a v1 action result in the standard SES Query protocol XML envelope.
-fn xml_wrap(action: &str, inner: &str, request_id: &str) -> String {
-    fakecloud_core::query::query_response_xml(action, SES_NS, inner, request_id)
-}
-
 /// Response with only metadata (no result body).
 fn xml_metadata_only(action: &str, request_id: &str) -> AwsResponse {
-    let xml = fakecloud_core::query::query_metadata_only_xml(action, SES_NS, request_id);
+    let xml = query_metadata_only_xml(action, SES_NS, request_id);
     AwsResponse::xml(StatusCode::OK, xml)
 }
 
@@ -521,7 +517,7 @@ fn verify_domain_identity(
     let inner = format!("<VerificationToken>{token}</VerificationToken>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("VerifyDomainIdentity", &inner, &req.request_id),
+        query_response_xml("VerifyDomainIdentity", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -559,7 +555,7 @@ fn verify_domain_dkim(
     inner.push_str("</DkimTokens>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("VerifyDomainDkim", &inner, &req.request_id),
+        query_response_xml("VerifyDomainDkim", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -590,7 +586,7 @@ fn list_identities(
     inner.push_str("</Identities>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("ListIdentities", &inner, &req.request_id),
+        query_response_xml("ListIdentities", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -634,7 +630,12 @@ fn get_identity_verification_attributes(
     inner.push_str("</VerificationAttributes>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("GetIdentityVerificationAttributes", &inner, &req.request_id),
+        query_response_xml(
+            "GetIdentityVerificationAttributes",
+            SES_NS,
+            &inner,
+            &req.request_id,
+        ),
     ))
 }
 
@@ -688,7 +689,7 @@ fn get_identity_dkim_attributes(
     inner.push_str("</DkimAttributes>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("GetIdentityDkimAttributes", &inner, &req.request_id),
+        query_response_xml("GetIdentityDkimAttributes", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -811,7 +812,12 @@ fn get_identity_notification_attributes(
     inner.push_str("</NotificationAttributes>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("GetIdentityNotificationAttributes", &inner, &req.request_id),
+        query_response_xml(
+            "GetIdentityNotificationAttributes",
+            SES_NS,
+            &inner,
+            &req.request_id,
+        ),
     ))
 }
 
@@ -861,8 +867,9 @@ fn get_identity_mail_from_domain_attributes(
     inner.push_str("</MailFromDomainAttributes>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap(
+        query_response_xml(
             "GetIdentityMailFromDomainAttributes",
+            SES_NS,
             &inner,
             &req.request_id,
         ),
@@ -955,7 +962,7 @@ fn send_email(state: &SharedSesState, req: &AwsRequest) -> Result<AwsResponse, A
     let inner = format!("<MessageId>{message_id}</MessageId>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("SendEmail", &inner, &req.request_id),
+        query_response_xml("SendEmail", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -999,7 +1006,7 @@ fn send_raw_email(
     let inner = format!("<MessageId>{message_id}</MessageId>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("SendRawEmail", &inner, &req.request_id),
+        query_response_xml("SendRawEmail", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -1060,7 +1067,7 @@ fn send_templated_email(
     let inner = format!("<MessageId>{message_id}</MessageId>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("SendTemplatedEmail", &inner, &req.request_id),
+        query_response_xml("SendTemplatedEmail", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -1114,7 +1121,7 @@ fn send_bulk_templated_email(
     inner.push_str("</Status>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("SendBulkTemplatedEmail", &inner, &req.request_id),
+        query_response_xml("SendBulkTemplatedEmail", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -1228,7 +1235,7 @@ fn get_template(state: &SharedSesState, req: &AwsRequest) -> Result<AwsResponse,
     inner.push_str("</Template>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("GetTemplate", &inner, &req.request_id),
+        query_response_xml("GetTemplate", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -1252,7 +1259,7 @@ fn list_templates(
     inner.push_str("</TemplatesMetadata>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("ListTemplates", &inner, &req.request_id),
+        query_response_xml("ListTemplates", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -1387,7 +1394,7 @@ fn describe_configuration_set(
     }
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("DescribeConfigurationSet", &inner, &req.request_id),
+        query_response_xml("DescribeConfigurationSet", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -1410,7 +1417,7 @@ fn list_configuration_sets(
     inner.push_str("</ConfigurationSets>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("ListConfigurationSets", &inner, &req.request_id),
+        query_response_xml("ListConfigurationSets", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -1561,7 +1568,7 @@ fn get_send_quota(
         <SentLast24Hours>0.0</SentLast24Hours>";
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("GetSendQuota", inner, &req.request_id),
+        query_response_xml("GetSendQuota", SES_NS, inner, &req.request_id),
     ))
 }
 
@@ -1587,7 +1594,7 @@ fn get_send_statistics(
     );
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("GetSendStatistics", &inner, &req.request_id),
+        query_response_xml("GetSendStatistics", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -1602,7 +1609,7 @@ fn get_account_sending_enabled(
     let inner = format!("<Enabled>{enabled}</Enabled>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("GetAccountSendingEnabled", &inner, &req.request_id),
+        query_response_xml("GetAccountSendingEnabled", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -1705,7 +1712,7 @@ fn describe_receipt_rule_set(
     );
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("DescribeReceiptRuleSet", &inner, &req.request_id),
+        query_response_xml("DescribeReceiptRuleSet", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -1729,7 +1736,7 @@ fn list_receipt_rule_sets(
     inner.push_str("</RuleSets>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("ListReceiptRuleSets", &inner, &req.request_id),
+        query_response_xml("ListReceiptRuleSets", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -1957,7 +1964,7 @@ fn describe_receipt_rule(
     let inner = format!("<Rule>{inner_xml}</Rule>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("DescribeReceiptRule", &inner, &req.request_id),
+        query_response_xml("DescribeReceiptRule", SES_NS, &inner, &req.request_id),
     ))
 }
 
@@ -2068,7 +2075,7 @@ fn list_receipt_filters(
     inner.push_str("</Filters>");
     Ok(AwsResponse::xml(
         StatusCode::OK,
-        xml_wrap("ListReceiptFilters", &inner, &req.request_id),
+        query_response_xml("ListReceiptFilters", SES_NS, &inner, &req.request_id),
     ))
 }
 

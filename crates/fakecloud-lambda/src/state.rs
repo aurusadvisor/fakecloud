@@ -37,6 +37,22 @@ pub struct LambdaFunction {
     /// `RemovePermission` leaves at least `{"Statement":[]}` behind,
     /// matching AWS behavior.
     pub policy: Option<String>,
+    /// Layer versions attached to this function, in attach order. AWS
+    /// extracts each layer's content into `/opt` of the runtime sandbox at
+    /// invoke time; fakecloud's container runtime mirrors that via
+    /// `docker cp`. `code_size` is captured at attach time from the
+    /// referenced `LayerVersion` so `GetFunctionConfiguration` can echo it
+    /// without a second state lookup; layer versions are immutable so the
+    /// cached size never goes stale.
+    #[serde(default)]
+    pub layers: Vec<AttachedLayer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachedLayer {
+    pub arn: String,
+    #[serde(default)]
+    pub code_size: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +187,14 @@ pub struct LayerVersion {
     pub compatible_runtimes: Vec<String>,
     pub license_info: String,
     pub policy: Option<String>,
+    /// Raw ZIP bytes from `Content.ZipFile` on `PublishLayerVersion`.
+    /// `None` only on legacy snapshots predating layer storage.
+    #[serde(default)]
+    pub code_zip: Option<Vec<u8>>,
+    #[serde(default)]
+    pub code_sha256: String,
+    #[serde(default)]
+    pub code_size: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

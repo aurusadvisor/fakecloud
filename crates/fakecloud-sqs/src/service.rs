@@ -1020,15 +1020,12 @@ fn val_as_i64(v: &Value) -> Option<i64> {
 }
 
 use fakecloud_aws::xml::xml_escape;
+use fakecloud_core::query::{query_metadata_only_xml, query_response_xml};
 
 const SQS_NS: &str = "http://queue.amazonaws.com/doc/2012-11-05/";
 
-fn xml_wrap(action: &str, inner: &str, request_id: &str) -> String {
-    fakecloud_core::query::query_response_xml(action, SQS_NS, inner, request_id)
-}
-
 fn xml_metadata_only(action: &str, request_id: &str) -> AwsResponse {
-    let xml = fakecloud_core::query::query_metadata_only_xml(action, SQS_NS, request_id);
+    let xml = query_metadata_only_xml(action, SQS_NS, request_id);
     AwsResponse::xml(StatusCode::OK, xml)
 }
 
@@ -1062,7 +1059,10 @@ fn sqs_response(action: &str, body: Value, request_id: &str, is_query: bool) -> 
         // DeleteQueue, DeleteMessage, PurgeQueue, SetQueueAttributes, ChangeMessageVisibility
         _ => return xml_metadata_only(action, request_id),
     };
-    AwsResponse::xml(StatusCode::OK, xml_wrap(action, &inner, request_id))
+    AwsResponse::xml(
+        StatusCode::OK,
+        query_response_xml(action, SQS_NS, &inner, request_id),
+    )
 }
 
 fn xml_queue_url_only(body: &Value) -> String {

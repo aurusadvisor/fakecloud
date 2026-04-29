@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -37,11 +37,11 @@ pub struct OrganizationState {
     pub root_arn: String,
     pub root_name: String,
     pub created_at: DateTime<Utc>,
-    pub ous: HashMap<String, OrganizationalUnit>,
-    pub accounts: HashMap<String, MemberAccount>,
-    pub policies: HashMap<String, Policy>,
+    pub ous: BTreeMap<String, OrganizationalUnit>,
+    pub accounts: BTreeMap<String, MemberAccount>,
+    pub policies: BTreeMap<String, Policy>,
     /// target_id -> attached policy ids. Targets are root id, OU id, or account id.
-    pub attachments: HashMap<String, HashSet<String>>,
+    pub attachments: BTreeMap<String, HashSet<String>>,
 }
 
 impl OrganizationState {
@@ -66,7 +66,7 @@ impl OrganizationState {
             management_account_id, org_id, management_account_id
         );
 
-        let mut policies = HashMap::new();
+        let mut policies = BTreeMap::new();
         policies.insert(
             FULL_AWS_ACCESS_POLICY_ID.to_string(),
             Policy {
@@ -83,13 +83,13 @@ impl OrganizationState {
             },
         );
 
-        let mut attachments: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut attachments: BTreeMap<String, HashSet<String>> = BTreeMap::new();
         attachments
             .entry(root_id.clone())
             .or_default()
             .insert(FULL_AWS_ACCESS_POLICY_ID.to_string());
 
-        let mut accounts = HashMap::new();
+        let mut accounts = BTreeMap::new();
         accounts.insert(
             management_account_id.to_string(),
             MemberAccount {
@@ -115,7 +115,7 @@ impl OrganizationState {
             root_arn,
             root_name: "Root".to_string(),
             created_at: now,
-            ous: HashMap::new(),
+            ous: BTreeMap::new(),
             accounts,
             policies,
             attachments,
