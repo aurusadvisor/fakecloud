@@ -83,6 +83,8 @@ pub fn parse_template_with_resolution(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    let conditions = evaluate_conditions(&value, parameters);
+
     let resources_obj = value
         .get("Resources")
         .and_then(|v| v.as_object())
@@ -90,6 +92,13 @@ pub fn parse_template_with_resolution(
 
     let mut resources = Vec::new();
     for (logical_id, resource) in resources_obj {
+        // Skip resources whose Condition evaluates to false. Real CFN
+        // simply omits these resources from the stack.
+        if let Some(cond_name) = resource.get("Condition").and_then(|v| v.as_str()) {
+            if !conditions.get(cond_name).copied().unwrap_or(false) {
+                continue;
+            }
+        }
         let resource_type = resource
             .get("Type")
             .and_then(|v| v.as_str())
@@ -102,12 +111,14 @@ pub fn parse_template_with_resolution(
             .unwrap_or(Value::Object(serde_json::Map::new()));
 
         // Resolve Ref and parameter substitutions in properties
-        let resolved = resolve_refs(
+        let resolved = resolve_refs_full(
             &properties,
             parameters,
             resources_obj,
             resource_physical_ids,
             resource_attributes,
+            &BTreeMap::new(),
+            &conditions,
         );
 
         resources.push(ResourceDefinition {
@@ -155,13 +166,14 @@ pub fn parse_outputs(
             Some(v) => v,
             None => continue,
         };
-        let resolved = resolve_refs_with_imports(
+        let resolved = resolve_refs_full(
             raw_value,
             parameters,
             resources,
             resource_physical_ids,
             resource_attributes,
             imports,
+            &BTreeMap::new(),
         );
         let value = match resolved {
             Value::String(s) => s,
@@ -172,13 +184,14 @@ pub fn parse_outputs(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let export_name = body.get("Export").and_then(|e| e.get("Name")).map(|n| {
-            let resolved = resolve_refs_with_imports(
+            let resolved = resolve_refs_full(
                 n,
                 parameters,
                 resources,
                 resource_physical_ids,
                 resource_attributes,
                 imports,
+                &BTreeMap::new(),
             );
             match resolved {
                 Value::String(s) => s,
@@ -193,6 +206,101 @@ pub fn parse_outputs(
         });
     }
     out
+}
+
+/// Walk the top-level `Conditions` block and evaluate each entry to a
+/// boolean. Real CFN allows conditions to reference each other, so a
+/// single bottom-up pass with re-evaluation handles forward references.
+fn evaluate_conditions(
+    template: &Value,
+    parameters: &BTreeMap<String, String>,
+) -> BTreeMap<String, bool> {
+    let mut out: BTreeMap<String, bool> = BTreeMap::new();
+    let Some(conds) = template.get("Conditions").and_then(|v| v.as_object()) else {
+        return out;
+    };
+    for _ in 0..conds.len().max(1) {
+        let mut progress = false;
+        for (name, expr) in conds {
+            if out.contains_key(name) {
+                continue;
+            }
+            if let Some(b) = eval_condition_expr(expr, parameters, &out) {
+                out.insert(name.clone(), b);
+                progress = true;
+            }
+        }
+        if !progress {
+            break;
+        }
+    }
+    out
+}
+
+fn eval_condition_expr(
+    expr: &Value,
+    parameters: &BTreeMap<String, String>,
+    conditions: &BTreeMap<String, bool>,
+) -> Option<bool> {
+    let Some(map) = expr.as_object() else {
+        return expr.as_bool();
+    };
+    if let Some(args) = map.get("Fn::Equals").and_then(|v| v.as_array()) {
+        if args.len() == 2 {
+            let a = stringify_value(&args[0], parameters);
+            let b = stringify_value(&args[1], parameters);
+            return Some(a == b);
+        }
+    }
+    if let Some(args) = map.get("Fn::And").and_then(|v| v.as_array()) {
+        let mut all = true;
+        for a in args {
+            match eval_condition_expr(a, parameters, conditions) {
+                Some(b) => all &= b,
+                None => return None,
+            }
+        }
+        return Some(all);
+    }
+    if let Some(args) = map.get("Fn::Or").and_then(|v| v.as_array()) {
+        let mut any = false;
+        for a in args {
+            match eval_condition_expr(a, parameters, conditions) {
+                Some(b) => any |= b,
+                None => return None,
+            }
+        }
+        return Some(any);
+    }
+    if let Some(arr) = map.get("Fn::Not").and_then(|v| v.as_array()) {
+        if let Some(arg) = arr.first() {
+            return eval_condition_expr(arg, parameters, conditions).map(|b| !b);
+        }
+    }
+    if let Some(name) = map.get("Condition").and_then(|v| v.as_str()) {
+        return conditions.get(name).copied();
+    }
+    None
+}
+
+/// Render a CFN intrinsic value (Ref to a parameter, plain string, etc.)
+/// as a string for Fn::Equals comparison.
+fn stringify_value(value: &Value, parameters: &BTreeMap<String, String>) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Object(m) => {
+            if let Some(name) = m.get("Ref").and_then(|v| v.as_str()) {
+                if let Some(p) = parameters.get(name) {
+                    return p.clone();
+                }
+                return name.to_string();
+            }
+            value.to_string()
+        }
+        _ => value.to_string(),
+    }
 }
 
 /// Re-resolve a single resource definition's properties with updated physical IDs.
@@ -284,26 +392,52 @@ fn resolve_refs(
     resource_physical_ids: &BTreeMap<String, String>,
     resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Value {
-    resolve_refs_with_imports(
+    resolve_refs_full(
         value,
         parameters,
         _resources,
         resource_physical_ids,
         resource_attributes,
         &BTreeMap::new(),
+        &BTreeMap::new(),
     )
 }
 
 /// Resolve `Ref`, `Fn::GetAtt`, `Fn::Join`, `Fn::Sub`, and
 /// `Fn::ImportValue` in property values.
-fn resolve_refs_with_imports(
+fn resolve_refs_full(
     value: &Value,
     parameters: &BTreeMap<String, String>,
     _resources: &serde_json::Map<String, Value>,
     resource_physical_ids: &BTreeMap<String, String>,
     resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
     imports: &BTreeMap<String, String>,
+    conditions: &BTreeMap<String, bool>,
 ) -> Value {
+    // Fn::If always rewrites to either branch BEFORE descent so we don't
+    // try to resolve the unused branch (it may legitimately reference an
+    // unconditional resource).
+    if let Some(map) = value.as_object() {
+        if let Some(arr) = map.get("Fn::If").and_then(|v| v.as_array()) {
+            if arr.len() == 3 {
+                let cond_name = arr[0].as_str().unwrap_or("");
+                let picked = if conditions.get(cond_name).copied().unwrap_or(false) {
+                    &arr[1]
+                } else {
+                    &arr[2]
+                };
+                return resolve_refs_full(
+                    picked,
+                    parameters,
+                    _resources,
+                    resource_physical_ids,
+                    resource_attributes,
+                    imports,
+                    conditions,
+                );
+            }
+        }
+    }
     match value {
         Value::Object(map) => {
             if let Some(ref_val) = map.get("Ref") {
@@ -338,13 +472,14 @@ fn resolve_refs_with_imports(
             // Resolves to the empty string when the export name isn't known
             // (callers that need strict failure can pre-validate).
             if let Some(import_val) = map.get("Fn::ImportValue") {
-                let resolved = resolve_refs_with_imports(
+                let resolved = resolve_refs_full(
                     import_val,
                     parameters,
                     _resources,
                     resource_physical_ids,
                     resource_attributes,
                     imports,
+                    conditions,
                 );
                 let key = match &resolved {
                     Value::String(s) => s.clone(),
@@ -376,13 +511,14 @@ fn resolve_refs_with_imports(
                             let resolved_parts: Vec<String> = parts
                                 .iter()
                                 .map(|p| {
-                                    let resolved = resolve_refs_with_imports(
+                                    let resolved = resolve_refs_full(
                                         p,
                                         parameters,
                                         _resources,
                                         resource_physical_ids,
                                         resource_attributes,
                                         imports,
+                                        conditions,
                                     );
                                     match resolved {
                                         Value::String(s) => s,
@@ -398,13 +534,14 @@ fn resolve_refs_with_imports(
             // Fn::Base64: base64-encode a string (or recursively-resolved
             // value).
             if let Some(b64_val) = map.get("Fn::Base64") {
-                let resolved = resolve_refs_with_imports(
+                let resolved = resolve_refs_full(
                     b64_val,
                     parameters,
                     _resources,
                     resource_physical_ids,
                     resource_attributes,
                     imports,
+                    conditions,
                 );
                 let s = match &resolved {
                     Value::String(s) => s.clone(),
@@ -416,13 +553,14 @@ fn resolve_refs_with_imports(
             }
             // Fn::Length: number of elements in an array.
             if let Some(len_val) = map.get("Fn::Length") {
-                let resolved = resolve_refs_with_imports(
+                let resolved = resolve_refs_full(
                     len_val,
                     parameters,
                     _resources,
                     resource_physical_ids,
                     resource_attributes,
                     imports,
+                    conditions,
                 );
                 if let Some(arr) = resolved.as_array() {
                     return Value::Number(serde_json::Number::from(arr.len()));
@@ -431,13 +569,14 @@ fn resolve_refs_with_imports(
             }
             // Fn::ToJsonString: serialize a value as a JSON string.
             if let Some(to_json) = map.get("Fn::ToJsonString") {
-                let resolved = resolve_refs_with_imports(
+                let resolved = resolve_refs_full(
                     to_json,
                     parameters,
                     _resources,
                     resource_physical_ids,
                     resource_attributes,
                     imports,
+                    conditions,
                 );
                 let s = serde_json::to_string(&resolved).unwrap_or_default();
                 return Value::String(s);
@@ -448,13 +587,14 @@ fn resolve_refs_with_imports(
                 if let Some(arr) = split_val.as_array() {
                     if arr.len() == 2 {
                         let delim = arr[0].as_str().unwrap_or("");
-                        let src_resolved = resolve_refs_with_imports(
+                        let src_resolved = resolve_refs_full(
                             &arr[1],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
                             imports,
+                            conditions,
                         );
                         let src = match src_resolved {
                             Value::String(s) => s,
@@ -473,21 +613,23 @@ fn resolve_refs_with_imports(
             if let Some(sel_val) = map.get("Fn::Select") {
                 if let Some(arr) = sel_val.as_array() {
                     if arr.len() == 2 {
-                        let idx_val = resolve_refs_with_imports(
+                        let idx_val = resolve_refs_full(
                             &arr[0],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
                             imports,
+                            conditions,
                         );
-                        let list_val = resolve_refs_with_imports(
+                        let list_val = resolve_refs_full(
                             &arr[1],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
                             imports,
+                            conditions,
                         );
                         let idx: usize = match &idx_val {
                             Value::Number(n) => n.as_u64().unwrap_or(0) as usize,
@@ -510,29 +652,32 @@ fn resolve_refs_with_imports(
             if let Some(cidr_val) = map.get("Fn::Cidr") {
                 if let Some(arr) = cidr_val.as_array() {
                     if arr.len() == 3 {
-                        let block_val = resolve_refs_with_imports(
+                        let block_val = resolve_refs_full(
                             &arr[0],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
                             imports,
+                            conditions,
                         );
-                        let count_val = resolve_refs_with_imports(
+                        let count_val = resolve_refs_full(
                             &arr[1],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
                             imports,
+                            conditions,
                         );
-                        let bits_val = resolve_refs_with_imports(
+                        let bits_val = resolve_refs_full(
                             &arr[2],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
                             imports,
+                            conditions,
                         );
                         let block_str = match &block_val {
                             Value::String(s) => s.clone(),
@@ -581,13 +726,14 @@ fn resolve_refs_with_imports(
             for (k, v) in map {
                 new_map.insert(
                     k.clone(),
-                    resolve_refs_with_imports(
+                    resolve_refs_full(
                         v,
                         parameters,
                         _resources,
                         resource_physical_ids,
                         resource_attributes,
                         imports,
+                        conditions,
                     ),
                 );
             }
@@ -596,13 +742,14 @@ fn resolve_refs_with_imports(
         Value::Array(arr) => Value::Array(
             arr.iter()
                 .map(|v| {
-                    resolve_refs_with_imports(
+                    resolve_refs_full(
                         v,
                         parameters,
                         _resources,
                         resource_physical_ids,
                         resource_attributes,
                         imports,
+                        conditions,
                     )
                 })
                 .collect(),
@@ -1187,5 +1334,114 @@ Resources:
             resolved,
             serde_json::json!(["10.0.0.0/24", "10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24",])
         );
+    }
+
+    #[test]
+    fn condition_skips_resource_when_false() {
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}},
+            "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}
+            },
+            "Resources": {
+                "ProdQueue": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "IsProd",
+                    "Properties": {"QueueName": "prod-q"}
+                },
+                "AlwaysQueue": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"QueueName": "always-q"}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "dev".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        let names: Vec<&str> = parsed
+            .resources
+            .iter()
+            .map(|r| r.logical_id.as_str())
+            .collect();
+        assert!(names.contains(&"AlwaysQueue"));
+        assert!(!names.contains(&"ProdQueue"));
+    }
+
+    #[test]
+    fn condition_includes_resource_when_true() {
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}},
+            "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}
+            },
+            "Resources": {
+                "ProdQueue": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "IsProd",
+                    "Properties": {"QueueName": "prod-q"}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "prod".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(parsed.resources.len(), 1);
+    }
+
+    #[test]
+    fn fn_if_picks_branch_based_on_condition() {
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}},
+            "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": {"Fn::If": ["IsProd", "prod-q", "dev-q"]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "dev".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["QueueName"],
+            Value::String("dev-q".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_and_or_not_combine_conditions() {
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}, "Region": {"Type": "String"}},
+            "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+                "IsUsEast": {"Fn::Equals": [{"Ref": "Region"}, "us-east-1"]},
+                "IsProdInUsEast": {"Fn::And": [{"Condition": "IsProd"}, {"Condition": "IsUsEast"}]},
+                "IsNotProd": {"Fn::Not": [{"Condition": "IsProd"}]},
+                "IsAny": {"Fn::Or": [{"Condition": "IsProd"}, {"Condition": "IsNotProd"}]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "P1": {"Fn::If": ["IsProdInUsEast", "yes", "no"]},
+                        "P2": {"Fn::If": ["IsNotProd", "yes", "no"]},
+                        "P3": {"Fn::If": ["IsAny", "yes", "no"]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "prod".to_string());
+        params.insert("Region".to_string(), "us-east-1".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        let p = &parsed.resources[0].properties;
+        assert_eq!(p["P1"], Value::String("yes".to_string()));
+        assert_eq!(p["P2"], Value::String("no".to_string()));
+        assert_eq!(p["P3"], Value::String("yes".to_string()));
     }
 }
