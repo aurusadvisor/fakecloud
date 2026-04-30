@@ -709,7 +709,11 @@ impl DynamoDbService {
                     "RevisionId": revision_id
                 }))
             }
-            None => Self::ok_json(json!({ "Policy": null })),
+            None => Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "PolicyNotFoundException",
+                "No resource-based policy is attached to the resource.",
+            )),
         }
     }
 
