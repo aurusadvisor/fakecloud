@@ -857,6 +857,22 @@ fn add_cluster_to_replication_group_updates_members_and_count() {
             member_clusters: vec!["rg-1-001".to_string()],
             snapshot_retention_limit: 0,
             snapshot_window: "05:00-09:00".to_string(),
+            transit_encryption_enabled: false,
+            at_rest_encryption_enabled: false,
+            cluster_enabled: false,
+            kms_key_id: None,
+            auth_token_enabled: false,
+            user_group_ids: Vec::new(),
+            multi_az_enabled: false,
+            log_delivery_configurations: Vec::new(),
+            data_tiering: None,
+            ip_discovery: None,
+            network_type: None,
+            transit_encryption_mode: None,
+            num_node_groups: 1,
+            configuration_endpoint_address: None,
+            configuration_endpoint_port: None,
+            replicas_per_node_group: None,
         },
     );
 
@@ -901,6 +917,22 @@ async fn delete_cache_cluster_removes_cluster_from_replication_group() {
                 member_clusters: vec!["delete-rg-001".to_string(), "delete-rg-cluster".to_string()],
                 snapshot_retention_limit: 0,
                 snapshot_window: "05:00-09:00".to_string(),
+                transit_encryption_enabled: false,
+                at_rest_encryption_enabled: false,
+                cluster_enabled: false,
+                kms_key_id: None,
+                auth_token_enabled: false,
+                user_group_ids: Vec::new(),
+                multi_az_enabled: false,
+                log_delivery_configurations: Vec::new(),
+                data_tiering: None,
+                ip_discovery: None,
+                network_type: None,
+                transit_encryption_mode: None,
+                num_node_groups: 1,
+                configuration_endpoint_address: None,
+                configuration_endpoint_port: None,
+                replicas_per_node_group: None,
             },
         );
     }
@@ -970,6 +1002,22 @@ fn service_with_replication_group(group_id: &str, num_clusters: i32) -> ElastiCa
                 member_clusters,
                 snapshot_retention_limit: 0,
                 snapshot_window: "05:00-09:00".to_string(),
+                transit_encryption_enabled: false,
+                at_rest_encryption_enabled: false,
+                cluster_enabled: false,
+                kms_key_id: None,
+                auth_token_enabled: false,
+                user_group_ids: Vec::new(),
+                multi_az_enabled: false,
+                log_delivery_configurations: Vec::new(),
+                data_tiering: None,
+                ip_discovery: None,
+                network_type: None,
+                transit_encryption_mode: None,
+                num_node_groups: 1,
+                configuration_endpoint_address: None,
+                configuration_endpoint_port: None,
+                replicas_per_node_group: None,
             },
         );
     }
@@ -1184,6 +1232,73 @@ fn delete_global_replication_group_clears_primary_group_association() {
     let primary_group = state.replication_groups.get("primary-rg").unwrap();
     assert!(primary_group.global_replication_group_id.is_none());
     assert!(primary_group.global_replication_group_role.is_none());
+}
+
+#[test]
+fn replication_group_xml_emits_dynamic_encryption_and_kms() {
+    let mut state = crate::state::ElastiCacheState::new("123456789012", "us-east-1");
+    state.replication_groups.insert(
+        "enc-rg".to_string(),
+        ReplicationGroup {
+            replication_group_id: "enc-rg".to_string(),
+            description: "encrypted".to_string(),
+            global_replication_group_id: None,
+            global_replication_group_role: None,
+            status: "available".to_string(),
+            cache_node_type: "cache.t3.micro".to_string(),
+            engine: "redis".to_string(),
+            engine_version: "7.1".to_string(),
+            num_cache_clusters: 1,
+            automatic_failover_enabled: true,
+            endpoint_address: "127.0.0.1".to_string(),
+            endpoint_port: 6379,
+            arn: "arn:aws:elasticache:us-east-1:123:replicationgroup:enc-rg".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            container_id: "c".to_string(),
+            host_port: 6379,
+            member_clusters: vec!["enc-rg-001".to_string()],
+            snapshot_retention_limit: 5,
+            snapshot_window: "05:00-09:00".to_string(),
+            transit_encryption_enabled: true,
+            at_rest_encryption_enabled: true,
+            cluster_enabled: true,
+            kms_key_id: Some("arn:aws:kms:us-east-1:123:key/abc-123".to_string()),
+            auth_token_enabled: true,
+            user_group_ids: vec!["ug-prod".to_string()],
+            multi_az_enabled: true,
+            log_delivery_configurations: vec![crate::state::LogDeliveryConfiguration {
+                log_type: "slow-log".to_string(),
+                destination_type: "cloudwatch-logs".to_string(),
+                destination_details: Some("/aws/elasticache/slow".to_string()),
+                log_format: "json".to_string(),
+                status: "active".to_string(),
+            }],
+            data_tiering: Some("disabled".to_string()),
+            ip_discovery: Some("ipv4".to_string()),
+            network_type: Some("dual_stack".to_string()),
+            transit_encryption_mode: Some("required".to_string()),
+            num_node_groups: 2,
+            configuration_endpoint_address: Some("config.local".to_string()),
+            configuration_endpoint_port: Some(6379),
+            replicas_per_node_group: Some(1),
+        },
+    );
+    let xml =
+        super::replication_group_xml(state.replication_groups.get("enc-rg").unwrap(), "us-east-1");
+    assert!(xml.contains("<TransitEncryptionEnabled>true</TransitEncryptionEnabled>"));
+    assert!(xml.contains("<AtRestEncryptionEnabled>true</AtRestEncryptionEnabled>"));
+    assert!(xml.contains("<ClusterEnabled>true</ClusterEnabled>"));
+    assert!(xml.contains("<KmsKeyId>arn:aws:kms:us-east-1:123:key/abc-123</KmsKeyId>"));
+    assert!(xml.contains("<AuthTokenEnabled>true</AuthTokenEnabled>"));
+    assert!(xml.contains("<MultiAZ>enabled</MultiAZ>"));
+    assert!(xml.contains("<UserGroupIds><member>ug-prod</member></UserGroupIds>"));
+    assert!(xml.contains("<LogDeliveryConfigurations>"));
+    assert!(xml.contains("<DataTiering>disabled</DataTiering>"));
+    assert!(xml.contains("<NetworkType>dual_stack</NetworkType>"));
+    assert!(xml.contains("<TransitEncryptionMode>required</TransitEncryptionMode>"));
+    assert!(xml.contains("<ConfigurationEndpoint>"));
+    assert!(xml
+        .contains("<ReplicationGroupCreateTime>2024-01-01T00:00:00Z</ReplicationGroupCreateTime>"));
 }
 
 #[test]

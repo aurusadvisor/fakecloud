@@ -128,6 +128,54 @@ pub struct ReplicationGroup {
     pub member_clusters: Vec<String>,
     pub snapshot_retention_limit: i32,
     pub snapshot_window: String,
+    /// Stored at create / modify time so DescribeReplicationGroups returns
+    /// the actual configuration instead of canned defaults. AWS always
+    /// emits these flags; SDKs that read them (terraform plan diff,
+    /// compliance checks) saw stale `false` for everyone.
+    #[serde(default)]
+    pub transit_encryption_enabled: bool,
+    #[serde(default)]
+    pub at_rest_encryption_enabled: bool,
+    #[serde(default)]
+    pub cluster_enabled: bool,
+    #[serde(default)]
+    pub kms_key_id: Option<String>,
+    #[serde(default)]
+    pub auth_token_enabled: bool,
+    #[serde(default)]
+    pub user_group_ids: Vec<String>,
+    #[serde(default)]
+    pub multi_az_enabled: bool,
+    #[serde(default)]
+    pub log_delivery_configurations: Vec<LogDeliveryConfiguration>,
+    #[serde(default)]
+    pub data_tiering: Option<String>,
+    #[serde(default)]
+    pub ip_discovery: Option<String>,
+    #[serde(default)]
+    pub network_type: Option<String>,
+    #[serde(default)]
+    pub transit_encryption_mode: Option<String>,
+    #[serde(default)]
+    pub num_node_groups: i32,
+    #[serde(default)]
+    pub configuration_endpoint_address: Option<String>,
+    #[serde(default)]
+    pub configuration_endpoint_port: Option<u16>,
+    #[serde(default)]
+    pub replicas_per_node_group: Option<i32>,
+}
+
+/// AWS's LogDeliveryConfiguration shape, retained verbatim so we can
+/// echo the exact request back. Stored as raw fields for both
+/// CloudWatch + Firehose destinations.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LogDeliveryConfiguration {
+    pub log_type: String,
+    pub destination_type: String,
+    pub destination_details: Option<String>,
+    pub log_format: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1069,6 +1117,22 @@ mod tests {
                 member_clusters: vec!["my-group-001".to_string()],
                 snapshot_retention_limit: 0,
                 snapshot_window: "05:00-09:00".to_string(),
+                transit_encryption_enabled: false,
+                at_rest_encryption_enabled: false,
+                cluster_enabled: false,
+                kms_key_id: None,
+                auth_token_enabled: false,
+                user_group_ids: Vec::new(),
+                multi_az_enabled: false,
+                log_delivery_configurations: Vec::new(),
+                data_tiering: None,
+                ip_discovery: None,
+                network_type: None,
+                transit_encryption_mode: None,
+                num_node_groups: 1,
+                configuration_endpoint_address: None,
+                configuration_endpoint_port: None,
+                replicas_per_node_group: None,
             },
         );
         assert_eq!(state.replication_groups.len(), 1);
