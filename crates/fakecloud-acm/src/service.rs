@@ -158,15 +158,19 @@ impl AcmService {
 
         let arn = synth_certificate_arn(&req.account_id, &req.region);
         let now = Utc::now();
+        let effective = effective_sans(&domain_name, &sans);
+        let (cert_pem, key_pem) = generate_self_signed_cert(&domain_name, &effective)
+            .map(|(c, k)| (Some(c), Some(k)))
+            .unwrap_or((None, None));
         let cert = StoredCertificate {
             arn: arn.clone(),
             domain_name: domain_name.clone(),
-            subject_alternative_names: effective_sans(&domain_name, &sans),
+            subject_alternative_names: effective,
             status: "PENDING_VALIDATION".to_string(),
             cert_type: "AMAZON_ISSUED".to_string(),
-            certificate_pem: None,
+            certificate_pem: cert_pem,
             certificate_chain_pem: None,
-            private_key_pem: None,
+            private_key_pem: key_pem,
             idempotency_token,
             serial: synth_serial(&arn),
             subject: format!("CN={domain_name}"),
@@ -920,6 +924,9 @@ fn parse_cn_from_pem(pem: &str) -> Option<String> {
 }
 
 fn placeholder_cert_pem(arn: &str) -> String {
+    // Fallback used only when an actually-issued cert was somehow
+    // dropped. Kept distinguishable so callers don't silently treat
+    // these as real X.509.
     let body = base64::engine::general_purpose::STANDARD.encode(arn.as_bytes());
     format!("-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----\n")
 }
@@ -933,6 +940,23 @@ fn placeholder_chain_pem(arn: &str) -> String {
 fn placeholder_key_pem(arn: &str) -> String {
     let body = base64::engine::general_purpose::STANDARD.encode(format!("key-of-{arn}").as_bytes());
     format!("-----BEGIN RSA PRIVATE KEY-----\n{body}\n-----END RSA PRIVATE KEY-----\n")
+}
+
+/// Generate a real self-signed X.509 certificate + private key pair
+/// for `domain_name` covering `sans`. Returns
+/// `(certificate_pem, private_key_pem)`. Used by RequestCertificate
+/// so the cert that GetCertificate / ExportCertificate hands back
+/// is actually parseable as a real PEM-encoded X.509 (matching real
+/// ACM's output format), not a base64-of-the-ARN placeholder.
+fn generate_self_signed_cert(domain_name: &str, sans: &[String]) -> Option<(String, String)> {
+    let mut all_names: Vec<String> = vec![domain_name.to_string()];
+    for s in sans {
+        if !all_names.contains(s) {
+            all_names.push(s.clone());
+        }
+    }
+    let cert = rcgen::generate_simple_self_signed(all_names).ok()?;
+    Some((cert.cert.pem(), cert.key_pair.serialize_pem()))
 }
 
 fn certificate_summary_json(c: &StoredCertificate) -> Value {
@@ -1108,4 +1132,65 @@ fn domain_validation_json(v: &DomainValidation) -> Value {
         );
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_self_signed_cert_returns_real_pem() {
+        let (cert_pem, key_pem) =
+            generate_self_signed_cert("example.com", &["www.example.com".to_string()])
+                .expect("rcgen should produce a self-signed cert");
+        assert!(
+            cert_pem.starts_with("-----BEGIN CERTIFICATE-----"),
+            "expected real PEM cert, got {cert_pem:.80}"
+        );
+        assert!(cert_pem.ends_with("-----END CERTIFICATE-----\n"));
+        assert!(key_pem.contains("-----BEGIN PRIVATE KEY-----"));
+        // Substantially longer than the placeholder (= base64-of-domain).
+        assert!(cert_pem.len() > 400, "real cert PEM should be >400 chars");
+    }
+
+    #[tokio::test]
+    async fn request_certificate_stores_real_pem_and_key() {
+        let svc = AcmService::default();
+        let req = AwsRequest {
+            service: "acm".to_string(),
+            action: "RequestCertificate".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "rid".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(
+                serde_json::to_vec(&json!({"DomainName": "example.com"})).unwrap(),
+            ),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        };
+        let resp = svc.handle(req).await.unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap();
+        let st = svc.state.read();
+        let cert = st
+            .accounts
+            .get("123456789012")
+            .unwrap()
+            .certificates
+            .get(arn)
+            .unwrap();
+        let cert_pem = cert.certificate_pem.as_deref().unwrap();
+        let key_pem = cert.private_key_pem.as_deref().unwrap();
+        assert!(cert_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+        assert!(key_pem.contains("-----BEGIN PRIVATE KEY-----"));
+        assert!(cert_pem.len() > 400);
+    }
 }
