@@ -50,7 +50,9 @@ impl KmsService {
             ));
         }
 
-        let ciphertext_b64 = build_encrypt_ciphertext(state, key, plaintext_b64, &plaintext_bytes);
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let ciphertext_b64 =
+            build_encrypt_ciphertext(state, key, plaintext_b64, &plaintext_bytes, &ec_aad);
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -76,7 +78,8 @@ impl KmsService {
         let accounts = self.state.read();
         let empty = KmsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let decoded = decode_ciphertext_envelope(state, ciphertext_b64)?;
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let decoded = decode_ciphertext_envelope(state, ciphertext_b64, &ec_aad)?;
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -109,7 +112,9 @@ impl KmsService {
         let accounts = self.state.read();
         let empty = KmsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let decoded = decode_ciphertext_envelope(state, ciphertext_b64)?;
+        let source_ec_aad = canonical_encryption_context(&body["SourceEncryptionContext"]);
+        let dest_ec_aad = canonical_encryption_context(&body["DestinationEncryptionContext"]);
+        let decoded = decode_ciphertext_envelope(state, ciphertext_b64, &source_ec_aad)?;
 
         let dest_resolved =
             Self::resolve_key_id_with_state(state, dest_key_id).ok_or_else(|| {
@@ -144,9 +149,14 @@ impl KmsService {
             base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes())
         } else {
             // Default path: wrap the recovered plaintext under the
-            // destination key with the AWS-shaped binary blob.
-            let blob =
-                crate::blob::encode(&state.master_key_bytes, &dest_key.key_id, &plaintext_bytes);
+            // destination key with the AWS-shaped binary blob, binding
+            // the caller's DestinationEncryptionContext into the AAD.
+            let blob = crate::blob::encode_with_context(
+                &state.master_key_bytes,
+                &dest_key.key_id,
+                &plaintext_bytes,
+                &dest_ec_aad,
+            );
             base64::engine::general_purpose::STANDARD.encode(&blob)
         };
 

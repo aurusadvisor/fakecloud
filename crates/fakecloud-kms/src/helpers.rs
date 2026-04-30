@@ -1,5 +1,24 @@
 use super::*;
 
+/// Canonicalize a KMS `EncryptionContext` (a JSON string-string map)
+/// into a deterministic byte string for use as AEAD AAD. Keys are
+/// sorted via `BTreeMap`'s ordering and the result is JSON-encoded
+/// without whitespace. An empty EC produces zero bytes so blobs
+/// encoded without EC stay byte-compatible with the original AAD shape.
+pub(crate) fn canonical_encryption_context(value: &serde_json::Value) -> Vec<u8> {
+    let Some(obj) = value.as_object() else {
+        return Vec::new();
+    };
+    if obj.is_empty() {
+        return Vec::new();
+    }
+    let sorted: std::collections::BTreeMap<&str, String> = obj
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.as_str(), s.to_string())))
+        .collect();
+    serde_json::to_vec(&sorted).unwrap_or_default()
+}
+
 /// Decode a FakeCloud KMS ciphertext envelope back into its plaintext.
 ///
 /// Ciphertexts come in two flavours: `fakecloud-kms:<key-id>:<b64>`
@@ -9,9 +28,15 @@ use super::*;
 /// flavours look up the source key to return its ARN, so `Decrypt`
 /// and `ReEncrypt` can surface the same `KeyId` / `SourceKeyId` the
 /// real service does.
+///
+/// `encryption_context_aad` is the canonicalized EC bytes
+/// (see [`canonical_encryption_context`]). When the supplied EC
+/// doesn't match what was bound at encrypt time, `crate::blob::decode_with_context`
+/// fails AEAD verification and we surface `InvalidCiphertextException`.
 pub(crate) fn decode_ciphertext_envelope(
     state: &KmsState,
     ciphertext_b64: &str,
+    encryption_context_aad: &[u8],
 ) -> Result<DecodedCiphertext, AwsServiceError> {
     let ciphertext_bytes = base64::engine::general_purpose::STANDARD
         .decode(ciphertext_b64)
@@ -19,7 +44,11 @@ pub(crate) fn decode_ciphertext_envelope(
 
     // Modern AWS-shaped blob (AES-256-GCM under the per-account master
     // key) — try this first. Older textual envelopes fall through.
-    if let Some(decoded) = crate::blob::decode(&state.master_key_bytes, &ciphertext_bytes) {
+    if let Some(decoded) = crate::blob::decode_with_context(
+        &state.master_key_bytes,
+        &ciphertext_bytes,
+        encryption_context_aad,
+    ) {
         let key = state.keys.get(&decoded.key_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -331,6 +360,7 @@ pub(crate) fn build_encrypt_ciphertext(
     key: &KmsKey,
     plaintext_b64: &str,
     plaintext_bytes: &[u8],
+    encryption_context_aad: &[u8],
 ) -> String {
     let _ = plaintext_b64;
     if let Some(ref material) = key.imported_material_bytes {
@@ -351,7 +381,12 @@ pub(crate) fn build_encrypt_ciphertext(
     // Default path: AWS-shaped binary blob with AES-256-GCM under the
     // per-account master key persisted in `KmsState`. Round-trips through
     // real SDKs and does not leak plaintext to anyone inspecting the bytes.
-    let blob = crate::blob::encode(&state.master_key_bytes, &key.key_id, plaintext_bytes);
+    let blob = crate::blob::encode_with_context(
+        &state.master_key_bytes,
+        &key.key_id,
+        plaintext_bytes,
+        encryption_context_aad,
+    );
     base64::engine::general_purpose::STANDARD.encode(&blob)
 }
 

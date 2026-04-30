@@ -42,6 +42,22 @@ fn cipher_for(master_key_bytes: &[u8]) -> Option<Aes256Gcm> {
 /// placing in JSON responses. Panics on a master key that isn't 32
 /// bytes; callers control the key, so this is a programming error.
 pub fn encode(master_key_bytes: &[u8], key_id: &str, plaintext: &[u8]) -> Vec<u8> {
+    encode_with_context(master_key_bytes, key_id, plaintext, &[])
+}
+
+/// Variant of [`encode`] that mixes additional bytes into the AEAD AAD.
+/// Used by `Encrypt` / `GenerateDataKey` / `ReEncrypt` to bind the
+/// caller's `EncryptionContext` into the ciphertext: a different EC
+/// supplied at decrypt time fails AES-GCM verification, matching real
+/// KMS behavior. When `extra_aad` is empty the AAD is just `key_id`,
+/// so blobs produced by callers that don't pass EC stay byte-compatible
+/// with the original `encode` output and pre-existing persisted blobs.
+pub fn encode_with_context(
+    master_key_bytes: &[u8],
+    key_id: &str,
+    plaintext: &[u8],
+    extra_aad: &[u8],
+) -> Vec<u8> {
     let cipher =
         cipher_for(master_key_bytes).expect("KMS master key must be 32 bytes for AES-256-GCM");
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -49,17 +65,19 @@ pub fn encode(master_key_bytes: &[u8], key_id: &str, plaintext: &[u8]) -> Vec<u8
     // AES-GCM in this crate produces ciphertext || tag concatenated; we'll
     // split tag off the back to keep the wire format aligned with the AWS
     // shape (ciphertext segment followed by separate tag segment).
-    // Bind the key-id into the AAD so any tampering with the header
-    // bytes (e.g. flipping a single character of the embedded key-id)
-    // makes AEAD verification fail on decrypt. Without this, the
-    // header is a plain prefix and an attacker could rewrite the
-    // returned KeyId without breaking decryption.
+    // Bind the key-id and supplied EC into the AAD so any tampering
+    // with the header bytes (e.g. flipping a character of the embedded
+    // key-id) or supplying a different EC at decrypt time fails AEAD
+    // verification.
+    let mut aad = Vec::with_capacity(key_id.len() + extra_aad.len());
+    aad.extend_from_slice(key_id.as_bytes());
+    aad.extend_from_slice(extra_aad);
     let combined = cipher
         .encrypt(
             &nonce,
             Payload {
                 msg: plaintext,
-                aad: key_id.as_bytes(),
+                aad: &aad,
             },
         )
         .expect("AES-GCM encrypt with 96-bit nonce never fails on valid key");
@@ -95,6 +113,19 @@ pub struct Decoded {
 /// master key); callers fall back to legacy envelope formats in that
 /// case.
 pub fn decode(master_key_bytes: &[u8], blob: &[u8]) -> Option<Decoded> {
+    decode_with_context(master_key_bytes, blob, &[])
+}
+
+/// Variant of [`decode`] that mixes additional bytes into the AEAD AAD
+/// during verification. Returns `None` when the supplied `extra_aad`
+/// doesn't match what was passed to [`encode_with_context`] at encrypt
+/// time — the caller surfaces this as `InvalidCiphertextException`,
+/// matching the real KMS error for an `EncryptionContext` mismatch.
+pub fn decode_with_context(
+    master_key_bytes: &[u8],
+    blob: &[u8],
+    extra_aad: &[u8],
+) -> Option<Decoded> {
     if blob.len() < VERSION_HEADER.len() + 8 + 12 + 4 + 16 {
         return None;
     }
@@ -124,12 +155,15 @@ pub fn decode(master_key_bytes: &[u8], blob: &[u8]) -> Option<Decoded> {
     let ct_with_tag = &blob[cursor..cursor + ct_len + 16];
 
     let cipher = cipher_for(master_key_bytes)?;
+    let mut aad = Vec::with_capacity(key_id.len() + extra_aad.len());
+    aad.extend_from_slice(key_id.as_bytes());
+    aad.extend_from_slice(extra_aad);
     let plaintext = cipher
         .decrypt(
             nonce,
             Payload {
                 msg: ct_with_tag,
-                aad: key_id.as_bytes(),
+                aad: &aad,
             },
         )
         .ok()?;
