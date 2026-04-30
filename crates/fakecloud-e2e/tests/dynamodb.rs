@@ -3555,3 +3555,126 @@ async fn dynamodb_update_nested_set_path() {
         "nested SET must not leak a literal dotted-name top-level attribute"
     );
 }
+
+#[tokio::test]
+async fn query_consistent_read_on_gsi_rejected() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("ConsistentGsi")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("gsi_pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .global_secondary_indexes(
+            GlobalSecondaryIndex::builder()
+                .index_name("gsi-idx")
+                .key_schema(
+                    KeySchemaElement::builder()
+                        .attribute_name("gsi_pk")
+                        .key_type(KeyType::Hash)
+                        .build()
+                        .unwrap(),
+                )
+                .projection(
+                    Projection::builder()
+                        .projection_type(ProjectionType::All)
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .query()
+        .table_name("ConsistentGsi")
+        .index_name("gsi-idx")
+        .key_condition_expression("gsi_pk = :v")
+        .expression_attribute_values(":v", AttributeValue::S("a".to_string()))
+        .consistent_read(true)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("ValidationException"),
+        "expected ValidationException, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn query_select_count_omits_items_array() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("CountOnly")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    for i in 0..3 {
+        client
+            .put_item()
+            .table_name("CountOnly")
+            .item("pk", AttributeValue::S(format!("k{i}")))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let resp = client
+        .query()
+        .table_name("CountOnly")
+        .key_condition_expression("pk = :v")
+        .expression_attribute_values(":v", AttributeValue::S("k0".to_string()))
+        .select(aws_sdk_dynamodb::types::Select::Count)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.count(), 1);
+    // Items array is empty/absent under Select=COUNT
+    assert!(
+        resp.items().is_empty(),
+        "expected empty items under Select=COUNT, got {:?}",
+        resp.items()
+    );
+}

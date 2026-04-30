@@ -35,12 +35,20 @@ impl DynamoDbService {
         let exclusive_start_key: Option<HashMap<String, AttributeValue>> =
             parse_key_map(&body["ExclusiveStartKey"]);
 
+        let consistent_read = body["ConsistentRead"].as_bool().unwrap_or(false);
         let (items_to_scan, hash_key_name, range_key_name): (
             &[HashMap<String, AttributeValue>],
             String,
             Option<String>,
         ) = if let Some(idx_name) = index_name {
             if let Some(gsi) = table.gsi.iter().find(|g| g.index_name == idx_name) {
+                if consistent_read {
+                    return Err(AwsServiceError::aws_error(
+                        http::StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        "Consistent reads are not supported on global secondary indexes",
+                    ));
+                }
                 let hk = gsi
                     .key_schema
                     .iter()
@@ -180,19 +188,32 @@ impl DynamoDbService {
             Vec::new()
         };
 
-        let items: Vec<Value> = matched
-            .iter()
-            .map(|item| {
-                let projected = project_item(item, &body);
-                json!(projected)
+        let select = body["Select"].as_str();
+        let count_only = matches!(select, Some("COUNT"));
+        let items: Vec<Value> = if count_only {
+            Vec::new()
+        } else {
+            matched
+                .iter()
+                .map(|item| {
+                    let projected = project_item(item, &body);
+                    json!(projected)
+                })
+                .collect()
+        };
+        let count = matched.len();
+        let mut result = if count_only {
+            json!({
+                "Count": count,
+                "ScannedCount": scanned_count,
             })
-            .collect();
-
-        let mut result = json!({
-            "Items": items,
-            "Count": items.len(),
-            "ScannedCount": scanned_count,
-        });
+        } else {
+            json!({
+                "Items": items,
+                "Count": count,
+                "ScannedCount": scanned_count,
+            })
+        };
 
         if let Some(lek) = last_evaluated_key {
             result["LastEvaluatedKey"] = json!(lek);
@@ -298,19 +319,32 @@ impl DynamoDbService {
             Vec::new()
         };
 
-        let items: Vec<Value> = matched
-            .iter()
-            .map(|item| {
-                let projected = project_item(item, &body);
-                json!(projected)
+        let select = body["Select"].as_str();
+        let count_only = matches!(select, Some("COUNT"));
+        let items: Vec<Value> = if count_only {
+            Vec::new()
+        } else {
+            matched
+                .iter()
+                .map(|item| {
+                    let projected = project_item(item, &body);
+                    json!(projected)
+                })
+                .collect()
+        };
+        let count = matched.len();
+        let mut result = if count_only {
+            json!({
+                "Count": count,
+                "ScannedCount": scanned_count,
             })
-            .collect();
-
-        let mut result = json!({
-            "Items": items,
-            "Count": items.len(),
-            "ScannedCount": scanned_count,
-        });
+        } else {
+            json!({
+                "Items": items,
+                "Count": count,
+                "ScannedCount": scanned_count,
+            })
+        };
 
         if let Some(lek) = last_evaluated_key {
             result["LastEvaluatedKey"] = json!(lek);
