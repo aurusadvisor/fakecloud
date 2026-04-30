@@ -1074,7 +1074,19 @@ impl Elbv2Service {
     fn create_listener(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let lb_arn = required_query_param(req, "LoadBalancerArn")?;
         let protocol = optional_query_param(req, "Protocol");
-        let port = optional_query_param(req, "Port").and_then(|s| s.parse().ok());
+        if let Some(ref p) = protocol {
+            validate_listener_protocol(p)?;
+        }
+        let port = match optional_query_param(req, "Port") {
+            Some(s) => {
+                let parsed: i32 = s
+                    .parse()
+                    .map_err(|_| invalid_param(format!("Port '{s}' must be a number")))?;
+                validate_listener_port(parsed)?;
+                Some(parsed)
+            }
+            None => None,
+        };
         let ssl_policy = optional_query_param(req, "SslPolicy");
         let alpn_policy = parse_member_list(req, "AlpnPolicy");
         let certificates = parse_certificates(req);
@@ -1186,10 +1198,15 @@ impl Elbv2Service {
             .listeners
             .get_mut(&arn)
             .ok_or_else(|| listener_not_found(&arn))?;
-        if let Some(p) = optional_query_param(req, "Port").and_then(|s| s.parse().ok()) {
-            listener.port = Some(p);
+        if let Some(s) = optional_query_param(req, "Port") {
+            let parsed: i32 = s
+                .parse()
+                .map_err(|_| invalid_param(format!("Port '{s}' must be a number")))?;
+            validate_listener_port(parsed)?;
+            listener.port = Some(parsed);
         }
         if let Some(p) = optional_query_param(req, "Protocol") {
+            validate_listener_protocol(&p)?;
             listener.protocol = Some(p);
         }
         if let Some(p) = optional_query_param(req, "SslPolicy") {

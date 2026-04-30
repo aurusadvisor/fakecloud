@@ -212,6 +212,187 @@ async fn describe_ssl_policies_includes_tls13() {
     assert!(body_string(&resp).contains("ELBSecurityPolicy-TLS13-1-2-2021-06"));
 }
 
+async fn create_lb_and_tg_for_listener_test(svc: &Elbv2Service) -> (String, String) {
+    let resp = svc
+        .handle(req(
+            "CreateLoadBalancer",
+            &[("Name", "lvb"), ("Subnets.member.1", "subnet-1")],
+        ))
+        .await
+        .unwrap();
+    let lb_arn = {
+        let st = svc.state.read();
+        st.get("123456789012")
+            .unwrap()
+            .load_balancers
+            .keys()
+            .next()
+            .unwrap()
+            .clone()
+    };
+    let _ = resp;
+    let resp = svc
+        .handle(req(
+            "CreateTargetGroup",
+            &[("Name", "tg-1"), ("Protocol", "HTTP"), ("Port", "80")],
+        ))
+        .await
+        .unwrap();
+    let _ = resp;
+    let tg_arn = {
+        let st = svc.state.read();
+        st.get("123456789012")
+            .unwrap()
+            .target_groups
+            .keys()
+            .next()
+            .unwrap()
+            .clone()
+    };
+    (lb_arn, tg_arn)
+}
+
+#[tokio::test]
+async fn create_listener_rejects_invalid_protocol() {
+    let svc = svc();
+    let (lb_arn, tg_arn) = create_lb_and_tg_for_listener_test(&svc).await;
+    let err = svc
+        .handle(req(
+            "CreateListener",
+            &[
+                ("LoadBalancerArn", &lb_arn),
+                ("Protocol", "BOGUS"),
+                ("Port", "80"),
+                ("DefaultActions.member.1.Type", "forward"),
+                ("DefaultActions.member.1.TargetGroupArn", &tg_arn),
+            ],
+        ))
+        .await
+        .err()
+        .expect("expected validation error");
+    assert_eq!(err.code(), "ValidationError");
+    assert!(format!("{err:?}").contains("BOGUS"));
+}
+
+#[tokio::test]
+async fn create_listener_rejects_port_zero() {
+    let svc = svc();
+    let (lb_arn, tg_arn) = create_lb_and_tg_for_listener_test(&svc).await;
+    let err = svc
+        .handle(req(
+            "CreateListener",
+            &[
+                ("LoadBalancerArn", &lb_arn),
+                ("Protocol", "HTTP"),
+                ("Port", "0"),
+                ("DefaultActions.member.1.Type", "forward"),
+                ("DefaultActions.member.1.TargetGroupArn", &tg_arn),
+            ],
+        ))
+        .await
+        .err()
+        .expect("expected validation error");
+    assert_eq!(err.code(), "ValidationError");
+}
+
+#[tokio::test]
+async fn create_listener_rejects_port_above_65535() {
+    let svc = svc();
+    let (lb_arn, tg_arn) = create_lb_and_tg_for_listener_test(&svc).await;
+    let err = svc
+        .handle(req(
+            "CreateListener",
+            &[
+                ("LoadBalancerArn", &lb_arn),
+                ("Protocol", "HTTP"),
+                ("Port", "70000"),
+                ("DefaultActions.member.1.Type", "forward"),
+                ("DefaultActions.member.1.TargetGroupArn", &tg_arn),
+            ],
+        ))
+        .await
+        .err()
+        .expect("expected validation error");
+    assert_eq!(err.code(), "ValidationError");
+}
+
+#[tokio::test]
+async fn create_listener_accepts_valid_protocols() {
+    let svc = svc();
+    let (lb_arn, tg_arn) = create_lb_and_tg_for_listener_test(&svc).await;
+    for proto in ["HTTP", "HTTPS", "TCP", "UDP", "TCP_UDP", "TLS", "GENEVE"] {
+        // Only HTTP/HTTPS work with the default ALB; for the test we just
+        // need protocol validation to pass, even if downstream rejects.
+        // We assert no ValidationError on the protocol token itself.
+        let res = svc
+            .handle(req(
+                "CreateListener",
+                &[
+                    ("LoadBalancerArn", &lb_arn),
+                    ("Protocol", proto),
+                    ("Port", "80"),
+                    ("DefaultActions.member.1.Type", "forward"),
+                    ("DefaultActions.member.1.TargetGroupArn", &tg_arn),
+                ],
+            ))
+            .await;
+        if let Err(e) = res {
+            assert!(
+                !format!("{e:?}").contains("not valid"),
+                "protocol {proto} should be accepted: {e:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn modify_listener_validates_protocol_and_port() {
+    let svc = svc();
+    let (lb_arn, tg_arn) = create_lb_and_tg_for_listener_test(&svc).await;
+    let resp = svc
+        .handle(req(
+            "CreateListener",
+            &[
+                ("LoadBalancerArn", &lb_arn),
+                ("Protocol", "HTTP"),
+                ("Port", "80"),
+                ("DefaultActions.member.1.Type", "forward"),
+                ("DefaultActions.member.1.TargetGroupArn", &tg_arn),
+            ],
+        ))
+        .await
+        .unwrap();
+    let listener_arn = {
+        let st = svc.state.read();
+        st.get("123456789012")
+            .unwrap()
+            .listeners
+            .keys()
+            .next()
+            .unwrap()
+            .clone()
+    };
+    let _ = resp;
+    let err = svc
+        .handle(req(
+            "ModifyListener",
+            &[("ListenerArn", &listener_arn), ("Port", "0")],
+        ))
+        .await
+        .err()
+        .expect("port 0 should fail");
+    assert_eq!(err.code(), "ValidationError");
+    let err = svc
+        .handle(req(
+            "ModifyListener",
+            &[("ListenerArn", &listener_arn), ("Protocol", "BOGUS")],
+        ))
+        .await
+        .err()
+        .expect("bogus protocol should fail");
+    assert_eq!(err.code(), "ValidationError");
+}
+
 #[tokio::test]
 async fn unimplemented_action_errors() {
     let svc = svc();

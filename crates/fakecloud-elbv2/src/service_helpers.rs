@@ -111,6 +111,32 @@ pub(crate) fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", msg.into())
 }
 
+/// Listener protocols accepted by ELBv2: HTTP/HTTPS for ALB, TCP/UDP/
+/// TCP_UDP/TLS for NLB, GENEVE for GWLB. Anything else gets rejected
+/// up front rather than silently stored — real ELBv2 returns
+/// ValidationError when callers pass nonsense like "FOO".
+pub(crate) fn validate_listener_protocol(protocol: &str) -> Result<(), AwsServiceError> {
+    const VALID: &[&str] = &["HTTP", "HTTPS", "TCP", "UDP", "TCP_UDP", "TLS", "GENEVE"];
+    if !VALID.contains(&protocol) {
+        return Err(invalid_param(format!(
+            "Protocol '{protocol}' is not valid. Valid values: {}",
+            VALID.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+/// Listener port must be in the TCP/UDP range 1-65535. Real ELBv2
+/// rejects 0 and anything outside u16 with a ValidationError.
+pub(crate) fn validate_listener_port(port: i32) -> Result<(), AwsServiceError> {
+    if !(1..=65535).contains(&port) {
+        return Err(invalid_param(format!(
+            "Port '{port}' must be between 1 and 65535"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn lb_not_found(arn: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
