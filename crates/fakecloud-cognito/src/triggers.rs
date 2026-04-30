@@ -759,6 +759,8 @@ mod tests {
                     sms_mfa_configuration: None,
                     user_pool_tier: "ESSENTIALS".to_string(),
                     verification_message_template: None,
+                    signing_key_pem: None,
+                    signing_kid: None,
                 },
             );
         }

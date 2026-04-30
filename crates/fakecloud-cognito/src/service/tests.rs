@@ -602,6 +602,7 @@ fn jwt_format_three_base64url_segments() {
         "sub-uuid",
         "user1",
         "us-east-1",
+        None,
     );
     // Each token should have 3 dot-separated segments
     for (name, token) in [("id", &tokens.id_token), ("access", &tokens.access_token)] {
@@ -653,6 +654,7 @@ fn jwt_id_token_payload_contains_required_fields() {
         "sub-uuid",
         "user1",
         "us-east-1",
+        None,
     );
     let parts: Vec<&str> = tokens.id_token.split('.').collect();
     let header: Value = serde_json::from_slice(&b64url.decode(parts[0]).unwrap()).unwrap();
@@ -682,6 +684,7 @@ fn jwt_access_token_payload_contains_required_fields() {
         "sub-uuid",
         "user1",
         "us-east-1",
+        None,
     );
     let parts: Vec<&str> = tokens.access_token.split('.').collect();
     let payload: Value = serde_json::from_slice(&b64url.decode(parts[1]).unwrap()).unwrap();

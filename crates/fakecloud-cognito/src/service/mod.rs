@@ -1505,21 +1505,28 @@ struct TokenSet {
     refresh_token: String,
 }
 
-/// Generate structurally valid JWTs for Cognito auth responses.
+/// Generate Cognito ID/Access/Refresh tokens. When `signing` is supplied
+/// (the pool's PKCS#8 PEM + stable kid), the JWTs are signed with real
+/// RS256 so SDK-side JWKS verification round-trips. Pre-existing pools
+/// without a stored key fall back to a placeholder signature so test
+/// fixtures keep parsing.
 fn generate_tokens(
     pool_id: &str,
     client_id: &str,
     sub: &str,
     username: &str,
     region: &str,
+    signing: Option<(&str, &str)>,
 ) -> TokenSet {
     let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
     let iss = format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}");
+    let kid = signing
+        .map(|(_, k)| k.to_string())
+        .unwrap_or_else(|| "fakecloud-key-1".to_string());
 
-    // ID Token
-    let id_header = json!({"kid": "fakecloud-key-1", "alg": "RS256"});
+    let id_header = json!({"kid": kid, "alg": "RS256", "typ": "JWT"});
     let id_payload = json!({
         "sub": sub,
         "iss": iss,
@@ -1531,11 +1538,10 @@ fn generate_tokens(
         "iat": now,
         "jti": jti,
     });
-    let id_token = sign_jwt(&id_header, &id_payload, &b64url);
+    let id_token = sign_jwt(&id_header, &id_payload, &b64url, signing.map(|(p, _)| p));
 
-    // Access Token
     let access_jti = Uuid::new_v4().to_string();
-    let access_header = json!({"kid": "fakecloud-key-1", "alg": "RS256"});
+    let access_header = json!({"kid": kid, "alg": "RS256", "typ": "JWT"});
     let access_payload = json!({
         "sub": sub,
         "iss": iss,
@@ -1546,9 +1552,13 @@ fn generate_tokens(
         "exp": now + 3600,
         "iat": now,
     });
-    let access_token = sign_jwt(&access_header, &access_payload, &b64url);
+    let access_token = sign_jwt(
+        &access_header,
+        &access_payload,
+        &b64url,
+        signing.map(|(p, _)| p),
+    );
 
-    // Refresh Token — random base64url string
     let mut refresh_bytes = Vec::with_capacity(72);
     for _ in 0..5 {
         refresh_bytes.extend_from_slice(Uuid::new_v4().as_bytes());
@@ -1562,12 +1572,15 @@ fn generate_tokens(
     }
 }
 
-/// Create a JWT with header.payload.signature using SHA256.
 fn sign_jwt(
     header: &Value,
     payload: &Value,
     engine: &base64::engine::general_purpose::GeneralPurpose,
+    private_key_pem: Option<&str>,
 ) -> String {
+    if let Some(pem) = private_key_pem {
+        return crate::jwt::sign_rs256(header, payload, pem);
+    }
     let header_b64 = engine.encode(header.to_string().as_bytes());
     let payload_b64 = engine.encode(payload.to_string().as_bytes());
     let signing_input = format!("{header_b64}.{payload_b64}");

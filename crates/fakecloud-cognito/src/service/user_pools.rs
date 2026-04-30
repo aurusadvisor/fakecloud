@@ -140,6 +140,13 @@ impl CognitoService {
         let verification_message_template =
             parse_verification_message_template(&body["VerificationMessageTemplate"]);
 
+        // Defer RSA-2048 keypair generation until first JWT sign /
+        // JWKS read. Generating eagerly here makes CreateUserPool spend
+        // ~100ms on every call (sometimes much more under load), which
+        // also blocks the Tokio worker thread and cascades into
+        // connection failures when many CreateUserPool calls fly in
+        // simultaneously (conformance burst tests, integration suites).
+        let signing_kid = format!("{pool_id}-key-1");
         let pool = UserPool {
             id: pool_id.clone(),
             name: pool_name.to_string(),
@@ -168,6 +175,8 @@ impl CognitoService {
             sms_mfa_configuration: None,
             user_pool_tier,
             verification_message_template,
+            signing_key_pem: None,
+            signing_kid: Some(signing_kid),
         };
 
         let response = user_pool_to_json(&pool);

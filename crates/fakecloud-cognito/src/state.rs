@@ -234,6 +234,14 @@ pub struct UserPool {
     pub sms_mfa_configuration: Option<SmsMfaConfiguration>,
     pub user_pool_tier: String,
     pub verification_message_template: Option<VerificationMessageTemplate>,
+    /// Per-pool RSA-2048 private key (PKCS#8 PEM). Real Cognito generates a
+    /// keypair at pool creation and signs RS256 JWTs with it; the public
+    /// half is published at the pool's `/.well-known/jwks.json` endpoint.
+    #[serde(default)]
+    pub signing_key_pem: Option<String>,
+    /// Stable `kid` exposed in the JWT header and JWKS document.
+    #[serde(default)]
+    pub signing_kid: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

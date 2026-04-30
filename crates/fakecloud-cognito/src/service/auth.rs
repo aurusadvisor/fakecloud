@@ -316,12 +316,22 @@ impl CognitoService {
         }
 
         let sub = user.sub.clone();
+        let pool_signing_owned = state.user_pools.get(&input.pool_id).and_then(|pool| {
+            pool.signing_key_pem
+                .as_ref()
+                .zip(pool.signing_kid.as_ref())
+                .map(|(p, k)| (p.clone(), k.clone()))
+        });
+        let signing = pool_signing_owned
+            .as_ref()
+            .map(|(p, k)| (p.as_str(), k.as_str()));
         let tokens = generate_tokens(
             &input.pool_id,
             &input.client_id,
             &sub,
             &input.username,
             region,
+            signing,
         );
 
         state.refresh_tokens.insert(
@@ -584,7 +594,16 @@ impl CognitoService {
             }
 
             let sub = user.sub.clone();
-            let tokens = generate_tokens(pool_id, client_id, &sub, username, &region);
+            let pool_signing_owned = state.user_pools.get(pool_id).and_then(|pool| {
+                pool.signing_key_pem
+                    .as_ref()
+                    .zip(pool.signing_kid.as_ref())
+                    .map(|(p, k)| (p.clone(), k.clone()))
+            });
+            let signing = pool_signing_owned
+                .as_ref()
+                .map(|(p, k)| (p.as_str(), k.as_str()));
+            let tokens = generate_tokens(pool_id, client_id, &sub, username, &region, signing);
 
             state.refresh_tokens.insert(
                 tokens.refresh_token.clone(),
@@ -886,7 +905,16 @@ impl CognitoService {
             })?;
 
         let sub = user.sub.clone();
-        let tokens = generate_tokens(pool_id, client_id, &sub, username, region);
+        let pool_signing_owned = state.user_pools.get(pool_id).and_then(|pool| {
+            pool.signing_key_pem
+                .as_ref()
+                .zip(pool.signing_kid.as_ref())
+                .map(|(p, k)| (p.clone(), k.clone()))
+        });
+        let signing = pool_signing_owned
+            .as_ref()
+            .map(|(p, k)| (p.as_str(), k.as_str()));
+        let tokens = generate_tokens(pool_id, client_id, &sub, username, region, signing);
 
         state.refresh_tokens.insert(
             tokens.refresh_token.clone(),
@@ -1001,7 +1029,23 @@ impl CognitoService {
 
         let region = state.region.clone();
         let sub = user.sub.clone();
-        let tokens = generate_tokens(&token_pool_id, client_id, &sub, &token_username, &region);
+        let pool_signing_owned = state.user_pools.get(&token_pool_id).and_then(|pool| {
+            pool.signing_key_pem
+                .as_ref()
+                .zip(pool.signing_kid.as_ref())
+                .map(|(p, k)| (p.clone(), k.clone()))
+        });
+        let signing = pool_signing_owned
+            .as_ref()
+            .map(|(p, k)| (p.as_str(), k.as_str()));
+        let tokens = generate_tokens(
+            &token_pool_id,
+            client_id,
+            &sub,
+            &token_username,
+            &region,
+            signing,
+        );
 
         state.access_tokens.insert(
             tokens.access_token.clone(),
@@ -1178,7 +1222,16 @@ impl CognitoService {
         let username = user.username.clone();
         let pool_id = session_data.user_pool_id.clone();
 
-        let tokens = generate_tokens(&pool_id, client_id, &sub, &username, &region);
+        let pool_signing_owned = state.user_pools.get(&pool_id).and_then(|pool| {
+            pool.signing_key_pem
+                .as_ref()
+                .zip(pool.signing_kid.as_ref())
+                .map(|(p, k)| (p.clone(), k.clone()))
+        });
+        let signing = pool_signing_owned
+            .as_ref()
+            .map(|(p, k)| (p.as_str(), k.as_str()));
+        let tokens = generate_tokens(&pool_id, client_id, &sub, &username, &region, signing);
 
         state.refresh_tokens.insert(
             tokens.refresh_token.clone(),
@@ -1508,7 +1561,16 @@ impl CognitoService {
             })?;
 
         let sub = user.sub.clone();
-        let tokens = generate_tokens(pool_id, client_id, &sub, username, region);
+        let pool_signing_owned = state.user_pools.get(pool_id).and_then(|pool| {
+            pool.signing_key_pem
+                .as_ref()
+                .zip(pool.signing_kid.as_ref())
+                .map(|(p, k)| (p.clone(), k.clone()))
+        });
+        let signing = pool_signing_owned
+            .as_ref()
+            .map(|(p, k)| (p.as_str(), k.as_str()));
+        let tokens = generate_tokens(pool_id, client_id, &sub, username, region, signing);
 
         state.refresh_tokens.insert(
             tokens.refresh_token.clone(),
