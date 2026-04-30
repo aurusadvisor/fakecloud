@@ -3004,6 +3004,27 @@ fn head_bucket_exists_returns_ok() {
 }
 
 #[test]
+fn head_bucket_returns_x_amz_bucket_region_header() {
+    // Regression for issue #816 / #817 class: AWS Toolkit reads
+    // x-amz-bucket-region from HeadBucket to do region routing.
+    let svc = make_service();
+    seed_bucket(&svc, "hbr");
+    let resp = svc.head_bucket("123456789012", "hbr").unwrap();
+    assert_eq!(
+        resp.headers
+            .get("x-amz-bucket-region")
+            .and_then(|v| v.to_str().ok()),
+        Some("us-east-1"),
+    );
+    assert_eq!(
+        resp.headers
+            .get("x-amz-bucket-location-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("Region"),
+    );
+}
+
+#[test]
 fn get_bucket_location_us_east_1_returns_empty() {
     let svc = make_service();
     seed_bucket(&svc, "loc");

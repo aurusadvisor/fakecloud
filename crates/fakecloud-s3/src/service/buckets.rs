@@ -101,10 +101,10 @@ impl S3Service {
         let mut buckets_xml = String::new();
         for b in page {
             buckets_xml.push_str(&format!(
-                "<Bucket><Name>{}</Name><CreationDate>{}</CreationDate><BucketRegion>{}</BucketRegion></Bucket>",
-                xml_escape(&b.name),
-                b.creation_date.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                xml_escape(&b.region),
+                "<Bucket><Name>{name}</Name><CreationDate>{cd}</CreationDate><BucketRegion>{region}</BucketRegion><BucketArn>arn:aws:s3:::{name}</BucketArn></Bucket>",
+                name = xml_escape(&b.name),
+                cd = b.creation_date.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                region = xml_escape(&b.region),
             ));
         }
 
@@ -353,18 +353,29 @@ impl S3Service {
         let accts = self.state.read();
         let __empty = crate::state::S3State::new(account_id, "us-east-1");
         let state = accts.get(account_id).unwrap_or(&__empty);
-        if !state.buckets.contains_key(bucket) {
-            return Err(AwsServiceError::aws_error(
+        let b = state.buckets.get(bucket).ok_or_else(|| {
+            AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchBucket",
                 format!("The specified bucket does not exist: {bucket}"),
-            ));
+            )
+        })?;
+        let mut headers = HeaderMap::new();
+        if let Ok(v) = http::HeaderValue::from_str(&b.region) {
+            headers.insert("x-amz-bucket-region", v);
         }
+        // Region buckets are the only type fakecloud creates; AWS Toolkit
+        // checks this header to disambiguate from "directory bucket" /
+        // "access point alias" forms.
+        headers.insert(
+            "x-amz-bucket-location-type",
+            http::HeaderValue::from_static("Region"),
+        );
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: "application/xml".to_string(),
             body: Bytes::new().into(),
-            headers: HeaderMap::new(),
+            headers,
         })
     }
 
