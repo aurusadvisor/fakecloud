@@ -84,6 +84,7 @@ pub fn parse_template_with_resolution(
         .map(|s| s.to_string());
 
     let conditions = evaluate_conditions(&value, parameters);
+    let mappings = parse_mappings(&value);
 
     let resources_obj = value
         .get("Resources")
@@ -109,6 +110,10 @@ pub fn parse_template_with_resolution(
             .get("Properties")
             .cloned()
             .unwrap_or(Value::Object(serde_json::Map::new()));
+
+        // Pre-resolve Fn::FindInMap before the main intrinsics pass so the
+        // existing resolver doesn't need to thread mappings through.
+        let properties = apply_mappings(&properties, parameters, &mappings);
 
         // Resolve Ref and parameter substitutions in properties
         let resolved = resolve_refs_full(
@@ -237,6 +242,36 @@ fn evaluate_conditions(
     out
 }
 
+type Mappings = BTreeMap<String, BTreeMap<String, BTreeMap<String, Value>>>;
+
+/// Parse the top-level `Mappings` block into a 2-level lookup table.
+/// `Fn::FindInMap: [MapName, TopKey, SecondKey]` returns the leaf
+/// value at that path.
+fn parse_mappings(template: &Value) -> Mappings {
+    let mut out: Mappings = BTreeMap::new();
+    let Some(maps) = template.get("Mappings").and_then(|v| v.as_object()) else {
+        return out;
+    };
+    for (map_name, top) in maps {
+        let Some(top_obj) = top.as_object() else {
+            continue;
+        };
+        let mut top_out = BTreeMap::new();
+        for (top_key, second) in top_obj {
+            let Some(second_obj) = second.as_object() else {
+                continue;
+            };
+            let mut second_out: BTreeMap<String, Value> = BTreeMap::new();
+            for (k, v) in second_obj {
+                second_out.insert(k.clone(), v.clone());
+            }
+            top_out.insert(top_key.clone(), second_out);
+        }
+        out.insert(map_name.clone(), top_out);
+    }
+    out
+}
+
 fn eval_condition_expr(
     expr: &Value,
     parameters: &BTreeMap<String, String>,
@@ -290,6 +325,63 @@ fn stringify_value(value: &Value, parameters: &BTreeMap<String, String>) -> Stri
         Value::String(s) => s.clone(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
+        Value::Object(m) => {
+            if let Some(name) = m.get("Ref").and_then(|v| v.as_str()) {
+                if let Some(p) = parameters.get(name) {
+                    return p.clone();
+                }
+                return name.to_string();
+            }
+            value.to_string()
+        }
+        _ => value.to_string(),
+    }
+}
+
+/// Walk `value`, replacing every `Fn::FindInMap` map ref with its
+/// resolved leaf value. Args resolve `Ref` against `parameters`. Unknown
+/// map / key returns the original node so downstream resolvers can flag
+/// the gap.
+fn apply_mappings(
+    value: &Value,
+    parameters: &BTreeMap<String, String>,
+    mappings: &Mappings,
+) -> Value {
+    match value {
+        Value::Object(map) => {
+            if let Some(arr) = map.get("Fn::FindInMap").and_then(|v| v.as_array()) {
+                if arr.len() == 3 {
+                    let map_name = stringify_findinmap_arg(&arr[0], parameters);
+                    let top_key = stringify_findinmap_arg(&arr[1], parameters);
+                    let second_key = stringify_findinmap_arg(&arr[2], parameters);
+                    if let Some(top) = mappings.get(&map_name) {
+                        if let Some(second) = top.get(&top_key) {
+                            if let Some(leaf) = second.get(&second_key) {
+                                return leaf.clone();
+                            }
+                        }
+                    }
+                    return value.clone();
+                }
+            }
+            let mut new_map = serde_json::Map::new();
+            for (k, v) in map {
+                new_map.insert(k.clone(), apply_mappings(v, parameters, mappings));
+            }
+            Value::Object(new_map)
+        }
+        Value::Array(arr) => Value::Array(
+            arr.iter()
+                .map(|v| apply_mappings(v, parameters, mappings))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn stringify_findinmap_arg(value: &Value, parameters: &BTreeMap<String, String>) -> String {
+    match value {
+        Value::String(s) => s.clone(),
         Value::Object(m) => {
             if let Some(name) = m.get("Ref").and_then(|v| v.as_str()) {
                 if let Some(p) = parameters.get(name) {
@@ -1443,5 +1535,81 @@ Resources:
         assert_eq!(p["P1"], Value::String("yes".to_string()));
         assert_eq!(p["P2"], Value::String("no".to_string()));
         assert_eq!(p["P3"], Value::String("yes".to_string()));
+    }
+
+    #[test]
+    fn fn_find_in_map_resolves_leaf_value() {
+        let template = r#"{
+            "Mappings": {
+                "RegionMap": {
+                    "us-east-1": {"AMI": "ami-east"},
+                    "us-west-2": {"AMI": "ami-west"}
+                }
+            },
+            "Resources": {
+                "Inst": {
+                    "Type": "AWS::EC2::Instance",
+                    "Properties": {
+                        "ImageId": {"Fn::FindInMap": ["RegionMap", "us-east-1", "AMI"]}
+                    }
+                }
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["ImageId"],
+            Value::String("ami-east".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_find_in_map_resolves_keys_via_ref() {
+        let template = r#"{
+            "Parameters": {"Region": {"Type": "String"}},
+            "Mappings": {
+                "RegionMap": {
+                    "us-east-1": {"AMI": "ami-east"},
+                    "us-west-2": {"AMI": "ami-west"}
+                }
+            },
+            "Resources": {
+                "Inst": {
+                    "Type": "AWS::EC2::Instance",
+                    "Properties": {
+                        "ImageId": {"Fn::FindInMap": ["RegionMap", {"Ref": "Region"}, "AMI"]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Region".to_string(), "us-west-2".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["ImageId"],
+            Value::String("ami-west".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_find_in_map_unknown_keys_passes_through() {
+        let template = r#"{
+            "Mappings": {
+                "RegionMap": {
+                    "us-east-1": {"AMI": "ami-east"}
+                }
+            },
+            "Resources": {
+                "Inst": {
+                    "Type": "AWS::EC2::Instance",
+                    "Properties": {
+                        "ImageId": {"Fn::FindInMap": ["RegionMap", "ap-south-1", "AMI"]}
+                    }
+                }
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        assert!(parsed.resources[0].properties["ImageId"]
+            .as_object()
+            .is_some());
     }
 }
