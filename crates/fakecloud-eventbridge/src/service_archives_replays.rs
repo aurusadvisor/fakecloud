@@ -117,6 +117,17 @@ impl EventBridgeService {
                 )
             })),
             sqs_parameters: None,
+            role_arn: None,
+            dead_letter_config: None,
+            retry_policy: None,
+            ecs_parameters: None,
+            batch_parameters: None,
+            kinesis_parameters: None,
+            redshift_data_parameters: None,
+            http_parameters: None,
+            sage_maker_pipeline_parameters: None,
+            app_sync_parameters: None,
+            run_command_parameters: None,
         };
 
         let archive_rule = EventRule {

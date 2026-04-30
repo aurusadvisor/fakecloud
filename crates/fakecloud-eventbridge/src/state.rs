@@ -39,7 +39,7 @@ pub struct EventRule {
 /// Composite key for rules: (event_bus_name, rule_name)
 pub type RuleKey = (String, String);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EventTarget {
     pub id: String,
     pub arn: String,
@@ -47,6 +47,28 @@ pub struct EventTarget {
     pub input_path: Option<String>,
     pub input_transformer: Option<Value>,
     pub sqs_parameters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_arn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_letter_config: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_policy: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ecs_parameters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_parameters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinesis_parameters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redshift_data_parameters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_parameters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sage_maker_pipeline_parameters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_sync_parameters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_command_parameters: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

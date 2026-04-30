@@ -1571,6 +1571,7 @@ fn put_rule_overlay_preserves_existing_targets() {
             input_path: None,
             input_transformer: None,
             sqs_parameters: None,
+            ..Default::default()
         });
     }
 
@@ -1730,6 +1731,87 @@ fn describe_rule_unknown_errors() {
     let req = make_request("DescribeRule", json!({ "Name": "ghost" }));
     let err = svc.describe_rule(&req).err().expect("expected error");
     assert_eq!(err.code(), "ResourceNotFoundException");
+}
+
+#[test]
+fn put_targets_round_trips_full_target_config() {
+    let svc = make_service();
+    put_rule_simple(&svc, "r1");
+    let req = make_request(
+        "PutTargets",
+        json!({
+            "Rule": "r1",
+            "Targets": [{
+                "Id": "t1",
+                "Arn": "arn:aws:ecs:us-east-1:123456789012:cluster/c1",
+                "RoleArn": "arn:aws:iam::123456789012:role/InvokeRole",
+                "DeadLetterConfig": {
+                    "Arn": "arn:aws:sqs:us-east-1:123456789012:dlq"
+                },
+                "RetryPolicy": {
+                    "MaximumRetryAttempts": 2,
+                    "MaximumEventAgeInSeconds": 600
+                },
+                "EcsParameters": {
+                    "TaskDefinitionArn": "arn:aws:ecs:us-east-1:123456789012:task-definition/td:1",
+                    "TaskCount": 1,
+                    "LaunchType": "FARGATE"
+                },
+                "HttpParameters": {
+                    "PathParameterValues": ["v1"],
+                    "HeaderParameters": {"X-Trace": "abc"},
+                    "QueryStringParameters": {"q": "1"}
+                },
+                "KinesisParameters": { "PartitionKeyPath": "$.detail.id" },
+                "BatchParameters": {
+                    "JobDefinition": "arn:aws:batch:us-east-1:123456789012:job-definition/jd:1",
+                    "JobName": "j"
+                },
+                "RedshiftDataParameters": {
+                    "Database": "db", "Sql": "SELECT 1"
+                },
+                "SageMakerPipelineParameters": {
+                    "PipelineParameterList": [{"Name": "k", "Value": "v"}]
+                },
+                "AppSyncParameters": { "GraphQLOperation": "query Foo { id }" },
+                "RunCommandParameters": {
+                    "RunCommandTargets": [{"Key": "tag:env", "Values": ["prod"]}]
+                }
+            }]
+        }),
+    );
+    svc.put_targets(&req).unwrap();
+
+    let list_req = make_request("ListTargetsByRule", json!({"Rule": "r1"}));
+    let resp = svc.list_targets_by_rule(&list_req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let target = &body["Targets"][0];
+    assert_eq!(
+        target["RoleArn"],
+        "arn:aws:iam::123456789012:role/InvokeRole"
+    );
+    assert_eq!(
+        target["DeadLetterConfig"]["Arn"],
+        "arn:aws:sqs:us-east-1:123456789012:dlq"
+    );
+    assert_eq!(target["RetryPolicy"]["MaximumRetryAttempts"], 2);
+    assert_eq!(target["EcsParameters"]["LaunchType"], "FARGATE");
+    assert_eq!(
+        target["HttpParameters"]["HeaderParameters"]["X-Trace"],
+        "abc"
+    );
+    assert_eq!(
+        target["KinesisParameters"]["PartitionKeyPath"],
+        "$.detail.id"
+    );
+    assert_eq!(target["BatchParameters"]["JobName"], "j");
+    assert_eq!(target["RedshiftDataParameters"]["Database"], "db");
+    assert!(target["SageMakerPipelineParameters"]["PipelineParameterList"].is_array());
+    assert!(target["AppSyncParameters"]["GraphQLOperation"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Foo"));
+    assert!(target["RunCommandParameters"]["RunCommandTargets"].is_array());
 }
 
 #[test]
