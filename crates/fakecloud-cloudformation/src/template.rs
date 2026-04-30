@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -240,6 +241,159 @@ fn resolve_refs(
                     }
                 }
             }
+            // Fn::Base64: base64-encode a string (or recursively-resolved
+            // value).
+            if let Some(b64_val) = map.get("Fn::Base64") {
+                let resolved = resolve_refs(
+                    b64_val,
+                    parameters,
+                    _resources,
+                    resource_physical_ids,
+                    resource_attributes,
+                );
+                let s = match &resolved {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                return Value::String(
+                    base64::engine::general_purpose::STANDARD.encode(s.as_bytes()),
+                );
+            }
+            // Fn::Length: number of elements in an array.
+            if let Some(len_val) = map.get("Fn::Length") {
+                let resolved = resolve_refs(
+                    len_val,
+                    parameters,
+                    _resources,
+                    resource_physical_ids,
+                    resource_attributes,
+                );
+                if let Some(arr) = resolved.as_array() {
+                    return Value::Number(serde_json::Number::from(arr.len()));
+                }
+                return Value::Number(serde_json::Number::from(0));
+            }
+            // Fn::ToJsonString: serialize a value as a JSON string.
+            if let Some(to_json) = map.get("Fn::ToJsonString") {
+                let resolved = resolve_refs(
+                    to_json,
+                    parameters,
+                    _resources,
+                    resource_physical_ids,
+                    resource_attributes,
+                );
+                let s = serde_json::to_string(&resolved).unwrap_or_default();
+                return Value::String(s);
+            }
+            // Fn::Split: split a string by a delimiter into an array of
+            // strings. Args: ["delim", "source"] (source can be a Ref/etc).
+            if let Some(split_val) = map.get("Fn::Split") {
+                if let Some(arr) = split_val.as_array() {
+                    if arr.len() == 2 {
+                        let delim = arr[0].as_str().unwrap_or("");
+                        let src_resolved = resolve_refs(
+                            &arr[1],
+                            parameters,
+                            _resources,
+                            resource_physical_ids,
+                            resource_attributes,
+                        );
+                        let src = match src_resolved {
+                            Value::String(s) => s,
+                            other => other.to_string(),
+                        };
+                        let parts: Vec<Value> = src
+                            .split(delim)
+                            .map(|p| Value::String(p.to_string()))
+                            .collect();
+                        return Value::Array(parts);
+                    }
+                }
+            }
+            // Fn::Select: pick element at index from an array. Args:
+            // [index, list]. The list may itself be an Fn::Split / Ref.
+            if let Some(sel_val) = map.get("Fn::Select") {
+                if let Some(arr) = sel_val.as_array() {
+                    if arr.len() == 2 {
+                        let idx_val = resolve_refs(
+                            &arr[0],
+                            parameters,
+                            _resources,
+                            resource_physical_ids,
+                            resource_attributes,
+                        );
+                        let list_val = resolve_refs(
+                            &arr[1],
+                            parameters,
+                            _resources,
+                            resource_physical_ids,
+                            resource_attributes,
+                        );
+                        let idx: usize = match &idx_val {
+                            Value::Number(n) => n.as_u64().unwrap_or(0) as usize,
+                            Value::String(s) => s.parse().unwrap_or(0),
+                            _ => 0,
+                        };
+                        if let Some(list) = list_val.as_array() {
+                            if let Some(elt) = list.get(idx) {
+                                return elt.clone();
+                            }
+                        }
+                        return Value::Null;
+                    }
+                }
+            }
+            // Fn::Cidr: split a CIDR block into N subnets each of a given
+            // bit count. Args: [ip_block, count, cidr_bits]. We compute
+            // contiguous sub-blocks within an IPv4 range; IPv6 falls
+            // through as a string for simplicity.
+            if let Some(cidr_val) = map.get("Fn::Cidr") {
+                if let Some(arr) = cidr_val.as_array() {
+                    if arr.len() == 3 {
+                        let block_val = resolve_refs(
+                            &arr[0],
+                            parameters,
+                            _resources,
+                            resource_physical_ids,
+                            resource_attributes,
+                        );
+                        let count_val = resolve_refs(
+                            &arr[1],
+                            parameters,
+                            _resources,
+                            resource_physical_ids,
+                            resource_attributes,
+                        );
+                        let bits_val = resolve_refs(
+                            &arr[2],
+                            parameters,
+                            _resources,
+                            resource_physical_ids,
+                            resource_attributes,
+                        );
+                        let block_str = match &block_val {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        let count: u32 = match &count_val {
+                            Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
+                            Value::String(s) => s.parse().unwrap_or(0),
+                            _ => 0,
+                        };
+                        let cidr_bits: u32 = match &bits_val {
+                            Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
+                            Value::String(s) => s.parse().unwrap_or(0),
+                            _ => 0,
+                        };
+                        if let Some(sub_cidrs) = compute_cidr_subnets(&block_str, count, cidr_bits)
+                        {
+                            return Value::Array(
+                                sub_cidrs.into_iter().map(Value::String).collect(),
+                            );
+                        }
+                    }
+                }
+            }
             if let Some(sub_val) = map.get("Fn::Sub") {
                 if let Some(s) = sub_val.as_str() {
                     let mut result = s.to_string();
@@ -290,6 +444,31 @@ fn resolve_refs(
         ),
         other => other.clone(),
     }
+}
+
+/// Carve `ip_block` (eg. `10.0.0.0/16`) into `count` subnet CIDR
+/// strings each with a host count of `2^cidr_bits - 2` (matching real
+/// `Fn::Cidr`). IPv4 only — returns `None` for IPv6 or malformed
+/// inputs, which leaves the value unresolved at the caller.
+fn compute_cidr_subnets(ip_block: &str, count: u32, cidr_bits: u32) -> Option<Vec<String>> {
+    let (ip_str, prefix_str) = ip_block.split_once('/')?;
+    let prefix: u32 = prefix_str.parse().ok()?;
+    let ip: std::net::Ipv4Addr = ip_str.parse().ok()?;
+    let base: u32 = ip.into();
+    // Subnet size in bits = 32 - new_prefix. Real Fn::Cidr cidr_bits
+    // is the host portion length, so new_prefix = 32 - cidr_bits.
+    let new_prefix = 32u32.checked_sub(cidr_bits)?;
+    if new_prefix <= prefix {
+        return None;
+    }
+    let step: u32 = 1u32 << cidr_bits;
+    let mut out = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let subnet_base = base.checked_add(step.checked_mul(i)?)?;
+        let addr = std::net::Ipv4Addr::from(subnet_base);
+        out.push(format!("{addr}/{new_prefix}"));
+    }
+    Some(out)
 }
 
 /// Parse a `Fn::GetAtt` argument. Accepts either the array form
@@ -714,5 +893,79 @@ Resources:
         .unwrap();
         assert_eq!(parsed.description.as_deref(), Some("My template"));
         assert_eq!(parsed.resources.len(), 1);
+    }
+
+    type EmptyCtx = (
+        BTreeMap<String, String>,
+        serde_json::Map<String, Value>,
+        BTreeMap<String, String>,
+        BTreeMap<String, BTreeMap<String, String>>,
+    );
+
+    fn empty() -> EmptyCtx {
+        (
+            BTreeMap::new(),
+            serde_json::Map::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn fn_base64_encodes_string() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value = serde_json::from_str(r#"{"Fn::Base64": "hello"}"#).unwrap();
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(resolved, Value::String("aGVsbG8=".to_string()));
+    }
+
+    #[test]
+    fn fn_split_emits_array() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value = serde_json::from_str(r#"{"Fn::Split": [",", "a,b,c"]}"#).unwrap();
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(resolved, serde_json::json!(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn fn_select_picks_index() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value =
+            serde_json::from_str(r#"{"Fn::Select": [1, {"Fn::Split": [",", "a,b,c"]}]}"#).unwrap();
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(resolved, Value::String("b".to_string()));
+    }
+
+    #[test]
+    fn fn_length_counts_array() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value = serde_json::from_str(r#"{"Fn::Length": [1,2,3,4]}"#).unwrap();
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(resolved, Value::Number(4.into()));
+    }
+
+    #[test]
+    fn fn_to_json_string_serializes() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value =
+            serde_json::from_str(r#"{"Fn::ToJsonString": {"a": 1, "b": [2, 3]}}"#).unwrap();
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        let s = resolved.as_str().unwrap();
+        // Order-insensitive: just verify it parses back.
+        let parsed: Value = serde_json::from_str(s).unwrap();
+        assert_eq!(parsed["a"], serde_json::json!(1));
+        assert_eq!(parsed["b"], serde_json::json!([2, 3]));
+    }
+
+    #[test]
+    fn fn_cidr_carves_subnets() {
+        let (p, r, ids, attrs) = empty();
+        // Carve 10.0.0.0/16 into 4 /24 subnets (cidr_bits = 8 host bits).
+        let v: Value = serde_json::from_str(r#"{"Fn::Cidr": ["10.0.0.0/16", 4, 8]}"#).unwrap();
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(
+            resolved,
+            serde_json::json!(["10.0.0.0/24", "10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24",])
+        );
     }
 }
