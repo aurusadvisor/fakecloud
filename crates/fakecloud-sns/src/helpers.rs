@@ -246,6 +246,44 @@ pub(crate) fn build_sns_lambda_event(input: &SnsLambdaEventInput<'_>) -> String 
     sns_event.to_string()
 }
 
+/// Build an SNS SubscriptionConfirmation envelope as a JSON string.
+/// AWS POSTs this to HTTP/HTTPS endpoints right after Subscribe so the
+/// subscriber can echo the Token back via ConfirmSubscription.
+pub(crate) fn build_subscription_confirmation_envelope(topic_arn: &str, token: &str) -> String {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "Type".to_string(),
+        Value::String("SubscriptionConfirmation".to_string()),
+    );
+    map.insert(
+        "MessageId".to_string(),
+        Value::String(uuid::Uuid::new_v4().to_string()),
+    );
+    map.insert("Token".to_string(), Value::String(token.to_string()));
+    map.insert("TopicArn".to_string(), Value::String(topic_arn.to_string()));
+    map.insert(
+        "Message".to_string(),
+        Value::String(format!(
+            "You have chosen to subscribe to the topic {topic_arn}.\nTo confirm the subscription, visit the SubscribeURL included in this message."
+        )),
+    );
+    map.insert(
+        "SubscribeURL".to_string(),
+        Value::String(format!(
+            "https://sns.amazonaws.com/?Action=ConfirmSubscription&TopicArn={topic_arn}&Token={token}"
+        )),
+    );
+    map.insert(
+        "Timestamp".to_string(),
+        Value::String(Utc::now().to_rfc3339()),
+    );
+    map.insert(
+        "SignatureVersion".to_string(),
+        Value::String("1".to_string()),
+    );
+    Value::Object(map).to_string()
+}
+
 /// Build an SNS notification envelope as JSON string.
 /// Subject and MessageAttributes are only included when present.
 pub(crate) fn build_sns_envelope(
@@ -1249,4 +1287,27 @@ pub(crate) fn validate_numeric_filter(arr: &[Value]) -> Result<(), AwsServiceErr
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod confirmation_envelope_tests {
+    use super::build_subscription_confirmation_envelope;
+    use serde_json::Value;
+
+    #[test]
+    fn envelope_carries_token_and_subscribe_url() {
+        let topic = "arn:aws:sns:us-east-1:123456789012:test-topic";
+        let token = "tok-abc";
+        let body = build_subscription_confirmation_envelope(topic, token);
+        let parsed: Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(parsed["Type"], "SubscriptionConfirmation");
+        assert_eq!(parsed["TopicArn"], topic);
+        assert_eq!(parsed["Token"], token);
+        let url = parsed["SubscribeURL"].as_str().unwrap();
+        assert!(url.contains("Action=ConfirmSubscription"));
+        assert!(url.contains(token));
+        assert!(url.contains(topic));
+        assert!(parsed["Timestamp"].is_string());
+        assert!(parsed["MessageId"].is_string());
+    }
 }
