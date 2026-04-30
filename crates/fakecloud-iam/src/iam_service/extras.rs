@@ -669,8 +669,61 @@ impl IamService {
     // ── Misc ──
 
     pub(super) fn change_password(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let _ = required_param(&req.query_params, "OldPassword")?;
-        let _ = required_param(&req.query_params, "NewPassword")?;
+        let old_password = required_param(&req.query_params, "OldPassword")?;
+        let new_password = required_param(&req.query_params, "NewPassword")?;
+        if old_password == new_password {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidUserType",
+                "The new password must be different from the old password.",
+            ));
+        }
+
+        // ChangePassword acts on the calling user's own login profile.
+        // Pull the caller from the request principal — only IAM users
+        // (not roles or root) have a console login profile, so reject
+        // the operation when called by a different principal type.
+        let user_name = req
+            .principal
+            .as_ref()
+            .and_then(|p| {
+                let arn = &p.arn;
+                arn.strip_prefix("arn:aws:iam::")
+                    .and_then(|rest| rest.split_once(":user/"))
+                    .map(|(_, name)| name.to_string())
+            })
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidUserType",
+                    "Only IAM users can change their own password",
+                )
+            })?;
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let profile = state.login_profiles.get_mut(&user_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("User {user_name} has no login profile"),
+            )
+        })?;
+
+        // Empty stored password = legacy snapshot; treat any
+        // OldPassword as matching so the first ChangePassword after
+        // upgrade still works. New stored password is always
+        // validated on subsequent calls.
+        if !profile.password.is_empty() && profile.password != old_password {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::FORBIDDEN,
+                "InvalidUserType",
+                "The provided old password does not match the user's current password.",
+            ));
+        }
+        profile.password = new_password;
+        profile.password_reset_required = false;
+
         Ok(AwsResponse::xml(
             StatusCode::OK,
             empty_response("ChangePassword", &req.request_id),

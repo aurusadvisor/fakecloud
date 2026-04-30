@@ -96,6 +96,13 @@ pub struct LoginProfile {
     pub user_name: String,
     pub created_at: DateTime<Utc>,
     pub password_reset_required: bool,
+    /// Console password. Stored in plaintext for emulator parity —
+    /// fakecloud is not a security boundary, and round-tripping it
+    /// is what `ChangePassword` / `UpdateLoginProfile` need to
+    /// validate against. Empty for legacy snapshots that pre-date
+    /// password storage.
+    #[serde(default)]
+    pub password: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
