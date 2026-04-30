@@ -9,6 +9,38 @@ use crate::state::SentEmail;
 use super::{extract_string_array, SesV2Service};
 
 impl SesV2Service {
+    /// Reject the send if either account-level sending or the resolved
+    /// configuration set's sending flag is paused. Real SES surfaces
+    /// these as `AccountSendingPausedException` and
+    /// `ConfigurationSetSendingPausedException` (HTTP 400).
+    fn check_sending_enabled(
+        &self,
+        account_id: &str,
+        config_set_name: Option<&str>,
+    ) -> Option<AwsResponse> {
+        let accounts = self.state.read();
+        let state = accounts.get(account_id)?;
+        if !state.account_settings.sending_enabled {
+            return Some(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "AccountSendingPausedException",
+                "Email sending is disabled for your account.",
+            ));
+        }
+        if let Some(name) = config_set_name {
+            if let Some(cs) = state.configuration_sets.get(name) {
+                if !cs.sending_enabled {
+                    return Some(Self::json_error(
+                        StatusCode::BAD_REQUEST,
+                        "ConfigurationSetSendingPausedException",
+                        &format!("Email sending is disabled for the configuration set {name}."),
+                    ));
+                }
+            }
+        }
+        None
+    }
+
     pub(super) fn send_email(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = Self::parse_body(req)?;
 
@@ -25,12 +57,14 @@ impl SesV2Service {
         }
 
         let from = body["FromEmailAddress"].as_str().unwrap_or("").to_string();
+        let config_set_name = body["ConfigurationSetName"].as_str().map(|s| s.to_string());
+        if let Some(err) = self.check_sending_enabled(&req.account_id, config_set_name.as_deref()) {
+            return Ok(err);
+        }
 
         let to = extract_string_array(&body["Destination"]["ToAddresses"]);
         let cc = extract_string_array(&body["Destination"]["CcAddresses"]);
         let bcc = extract_string_array(&body["Destination"]["BccAddresses"]);
-
-        let config_set_name = body["ConfigurationSetName"].as_str().map(|s| s.to_string());
 
         let (subject, html_body, text_body, raw_data, template_name, template_data) =
             if body["Content"]["Simple"].is_object() {
@@ -97,6 +131,9 @@ impl SesV2Service {
 
         let from = body["FromEmailAddress"].as_str().unwrap_or("").to_string();
         let config_set_name = body["ConfigurationSetName"].as_str().map(|s| s.to_string());
+        if let Some(err) = self.check_sending_enabled(&req.account_id, config_set_name.as_deref()) {
+            return Ok(err);
+        }
 
         let entries = match body["BulkEmailEntries"].as_array() {
             Some(arr) if !arr.is_empty() => arr.clone(),
