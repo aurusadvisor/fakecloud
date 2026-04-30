@@ -307,9 +307,6 @@ pub struct IamState {
     /// Per-user service-specific credentials (Codecommit/Keyspaces).
     #[serde(default)]
     pub service_specific_credentials: BTreeMap<String, Vec<ServiceSpecificCredential>>, // user -> creds
-    /// Active delegation requests keyed by id.
-    #[serde(default)]
-    pub delegation_requests: BTreeMap<String, DelegationRequest>,
     /// Per-resource-arn tag map for SAML/Server cert/MFA device tags.
     #[serde(default)]
     pub extra_tags: BTreeMap<String, Vec<(String, String)>>,
@@ -318,9 +315,6 @@ pub struct IamState {
     pub organizations_root_credentials_management: bool,
     #[serde(default)]
     pub organizations_root_sessions: bool,
-    /// Outbound web identity federation configuration.
-    #[serde(default)]
-    pub outbound_web_identity_federation: Option<OutboundWebIdentityFederation>,
     /// Generated ServiceLastAccessed jobs keyed by job id.
     #[serde(default)]
     pub service_last_accessed_jobs: BTreeMap<String, ServiceLastAccessedJob>,
@@ -338,23 +332,6 @@ pub struct ServiceSpecificCredential {
     pub service_password: String,
     pub status: String,
     pub create_date: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DelegationRequest {
-    pub id: String,
-    pub source_account: String,
-    pub target_account: String,
-    pub status: String,
-    pub create_date: DateTime<Utc>,
-    pub permissions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutboundWebIdentityFederation {
-    pub enabled: bool,
-    pub issuer_url: String,
-    pub audience: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,11 +379,9 @@ impl IamState {
             ssh_public_keys: BTreeMap::new(),
             access_key_last_used: BTreeMap::new(),
             service_specific_credentials: BTreeMap::new(),
-            delegation_requests: BTreeMap::new(),
             extra_tags: BTreeMap::new(),
             organizations_root_credentials_management: false,
             organizations_root_sessions: false,
-            outbound_web_identity_federation: None,
             service_last_accessed_jobs: BTreeMap::new(),
             organizations_access_reports: BTreeMap::new(),
         }

@@ -3234,29 +3234,6 @@ fn service_specific_credentials_lifecycle() {
 }
 
 #[test]
-fn delegation_request_lifecycle() {
-    let svc = make_service();
-    let resp = svc
-        .create_delegation_request(&make_request(
-            "CreateDelegationRequest",
-            vec![
-                ("TargetAccount", "999999999999"),
-                ("Permissions.member.1", "s3:Get*"),
-            ],
-        ))
-        .unwrap();
-    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
-    let id = extract_xml_tag(&body, "DelegationRequestId");
-    svc.get_delegation_request(&make_request(
-        "GetDelegationRequest",
-        vec![("DelegationRequestId", id)],
-    ))
-    .unwrap();
-    svc.list_delegation_requests(&make_request("ListDelegationRequests", vec![]))
-        .unwrap();
-}
-
-#[test]
 fn organizations_root_creds_and_sessions() {
     let svc = make_service();
     svc.enable_organizations_root_credentials_management(&make_request(
@@ -3281,26 +3258,6 @@ fn organizations_root_creds_and_sessions() {
     .unwrap();
     svc.list_organizations_features(&make_request("ListOrganizationsFeatures", vec![]))
         .unwrap();
-}
-
-#[test]
-fn outbound_wif_round_trip() {
-    let svc = make_service();
-    svc.enable_outbound_web_identity_federation(&make_request(
-        "EnableOutboundWebIdentityFederation",
-        vec![],
-    ))
-    .unwrap();
-    svc.get_outbound_web_identity_federation_info(&make_request(
-        "GetOutboundWebIdentityFederationInfo",
-        vec![],
-    ))
-    .unwrap();
-    svc.disable_outbound_web_identity_federation(&make_request(
-        "DisableOutboundWebIdentityFederation",
-        vec![],
-    ))
-    .unwrap();
 }
 
 #[test]
@@ -3406,8 +3363,6 @@ fn misc_extras_smoke() {
         vec![("OldPassword", "p"), ("NewPassword", "q")],
     ))
     .unwrap();
-    svc.get_human_readable_summary(&make_request("GetHumanReadableSummary", vec![]))
-        .unwrap();
     svc.set_security_token_service_preferences(&make_request(
         "SetSecurityTokenServicePreferences",
         vec![("GlobalEndpointTokenVersion", "v2Token")],

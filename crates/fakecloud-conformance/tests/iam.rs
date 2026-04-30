@@ -1752,51 +1752,6 @@ async fn iam_post_raw(server: &TestServer, params: &[(&str, &str)]) -> reqwest::
         .unwrap()
 }
 
-#[test_action("iam", "CreateDelegationRequest", checksum = "84b7a617")]
-#[test_action("iam", "GetDelegationRequest", checksum = "c7b7aff8")]
-#[test_action("iam", "ListDelegationRequests", checksum = "a06e2be5")]
-#[test_action("iam", "UpdateDelegationRequest", checksum = "0675f35d")]
-#[test_action("iam", "AcceptDelegationRequest", checksum = "d512c062")]
-#[test_action("iam", "RejectDelegationRequest", checksum = "4120b198")]
-#[test_action("iam", "AssociateDelegationRequest", checksum = "05f74036")]
-#[test_action("iam", "SendDelegationToken", checksum = "6d253750")]
-#[tokio::test]
-async fn iam_delegation_request_lifecycle() {
-    let server = TestServer::start().await;
-    let resp = iam_post_raw(
-        &server,
-        &[
-            ("Action", "CreateDelegationRequest"),
-            ("TargetAccount", "111122223333"),
-        ],
-    )
-    .await;
-    let body = resp.text().await.unwrap();
-    let id = body
-        .split("<DelegationRequestId>")
-        .nth(1)
-        .unwrap()
-        .split("</")
-        .next()
-        .unwrap()
-        .to_string();
-
-    for action in [
-        "GetDelegationRequest",
-        "UpdateDelegationRequest",
-        "AcceptDelegationRequest",
-        "AssociateDelegationRequest",
-        "RejectDelegationRequest",
-        "SendDelegationToken",
-    ] {
-        let resp = iam_post_raw(&server, &[("Action", action), ("DelegationRequestId", &id)]).await;
-        assert!(resp.status().is_success(), "{action}");
-    }
-
-    let resp = iam_post_raw(&server, &[("Action", "ListDelegationRequests")]).await;
-    assert!(resp.status().is_success());
-}
-
 #[test_action(
     "iam",
     "EnableOrganizationsRootCredentialsManagement",
@@ -1856,35 +1811,6 @@ async fn iam_organizations_lifecycle() {
         let resp = iam_post_raw(&server, &[("Action", action)]).await;
         assert!(resp.status().is_success(), "{action}");
     }
-}
-
-#[test_action("iam", "EnableOutboundWebIdentityFederation", checksum = "ed54ae5f")]
-#[test_action("iam", "DisableOutboundWebIdentityFederation", checksum = "2f6d24b9")]
-#[test_action("iam", "GetOutboundWebIdentityFederationInfo", checksum = "947612c4")]
-#[tokio::test]
-async fn iam_outbound_web_identity_federation() {
-    let server = TestServer::start().await;
-    let resp = iam_post_raw(
-        &server,
-        &[
-            ("Action", "EnableOutboundWebIdentityFederation"),
-            ("IssuerUrl", "https://example.com"),
-        ],
-    )
-    .await;
-    assert!(resp.status().is_success());
-    let resp = iam_post_raw(
-        &server,
-        &[("Action", "GetOutboundWebIdentityFederationInfo")],
-    )
-    .await;
-    assert!(resp.status().is_success());
-    let resp = iam_post_raw(
-        &server,
-        &[("Action", "DisableOutboundWebIdentityFederation")],
-    )
-    .await;
-    assert!(resp.status().is_success());
 }
 
 #[test_action("iam", "GenerateServiceLastAccessedDetails", checksum = "1222363b")]
@@ -2151,7 +2077,6 @@ async fn iam_policy_simulation() {
 }
 
 #[test_action("iam", "ChangePassword", checksum = "afd8c998")]
-#[test_action("iam", "GetHumanReadableSummary", checksum = "b37cb675")]
 #[test_action("iam", "SetSecurityTokenServicePreferences", checksum = "b48dcc82")]
 #[tokio::test]
 async fn iam_misc_account_ops() {
@@ -2165,8 +2090,6 @@ async fn iam_misc_account_ops() {
         ],
     )
     .await;
-    assert!(r.status().is_success());
-    let r = iam_post_raw(&server, &[("Action", "GetHumanReadableSummary")]).await;
     assert!(r.status().is_success());
     let r = iam_post_raw(
         &server,
