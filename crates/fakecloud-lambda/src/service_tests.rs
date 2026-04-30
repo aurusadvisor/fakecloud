@@ -484,6 +484,133 @@ async fn update_function_code_replaces_image_uri() {
 }
 
 #[tokio::test]
+async fn update_function_code_noop_keeps_revision_id() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "noop").await;
+
+    let req = make_request(Method::GET, "/2015-03-31/functions/noop/configuration", "");
+    let pre: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
+    let pre_rev = pre["RevisionId"].as_str().unwrap().to_string();
+
+    // Empty body — no ZipFile, no ImageUri, no signing profile.
+    let req = make_request(Method::PUT, "/2015-03-31/functions/noop/code", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(post["RevisionId"].as_str().unwrap(), pre_rev);
+}
+
+#[tokio::test]
+async fn update_function_code_same_bytes_keeps_revision_id() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "samebytes").await;
+
+    let req = make_request(
+        Method::GET,
+        "/2015-03-31/functions/samebytes/configuration",
+        "",
+    );
+    let pre: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
+    let pre_rev = pre["RevisionId"].as_str().unwrap().to_string();
+    let pre_sha = pre["CodeSha256"].as_str().unwrap().to_string();
+
+    // Re-upload the seed bytes (same hash) — revision_id must not move.
+    let same_zip_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"\x50\x4b\x03\x04hello",
+    );
+    // Compute what the hash will be to confirm the test setup is faithful.
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"\x50\x4b\x03\x04hello");
+    let computed = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        hasher.finalize(),
+    );
+    if computed == pre_sha {
+        let body = json!({ "ZipFile": same_zip_b64 });
+        let req = make_request(
+            Method::PUT,
+            "/2015-03-31/functions/samebytes/code",
+            &body.to_string(),
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            post["RevisionId"].as_str().unwrap(),
+            pre_rev,
+            "same code should not bump revision"
+        );
+    }
+}
+
+#[tokio::test]
+async fn update_function_code_csc_enforce_rejects_unsigned() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "csc-fn").await;
+
+    // Create a CodeSigningConfig with one allowed publisher and Enforce.
+    let csc_body = json!({
+        "AllowedPublishers": {
+            "SigningProfileVersionArns": [
+                "arn:aws:signer:us-east-1:123456789012:/signing-profiles/MyProfile/abc",
+            ],
+        },
+        "CodeSigningPolicies": {"UntrustedArtifactOnDeployment": "Enforce"},
+    });
+    let req = make_request(
+        Method::POST,
+        "/2020-04-22/code-signing-configs",
+        &csc_body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let csc: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let csc_arn = csc["CodeSigningConfig"]["CodeSigningConfigArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Bind to function.
+    let bind_body = json!({"CodeSigningConfigArn": csc_arn});
+    let req = make_request(
+        Method::PUT,
+        "/2020-06-30/functions/csc-fn/code-signing-config",
+        &bind_body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // UpdateFunctionCode without a SigningProfileVersionArn — must be rejected.
+    let new_zip_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"unsigned");
+    let body = json!({ "ZipFile": new_zip_b64 });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/csc-fn/code",
+        &body.to_string(),
+    );
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected InvalidCodeSignatureException"),
+    };
+    assert_eq!(err.status(), 400);
+
+    // Now with a matching profile — must succeed.
+    let body = json!({
+        "ZipFile": new_zip_b64,
+        "SigningProfileVersionArn":
+            "arn:aws:signer:us-east-1:123456789012:/signing-profiles/MyProfile/abc",
+    });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/csc-fn/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, http::StatusCode::OK);
+}
+
+#[tokio::test]
 async fn publish_version_increments_and_snapshots_config() {
     let svc = LambdaService::new(make_state());
     seed_function(&svc, "vfn").await;
