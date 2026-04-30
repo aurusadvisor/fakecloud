@@ -142,6 +142,19 @@ fn create_queue_returns_url() {
 }
 
 #[test]
+fn send_message_accepts_queue_arn() {
+    let svc = make_service();
+    create_queue(&svc, "arn-queue");
+    let arn = "arn:aws:sqs:us-east-1:123456789012:arn-queue";
+    let id = send_msg(&svc, arn, "hello");
+    assert!(!id.is_empty());
+
+    let messages = receive_msgs(&svc, arn, 1);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["Body"], "hello");
+}
+
+#[test]
 fn create_queue_idempotent_same_attributes() {
     let svc = make_service();
     let url1 = create_queue(&svc, "my-queue");
