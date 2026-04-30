@@ -4034,3 +4034,139 @@ fn ssm_delete_resource_policy_not_found() {
     );
     assert!(svc.delete_resource_policy(&req).is_err());
 }
+
+#[test]
+fn get_parameter_with_expired_policy_returns_not_found() {
+    let svc = make_service();
+    let past = "1990-01-01T00:00:00.000Z";
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": past }
+    }]))
+    .unwrap();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/expired",
+            "Value": "v1",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": policies
+        }),
+    );
+    svc.put_parameter(&req).unwrap();
+
+    let req = make_request("GetParameter", json!({ "Name": "/expired" }));
+    let err = match svc.get_parameter(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected expired param to be hidden"),
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn get_parameter_with_future_expiration_still_returned() {
+    let svc = make_service();
+    let future = "9999-01-01T00:00:00.000Z";
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": future }
+    }]))
+    .unwrap();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/notyet",
+            "Value": "v1",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": policies
+        }),
+    );
+    svc.put_parameter(&req).unwrap();
+
+    let req = make_request("GetParameter", json!({ "Name": "/notyet" }));
+    let resp = svc.get_parameter(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Parameter"]["Value"], "v1");
+}
+
+#[test]
+fn get_parameters_drops_expired_into_invalid_list() {
+    let svc = make_service();
+    // Live param
+    let req = make_request(
+        "PutParameter",
+        json!({ "Name": "/live", "Value": "ok", "Type": "String" }),
+    );
+    svc.put_parameter(&req).unwrap();
+
+    // Expired param
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": "1990-01-01T00:00:00.000Z" }
+    }]))
+    .unwrap();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/dead",
+            "Value": "no",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": policies
+        }),
+    );
+    svc.put_parameter(&req).unwrap();
+
+    let req = make_request("GetParameters", json!({ "Names": ["/live", "/dead"] }));
+    let resp = svc.get_parameters(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let params = body["Parameters"].as_array().unwrap();
+    let invalid = body["InvalidParameters"].as_array().unwrap();
+    assert_eq!(params.len(), 1);
+    assert_eq!(params[0]["Name"], "/live");
+    assert!(invalid.iter().any(|v| v == "/dead"));
+}
+
+#[test]
+fn get_parameters_by_path_skips_expired_entries() {
+    let svc = make_service();
+    let req = make_request(
+        "PutParameter",
+        json!({ "Name": "/app/live", "Value": "ok", "Type": "String" }),
+    );
+    svc.put_parameter(&req).unwrap();
+
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": "1990-01-01T00:00:00.000Z" }
+    }]))
+    .unwrap();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/app/dead",
+            "Value": "no",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": policies
+        }),
+    );
+    svc.put_parameter(&req).unwrap();
+
+    let req = make_request("GetParametersByPath", json!({ "Path": "/app" }));
+    let resp = svc.get_parameters_by_path(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let names: Vec<&str> = body["Parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["Name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["/app/live"]);
+}
