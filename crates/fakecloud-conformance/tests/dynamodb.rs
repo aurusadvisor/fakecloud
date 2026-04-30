@@ -926,15 +926,14 @@ async fn dynamodb_resource_policy_lifecycle() {
         .await
         .unwrap();
 
-    let resp = client
+    let err = client
         .get_resource_policy()
         .resource_arn(&arn)
         .send()
         .await
-        .unwrap();
-    // After deletion, policy should be absent
-    let policy_val = resp.policy().unwrap_or_default();
-    assert!(policy_val.is_empty() || policy_val == "null");
+        .unwrap_err();
+    let svc_err = err.into_service_error();
+    assert!(svc_err.is_policy_not_found_exception());
 }
 
 // ---------------------------------------------------------------------------
