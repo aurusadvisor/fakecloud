@@ -382,7 +382,7 @@ impl OrganizationsService {
         // filter so the SDK wire format matches and callers learn about
         // their typo rather than getting an implicit SCP default.
         let filter = required_str(&body, "Filter")?;
-        if filter != POLICY_TYPE_SCP {
+        if !is_known_policy_type(filter) {
             return Err(org_error_to_aws(OrgError::PolicyTypeNotSupported(
                 filter.to_string(),
             )));
@@ -427,7 +427,7 @@ impl OrganizationsService {
         let body = req.json_body();
         let target_id = required_str(&body, "TargetId")?;
         let filter = required_str(&body, "Filter")?;
-        if filter != POLICY_TYPE_SCP {
+        if !is_known_policy_type(filter) {
             return Err(org_error_to_aws(OrgError::PolicyTypeNotSupported(
                 filter.to_string(),
             )));
@@ -1304,6 +1304,17 @@ fn required_str<'a>(body: &'a Value, key: &str) -> Result<&'a str, AwsServiceErr
             format!("Missing required parameter: {key}"),
         )
     })
+}
+
+fn is_known_policy_type(t: &str) -> bool {
+    matches!(
+        t,
+        POLICY_TYPE_SCP
+            | "TAG_POLICY"
+            | "BACKUP_POLICY"
+            | "AISERVICES_OPT_OUT_POLICY"
+            | "RESOURCE_CONTROL_POLICY"
+    )
 }
 
 fn org_error_to_aws(err: OrgError) -> AwsServiceError {
@@ -2278,7 +2289,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_policy_rejects_non_scp_type() {
+    async fn create_policy_rejects_unrecognized_type() {
         let (svc, _state) = OrganizationsService::shared();
         create_org_with_root(&svc).await;
         let err = expect_err(
@@ -2288,13 +2299,38 @@ mod tests {
                 json!({
                     "Name": "T",
                     "Description": "",
-                    "Type": "TAG_POLICY",
+                    "Type": "NONSENSE_POLICY",
                     "Content": SCP_ALLOW_ALL,
                 }),
             ))
             .await,
         );
         assert_eq!(err.code(), "PolicyTypeNotSupportedException");
+    }
+
+    #[tokio::test]
+    async fn create_policy_accepts_tag_policy_type() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        let resp = svc
+            .handle(req_with(
+                "111111111111",
+                "CreatePolicy",
+                json!({
+                    "Name": "MyTags",
+                    "Description": "",
+                    "Type": "TAG_POLICY",
+                    "Content": SCP_ALLOW_ALL,
+                }),
+            ))
+            .await
+            .unwrap();
+        let v = body_json(&resp);
+        assert_eq!(v["Policy"]["PolicySummary"]["Type"], "TAG_POLICY");
+        assert!(v["Policy"]["PolicySummary"]["Arn"]
+            .as_str()
+            .unwrap()
+            .contains("/tag_policy/"));
     }
 
     #[tokio::test]
@@ -2447,14 +2483,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_policies_rejects_unsupported_filter() {
+    async fn list_policies_rejects_unrecognized_filter() {
         let (svc, _state) = OrganizationsService::shared();
         create_org_with_root(&svc).await;
         let err = expect_err(
             svc.handle(req_with(
                 "111111111111",
                 "ListPolicies",
-                json!({"Filter": "TAG_POLICY"}),
+                json!({"Filter": "NONSENSE_POLICY"}),
             ))
             .await,
         );
@@ -2601,7 +2637,7 @@ mod tests {
             svc.handle(req_with(
                 "111111111111",
                 "ListPoliciesForTarget",
-                json!({"TargetId": root_id, "Filter": "TAG_POLICY"}),
+                json!({"TargetId": root_id, "Filter": "NONSENSE_POLICY"}),
             ))
             .await,
         );

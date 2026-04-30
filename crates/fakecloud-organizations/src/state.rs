@@ -771,7 +771,7 @@ impl OrganizationState {
         content: &str,
         policy_type: &str,
     ) -> Result<Policy, OrgError> {
-        if policy_type != POLICY_TYPE_SCP {
+        if !is_supported_policy_type(policy_type) {
             return Err(OrgError::PolicyTypeNotSupported(policy_type.to_string()));
         }
         if serde_json::from_str::<serde_json::Value>(content).is_err() {
@@ -780,21 +780,24 @@ impl OrganizationState {
         let dup = self
             .policies
             .values()
-            .any(|p| p.policy_type == POLICY_TYPE_SCP && p.name == name);
+            .any(|p| p.policy_type == policy_type && p.name == name);
         if dup {
             return Err(OrgError::DuplicatePolicy(name.to_string()));
         }
         let id = format!("p-{}", random_id(8));
         let arn = format!(
-            "arn:aws:organizations::{}:policy/{}/service_control_policy/{}",
-            self.management_account_id, self.org_id, id
+            "arn:aws:organizations::{}:policy/{}/{}/{}",
+            self.management_account_id,
+            self.org_id,
+            policy_type_path_segment(policy_type),
+            id,
         );
         let policy = Policy {
             id: id.clone(),
             arn,
             name: name.to_string(),
             description: description.to_string(),
-            policy_type: POLICY_TYPE_SCP.to_string(),
+            policy_type: policy_type.to_string(),
             aws_managed: false,
             content: content.to_string(),
         };
@@ -819,11 +822,12 @@ impl OrganizationState {
         if policy.aws_managed {
             return Err(OrgError::PolicyChangesNotAllowed(id.to_string()));
         }
+        let policy_type = policy.policy_type.clone();
         if let Some(new_name) = name {
             let dup = self
                 .policies
                 .values()
-                .any(|p| p.id != id && p.policy_type == POLICY_TYPE_SCP && p.name == new_name);
+                .any(|p| p.id != id && p.policy_type == policy_type && p.name == new_name);
             if dup {
                 return Err(OrgError::DuplicatePolicy(new_name.to_string()));
             }
@@ -1093,6 +1097,36 @@ fn parent_type_for(_org: &OrganizationState, parent_id: &str) -> String {
     }
 }
 
+/// AWS Organizations policy types we support: SCP plus the four
+/// non-SCP types that share the same dispatch path. Real Organizations
+/// also has SCP enabled at bootstrap and the rest opt-in via
+/// EnablePolicyType, but `create_policy` doesn't enforce that
+/// enablement gate (mirroring AWS, which lets you create the policy
+/// before enabling it on the root).
+fn is_supported_policy_type(policy_type: &str) -> bool {
+    matches!(
+        policy_type,
+        POLICY_TYPE_SCP
+            | "TAG_POLICY"
+            | "BACKUP_POLICY"
+            | "AISERVICES_OPT_OUT_POLICY"
+            | "RESOURCE_CONTROL_POLICY"
+    )
+}
+
+/// Map the policy type to the lowercase ARN path segment AWS uses.
+/// Example: `SERVICE_CONTROL_POLICY` -> `service_control_policy`.
+fn policy_type_path_segment(policy_type: &str) -> &'static str {
+    match policy_type {
+        POLICY_TYPE_SCP => "service_control_policy",
+        "TAG_POLICY" => "tag_policy",
+        "BACKUP_POLICY" => "backup_policy",
+        "AISERVICES_OPT_OUT_POLICY" => "aiservices_opt_out_policy",
+        "RESOURCE_CONTROL_POLICY" => "resource_control_policy",
+        _ => "policy",
+    }
+}
+
 /// Generate a lowercase alphanumeric ID fragment of `len` characters.
 /// Used for org/root/OU/policy IDs. Pulled from a UUID v4 so the PRNG
 /// is the one already pulled in by the rest of fakecloud.
@@ -1279,10 +1313,10 @@ mod tests {
     }
 
     #[test]
-    fn create_policy_rejects_non_scp_type() {
+    fn create_policy_rejects_unrecognized_type() {
         let mut org = OrganizationState::bootstrap("111111111111");
         let err = org
-            .create_policy("x", "d", CONTENT_ALL, "TAG_POLICY")
+            .create_policy("x", "d", CONTENT_ALL, "NONSENSE_POLICY")
             .unwrap_err();
         assert!(matches!(err, OrgError::PolicyTypeNotSupported(_)));
     }
@@ -1566,6 +1600,40 @@ mod tests {
     }
 
     #[test]
+    fn create_policy_accepts_tag_policy_type() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        let p = org
+            .create_policy("MyTags", "tag rules", CONTENT_ALL, "TAG_POLICY")
+            .unwrap();
+        assert_eq!(p.policy_type, "TAG_POLICY");
+        assert!(p.arn.contains("/tag_policy/"));
+    }
+
+    #[test]
+    fn create_policy_accepts_backup_resource_aiopt_out() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        for kind in [
+            "BACKUP_POLICY",
+            "AISERVICES_OPT_OUT_POLICY",
+            "RESOURCE_CONTROL_POLICY",
+        ] {
+            let p = org
+                .create_policy(&format!("p-{kind}"), "d", CONTENT_ALL, kind)
+                .unwrap();
+            assert_eq!(p.policy_type, kind);
+        }
+    }
+
+    #[test]
+    fn create_policy_rejects_unknown_type() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        let err = org
+            .create_policy("p", "d", CONTENT_ALL, "UNKNOWN_POLICY")
+            .unwrap_err();
+        assert!(matches!(err, OrgError::PolicyTypeNotSupported(_)));
+    }
+
+    #[test]
     fn list_policy_type_statuses_includes_all_known_types() {
         let org = OrganizationState::bootstrap("111111111111");
         let statuses = org.list_policy_type_statuses();
@@ -1624,6 +1692,21 @@ mod tests {
         assert!(accounts.contains(&"222222222222".to_string()));
         let ous = org.list_children(&org.root_id, "ORGANIZATIONAL_UNIT");
         assert!(ous.contains(&ou.id));
+    }
+
+    #[test]
+    fn duplicate_policy_check_scoped_per_type() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.create_policy("Same", "d", CONTENT_ALL, POLICY_TYPE_SCP)
+            .unwrap();
+        // Same name allowed in a different policy type.
+        org.create_policy("Same", "d", CONTENT_ALL, "TAG_POLICY")
+            .unwrap();
+        // Same name + same type is rejected.
+        let err = org
+            .create_policy("Same", "d", CONTENT_ALL, "TAG_POLICY")
+            .unwrap_err();
+        assert!(matches!(err, OrgError::DuplicatePolicy(_)));
     }
 
     #[test]
