@@ -35,6 +35,99 @@ fn now_iso() -> String {
     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+/// Collect a member list from query params (`Prefix.1`, `Prefix.2`, ...).
+/// Stops at the first missing index. Bounded at 128 to match AWS's
+/// per-API simulate limit.
+fn collect_member_list(req: &AwsRequest, prefix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 1..=128 {
+        let key = format!("{prefix}{i}");
+        match req.query_params.get(&key) {
+            Some(v) => out.push(v.clone()),
+            None => break,
+        }
+    }
+    out
+}
+
+/// Resolve an IAM principal ARN (user or role) to its full identity
+/// policy set: managed policies (default version) plus inline
+/// policies. Returns an empty vec if the ARN doesn't resolve.
+fn collect_principal_policies(
+    state: &IamState,
+    source_arn: &str,
+) -> Vec<crate::evaluator::PolicyDocument> {
+    use crate::evaluator::PolicyDocument;
+    let mut out: Vec<PolicyDocument> = Vec::new();
+    let (kind, name) = match parse_principal_arn(source_arn) {
+        Some(p) => p,
+        None => return out,
+    };
+    let (managed, inline) = match kind {
+        PrincipalKind::User => (
+            state.user_policies.get(name).cloned().unwrap_or_default(),
+            state
+                .user_inline_policies
+                .get(name)
+                .cloned()
+                .unwrap_or_default(),
+        ),
+        PrincipalKind::Role => (
+            state.role_policies.get(name).cloned().unwrap_or_default(),
+            state
+                .role_inline_policies
+                .get(name)
+                .cloned()
+                .unwrap_or_default(),
+        ),
+    };
+    for arn in &managed {
+        if let Some(policy) = state.policies.get(arn) {
+            if let Some(v) = policy.versions.iter().find(|v| v.is_default) {
+                out.push(PolicyDocument::parse(&v.document));
+            }
+        }
+    }
+    for doc in inline.values() {
+        out.push(PolicyDocument::parse(doc));
+    }
+    out
+}
+
+fn principal_boundary(state: &IamState, source_arn: &str) -> Option<String> {
+    let (kind, name) = parse_principal_arn(source_arn)?;
+    match kind {
+        PrincipalKind::User => state
+            .users
+            .get(name)
+            .and_then(|u| u.permissions_boundary.clone()),
+        PrincipalKind::Role => state
+            .roles
+            .get(name)
+            .and_then(|r| r.permissions_boundary.clone()),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PrincipalKind {
+    User,
+    Role,
+}
+
+fn parse_principal_arn(arn: &str) -> Option<(PrincipalKind, &str)> {
+    // arn:aws:iam::ACCOUNT:user/path/name -> User, "name"
+    // arn:aws:iam::ACCOUNT:role/path/name -> Role, "name"
+    let colon_at = arn.rfind(':')?;
+    let resource = &arn[colon_at + 1..];
+    let (resource_type, rest) = resource.split_once('/')?;
+    let last = rest.rsplit('/').next().unwrap_or(rest);
+    match resource_type {
+        "user" => Some((PrincipalKind::User, last)),
+        "role" => Some((PrincipalKind::Role, last)),
+        _ => None,
+    }
+}
+
 fn service_credential_xml(c: &ServiceSpecificCredential, include_password: bool) -> String {
     let pw = if include_password {
         format!(
@@ -593,26 +686,148 @@ impl IamService {
         req: &AwsRequest,
         action: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // Collect ActionNames to echo back as evaluation results.
-        let mut actions: Vec<String> = Vec::new();
-        for i in 1..=64 {
-            let k = format!("ActionNames.member.{i}");
-            match req.query_params.get(&k) {
-                Some(v) => actions.push(v.clone()),
-                None => break,
+        use crate::evaluator::{evaluate_with_gates, Decision, EvalRequest, PolicyDocument};
+        use fakecloud_core::auth::{ConditionContext, Principal, PrincipalType};
+        use std::collections::BTreeMap;
+
+        let actions = collect_member_list(req, "ActionNames.member.");
+        if actions.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                "ActionNames.member.1 is required",
+            ));
+        }
+        let resources = collect_member_list(req, "ResourceArns.member.");
+        let resources = if resources.is_empty() {
+            vec!["*".to_string()]
+        } else {
+            resources
+        };
+
+        // Identity-side policies. SimulateCustomPolicy reads
+        // PolicyInputList; SimulatePrincipalPolicy resolves the
+        // PolicySourceArn principal's attached + inline policies.
+        let mut identity_docs: Vec<PolicyDocument> = Vec::new();
+        let mut caller_arn: Option<String> = req.query_params.get("CallerArn").cloned();
+        let mut boundary_docs: Option<Vec<PolicyDocument>> = None;
+
+        match action {
+            "SimulateCustomPolicy" => {
+                for body in collect_member_list(req, "PolicyInputList.member.") {
+                    identity_docs.push(PolicyDocument::parse(&body));
+                }
+                if identity_docs.is_empty() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidInput",
+                        "PolicyInputList.member.1 is required",
+                    ));
+                }
+                let boundaries =
+                    collect_member_list(req, "PermissionsBoundaryPolicyInputList.member.");
+                if !boundaries.is_empty() {
+                    boundary_docs = Some(
+                        boundaries
+                            .into_iter()
+                            .map(|s| PolicyDocument::parse(&s))
+                            .collect(),
+                    );
+                }
+            }
+            "SimulatePrincipalPolicy" => {
+                let source_arn = req.query_params.get("PolicySourceArn").ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidInput",
+                        "PolicySourceArn is required",
+                    )
+                })?;
+                caller_arn.get_or_insert_with(|| source_arn.clone());
+                let accounts = self.state.read();
+                let empty = IamState::new(&req.account_id);
+                let state = accounts.get(&req.account_id).unwrap_or(&empty);
+                identity_docs = collect_principal_policies(state, source_arn);
+                if let Some(boundary_arn) = principal_boundary(state, source_arn) {
+                    if let Some(p) = state.policies.get(&boundary_arn) {
+                        if let Some(v) = p.versions.iter().find(|v| v.is_default) {
+                            boundary_docs = Some(vec![PolicyDocument::parse(&v.document)]);
+                        }
+                    }
+                }
+                // Add policies attached via PolicyInputList overlay.
+                for body in collect_member_list(req, "PolicyInputList.member.") {
+                    identity_docs.push(PolicyDocument::parse(&body));
+                }
+            }
+            _ => {}
+        }
+
+        // ContextEntries -> ConditionContext.service_keys (single
+        // bucket; populating typed fields requires per-key dispatch
+        // which the evaluator already handles via lookup).
+        let mut service_keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for i in 1..=128 {
+            let k = format!("ContextEntries.member.{i}.ContextKeyName");
+            let Some(name) = req.query_params.get(&k) else {
+                break;
+            };
+            let mut values: Vec<String> = Vec::new();
+            for j in 1..=32 {
+                let vk = format!("ContextEntries.member.{i}.ContextKeyValues.member.{j}");
+                if let Some(v) = req.query_params.get(&vk) {
+                    values.push(v.clone());
+                } else {
+                    break;
+                }
+            }
+            service_keys.insert(name.to_lowercase(), values);
+        }
+
+        let principal_arn_str = caller_arn
+            .clone()
+            .unwrap_or_else(|| format!("arn:aws:iam::{}:root", req.account_id));
+        let principal = Principal {
+            arn: principal_arn_str.clone(),
+            user_id: principal_arn_str.clone(),
+            account_id: req.account_id.clone(),
+            principal_type: PrincipalType::User,
+            source_identity: None,
+            tags: None,
+        };
+        let ctx = ConditionContext {
+            aws_principal_arn: Some(principal_arn_str.clone()),
+            aws_principal_account: Some(req.account_id.clone()),
+            service_keys,
+            ..Default::default()
+        };
+
+        let mut members = String::new();
+        for action_name in &actions {
+            for resource in &resources {
+                let eval_req = EvalRequest {
+                    principal: &principal,
+                    action: action_name.clone(),
+                    resource: resource.clone(),
+                    context: ctx.clone(),
+                };
+                let decision =
+                    evaluate_with_gates(&identity_docs, boundary_docs.as_deref(), None, &eval_req);
+                let decision_str = match decision {
+                    Decision::Allow => "allowed",
+                    Decision::ImplicitDeny => "implicitDeny",
+                    Decision::ExplicitDeny => "explicitDeny",
+                };
+                members.push_str(&format!(
+                    "<member><EvalActionName>{}</EvalActionName><EvalResourceName>{}</EvalResourceName><EvalDecision>{}</EvalDecision></member>",
+                    xml_escape(action_name),
+                    xml_escape(resource),
+                    decision_str
+                ));
             }
         }
-        let results: String = actions
-            .iter()
-            .map(|a| {
-                format!(
-                    "<member><EvalActionName>{}</EvalActionName><EvalDecision>allowed</EvalDecision><EvalResourceName>*</EvalResourceName></member>",
-                    xml_escape(a)
-                )
-            })
-            .collect();
         let body = format!(
-            "  <{action}Result><EvaluationResults>{results}</EvaluationResults><IsTruncated>false</IsTruncated></{action}Result>"
+            "  <{action}Result><EvaluationResults>{members}</EvaluationResults><IsTruncated>false</IsTruncated></{action}Result>"
         );
         Ok(xml_response(action, &body, &req.request_id))
     }

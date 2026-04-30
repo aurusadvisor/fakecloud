@@ -3349,6 +3349,165 @@ fn policy_simulation_smoke() {
 }
 
 #[test]
+fn simulate_custom_policy_returns_allow_when_action_matches() {
+    let svc = make_service();
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+    let resp = svc
+        .simulate_custom_policy(&make_request(
+            "SimulateCustomPolicy",
+            vec![
+                ("PolicyInputList.member.1", policy),
+                ("ActionNames.member.1", "s3:GetObject"),
+                ("ResourceArns.member.1", "arn:aws:s3:::b/k"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>allowed</EvalDecision>"),
+        "expected allowed, body: {body}"
+    );
+    assert!(body.contains("<EvalActionName>s3:GetObject</EvalActionName>"));
+    assert!(body.contains("<EvalResourceName>arn:aws:s3:::b/k</EvalResourceName>"));
+}
+
+#[test]
+fn simulate_custom_policy_returns_implicit_deny_when_action_unrelated() {
+    let svc = make_service();
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+    let resp = svc
+        .simulate_custom_policy(&make_request(
+            "SimulateCustomPolicy",
+            vec![
+                ("PolicyInputList.member.1", policy),
+                ("ActionNames.member.1", "ec2:RunInstances"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>implicitDeny</EvalDecision>"),
+        "expected implicitDeny, body: {body}"
+    );
+}
+
+#[test]
+fn simulate_custom_policy_returns_explicit_deny_for_matching_deny_statement() {
+    let svc = make_service();
+    let policy = r#"{"Version":"2012-10-17","Statement":[
+        {"Effect":"Allow","Action":"s3:*","Resource":"*"},
+        {"Effect":"Deny","Action":"s3:DeleteObject","Resource":"*"}
+    ]}"#;
+    let resp = svc
+        .simulate_custom_policy(&make_request(
+            "SimulateCustomPolicy",
+            vec![
+                ("PolicyInputList.member.1", policy),
+                ("ActionNames.member.1", "s3:DeleteObject"),
+                ("ResourceArns.member.1", "arn:aws:s3:::b/k"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>explicitDeny</EvalDecision>"),
+        "expected explicitDeny, body: {body}"
+    );
+}
+
+#[test]
+fn simulate_custom_policy_boundary_caps_allow() {
+    let svc = make_service();
+    let identity =
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
+    let boundary = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+    let resp = svc
+        .simulate_custom_policy(&make_request(
+            "SimulateCustomPolicy",
+            vec![
+                ("PolicyInputList.member.1", identity),
+                ("PermissionsBoundaryPolicyInputList.member.1", boundary),
+                ("ActionNames.member.1", "ec2:RunInstances"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    // Boundary doesn't allow ec2:RunInstances, so result is implicitDeny.
+    assert!(
+        body.contains("<EvalDecision>implicitDeny</EvalDecision>"),
+        "expected implicitDeny under boundary, body: {body}"
+    );
+}
+
+#[test]
+fn simulate_principal_policy_uses_principals_attached_managed_policy() {
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "alice")]))
+        .unwrap();
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+    svc.create_policy(&make_request(
+        "CreatePolicy",
+        vec![("PolicyName", "P"), ("PolicyDocument", policy_doc)],
+    ))
+    .unwrap();
+    let policy_arn = "arn:aws:iam::123456789012:policy/P";
+    svc.attach_user_policy(&make_request(
+        "AttachUserPolicy",
+        vec![("UserName", "alice"), ("PolicyArn", policy_arn)],
+    ))
+    .unwrap();
+    let user_arn = "arn:aws:iam::123456789012:user/alice";
+    let resp = svc
+        .simulate_principal_policy(&make_request(
+            "SimulatePrincipalPolicy",
+            vec![
+                ("PolicySourceArn", user_arn),
+                ("ActionNames.member.1", "s3:GetObject"),
+                ("ResourceArns.member.1", "arn:aws:s3:::b/k"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>allowed</EvalDecision>"),
+        "expected allowed via attached policy, body: {body}"
+    );
+}
+
+#[test]
+fn simulate_principal_policy_unknown_principal_returns_implicit_deny() {
+    let svc = make_service();
+    let resp = svc
+        .simulate_principal_policy(&make_request(
+            "SimulatePrincipalPolicy",
+            vec![
+                ("PolicySourceArn", "arn:aws:iam::123456789012:user/ghost"),
+                ("ActionNames.member.1", "s3:GetObject"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>implicitDeny</EvalDecision>"),
+        "expected implicitDeny for unknown principal, body: {body}"
+    );
+}
+
+#[test]
+fn simulate_custom_policy_requires_action_names() {
+    let svc = make_service();
+    let policy = r#"{"Version":"2012-10-17","Statement":[]}"#;
+    let err = match svc.simulate_custom_policy(&make_request(
+        "SimulateCustomPolicy",
+        vec![("PolicyInputList.member.1", policy)],
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("expected InvalidInput"),
+    };
+    assert_eq!(err.code(), "InvalidInput");
+}
+
+#[test]
 fn misc_extras_smoke() {
     let svc = make_service();
     svc.create_user(&make_request("CreateUser", vec![("UserName", "u1")]))
