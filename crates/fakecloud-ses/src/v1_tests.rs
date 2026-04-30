@@ -40,6 +40,7 @@ fn seed_identity(state: &SharedSesState, name: &str) {
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
             mail_from_domain_status: "NotStarted".to_string(),
+            dkim_public_key_b64: None,
             configuration_set_name: None,
         },
     );

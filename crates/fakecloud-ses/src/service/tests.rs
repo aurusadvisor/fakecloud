@@ -43,6 +43,7 @@ fn seed_identity(state: &SharedSesState, name: &str) {
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
             mail_from_domain_status: "NotStarted".to_string(),
+            dkim_public_key_b64: None,
             configuration_set_name: None,
         },
     );
@@ -222,8 +223,14 @@ async fn test_template_lifecycle() {
 #[tokio::test]
 async fn test_send_email() {
     let state = make_state();
-    seed_identity(&state, "sender@example.com");
     let svc = SesV2Service::new(state.clone());
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/identities",
+        r#"{"EmailIdentity": "sender@example.com"}"#,
+    );
+    svc.handle(req).await.unwrap();
 
     let req = make_request(
         Method::POST,
@@ -256,6 +263,39 @@ async fn test_send_email() {
     assert_eq!(s.sent_emails[0].from, "sender@example.com");
     assert_eq!(s.sent_emails[0].to, vec!["recipient@example.com"]);
     assert_eq!(s.sent_emails[0].subject.as_deref(), Some("Test Subject"));
+    let sig = s.sent_emails[0].dkim_signature.as_deref().unwrap();
+    assert!(sig.contains("v=1"));
+    assert!(sig.contains("d=example.com"));
+    assert!(sig.contains("a=rsa-sha256"));
+}
+
+#[tokio::test]
+async fn test_send_email_skips_dkim_when_signing_disabled() {
+    let state = make_state();
+    seed_identity(&state, "plain@example.com");
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        let id = st.identities.get_mut("plain@example.com").unwrap();
+        id.dkim_signing_enabled = false;
+    }
+    let svc = SesV2Service::new(state.clone());
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "plain@example.com",
+            "Destination": {"ToAddresses": ["a@b.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "x"}, "Body": {"Text": {"Data": "y"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let mas_r = state.read();
+    let s = mas_r.default_ref();
+    assert_eq!(s.sent_emails.len(), 1);
+    assert!(s.sent_emails[0].dkim_signature.is_none());
 }
 
 #[tokio::test]

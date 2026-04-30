@@ -481,6 +481,7 @@ pub(crate) fn verify_email_identity(
             dkim_domain_signing_private_key: None,
             dkim_domain_signing_selector: None,
             dkim_next_signing_key_length: None,
+            dkim_public_key_b64: None,
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
@@ -509,6 +510,7 @@ pub(crate) fn verify_domain_identity(
             dkim_domain_signing_private_key: None,
             dkim_domain_signing_selector: None,
             dkim_next_signing_key_length: None,
+            dkim_public_key_b64: None,
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
@@ -544,6 +546,7 @@ pub(crate) fn verify_domain_dkim(
             dkim_domain_signing_private_key: None,
             dkim_domain_signing_selector: None,
             dkim_next_signing_key_length: None,
+            dkim_public_key_b64: None,
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
@@ -961,8 +964,10 @@ pub(crate) fn send_email(
         raw_data: None,
         template_name: None,
         template_data: None,
+        dkim_signature: None,
         timestamp: Utc::now(),
     };
+    let sent = sign_sent_email(state, &req.account_id, &req.region, sent);
 
     state
         .write()
@@ -975,6 +980,26 @@ pub(crate) fn send_email(
         StatusCode::OK,
         query_response_xml("SendEmail", SES_NS, &inner, &req.request_id),
     ))
+}
+
+/// DKIM-sign `sent` against the account's stored identities. No-op when
+/// the sender has no matching verified identity or signing is disabled.
+fn sign_sent_email(
+    state: &SharedSesState,
+    account_id: &str,
+    _region: &str,
+    sent: SentEmail,
+) -> SentEmail {
+    let dkim_signature = {
+        let accounts = state.read();
+        accounts
+            .get(account_id)
+            .and_then(|st| crate::dkim::signature_for_sent_email(st, &sent))
+    };
+    SentEmail {
+        dkim_signature,
+        ..sent
+    }
 }
 
 pub(crate) fn send_raw_email(
@@ -1008,8 +1033,10 @@ pub(crate) fn send_raw_email(
         raw_data: Some(raw_data.to_string()),
         template_name: None,
         template_data: None,
+        dkim_signature: None,
         timestamp: Utc::now(),
     };
+    let sent = sign_sent_email(state, &req.account_id, &req.region, sent);
 
     state
         .write()
@@ -1070,8 +1097,10 @@ pub(crate) fn send_templated_email(
         raw_data: None,
         template_name: Some(template_name.to_string()),
         template_data: Some(template_data.to_string()),
+        dkim_signature: None,
         timestamp: Utc::now(),
     };
+    let sent = sign_sent_email(state, &req.account_id, &req.region, sent);
 
     state
         .write()
@@ -1178,8 +1207,10 @@ pub(crate) fn send_bulk_destination(
         raw_data: None,
         template_name: Some(template_name.to_string()),
         template_data: Some(replacement_data),
+        dkim_signature: None,
         timestamp: Utc::now(),
     };
+    let sent = sign_sent_email(state, account_id, "", sent);
 
     state
         .write()

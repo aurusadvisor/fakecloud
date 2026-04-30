@@ -16,6 +16,11 @@ pub struct EmailIdentity {
     pub dkim_domain_signing_private_key: Option<String>,
     pub dkim_domain_signing_selector: Option<String>,
     pub dkim_next_signing_key_length: Option<String>,
+    /// SubjectPublicKeyInfo DER, base64-encoded. Populated when Easy DKIM
+    /// generates the keypair. BYODKIM imports leave this empty (the user
+    /// publishes their own public record).
+    #[serde(default)]
+    pub dkim_public_key_b64: Option<String>,
     // Feedback attributes
     pub email_forwarding_enabled: bool,
     // Mail-from attributes
@@ -84,6 +89,11 @@ pub struct SentEmail {
     pub raw_data: Option<String>,
     pub template_name: Option<String>,
     pub template_data: Option<String>,
+    /// Computed `DKIM-Signature` header value when the sender's identity
+    /// has DKIM signing enabled. Empty string when sender unverified or
+    /// DKIM not configured.
+    #[serde(default)]
+    pub dkim_signature: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 
