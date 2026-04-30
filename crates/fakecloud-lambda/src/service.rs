@@ -1237,7 +1237,21 @@ impl LambdaService {
             let accounts = self.state.read();
             let empty = LambdaState::new(account_id, "");
             let state = accounts.get(account_id).unwrap_or(&empty);
-            let func = state.functions.get(function_name).cloned().ok_or_else(|| {
+            // Resolve numbered versions to the immutable snapshot stored
+            // by PublishVersion so an alias pinned to v1 runs the v1 code
+            // even after $LATEST is mutated. Falls back to $LATEST when
+            // the snapshot is missing (legacy state) so we never 404 a
+            // routable invoke.
+            let func = match resolved_version.as_deref() {
+                Some(v) => state
+                    .function_version_snapshots
+                    .get(function_name)
+                    .and_then(|m| m.get(v))
+                    .cloned()
+                    .or_else(|| state.functions.get(function_name).cloned()),
+                None => state.functions.get(function_name).cloned(),
+            }
+            .ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "ResourceNotFoundException",
