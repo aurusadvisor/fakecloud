@@ -3813,3 +3813,77 @@ async fn delete_objects_batch_respects_compliance_retention() {
         "expected free.txt to be deleted, got: {body_str}"
     );
 }
+
+#[tokio::test]
+async fn bucket_owner_enforced_rejects_put_bucket_acl_and_object_acl() {
+    let svc = make_service();
+    seed_bucket(&svc, "owner-enforced");
+
+    let body = br#"<OwnershipControls><Rule><ObjectOwnership>BucketOwnerEnforced</ObjectOwnership></Rule></OwnershipControls>"#;
+    let req = make_request(
+        Method::PUT,
+        "/owner-enforced",
+        &[("ownershipControls", "")],
+        body,
+    );
+    svc.put_bucket_ownership_controls("123456789012", &req, "owner-enforced")
+        .unwrap();
+
+    let mut req = make_request(Method::PUT, "/owner-enforced", &[("acl", "")], b"");
+    req.headers.insert("x-amz-acl", "private".parse().unwrap());
+    let err = match svc.put_bucket_acl("123456789012", &req, "owner-enforced") {
+        Err(e) => e,
+        Ok(_) => panic!("PutBucketAcl should be rejected under BucketOwnerEnforced"),
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+    // Seed an object first (PutObject without ACL header is fine).
+    let req = make_request(Method::PUT, "/owner-enforced/k", &[], b"x");
+    svc.put_object("123456789012", &req, "owner-enforced", "k")
+        .await
+        .unwrap();
+
+    let mut req = make_request(Method::PUT, "/owner-enforced/k", &[("acl", "")], b"");
+    req.headers
+        .insert("x-amz-acl", "public-read".parse().unwrap());
+    let err = match svc.put_object_acl("123456789012", &req, "owner-enforced", "k") {
+        Err(e) => e,
+        Ok(_) => panic!("PutObjectAcl should be rejected under BucketOwnerEnforced"),
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn bucket_owner_enforced_rejects_put_object_with_acl_header() {
+    let svc = make_service();
+    seed_bucket(&svc, "noaclonput");
+
+    let body = br#"<OwnershipControls><Rule><ObjectOwnership>BucketOwnerEnforced</ObjectOwnership></Rule></OwnershipControls>"#;
+    let req = make_request(
+        Method::PUT,
+        "/noaclonput",
+        &[("ownershipControls", "")],
+        body,
+    );
+    svc.put_bucket_ownership_controls("123456789012", &req, "noaclonput")
+        .unwrap();
+
+    // Plain PutObject still works.
+    let req = make_request(Method::PUT, "/noaclonput/plain", &[], b"x");
+    svc.put_object("123456789012", &req, "noaclonput", "plain")
+        .await
+        .unwrap();
+
+    // PutObject with x-amz-acl rejects.
+    let mut req = make_request(Method::PUT, "/noaclonput/withacl", &[], b"x");
+    req.headers
+        .insert("x-amz-acl", "public-read".parse().unwrap());
+    let err = match svc
+        .put_object("123456789012", &req, "noaclonput", "withacl")
+        .await
+    {
+        Err(e) => e,
+        Ok(_) => panic!("PutObject with x-amz-acl should be rejected under BucketOwnerEnforced"),
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+}
