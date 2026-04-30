@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
+use http::StatusCode;
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::state::AttributeValue;
+use crate::state::{AttributeValue, Projection};
 
 use super::{
     build_consumed_capacity, compare_attribute_values, evaluate_filter_expression,
@@ -118,6 +119,35 @@ impl DynamoDbService {
         let is_gsi_query = index_name.is_some()
             && (hash_key_name != table_pk_hash
                 || range_key_name.as_deref() != table_pk_range.as_deref());
+        // Pull the index's Projection + key attributes once, so the
+        // per-item closure below doesn't need to re-walk gsi/lsi.
+        let query_index_projection: Option<(Projection, Vec<String>)> =
+            index_name.and_then(|idx| {
+                table
+                    .gsi
+                    .iter()
+                    .find(|g| g.index_name == idx)
+                    .map(|g| {
+                        (
+                            g.projection.clone(),
+                            g.key_schema
+                                .iter()
+                                .map(|k| k.attribute_name.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .or_else(|| {
+                        table.lsi.iter().find(|l| l.index_name == idx).map(|l| {
+                            (
+                                l.projection.clone(),
+                                l.key_schema
+                                    .iter()
+                                    .map(|k| k.attribute_name.clone())
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                    })
+            });
 
         // Apply ExclusiveStartKey: skip items up to and including the start key.
         // For GSI queries the start key contains both index keys and table PK, so
@@ -196,7 +226,16 @@ impl DynamoDbService {
             matched
                 .iter()
                 .map(|item| {
-                    let projected = project_item(item, &body);
+                    let mut projected = project_item(item, &body);
+                    if let Some((proj, key_attrs)) = query_index_projection.as_ref() {
+                        projected = apply_index_projection(
+                            projected,
+                            proj,
+                            key_attrs,
+                            &table_pk_hash,
+                            table_pk_range.as_deref(),
+                        );
+                    }
                     json!(projected)
                 })
                 .collect()
@@ -268,6 +307,39 @@ impl DynamoDbService {
         let exclusive_start_key: Option<HashMap<String, AttributeValue>> =
             parse_key_map(&body["ExclusiveStartKey"]);
 
+        // IndexName: when present, items still come from the base
+        // table (fakecloud doesn't keep separate per-index storage)
+        // but the projection is restricted to what the index defines.
+        let index_name = body["IndexName"].as_str();
+        let (index_projection, index_key_attrs): (Option<Projection>, Vec<String>) =
+            if let Some(idx) = index_name {
+                if let Some(g) = table.gsi.iter().find(|g| g.index_name == idx) {
+                    (
+                        Some(g.projection.clone()),
+                        g.key_schema
+                            .iter()
+                            .map(|k| k.attribute_name.clone())
+                            .collect(),
+                    )
+                } else if let Some(l) = table.lsi.iter().find(|l| l.index_name == idx) {
+                    (
+                        Some(l.projection.clone()),
+                        l.key_schema
+                            .iter()
+                            .map(|k| k.attribute_name.clone())
+                            .collect(),
+                    )
+                } else {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        format!("Index '{idx}' does not exist on the table"),
+                    ));
+                }
+            } else {
+                (None, Vec::new())
+            };
+
         let hash_key_name = table.hash_key_name().to_string();
         let range_key_name = table.range_key_name().map(|s| s.to_string());
 
@@ -327,7 +399,16 @@ impl DynamoDbService {
             matched
                 .iter()
                 .map(|item| {
-                    let projected = project_item(item, &body);
+                    let mut projected = project_item(item, &body);
+                    if let Some(ref proj) = index_projection {
+                        projected = apply_index_projection(
+                            projected,
+                            proj,
+                            &index_key_attrs,
+                            &hash_key_name,
+                            range_key_name.as_deref(),
+                        );
+                    }
                     json!(projected)
                 })
                 .collect()
@@ -381,4 +462,44 @@ impl DynamoDbService {
 
         Self::ok_json(result)
     }
+}
+
+/// Apply a GSI/LSI projection to an item already projected via the
+/// caller's `ProjectionExpression`. AWS retains the table's primary key
+/// plus the index key; INCLUDE adds the listed non-key attributes;
+/// KEYS_ONLY drops everything else; ALL leaves the item alone.
+fn apply_index_projection(
+    item: HashMap<String, AttributeValue>,
+    projection: &Projection,
+    index_key_attrs: &[String],
+    table_hash_key: &str,
+    table_range_key: Option<&str>,
+) -> HashMap<String, AttributeValue> {
+    if projection.projection_type == "ALL" {
+        return item;
+    }
+    let mut allowed: Vec<String> = Vec::new();
+    allowed.push(table_hash_key.to_string());
+    if let Some(rk) = table_range_key {
+        allowed.push(rk.to_string());
+    }
+    for k in index_key_attrs {
+        if !allowed.contains(k) {
+            allowed.push(k.clone());
+        }
+    }
+    if projection.projection_type == "INCLUDE" {
+        for k in &projection.non_key_attributes {
+            if !allowed.contains(k) {
+                allowed.push(k.clone());
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for k in &allowed {
+        if let Some(v) = item.get(k) {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    out
 }
