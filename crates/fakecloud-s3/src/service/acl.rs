@@ -45,6 +45,10 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        // Snapshot PAB before taking the write lock — `pab_flags`
+        // reads its own lock and would deadlock under the same
+        // upgrade.
+        let pab = self.pab_flags(account_id, bucket);
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
         let b = state
@@ -54,25 +58,38 @@ impl S3Service {
         let owner_id = b.acl_owner_id.clone();
         let obj = b.objects.get_mut(key).ok_or_else(|| no_such_key(key))?;
 
-        if let Some(acl) = canned {
-            obj.acl_grants = canned_acl_grants_for_object(&acl, &owner_id);
+        let proposed_grants = if let Some(acl) = &canned {
+            canned_acl_grants_for_object(acl, &owner_id)
         } else {
-            // Check for grant headers
             let has_grant_headers = req.headers.keys().any(|k| {
                 let name = k.as_str();
                 name.starts_with("x-amz-grant-")
             });
             if has_grant_headers {
-                obj.acl_grants = parse_grant_headers(&req.headers);
+                parse_grant_headers(&req.headers)
             } else {
-                // Parse from body
                 let body_str = std::str::from_utf8(&req.body).unwrap_or("");
                 if !body_str.is_empty() {
-                    let grants = parse_acl_xml(body_str)?;
-                    obj.acl_grants = grants;
+                    parse_acl_xml(body_str)?
+                } else {
+                    obj.acl_grants.clone()
                 }
             }
+        };
+
+        if let Some(flags) = pab {
+            if flags.block_public_acls
+                && super::config::grants_are_public(&proposed_grants)
+                && !super::config::grants_are_public(&obj.acl_grants)
+            {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "AccessDenied",
+                    "User is not authorized to perform: s3:PutObjectAcl. Reason: Public Access Block (BlockPublicAcls)",
+                ));
+            }
         }
+        obj.acl_grants = proposed_grants;
 
         let meta = object_meta_snapshot(obj);
         self.store

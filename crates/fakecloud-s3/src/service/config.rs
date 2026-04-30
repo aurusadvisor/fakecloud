@@ -15,6 +15,110 @@ use super::{
     s3_xml, validate_lifecycle_xml, validate_tags, xml_escape, S3Service,
 };
 
+/// Decoded `PublicAccessBlockConfiguration` flags. Each flag defaults
+/// to `false` when missing from the stored XML, matching AWS's
+/// `GetPublicAccessBlock` echo path.
+///
+/// `ignore_public_acls` and `restrict_public_buckets` gate
+/// **read-time** evaluation (effective ACL / effective policy lookup)
+/// — fakecloud doesn't yet evaluate effective access at GetObject
+/// time, so we parse and store them but they are not read from on
+/// the request path. Removing them would silently drop the values
+/// from `GetPublicAccessBlock` round-trips.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PublicAccessBlockFlags {
+    pub block_public_acls: bool,
+    #[allow(dead_code)]
+    pub ignore_public_acls: bool,
+    pub block_public_policy: bool,
+    #[allow(dead_code)]
+    pub restrict_public_buckets: bool,
+}
+
+impl PublicAccessBlockFlags {
+    fn parse(xml: &str) -> Self {
+        fn flag(xml: &str, name: &str) -> bool {
+            let open = format!("<{name}>");
+            let close = format!("</{name}>");
+            let Some(start) = xml.find(&open) else {
+                return false;
+            };
+            let value_start = start + open.len();
+            let Some(end_offset) = xml[value_start..].find(&close) else {
+                return false;
+            };
+            xml[value_start..value_start + end_offset]
+                .trim()
+                .eq_ignore_ascii_case("true")
+        }
+        Self {
+            block_public_acls: flag(xml, "BlockPublicAcls"),
+            ignore_public_acls: flag(xml, "IgnorePublicAcls"),
+            block_public_policy: flag(xml, "BlockPublicPolicy"),
+            restrict_public_buckets: flag(xml, "RestrictPublicBuckets"),
+        }
+    }
+}
+
+/// Detect whether a parsed bucket-policy document grants access to an
+/// anonymous principal. Mirrors AWS's "is public" classifier:
+/// `Effect=Allow` with `Principal:"*"` or `{"AWS":"*"}` (or a list
+/// containing `"*"`) and no `Condition` block constraining the
+/// principal further. We deliberately mark conditioned policies as
+/// non-public — that matches AWS's `BlockPublicPolicy` behavior since
+/// IP / VPC / source-account conditions specifically narrow the
+/// principal.
+pub(crate) fn policy_is_public(policy_json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(policy_json) else {
+        return false;
+    };
+    let statements = match value.get("Statement") {
+        Some(serde_json::Value::Array(a)) => a.clone(),
+        Some(s) => vec![s.clone()],
+        None => return false,
+    };
+    statements.iter().any(|st| {
+        if st.get("Effect").and_then(|v| v.as_str()) != Some("Allow") {
+            return false;
+        }
+        if st.get("Condition").is_some() {
+            return false;
+        }
+        principal_includes_wildcard(st.get("Principal").unwrap_or(&serde_json::Value::Null))
+    })
+}
+
+fn principal_includes_wildcard(p: &serde_json::Value) -> bool {
+    match p {
+        serde_json::Value::String(s) => s == "*",
+        serde_json::Value::Object(m) => m.values().any(value_contains_star),
+        _ => false,
+    }
+}
+
+fn value_contains_star(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::String(s) => s == "*",
+        serde_json::Value::Array(arr) => arr.iter().any(value_contains_star),
+        _ => false,
+    }
+}
+
+/// Detect whether a set of ACL grants grants to a public group
+/// (AllUsers / AuthenticatedUsers). Used by PutBucketAcl /
+/// PutObjectAcl to gate the `BlockPublicAcls` flag.
+pub(crate) fn grants_are_public(grants: &[crate::state::AclGrant]) -> bool {
+    grants.iter().any(|g| {
+        g.grantee_uri
+            .as_deref()
+            .map(|u| {
+                u.contains("acs.amazonaws.com/groups/global/AllUsers")
+                    || u.contains("acs.amazonaws.com/groups/global/AuthenticatedUsers")
+            })
+            .unwrap_or(false)
+    })
+}
+
 impl S3Service {
     // ---- Encryption ----
 
@@ -181,6 +285,18 @@ impl S3Service {
                 "MalformedPolicy",
                 "This policy contains invalid Json",
             ));
+        }
+        // Enforce PublicAccessBlock.BlockPublicPolicy: AWS rejects
+        // PutBucketPolicy that grants public access while the flag is
+        // set, with `AccessDenied` and a body explaining the gate.
+        if let Some(flags) = self.pab_flags(account_id, bucket) {
+            if flags.block_public_policy && policy_is_public(&body_str) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "AccessDenied",
+                    "User is not authorized to perform: s3:PutBucketPolicy. Reason: Public Access Block (BlockPublicPolicy)",
+                ));
+            }
         }
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
@@ -572,6 +688,24 @@ impl S3Service {
         Ok(s3_xml(StatusCode::OK, body))
     }
 
+    // ---- PublicAccessBlock helpers ----
+
+    /// Read each `PublicAccessBlock` flag from the bucket's stored XML.
+    /// Missing fields default to `false` per AWS, which mirrors the
+    /// `GetPublicAccessBlock` echo path. Returns `None` when no
+    /// configuration is set, so callers can short-circuit.
+    pub(super) fn pab_flags(
+        &self,
+        account_id: &str,
+        bucket: &str,
+    ) -> Option<PublicAccessBlockFlags> {
+        let accts = self.state.read();
+        let state = accts.get(account_id)?;
+        let b = state.buckets.get(bucket)?;
+        let xml = b.public_access_block.as_ref()?;
+        Some(PublicAccessBlockFlags::parse(xml))
+    }
+
     // ---- PublicAccessBlock ----
 
     pub(super) fn put_public_access_block(
@@ -843,6 +977,7 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        let pab = self.pab_flags(account_id, bucket);
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
         let b = state
@@ -850,14 +985,27 @@ impl S3Service {
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
 
-        if let Some(acl) = canned {
-            b.acl_grants = canned_acl_grants(&acl, &b.acl_owner_id.clone());
+        let proposed_grants = if let Some(acl) = &canned {
+            canned_acl_grants(acl, &b.acl_owner_id.clone())
         } else {
-            // Parse ACL from body (AccessControlPolicy XML)
             let body_str = std::str::from_utf8(&req.body).unwrap_or("");
-            let grants = parse_acl_xml(body_str)?;
-            b.acl_grants = grants;
+            parse_acl_xml(body_str)?
+        };
+
+        // PublicAccessBlock.BlockPublicAcls rejects any new grant that
+        // would expose the bucket to AllUsers / AuthenticatedUsers,
+        // whether sourced via canned ACL header, x-amz-grant-* headers,
+        // or AccessControlPolicy XML body.
+        if let Some(flags) = pab {
+            if flags.block_public_acls && grants_are_public(&proposed_grants) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "AccessDenied",
+                    "User is not authorized to perform: s3:PutBucketAcl. Reason: Public Access Block (BlockPublicAcls)",
+                ));
+            }
         }
+        b.acl_grants = proposed_grants;
 
         let snap = AclSnapshot {
             owner_id: b.acl_owner_id.clone(),
