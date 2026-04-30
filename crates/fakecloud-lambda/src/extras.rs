@@ -445,17 +445,18 @@ impl LambdaService {
                 .functions
                 .get(function_name)
                 .ok_or_else(|| not_found("Function", function_name))?;
-            // AWS always returns $LATEST first, then numbered versions.
-            // Until PublishVersion snapshots real config (Phase D2), each
-            // numbered version reuses the current configuration with the
-            // Version field swapped — same as Moto.
+            // AWS returns $LATEST first, then numbered versions in
+            // ascending order. Each numbered version is an immutable
+            // snapshot of the function at publish time.
             let mut versions: Vec<serde_json::Value> = Vec::new();
             let mut latest = self.function_config_json(func);
             latest["Version"] = json!("$LATEST");
             versions.push(latest);
+            let snapshots = state.function_version_snapshots.get(function_name);
             if let Some(numbered) = state.function_versions.get(function_name) {
                 for v in numbered {
-                    let mut cfg = self.function_config_json(func);
+                    let snap = snapshots.and_then(|m| m.get(v)).unwrap_or(func);
+                    let mut cfg = self.function_config_json(snap);
                     cfg["Version"] = json!(v);
                     cfg["FunctionArn"] = json!(format!("{}:{v}", func.function_arn));
                     cfg["MasterArn"] = json!(func.function_arn);

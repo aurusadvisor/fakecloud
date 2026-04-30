@@ -172,6 +172,11 @@ pub struct LambdaState {
     /// Published versions per function (function_name -> Vec<version>).
     #[serde(default)]
     pub function_versions: BTreeMap<String, Vec<String>>,
+    /// Immutable per-version snapshot of the function (code + config),
+    /// keyed by `function_name -> version -> LambdaFunction`. AWS makes
+    /// each numbered version a frozen copy of `$LATEST` at publish time.
+    #[serde(default)]
+    pub function_version_snapshots: BTreeMap<String, BTreeMap<String, LambdaFunction>>,
     /// Layers keyed by name.
     #[serde(default)]
     pub layers: BTreeMap<String, Layer>,
@@ -338,6 +343,7 @@ impl LambdaState {
             invocations: Vec::new(),
             aliases: BTreeMap::new(),
             function_versions: BTreeMap::new(),
+            function_version_snapshots: BTreeMap::new(),
             layers: BTreeMap::new(),
             function_url_configs: BTreeMap::new(),
             function_concurrency: BTreeMap::new(),
@@ -361,6 +367,7 @@ impl LambdaState {
         self.invocations.clear();
         self.aliases.clear();
         self.function_versions.clear();
+        self.function_version_snapshots.clear();
         self.layers.clear();
         self.function_url_configs.clear();
         self.function_concurrency.clear();
