@@ -66,6 +66,14 @@ pub struct OrganizationState {
     /// EnablePolicyType / DisablePolicyType.
     #[serde(default = "default_enabled_policy_types")]
     pub enabled_policy_types: HashSet<String>,
+    /// Tag bag keyed by resource id (account id, OU id, root id, policy id).
+    #[serde(default)]
+    pub resource_tags: BTreeMap<String, BTreeMap<String, String>>,
+    /// Resource policy attached to the org via `PutResourcePolicy`.
+    /// AWS Organizations supports a single resource policy per org;
+    /// `None` means unset (the default).
+    #[serde(default)]
+    pub resource_policy: Option<String>,
 }
 
 fn default_enabled_policy_types() -> HashSet<String> {
@@ -154,6 +162,75 @@ impl OrganizationState {
             trusted_services: HashSet::new(),
             delegated_administrators: BTreeMap::new(),
             enabled_policy_types: default_enabled_policy_types(),
+            resource_tags: BTreeMap::new(),
+            resource_policy: None,
+        }
+    }
+
+    /// Replace `resource_id`'s tag set with `tags`. Used for both
+    /// adding new tag keys and overwriting existing ones; matches
+    /// `TagResource` semantics.
+    pub fn set_resource_tags(&mut self, resource_id: &str, tags: &[(String, String)]) {
+        let entry = self
+            .resource_tags
+            .entry(resource_id.to_string())
+            .or_default();
+        for (k, v) in tags {
+            entry.insert(k.clone(), v.clone());
+        }
+    }
+
+    /// Drop `tag_keys` from `resource_id`'s tag set. No-op if absent.
+    pub fn untag_resource(&mut self, resource_id: &str, tag_keys: &[String]) {
+        if let Some(entry) = self.resource_tags.get_mut(resource_id) {
+            for k in tag_keys {
+                entry.remove(k);
+            }
+        }
+    }
+
+    /// Read `resource_id`'s tag set (alphabetical by key).
+    pub fn list_resource_tags(&self, resource_id: &str) -> Vec<(String, String)> {
+        self.resource_tags
+            .get(resource_id)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    /// Find the immediate parent of `child_id` (account or OU). Returns
+    /// `(parent_id, parent_type)` matching the
+    /// `(ROOT|ORGANIZATIONAL_UNIT)` AWS shape.
+    pub fn parent_of(&self, child_id: &str) -> Option<(String, String)> {
+        if let Some(account) = self.accounts.get(child_id) {
+            return Some((
+                account.parent_id.clone(),
+                parent_type_for(self, &account.parent_id),
+            ));
+        }
+        if let Some(ou) = self.ous.get(child_id) {
+            return Some((ou.parent_id.clone(), parent_type_for(self, &ou.parent_id)));
+        }
+        None
+    }
+
+    /// List immediate children of `parent_id`. `child_type` is one of
+    /// `ACCOUNT` or `ORGANIZATIONAL_UNIT`; AWS only allows one type per
+    /// `ListChildren` call.
+    pub fn list_children(&self, parent_id: &str, child_type: &str) -> Vec<String> {
+        match child_type {
+            "ACCOUNT" => self
+                .accounts
+                .values()
+                .filter(|a| a.parent_id == parent_id)
+                .map(|a| a.id.clone())
+                .collect(),
+            "ORGANIZATIONAL_UNIT" => self
+                .ous
+                .values()
+                .filter(|o| o.parent_id == parent_id)
+                .map(|o| o.id.clone())
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -1005,6 +1082,17 @@ pub struct Policy {
     pub content: String,
 }
 
+/// Resolve `parent_id` to the AWS-shape parent type:
+/// - root id (starts with `r-`) -> "ROOT"
+/// - everything else -> "ORGANIZATIONAL_UNIT"
+fn parent_type_for(_org: &OrganizationState, parent_id: &str) -> String {
+    if parent_id.starts_with("r-") {
+        "ROOT".to_string()
+    } else {
+        "ORGANIZATIONAL_UNIT".to_string()
+    }
+}
+
 /// Generate a lowercase alphanumeric ID fragment of `len` characters.
 /// Used for org/root/OU/policy IDs. Pulled from a UUID v4 so the PRNG
 /// is the one already pulled in by the rest of fakecloud.
@@ -1487,6 +1575,55 @@ mod tests {
         assert!(types.contains(&"BACKUP_POLICY"));
         assert!(types.contains(&"AISERVICES_OPT_OUT_POLICY"));
         assert!(types.contains(&"RESOURCE_CONTROL_POLICY"));
+    }
+
+    #[test]
+    fn set_resource_tags_overwrites_existing_keys() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.set_resource_tags(
+            "111111111111",
+            &[("env".into(), "dev".into()), ("team".into(), "core".into())],
+        );
+        org.set_resource_tags("111111111111", &[("env".into(), "prod".into())]);
+        let tags = org.list_resource_tags("111111111111");
+        let env = tags.iter().find(|(k, _)| k == "env").unwrap();
+        assert_eq!(env.1, "prod");
+    }
+
+    #[test]
+    fn untag_resource_drops_only_listed_keys() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.set_resource_tags(
+            "111111111111",
+            &[("env".into(), "dev".into()), ("team".into(), "core".into())],
+        );
+        org.untag_resource("111111111111", &["env".into()]);
+        let keys: Vec<_> = org
+            .list_resource_tags("111111111111")
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(keys, vec!["team"]);
+    }
+
+    #[test]
+    fn parent_of_account_returns_root() {
+        let org = OrganizationState::bootstrap("111111111111");
+        let (parent, kind) = org.parent_of("111111111111").unwrap();
+        assert_eq!(parent, org.root_id);
+        assert_eq!(kind, "ROOT");
+    }
+
+    #[test]
+    fn list_children_separates_accounts_from_ous() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        let root = org.root_id.clone();
+        let ou = org.create_ou(&root, "Engineering").unwrap();
+        org.enroll_account_if_missing("222222222222");
+        let accounts = org.list_children(&org.root_id, "ACCOUNT");
+        assert!(accounts.contains(&"222222222222".to_string()));
+        let ous = org.list_children(&org.root_id, "ORGANIZATIONAL_UNIT");
+        assert!(ous.contains(&ou.id));
     }
 
     #[test]
