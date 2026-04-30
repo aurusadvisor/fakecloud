@@ -9,9 +9,10 @@ use fakecloud_core::validation::*;
 use crate::state::AttributeValue;
 
 use super::{
-    apply_update_expression, evaluate_condition, execute_partiql_statement, extract_key, get_table,
-    get_table_mut, parse_expression_attribute_names, parse_expression_attribute_values,
-    require_str, DynamoDbService,
+    apply_update_expression, build_consumed_capacity, evaluate_condition,
+    execute_partiql_statement, extract_key, get_table, get_table_mut,
+    parse_expression_attribute_names, parse_expression_attribute_values, require_str,
+    return_consumed_mode, return_icm_mode, DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -24,7 +25,7 @@ impl DynamoDbService {
             &["INDEXES", "TOTAL", "NONE"],
         )?;
 
-        let return_consumed = body["ReturnConsumedCapacity"].as_str().unwrap_or("NONE");
+        let return_consumed = return_consumed_mode(&body).to_string();
 
         let request_items = body["RequestItems"]
             .as_object()
@@ -61,13 +62,12 @@ impl DynamoDbService {
                     items.push(json!(table.items[idx]));
                 }
             }
+            let key_count = keys.len().max(1) as f64;
             responses.insert(table_name.clone(), items);
 
-            if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
-                consumed_capacity.push(json!({
-                    "TableName": table_name,
-                    "CapacityUnits": 1.0,
-                }));
+            let cc = build_consumed_capacity(&return_consumed, table_name, key_count * 0.5, 0.0);
+            if !cc.is_null() {
+                consumed_capacity.push(cc);
             }
         }
 
@@ -76,7 +76,7 @@ impl DynamoDbService {
             "UnprocessedKeys": {},
         });
 
-        if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
+        if !consumed_capacity.is_empty() {
             result["ConsumedCapacity"] = json!(consumed_capacity);
         }
 
@@ -100,10 +100,8 @@ impl DynamoDbService {
             &["SIZE", "NONE"],
         )?;
 
-        let return_consumed = body["ReturnConsumedCapacity"].as_str().unwrap_or("NONE");
-        let return_icm = body["ReturnItemCollectionMetrics"]
-            .as_str()
-            .unwrap_or("NONE");
+        let return_consumed = return_consumed_mode(&body).to_string();
+        let return_icm = return_icm_mode(&body).to_string();
 
         let request_items = body["RequestItems"]
             .as_object()
@@ -138,6 +136,7 @@ impl DynamoDbService {
                 )
             })?;
 
+            let mut write_count = 0u32;
             for request in reqs {
                 if let Some(put_req) = request.get("PutRequest") {
                     let item: HashMap<String, AttributeValue> =
@@ -148,22 +147,27 @@ impl DynamoDbService {
                     } else {
                         table.items.push(item);
                     }
+                    write_count += 1;
                 } else if let Some(del_req) = request.get("DeleteRequest") {
                     let key: HashMap<String, AttributeValue> =
                         serde_json::from_value(del_req["Key"].clone()).unwrap_or_default();
                     if let Some(idx) = table.find_item_index(&key) {
                         table.items.remove(idx);
                     }
+                    write_count += 1;
                 }
             }
 
             table.recalculate_stats();
 
-            if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
-                consumed_capacity.push(json!({
-                    "TableName": table_name,
-                    "CapacityUnits": 1.0,
-                }));
+            let cc = build_consumed_capacity(
+                &return_consumed,
+                table_name,
+                0.0,
+                write_count.max(1) as f64,
+            );
+            if !cc.is_null() {
+                consumed_capacity.push(cc);
             }
 
             if return_icm == "SIZE" {
@@ -175,7 +179,7 @@ impl DynamoDbService {
             "UnprocessedItems": {},
         });
 
-        if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
+        if !consumed_capacity.is_empty() {
             result["ConsumedCapacity"] = json!(consumed_capacity);
         }
 
@@ -196,6 +200,7 @@ impl DynamoDbService {
             &body["ReturnConsumedCapacity"],
             &["INDEXES", "TOTAL", "NONE"],
         )?;
+        let return_consumed = return_consumed_mode(&body).to_string();
         let transact_items = body["TransactItems"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -208,6 +213,7 @@ impl DynamoDbService {
         let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
         let mut responses: Vec<Value> = Vec::new();
+        let mut per_table_count: HashMap<String, u32> = HashMap::new();
 
         for ti in transact_items {
             let get = &ti["Get"];
@@ -230,9 +236,26 @@ impl DynamoDbService {
                     responses.push(json!({}));
                 }
             }
+            *per_table_count.entry(table_name.to_string()).or_insert(0) += 1;
         }
 
-        Self::ok_json(json!({ "Responses": responses }))
+        let mut result = json!({ "Responses": responses });
+        let consumed: Vec<Value> = per_table_count
+            .iter()
+            .filter_map(|(t, n)| {
+                let cc = build_consumed_capacity(&return_consumed, t, (*n as f64) * 2.0, 0.0);
+                if cc.is_null() {
+                    None
+                } else {
+                    Some(cc)
+                }
+            })
+            .collect();
+        if !consumed.is_empty() {
+            result["ConsumedCapacity"] = json!(consumed);
+        }
+
+        Self::ok_json(result)
     }
 
     pub(super) fn transact_write_items(
@@ -256,6 +279,8 @@ impl DynamoDbService {
             &body["ReturnItemCollectionMetrics"],
             &["SIZE", "NONE"],
         )?;
+        let return_consumed = return_consumed_mode(&body).to_string();
+        let return_icm = return_icm_mode(&body).to_string();
         let transact_items = body["TransactItems"].as_array().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -270,6 +295,7 @@ impl DynamoDbService {
         // First pass: validate all conditions
         let mut cancellation_reasons: Vec<Value> = Vec::new();
         let mut any_failed = false;
+        let mut per_table_writes: HashMap<String, u32> = HashMap::new();
 
         for ti in transact_items {
             if let Some(put) = ti.get("Put") {
@@ -393,6 +419,7 @@ impl DynamoDbService {
                     table.items.push(item);
                 }
                 table.recalculate_stats();
+                *per_table_writes.entry(table_name.to_string()).or_insert(0) += 1;
             } else if let Some(delete) = ti.get("Delete") {
                 let table_name = delete["TableName"].as_str().unwrap_or_default();
                 let key: HashMap<String, AttributeValue> =
@@ -402,6 +429,7 @@ impl DynamoDbService {
                     table.items.remove(idx);
                 }
                 table.recalculate_stats();
+                *per_table_writes.entry(table_name.to_string()).or_insert(0) += 1;
             } else if let Some(update) = ti.get("Update") {
                 let table_name = update["TableName"].as_str().unwrap_or_default();
                 let key: HashMap<String, AttributeValue> =
@@ -432,11 +460,35 @@ impl DynamoDbService {
                     )?;
                 }
                 table.recalculate_stats();
+                *per_table_writes.entry(table_name.to_string()).or_insert(0) += 1;
             }
             // ConditionCheck: no write needed
         }
 
-        Self::ok_json(json!({}))
+        let mut result = json!({});
+        let consumed: Vec<Value> = per_table_writes
+            .iter()
+            .filter_map(|(t, n)| {
+                let cc = build_consumed_capacity(&return_consumed, t, 0.0, (*n as f64) * 2.0);
+                if cc.is_null() {
+                    None
+                } else {
+                    Some(cc)
+                }
+            })
+            .collect();
+        if !consumed.is_empty() {
+            result["ConsumedCapacity"] = json!(consumed);
+        }
+        if return_icm == "SIZE" {
+            let icm: HashMap<String, Vec<Value>> = per_table_writes
+                .keys()
+                .map(|t| (t.clone(), vec![]))
+                .collect();
+            result["ItemCollectionMetrics"] = json!(icm);
+        }
+
+        Self::ok_json(result)
     }
 
     // ── PartiQL ─────────────────────────────────────────────────────────

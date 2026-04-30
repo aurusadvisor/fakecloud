@@ -2916,6 +2916,189 @@ fn put_item_returns_old_item() {
     assert_eq!(b["Attributes"]["v"]["N"], "1");
 }
 
+#[test]
+fn put_item_emits_consumed_capacity_when_requested() {
+    let svc = make_service();
+    create_test_table(&svc);
+
+    let req = make_request(
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": {"pk": {"S": "cc"}, "v": {"N": "1"}},
+            "ReturnConsumedCapacity": "TOTAL",
+        }),
+    );
+    let resp = svc.put_item(&req).unwrap();
+    let b = body_json(&resp);
+    assert_eq!(b["ConsumedCapacity"]["TableName"], "test-table");
+    assert_eq!(b["ConsumedCapacity"]["CapacityUnits"], 1.0);
+    assert_eq!(b["ConsumedCapacity"]["WriteCapacityUnits"], 1.0);
+    // TOTAL must not include the breakdown.
+    assert!(b["ConsumedCapacity"].get("Table").is_none());
+}
+
+#[test]
+fn put_item_consumed_capacity_indexes_includes_breakdown() {
+    let svc = make_service();
+    create_test_table(&svc);
+
+    let req = make_request(
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": {"pk": {"S": "cc"}, "v": {"N": "1"}},
+            "ReturnConsumedCapacity": "INDEXES",
+        }),
+    );
+    let resp = svc.put_item(&req).unwrap();
+    let b = body_json(&resp);
+    assert_eq!(b["ConsumedCapacity"]["Table"]["CapacityUnits"], 1.0);
+    assert!(b["ConsumedCapacity"]["GlobalSecondaryIndexes"].is_object());
+    assert!(b["ConsumedCapacity"]["LocalSecondaryIndexes"].is_object());
+}
+
+#[test]
+fn put_item_consumed_capacity_omitted_by_default() {
+    let svc = make_service();
+    create_test_table(&svc);
+
+    let req = make_request(
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": {"pk": {"S": "cc"}, "v": {"N": "1"}},
+        }),
+    );
+    let resp = svc.put_item(&req).unwrap();
+    let b = body_json(&resp);
+    assert!(b.get("ConsumedCapacity").is_none());
+}
+
+#[test]
+fn get_item_emits_consumed_capacity_when_requested() {
+    let svc = make_service();
+    create_test_table(&svc);
+
+    let req = make_request(
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": {"pk": {"S": "g"}, "v": {"N": "1"}},
+        }),
+    );
+    svc.put_item(&req).unwrap();
+
+    let req = make_request(
+        "GetItem",
+        json!({
+            "TableName": "test-table",
+            "Key": {"pk": {"S": "g"}},
+            "ReturnConsumedCapacity": "TOTAL",
+        }),
+    );
+    let resp = svc.get_item(&req).unwrap();
+    let b = body_json(&resp);
+    assert_eq!(b["ConsumedCapacity"]["TableName"], "test-table");
+    assert_eq!(b["ConsumedCapacity"]["ReadCapacityUnits"], 0.5);
+}
+
+#[test]
+fn query_emits_consumed_capacity_when_requested() {
+    let svc = make_service();
+    let req = make_request(
+        "CreateTable",
+        json!({
+            "TableName": "qcc",
+            "AttributeDefinitions": [
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            "KeySchema": [
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            "BillingMode": "PAY_PER_REQUEST",
+        }),
+    );
+    svc.create_table(&req).unwrap();
+    let put = make_request(
+        "PutItem",
+        json!({
+            "TableName": "qcc",
+            "Item": {"pk": {"S": "p"}, "sk": {"S": "s"}},
+        }),
+    );
+    svc.put_item(&put).unwrap();
+
+    let req = make_request(
+        "Query",
+        json!({
+            "TableName": "qcc",
+            "KeyConditionExpression": "pk = :p",
+            "ExpressionAttributeValues": {":p": {"S": "p"}},
+            "ReturnConsumedCapacity": "TOTAL",
+        }),
+    );
+    let resp = svc.query(&req).unwrap();
+    let b = body_json(&resp);
+    assert_eq!(b["ConsumedCapacity"]["TableName"], "qcc");
+    assert!(
+        b["ConsumedCapacity"]["CapacityUnits"]
+            .as_f64()
+            .unwrap_or(0.0)
+            >= 0.5
+    );
+}
+
+#[test]
+fn batch_get_item_emits_consumed_capacity() {
+    let svc = make_service();
+    create_test_table(&svc);
+    let put = make_request(
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": {"pk": {"S": "bg"}},
+        }),
+    );
+    svc.put_item(&put).unwrap();
+
+    let req = make_request(
+        "BatchGetItem",
+        json!({
+            "RequestItems": {
+                "test-table": {"Keys": [{"pk": {"S": "bg"}}]},
+            },
+            "ReturnConsumedCapacity": "TOTAL",
+        }),
+    );
+    let resp = svc.batch_get_item(&req).unwrap();
+    let b = body_json(&resp);
+    assert!(b["ConsumedCapacity"].is_array());
+    assert_eq!(b["ConsumedCapacity"][0]["TableName"], "test-table");
+}
+
+#[test]
+fn transact_write_items_emits_consumed_capacity() {
+    let svc = make_service();
+    create_test_table(&svc);
+
+    let req = make_request(
+        "TransactWriteItems",
+        json!({
+            "TransactItems": [
+                {"Put": {"TableName": "test-table", "Item": {"pk": {"S": "tw"}}}},
+            ],
+            "ReturnConsumedCapacity": "TOTAL",
+        }),
+    );
+    let resp = svc.transact_write_items(&req).unwrap();
+    let b = body_json(&resp);
+    assert!(b["ConsumedCapacity"].is_array());
+    assert_eq!(b["ConsumedCapacity"][0]["TableName"], "test-table");
+}
+
 // ── UpdateItem ──
 
 #[test]

@@ -6,10 +6,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
 use super::{
-    apply_update_expression, evaluate_condition, extract_key, get_table, get_table_mut,
-    parse_expression_attribute_names, parse_expression_attribute_values, project_item,
-    require_object, require_str, validate_key_attributes_in_key, validate_key_in_item,
-    DynamoDbService,
+    apply_update_expression, build_consumed_capacity, evaluate_condition, extract_key, get_table,
+    get_table_mut, parse_expression_attribute_names, parse_expression_attribute_values,
+    project_item, require_object, require_str, return_consumed_mode, return_icm_mode,
+    validate_key_attributes_in_key, validate_key_in_item, DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -22,6 +22,8 @@ impl DynamoDbService {
         let expr_attr_names = parse_expression_attribute_names(&body);
         let expr_attr_values = parse_expression_attribute_values(&body);
         let return_values = body["ReturnValues"].as_str().unwrap_or("NONE").to_string();
+        let return_consumed = return_consumed_mode(&body).to_string();
+        let return_icm = return_icm_mode(&body).to_string();
 
         // --- Acquire write lock ONLY for validation + mutation ---
         // Capture kinesis delivery info alongside the return value
@@ -134,6 +136,13 @@ impl DynamoDbService {
         if let Some(old) = old_item {
             result["Attributes"] = json!(old);
         }
+        let cc = build_consumed_capacity(&return_consumed, table_name, 0.0, 1.0);
+        if !cc.is_null() {
+            result["ConsumedCapacity"] = cc;
+        }
+        if return_icm == "SIZE" {
+            result["ItemCollectionMetrics"] = json!({});
+        }
 
         Self::ok_json(result)
     }
@@ -143,6 +152,7 @@ impl DynamoDbService {
         let body = Self::parse_body(req)?;
         let table_name = require_str(&body, "TableName")?;
         let key = require_object(&body, "Key")?;
+        let return_consumed = return_consumed_mode(&body).to_string();
 
         // --- Use a read lock for the lookup (allows concurrent GetItem calls) ---
         let (result, needs_insights, kms_audit) = {
@@ -152,7 +162,7 @@ impl DynamoDbService {
             let table = get_table(&state.tables, table_name)?;
             let needs_insights = table.contributor_insights_status == "ENABLED";
 
-            let result = match table.find_item_index(&key) {
+            let mut result = match table.find_item_index(&key) {
                 Some(idx) => {
                     let item = &table.items[idx];
                     let projected = project_item(item, &body);
@@ -160,6 +170,10 @@ impl DynamoDbService {
                 }
                 None => json!({}),
             };
+            let cc = build_consumed_capacity(&return_consumed, table_name, 0.5, 0.0);
+            if !cc.is_null() {
+                result["ConsumedCapacity"] = cc;
+            }
             let kms_audit = if table.sse_type.as_deref() == Some("KMS") {
                 Some((table.arn.clone(), table.sse_kms_key_arn.clone()))
             } else {
@@ -278,11 +292,9 @@ impl DynamoDbService {
                 .as_str()
                 .unwrap_or("NONE");
 
-            if return_consumed == "TOTAL" || return_consumed == "INDEXES" {
-                result["ConsumedCapacity"] = json!({
-                    "TableName": table_name,
-                    "CapacityUnits": 1.0,
-                });
+            let cc = build_consumed_capacity(return_consumed, table_name, 0.0, 1.0);
+            if !cc.is_null() {
+                result["ConsumedCapacity"] = cc;
             }
 
             if return_icm == "SIZE" {
@@ -310,6 +322,8 @@ impl DynamoDbService {
         let body = Self::parse_body(req)?;
         let table_name = require_str(&body, "TableName")?;
         let key = require_object(&body, "Key")?;
+        let return_consumed = return_consumed_mode(&body).to_string();
+        let return_icm = return_icm_mode(&body).to_string();
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -427,6 +441,13 @@ impl DynamoDbService {
             result["Attributes"] = json!(old);
         } else if let Some(new) = new_item {
             result["Attributes"] = json!(new);
+        }
+        let cc = build_consumed_capacity(&return_consumed, table_name, 0.0, 1.0);
+        if !cc.is_null() {
+            result["ConsumedCapacity"] = cc;
+        }
+        if return_icm == "SIZE" {
+            result["ItemCollectionMetrics"] = json!({});
         }
 
         Self::ok_json(result)
