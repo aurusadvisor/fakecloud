@@ -13,6 +13,36 @@ use crate::state::{SsmParameter, SsmParameterVersion, SsmState};
 
 use super::{missing, SsmService, PARAMETER_VERSION_LIMIT};
 
+/// Parse the `Expiration` policy timestamp from the parameter's `Policies`
+/// JSON. The wire format is an array of `{Type, Version, Attributes:{...}}`
+/// objects; for `Type=Expiration` the `Attributes.Timestamp` field is an
+/// ISO 8601 string. Returns `None` for any malformed/missing data — we
+/// fail open rather than rejecting parameters with unparseable policies.
+fn extract_expiration(policies_str: &str) -> Option<chrono::DateTime<Utc>> {
+    let value: Value = serde_json::from_str(policies_str).ok()?;
+    for policy in value.as_array()? {
+        if policy["Type"].as_str() == Some("Expiration") {
+            if let Some(ts) = policy["Attributes"]["Timestamp"].as_str() {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+                    return Some(dt.with_timezone(&Utc));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Returns true if the parameter has an `Expiration` policy whose timestamp
+/// is in the past. AWS deletes expired advanced-tier parameters at the
+/// scheduled time; we lazily check on every read instead of running a
+/// background sweeper.
+pub(crate) fn is_param_expired(p: &SsmParameter) -> bool {
+    p.policies
+        .as_deref()
+        .and_then(extract_expiration)
+        .is_some_and(|exp| exp < Utc::now())
+}
+
 /// Build the JSON `Parameter` body for a historical version of `param`.
 /// `Get*Parameter*` returns the same shape whether the lookup landed on
 /// the current version or pulled an older one out of the history list,
@@ -534,6 +564,9 @@ impl SsmService {
         // Handle ARN-style names directly (they contain many colons)
         if raw_name.starts_with("arn:aws:ssm:") {
             let param = resolve_param_by_name_or_arn(state, raw_name)?;
+            if is_param_expired(param) {
+                return Err(param_not_found(raw_name));
+            }
             return Ok(AwsResponse::ok_json(json!({
                 "Parameter": self.render_param_to_json(param, true, with_decryption, &req.region, &req.account_id),
             })));
@@ -549,6 +582,9 @@ impl SsmService {
         // Try looking up by name or by ARN - use raw_name in error for full context
         let param = resolve_param_by_name_or_arn(state, base_name)
             .map_err(|_| param_not_found(raw_name))?;
+        if is_param_expired(param) {
+            return Err(param_not_found(raw_name));
+        }
 
         match selector {
             ParamSelector::None => Ok(AwsResponse::ok_json(json!({
@@ -656,20 +692,26 @@ impl SsmService {
                     }
                     ParamSelector::None => {
                         if let Some(param) = lookup_param(&state.parameters, base_name) {
-                            parameters.push(self.render_param_to_json(
-                                param,
-                                true,
-                                with_decryption,
-                                &req.region,
-                                &req.account_id,
-                            ));
+                            if is_param_expired(param) {
+                                invalid.push(raw_name.to_string());
+                            } else {
+                                parameters.push(self.render_param_to_json(
+                                    param,
+                                    true,
+                                    with_decryption,
+                                    &req.region,
+                                    &req.account_id,
+                                ));
+                            }
                         } else {
                             invalid.push(raw_name.to_string());
                         }
                     }
                     ParamSelector::Version(ver) => {
                         if let Some(param) = lookup_param(&state.parameters, base_name) {
-                            if param.version == ver {
+                            if is_param_expired(param) {
+                                invalid.push(raw_name.to_string());
+                            } else if param.version == ver {
                                 parameters.push(self.render_param_to_json(
                                     param,
                                     true,
@@ -696,6 +738,10 @@ impl SsmService {
                     }
                     ParamSelector::Label(ref label) => {
                         if let Some(param) = lookup_param(&state.parameters, base_name) {
+                            if is_param_expired(param) {
+                                invalid.push(raw_name.to_string());
+                                continue;
+                            }
                             let mut found = false;
                             for (ver, labels) in &param.labels {
                                 if labels.contains(label) {
@@ -780,6 +826,7 @@ impl SsmService {
         let all_params: Vec<&SsmParameter> = state
             .parameters
             .values()
+            .filter(|p| !is_param_expired(p))
             .filter(|p| param_matches_path(p, path, recursive))
             .filter(|p| apply_parameter_filters(p, filters.as_ref()))
             .collect();
