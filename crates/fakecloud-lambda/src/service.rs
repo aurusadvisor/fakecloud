@@ -1113,11 +1113,12 @@ impl LambdaService {
         function_name: &str,
         account_id: &str,
         region: &str,
+        qualifier: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let accounts = self.state.read();
         let empty = LambdaState::new(account_id, region);
         let state = accounts.get(account_id).unwrap_or(&empty);
-        let func = state.functions.get(function_name).ok_or_else(|| {
+        let live = state.functions.get(function_name).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ResourceNotFoundException",
@@ -1128,7 +1129,38 @@ impl LambdaService {
             )
         })?;
 
-        let config = self.function_config_json(func);
+        // Resolve the qualifier to either $LATEST (live config) or a
+        // numbered immutable snapshot. Aliases route through
+        // `resolve_qualifier_to_version` so weighted aliases still pick
+        // between the underlying numbered versions.
+        let resolved_version = resolve_qualifier_to_version(state, function_name, qualifier);
+        let (func, version_label) = match resolved_version {
+            None => (live, "$LATEST".to_string()),
+            Some(v) => {
+                let snap = state
+                    .function_version_snapshots
+                    .get(function_name)
+                    .and_then(|m| m.get(&v))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "ResourceNotFoundException",
+                            format!(
+                                "Function not found: arn:aws:lambda:{}:{}:function:{}:{v}",
+                                state.region, state.account_id, function_name
+                            ),
+                        )
+                    })?;
+                (snap, v)
+            }
+        };
+
+        let mut config = self.function_config_json(func);
+        config["Version"] = json!(version_label);
+        if version_label != "$LATEST" {
+            config["FunctionArn"] = json!(format!("{}:{version_label}", live.function_arn));
+            config["MasterArn"] = json!(live.function_arn);
+        }
         let code = if let Some(ref uri) = func.image_uri {
             json!({
                 "ImageUri": uri,
@@ -1153,7 +1185,7 @@ impl LambdaService {
         let response = json!({
             "Code": code,
             "Configuration": config,
-            "Tags": func.tags,
+            "Tags": live.tags,
         });
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
@@ -1668,6 +1700,7 @@ impl AwsService for LambdaService {
                 resource_name.as_deref().unwrap_or(""),
                 aid,
                 req.region.as_str(),
+                req.query_params.get("Qualifier").map(String::as_str),
             ),
             "DeleteFunction" => self.delete_function(resource_name.as_deref().unwrap_or(""), aid),
             "Invoke" => {

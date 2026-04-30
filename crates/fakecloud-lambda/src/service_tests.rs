@@ -658,6 +658,93 @@ async fn publish_version_increments_and_snapshots_config() {
 }
 
 #[tokio::test]
+async fn get_function_with_qualifier_returns_snapshot() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "qfn").await;
+
+    // Publish v1 of the seed config, then mutate $LATEST.
+    let req = make_request(Method::POST, "/2015-03-31/functions/qfn/versions", "{}");
+    svc.handle(req).await.unwrap();
+    let body = json!({ "Description": "post-v1" });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/qfn/configuration",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // GetFunction?Qualifier=1 must return the v1 snapshot, not $LATEST.
+    let mut req = make_request(Method::GET, "/2015-03-31/functions/qfn", "");
+    req.query_params
+        .insert("Qualifier".to_string(), "1".to_string());
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Configuration"]["Version"], "1");
+    assert_eq!(body["Configuration"]["Description"].as_str().unwrap(), "");
+    assert!(body["Configuration"]["FunctionArn"]
+        .as_str()
+        .unwrap()
+        .ends_with(":1"));
+
+    // GetFunction without qualifier returns $LATEST with the new description.
+    let req = make_request(Method::GET, "/2015-03-31/functions/qfn", "");
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Configuration"]["Version"], "$LATEST");
+    assert_eq!(
+        body["Configuration"]["Description"].as_str().unwrap(),
+        "post-v1"
+    );
+}
+
+#[tokio::test]
+async fn get_function_with_alias_resolves_to_version_snapshot() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "afn").await;
+
+    // Publish v1, mutate $LATEST, create alias pointing at v1.
+    let req = make_request(Method::POST, "/2015-03-31/functions/afn/versions", "{}");
+    svc.handle(req).await.unwrap();
+    let body = json!({ "Description": "post-publish" });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/afn/configuration",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let body = json!({"Name": "PROD", "FunctionVersion": "1"});
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/afn/aliases",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // GetFunction?Qualifier=PROD must hit the v1 snapshot.
+    let mut req = make_request(Method::GET, "/2015-03-31/functions/afn", "");
+    req.query_params
+        .insert("Qualifier".to_string(), "PROD".to_string());
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Configuration"]["Description"].as_str().unwrap(), "");
+}
+
+#[tokio::test]
+async fn get_function_unknown_qualifier_404s() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "missing").await;
+
+    let mut req = make_request(Method::GET, "/2015-03-31/functions/missing", "");
+    req.query_params
+        .insert("Qualifier".to_string(), "99".to_string());
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected ResourceNotFoundException"),
+    };
+    assert_eq!(err.status(), 404);
+}
+
+#[tokio::test]
 async fn add_permission_builds_canonical_statement() {
     let svc = LambdaService::new(make_state());
     seed_function(&svc, "f").await;
@@ -1028,7 +1115,7 @@ async fn publish_version_unknown_function_errors() {
 async fn get_function_unknown_errors() {
     let svc = LambdaService::new(make_state());
     assert!(svc
-        .get_function("ghost", "123456789012", "us-east-1")
+        .get_function("ghost", "123456789012", "us-east-1", None)
         .is_err());
 }
 
