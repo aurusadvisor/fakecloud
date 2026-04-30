@@ -3517,11 +3517,19 @@ fn misc_extras_smoke() {
         vec![("UserName", "u1"), ("Password", "p")],
     ))
     .unwrap();
-    svc.change_password(&make_request(
+    let mut req = make_request(
         "ChangePassword",
         vec![("OldPassword", "p"), ("NewPassword", "q")],
-    ))
-    .unwrap();
+    );
+    req.principal = Some(fakecloud_core::auth::Principal {
+        arn: "arn:aws:iam::123456789012:user/u1".to_string(),
+        user_id: "AIDAEXAMPLE".to_string(),
+        account_id: "123456789012".to_string(),
+        principal_type: fakecloud_core::auth::PrincipalType::User,
+        source_identity: None,
+        tags: None,
+    });
+    svc.change_password(&req).unwrap();
     svc.set_security_token_service_preferences(&make_request(
         "SetSecurityTokenServicePreferences",
         vec![("GlobalEndpointTokenVersion", "v2Token")],

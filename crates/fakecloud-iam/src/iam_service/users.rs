@@ -662,7 +662,7 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
-        let _password = required_param(&req.query_params, "Password")?;
+        let password = required_param(&req.query_params, "Password")?;
         let password_reset_required = req
             .query_params
             .get("PasswordResetRequired")
@@ -692,6 +692,7 @@ impl IamService {
             user_name: user_name.clone(),
             created_at: Utc::now(),
             password_reset_required,
+            password,
         };
 
         let xml = format!(
