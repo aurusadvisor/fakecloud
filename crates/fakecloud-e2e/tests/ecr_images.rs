@@ -429,3 +429,63 @@ async fn immutable_tag_blocks_reassignment() {
         .expect_err("immutable tag rewrite should fail");
     assert!(format!("{err:?}").contains("ImageAlreadyExists"), "{err:?}");
 }
+
+#[tokio::test]
+async fn put_image_triggers_scan_when_scan_on_push_enabled() {
+    let server = TestServer::start().await;
+    let client = server.ecr_client().await;
+
+    client
+        .create_repository()
+        .repository_name("scan-repo")
+        .image_scanning_configuration(
+            aws_sdk_ecr::types::ImageScanningConfiguration::builder()
+                .scan_on_push(true)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let manifest = r#"{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"mediaType":"application/vnd.docker.container.image.v1+json","size":7023,"digest":"sha256:dummy"},"layers":[]}"#;
+    let put = client
+        .put_image()
+        .repository_name("scan-repo")
+        .image_manifest(manifest)
+        .image_tag("v1")
+        .send()
+        .await
+        .unwrap();
+    let digest = put
+        .image()
+        .and_then(|i| i.image_id())
+        .and_then(|id| id.image_digest())
+        .unwrap()
+        .to_string();
+
+    // Poll DescribeImageScanFindings until the scan transitions out of
+    // IN_PROGRESS. With scan-on-push the scanner kicks immediately; the
+    // poll catches either IN_PROGRESS (race) or COMPLETE.
+    for _ in 0..40 {
+        let resp = client
+            .describe_image_scan_findings()
+            .repository_name("scan-repo")
+            .image_id(
+                aws_sdk_ecr::types::ImageIdentifier::builder()
+                    .image_digest(&digest)
+                    .build(),
+            )
+            .send()
+            .await;
+        if let Ok(r) = resp {
+            let status = r.image_scan_status().and_then(|s| s.status());
+            if status.map(|s| s.as_str()) != Some("FAILED") {
+                // Found a status — happy path. Either IN_PROGRESS or
+                // COMPLETE; both prove the scan was kicked.
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("scan-on-push did not kick a scan within budget");
+}
