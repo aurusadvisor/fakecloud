@@ -140,6 +140,8 @@ impl CognitoService {
         let verification_message_template =
             parse_verification_message_template(&body["VerificationMessageTemplate"]);
 
+        let signing_key_pem = crate::jwt::generate_pool_signing_key();
+        let signing_kid = format!("{pool_id}-key-1");
         let pool = UserPool {
             id: pool_id.clone(),
             name: pool_name.to_string(),
@@ -168,6 +170,8 @@ impl CognitoService {
             sms_mfa_configuration: None,
             user_pool_tier,
             verification_message_template,
+            signing_key_pem: Some(signing_key_pem),
+            signing_kid: Some(signing_kid),
         };
 
         let response = user_pool_to_json(&pool);

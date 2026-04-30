@@ -1,3 +1,4 @@
+pub(crate) mod jwt;
 pub(crate) mod service;
 pub(crate) mod state;
 pub mod triggers;

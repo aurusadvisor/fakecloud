@@ -680,8 +680,16 @@ impl CognitoService {
         let sub = user.sub.clone();
         let region = state.region.clone();
 
-        // Generate new tokens
-        let tokens = super::generate_tokens(&pool_id, client_id, &sub, &username, &region);
+        let pool_signing_owned = state.user_pools.get(&pool_id).and_then(|pool| {
+            pool.signing_key_pem
+                .as_ref()
+                .zip(pool.signing_kid.as_ref())
+                .map(|(p, k)| (p.clone(), k.clone()))
+        });
+        let signing = pool_signing_owned
+            .as_ref()
+            .map(|(p, k)| (p.as_str(), k.as_str()));
+        let tokens = super::generate_tokens(&pool_id, client_id, &sub, &username, &region, signing);
 
         // Store the new access token
         let now = Utc::now();
