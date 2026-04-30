@@ -63,6 +63,24 @@ impl SsmService {
         self
     }
 
+    /// Admin: force a SendCommand result to a specific terminal status
+    /// (e.g. "Failed", "Cancelled", "TimedOut"). Used by tests to
+    /// simulate command failures without waiting on a real SSM agent.
+    /// Returns `true` when the command was found and updated.
+    pub fn set_command_status(&self, account_id: &str, command_id: &str, status: &str) -> bool {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        if let Some(c) = state
+            .commands
+            .iter_mut()
+            .find(|c| c.command_id == command_id)
+        {
+            c.status = status.to_string();
+            return true;
+        }
+        false
+    }
+
     /// Persist current state as a snapshot. Held across the
     /// clone-serialize-write sequence to prevent stale-last writes,
     /// with serde + file I/O offloaded to the blocking pool.

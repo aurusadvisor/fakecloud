@@ -2101,6 +2101,39 @@ fn send_command_starts_pending() {
 }
 
 #[test]
+fn set_command_status_overrides_lifecycle() {
+    let svc = make_service();
+    let cmd_id = send_command(&svc, "AWS-RunShellScript");
+    // Force a Failed status before any polling.
+    let updated = svc.set_command_status("123456789012", &cmd_id, "Failed");
+    assert!(updated);
+    // Even after multiple GetCommandInvocation polls (which would
+    // normally advance Pending -> InProgress -> Success), the forced
+    // status sticks since the auto-advance only fires when status is
+    // Pending or InProgress.
+    for _ in 0..3 {
+        let req = make_request(
+            "GetCommandInvocation",
+            json!({
+                "CommandId": cmd_id,
+                "InstanceId": "i-0000000000000000a",
+            }),
+        );
+        let _ = svc.get_command_invocation(&req);
+    }
+    let req = make_request("ListCommands", json!({"CommandId": cmd_id}));
+    let resp = svc.list_commands(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Commands"][0]["Status"].as_str().unwrap(), "Failed");
+}
+
+#[test]
+fn set_command_status_unknown_id_returns_false() {
+    let svc = make_service();
+    assert!(!svc.set_command_status("123456789012", "no-such-id", "Failed"));
+}
+
+#[test]
 fn get_command_invocation_wrong_instance_fails() {
     let svc = make_service();
     let cmd_id = send_command(&svc, "AWS-RunShellScript");

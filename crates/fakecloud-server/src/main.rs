@@ -1045,6 +1045,7 @@ async fn main() {
         } else {
             None
         };
+    let ssm_state_for_admin = ssm_state.clone();
     let mut ssm_service = SsmService::new(ssm_state)
         .with_secretsmanager(secretsmanager_state.clone())
         .with_kms_hook(kms_hook_for_services.clone());
@@ -3079,6 +3080,19 @@ async fn main() {
                     axum::Json(types::ForceDlqResponse {
                         moved_messages: moved,
                     })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ssm/commands/{command_id}/status",
+            axum::routing::post({
+                let ss = ssm_state_for_admin;
+                move |axum::extract::Path(command_id): axum::extract::Path<String>,
+                      axum::Json(body): axum::Json<types::SetSsmCommandStatusRequest>| async move {
+                    let account = body.account_id.as_deref().unwrap_or("000000000000");
+                    let svc = fakecloud_ssm::SsmService::new(ss);
+                    let updated = svc.set_command_status(account, &command_id, &body.status);
+                    axum::Json(types::SetSsmCommandStatusResponse { updated })
                 }
             }),
         )
