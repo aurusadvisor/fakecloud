@@ -12,25 +12,30 @@ impl DynamoDbService {
 
     pub(super) fn describe_endpoints(
         &self,
-        _req: &AwsRequest,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         Self::ok_json(json!({
             "Endpoints": [{
-                "Address": "dynamodb.us-east-1.amazonaws.com",
+                "Address": format!("dynamodb.{}.amazonaws.com", req.region),
                 "CachePeriodInMinutes": 1440
             }]
         }))
     }
 
-    pub(super) fn describe_limits(
-        &self,
-        _req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
+    pub(super) fn describe_limits(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Smaller commercial regions cap per-account capacity at 40k while
+        // the major ones (us-east-1 etc.) sit at 80k. Per-table caps stay
+        // at 40k everywhere.
+        let account_cap = match req.region.as_str() {
+            "ap-south-1" | "ap-northeast-2" | "ap-southeast-1" | "ap-southeast-2"
+            | "ca-central-1" | "eu-central-1" | "eu-north-1" | "sa-east-1" | "us-west-1" => 40_000,
+            _ => 80_000,
+        };
         Self::ok_json(json!({
-            "AccountMaxReadCapacityUnits": 80000,
-            "AccountMaxWriteCapacityUnits": 80000,
-            "TableMaxReadCapacityUnits": 40000,
-            "TableMaxWriteCapacityUnits": 40000
+            "AccountMaxReadCapacityUnits": account_cap,
+            "AccountMaxWriteCapacityUnits": account_cap,
+            "TableMaxReadCapacityUnits": 40_000,
+            "TableMaxWriteCapacityUnits": 40_000
         }))
     }
 

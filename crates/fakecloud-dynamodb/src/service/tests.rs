@@ -627,21 +627,38 @@ fn resource_policy_lifecycle() {
 }
 
 #[test]
-fn describe_endpoints() {
+fn describe_endpoints_uses_request_region() {
     let svc = make_service();
-    let req = make_request("DescribeEndpoints", json!({}));
+    let mut req = make_request("DescribeEndpoints", json!({}));
+    req.region = "eu-west-1".to_string();
     let resp = svc.describe_endpoints(&req).unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["Endpoints"][0]["Address"],
+        "dynamodb.eu-west-1.amazonaws.com"
+    );
     assert_eq!(body["Endpoints"][0]["CachePeriodInMinutes"], 1440);
 }
 
 #[test]
-fn describe_limits() {
+fn describe_limits_default_account_cap() {
     let svc = make_service();
     let req = make_request("DescribeLimits", json!({}));
     let resp = svc.describe_limits(&req).unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["TableMaxReadCapacityUnits"], 40000);
+    assert_eq!(body["AccountMaxReadCapacityUnits"], 80_000);
+    assert_eq!(body["TableMaxReadCapacityUnits"], 40_000);
+}
+
+#[test]
+fn describe_limits_smaller_region_lower_cap() {
+    let svc = make_service();
+    let mut req = make_request("DescribeLimits", json!({}));
+    req.region = "ap-south-1".to_string();
+    let resp = svc.describe_limits(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["AccountMaxReadCapacityUnits"], 40_000);
+    assert_eq!(body["AccountMaxWriteCapacityUnits"], 40_000);
 }
 
 #[test]
