@@ -422,6 +422,68 @@ async fn seed_function(svc: &LambdaService, name: &str) {
 }
 
 #[tokio::test]
+async fn update_function_code_replaces_zip_and_bumps_revision() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "ucode").await;
+
+    // GetFunctionConfiguration to capture the original revisionId
+    let req = make_request(Method::GET, "/2015-03-31/functions/ucode/configuration", "");
+    let resp = svc.handle(req).await.unwrap();
+    let pre: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let pre_revision = pre["RevisionId"].as_str().unwrap().to_string();
+    let pre_sha = pre["CodeSha256"].as_str().unwrap().to_string();
+
+    // UpdateFunctionCode with a real ZipFile payload
+    let new_zip_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"fresh-zip-bytes",
+    );
+    let body = json!({ "ZipFile": new_zip_b64 });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/ucode/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_ne!(post["RevisionId"].as_str().unwrap(), pre_revision);
+    assert_ne!(post["CodeSha256"].as_str().unwrap(), pre_sha);
+    assert_eq!(
+        post["CodeSize"].as_i64().unwrap(),
+        b"fresh-zip-bytes".len() as i64
+    );
+}
+
+#[tokio::test]
+async fn update_function_code_replaces_image_uri() {
+    let svc = LambdaService::new(make_state());
+    // Seed an image-package function so UpdateFunctionCode can swap URIs.
+    let body = json!({
+        "FunctionName": "img-fn",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "PackageType": "Image",
+        "Code": {"ImageUri": "old.example.com/image:1"},
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    svc.handle(req).await.unwrap();
+
+    let body = json!({ "ImageUri": "new.example.com/image:2" });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/img-fn/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        post["Code"]["ImageUri"].as_str().unwrap(),
+        "new.example.com/image:2"
+    );
+}
+
+#[tokio::test]
 async fn add_permission_builds_canonical_statement() {
     let svc = LambdaService::new(make_state());
     seed_function(&svc, "f").await;
