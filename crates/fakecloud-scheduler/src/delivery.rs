@@ -81,6 +81,21 @@ pub fn deliver_target(bus: &Arc<DeliveryBus>, schedule: &Schedule) -> Result<(),
         return Ok(());
     }
 
+    if arn.contains(":kinesis:") {
+        // KinesisParameters.PartitionKey carries the per-record key per
+        // AWS contract; fall back to the schedule name so the put never
+        // fails on a missing key.
+        let partition_key = schedule
+            .target
+            .kinesis_parameters
+            .as_ref()
+            .and_then(|p| p.get("PartitionKey").and_then(|v| v.as_str()))
+            .unwrap_or(&schedule.name)
+            .to_string();
+        bus.send_to_kinesis(arn, body, &partition_key);
+        return Ok(());
+    }
+
     // Unsupported target type — log and succeed so we don't push it to
     // DLQ (DLQ is for deliverable-target failures, not unknown targets).
     tracing::warn!(target_arn = %arn, schedule = %schedule.name, "scheduler: unsupported target type, skipping");
@@ -297,6 +312,61 @@ mod tests {
         let calls = recorder.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, r#"{"v":1}"#);
+    }
+
+    #[test]
+    fn deliver_target_kinesis_uses_kinesis_parameters_partition_key() {
+        struct KinesisRec(Mutex<Vec<(String, String, String)>>);
+        impl fakecloud_core::delivery::KinesisDelivery for KinesisRec {
+            fn put_record(&self, stream_arn: &str, data: &str, partition_key: &str) {
+                self.0.lock().unwrap().push((
+                    stream_arn.to_string(),
+                    data.to_string(),
+                    partition_key.to_string(),
+                ));
+            }
+        }
+        let kinesis = Arc::new(KinesisRec(Mutex::new(Vec::new())));
+        let bus = Arc::new(DeliveryBus::new().with_kinesis(kinesis.clone()));
+        let mut sched = make_schedule(
+            "arn:aws:kinesis:us-east-1:1:stream/orders",
+            None,
+            Some(r#"{"order":42}"#),
+        );
+        sched.target.kinesis_parameters = Some(serde_json::json!({"PartitionKey": "tenant-7"}));
+        let result = deliver_target(&bus, &sched);
+        assert!(result.is_ok());
+        let calls = kinesis.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "arn:aws:kinesis:us-east-1:1:stream/orders");
+        assert_eq!(calls[0].1, r#"{"order":42}"#);
+        assert_eq!(calls[0].2, "tenant-7");
+    }
+
+    #[test]
+    fn deliver_target_kinesis_falls_back_to_schedule_name_for_partition_key() {
+        struct KinesisRec(Mutex<Vec<(String, String, String)>>);
+        impl fakecloud_core::delivery::KinesisDelivery for KinesisRec {
+            fn put_record(&self, stream_arn: &str, data: &str, partition_key: &str) {
+                self.0.lock().unwrap().push((
+                    stream_arn.to_string(),
+                    data.to_string(),
+                    partition_key.to_string(),
+                ));
+            }
+        }
+        let kinesis = Arc::new(KinesisRec(Mutex::new(Vec::new())));
+        let bus = Arc::new(DeliveryBus::new().with_kinesis(kinesis.clone()));
+        let sched = make_schedule(
+            "arn:aws:kinesis:us-east-1:1:stream/orders",
+            None,
+            Some(r#"{"v":1}"#),
+        );
+        let result = deliver_target(&bus, &sched);
+        assert!(result.is_ok());
+        let calls = kinesis.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].2, "t");
     }
 
     #[test]
