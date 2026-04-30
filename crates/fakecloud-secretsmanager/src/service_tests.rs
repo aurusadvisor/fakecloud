@@ -2178,3 +2178,99 @@ fn test_filter_all_searches_name_desc_tags() {
     // No match
     assert!(!filter_all(&secret, &["zzzz"]));
 }
+
+// ── Cross-account GetSecretValue: resource policy enforcement ────
+
+fn make_request_for(action: &str, account: &str, body: &str) -> AwsRequest {
+    let mut req = make_request(action, body);
+    req.account_id = account.to_string();
+    req
+}
+
+#[tokio::test]
+async fn cross_account_get_secret_value_denied_without_policy() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    // Owner creates the secret in account 111111111111.
+    let req = make_request_for(
+        "CreateSecret",
+        "111111111111",
+        r#"{"Name": "shared/secret", "SecretString": "ssss"}"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let arn = body["ARN"].as_str().unwrap().to_string();
+
+    // Another account asks for it without any resource policy in
+    // place — must be denied.
+    let req = make_request_for(
+        "GetSecretValue",
+        "222222222222",
+        &format!(r#"{{"SecretId": "{arn}"}}"#),
+    );
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.code(), "AccessDeniedException");
+}
+
+#[tokio::test]
+async fn cross_account_get_secret_value_allowed_with_matching_policy() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    // Owner creates the secret.
+    let req = make_request_for(
+        "CreateSecret",
+        "111111111111",
+        r#"{"Name": "shared/secret", "SecretString": "shhh"}"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let arn = body["ARN"].as_str().unwrap().to_string();
+
+    // Owner attaches a resource policy granting GetSecretValue to
+    // the cross-account principal.
+    let policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::222222222222:root"},
+            "Action": "secretsmanager:GetSecretValue",
+            "Resource": "*"
+        }]
+    });
+    let put_policy = make_request_for(
+        "PutResourcePolicy",
+        "111111111111",
+        &format!(
+            r#"{{"SecretId": "{arn}", "ResourcePolicy": {}}}"#,
+            serde_json::to_string(&policy.to_string()).unwrap()
+        ),
+    );
+    svc.handle(put_policy).await.unwrap();
+
+    // Cross-account caller now succeeds.
+    let req = make_request_for(
+        "GetSecretValue",
+        "222222222222",
+        &format!(r#"{{"SecretId": "{arn}"}}"#),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["SecretString"].as_str().unwrap(), "shhh");
+}
+
+#[test]
+fn secret_owner_account_extracts_from_arn() {
+    assert_eq!(
+        secret_owner_account(
+            "arn:aws:secretsmanager:us-east-1:111111111111:secret:s-abc123",
+            "999999999999"
+        ),
+        "111111111111"
+    );
+    assert_eq!(
+        secret_owner_account("plain-name", "999999999999"),
+        "999999999999"
+    );
+}
