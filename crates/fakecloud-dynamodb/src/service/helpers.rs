@@ -2542,3 +2542,58 @@ pub(crate) fn split_partiql_pairs(s: &str) -> Vec<&str> {
 pub(crate) fn count_params_in_str(s: &str) -> usize {
     s.chars().filter(|c| *c == '?').count()
 }
+
+/// Build a `ConsumedCapacity` JSON object matching AWS shape.
+/// Mode is one of `"TOTAL" | "INDEXES"`. Anything else returns `Value::Null`.
+/// `read_units` and `write_units` are the consumed CU; either may be 0.
+/// `INDEXES` mode also emits an empty `Table`/`GlobalSecondaryIndexes`/
+/// `LocalSecondaryIndexes` breakdown so SDKs that deserialize the index
+/// map round-trip.
+pub(crate) fn build_consumed_capacity(
+    mode: &str,
+    table_name: &str,
+    read_units: f64,
+    write_units: f64,
+) -> Value {
+    if mode != "TOTAL" && mode != "INDEXES" {
+        return Value::Null;
+    }
+    let total = read_units + write_units;
+    let mut cc = json!({
+        "TableName": table_name,
+        "CapacityUnits": total,
+    });
+    if read_units > 0.0 {
+        cc["ReadCapacityUnits"] = json!(read_units);
+    }
+    if write_units > 0.0 {
+        cc["WriteCapacityUnits"] = json!(write_units);
+    }
+    if mode == "INDEXES" {
+        let mut table_breakdown = json!({ "CapacityUnits": total });
+        if read_units > 0.0 {
+            table_breakdown["ReadCapacityUnits"] = json!(read_units);
+        }
+        if write_units > 0.0 {
+            table_breakdown["WriteCapacityUnits"] = json!(write_units);
+        }
+        cc["Table"] = table_breakdown;
+        cc["GlobalSecondaryIndexes"] = json!({});
+        cc["LocalSecondaryIndexes"] = json!({});
+    }
+    cc
+}
+
+/// Read the request body's `ReturnConsumedCapacity` value with default
+/// `"NONE"`, returning the canonical mode string.
+pub(crate) fn return_consumed_mode(body: &Value) -> &str {
+    body["ReturnConsumedCapacity"].as_str().unwrap_or("NONE")
+}
+
+/// Read the request body's `ReturnItemCollectionMetrics` value with
+/// default `"NONE"`.
+pub(crate) fn return_icm_mode(body: &Value) -> &str {
+    body["ReturnItemCollectionMetrics"]
+        .as_str()
+        .unwrap_or("NONE")
+}

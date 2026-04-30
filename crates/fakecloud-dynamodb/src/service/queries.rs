@@ -7,15 +7,17 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::state::AttributeValue;
 
 use super::{
-    compare_attribute_values, evaluate_filter_expression, evaluate_key_condition,
-    extract_key_for_schema, get_table, item_matches_key, parse_expression_attribute_names,
-    parse_expression_attribute_values, parse_key_map, project_item, require_str, DynamoDbService,
+    build_consumed_capacity, compare_attribute_values, evaluate_filter_expression,
+    evaluate_key_condition, extract_key_for_schema, get_table, item_matches_key,
+    parse_expression_attribute_names, parse_expression_attribute_values, parse_key_map,
+    project_item, require_str, return_consumed_mode, DynamoDbService,
 };
 
 impl DynamoDbService {
     pub(super) fn query(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
         let table_name = require_str(&body, "TableName")?;
+        let return_consumed = return_consumed_mode(&body).to_string();
 
         let accounts = self.state.read();
         let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
@@ -196,6 +198,16 @@ impl DynamoDbService {
             result["LastEvaluatedKey"] = json!(lek);
         }
 
+        let cc = build_consumed_capacity(
+            &return_consumed,
+            table_name,
+            (scanned_count.max(1) as f64) * 0.5,
+            0.0,
+        );
+        if !cc.is_null() {
+            result["ConsumedCapacity"] = cc;
+        }
+
         drop(accounts);
 
         if !accessed_keys.is_empty() {
@@ -221,6 +233,7 @@ impl DynamoDbService {
     pub(super) fn scan(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = Self::parse_body(req)?;
         let table_name = require_str(&body, "TableName")?;
+        let return_consumed = return_consumed_mode(&body).to_string();
 
         let accounts = self.state.read();
         let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
@@ -301,6 +314,16 @@ impl DynamoDbService {
 
         if let Some(lek) = last_evaluated_key {
             result["LastEvaluatedKey"] = json!(lek);
+        }
+
+        let cc = build_consumed_capacity(
+            &return_consumed,
+            table_name,
+            (scanned_count.max(1) as f64) * 0.5,
+            0.0,
+        );
+        if !cc.is_null() {
+            result["ConsumedCapacity"] = cc;
         }
 
         drop(accounts);
