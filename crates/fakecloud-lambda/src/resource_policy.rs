@@ -128,6 +128,20 @@ mod tests {
             image_uri: None,
             policy: policy.map(str::to_string),
             layers: Vec::new(),
+            revision_id: "test-rev".to_string(),
+            tracing_mode: None,
+            kms_key_arn: None,
+            ephemeral_storage_size: None,
+            vpc_config: None,
+            snap_start: None,
+            dead_letter_config_arn: None,
+            file_system_configs: Vec::new(),
+            logging_config: None,
+            image_config: None,
+            signing_profile_version_arn: None,
+            signing_job_arn: None,
+            runtime_version_config: None,
+            master_arn: None,
         }
     }
 
