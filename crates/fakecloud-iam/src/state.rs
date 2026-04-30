@@ -328,6 +328,10 @@ pub struct IamState {
     /// Organizations access reports keyed by job id.
     #[serde(default)]
     pub organizations_access_reports: BTreeMap<String, OrganizationsAccessReport>,
+    /// `SetSecurityTokenServicePreferences` value (e.g. `v1Token`,
+    /// `v2Token`). `None` means caller hasn't configured a preference.
+    #[serde(default)]
+    pub global_endpoint_token_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,6 +395,7 @@ impl IamState {
             organizations_root_sessions: false,
             service_last_accessed_jobs: BTreeMap::new(),
             organizations_access_reports: BTreeMap::new(),
+            global_endpoint_token_version: None,
         }
     }
 
