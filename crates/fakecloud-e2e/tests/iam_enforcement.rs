@@ -1827,3 +1827,137 @@ async fn kms_key_policy_deny_beats_identity_allow() {
         "expected AccessDenied for bob, got {err:?}"
     );
 }
+
+// ======================================================================
+// Phase 2b: SQS queue policies
+//
+// Mirrors the SNS topic-policy block above. Drives the resource-policy
+// evaluator path end-to-end for SQS: dispatch fetches the queue policy
+// via the `SqsResourcePolicyProvider` and hands it to the evaluator
+// alongside the caller's identity policies.
+// ======================================================================
+
+async fn seed_queue_with_policy(
+    server: &TestServer,
+    name: &str,
+    policy_json: &str,
+) -> (String, String) {
+    let boot = sdk_config_with(server, "test", "test").await;
+    let sqs_boot = aws_sdk_sqs::Client::new(&boot);
+    let queue_url = sqs_boot
+        .create_queue()
+        .queue_name(name)
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    sqs_boot
+        .set_queue_attributes()
+        .queue_url(&queue_url)
+        .attributes(aws_sdk_sqs::types::QueueAttributeName::Policy, policy_json)
+        .send()
+        .await
+        .unwrap();
+    let attrs = sqs_boot
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap();
+    let arn = attrs
+        .attributes()
+        .and_then(|m| m.get(&aws_sdk_sqs::types::QueueAttributeName::QueueArn))
+        .unwrap()
+        .clone();
+    (queue_url, arn)
+}
+
+#[tokio::test]
+async fn queue_policy_grants_send_without_identity_policy() {
+    let server = start_strict().await;
+    let (akid, secret) = bootstrap_user(&server, "qp_sender").await;
+    let (queue_url, _) = seed_queue_with_policy(
+        &server,
+        "qp-shared",
+        r#"{"Version":"2012-10-17","Statement":[{
+            "Effect":"Allow",
+            "Principal":{"AWS":"arn:aws:iam::123456789012:user/qp_sender"},
+            "Action":"sqs:SendMessage",
+            "Resource":"*"
+        }]}"#,
+    )
+    .await;
+
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let sqs = aws_sdk_sqs::Client::new(&cfg);
+    sqs.send_message()
+        .queue_url(&queue_url)
+        .message_body("hello")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn queue_policy_explicit_deny_beats_identity_allow() {
+    let server = start_strict().await;
+    let (akid, secret) = bootstrap_user(&server, "qp_blocked").await;
+    let (queue_url, queue_arn) = seed_queue_with_policy(
+        &server,
+        "qp-locked",
+        r#"{"Version":"2012-10-17","Statement":[{
+            "Effect":"Deny",
+            "Principal":{"AWS":"arn:aws:iam::123456789012:user/qp_blocked"},
+            "Action":"sqs:SendMessage",
+            "Resource":"*"
+        }]}"#,
+    )
+    .await;
+    let identity_policy = format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":"sqs:SendMessage","Resource":"{queue_arn}"}}]}}"#
+    );
+    attach_inline_policy(&server, "qp_blocked", "AllowQp", &identity_policy).await;
+
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let sqs = aws_sdk_sqs::Client::new(&cfg);
+    let err = sqs
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("nope")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("AccessDenied"),
+        "expected AccessDenied, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn queue_policy_principal_wildcard_grants_any_user() {
+    let server = start_strict().await;
+    let (akid, secret) = bootstrap_user(&server, "qp_anyone").await;
+    let (queue_url, _) = seed_queue_with_policy(
+        &server,
+        "qp-public",
+        r#"{"Version":"2012-10-17","Statement":[{
+            "Effect":"Allow",
+            "Principal":"*",
+            "Action":"sqs:SendMessage",
+            "Resource":"*"
+        }]}"#,
+    )
+    .await;
+
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let sqs = aws_sdk_sqs::Client::new(&cfg);
+    sqs.send_message()
+        .queue_url(&queue_url)
+        .message_body("hi")
+        .send()
+        .await
+        .unwrap();
+}
