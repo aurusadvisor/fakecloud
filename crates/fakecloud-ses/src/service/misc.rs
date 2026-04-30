@@ -441,6 +441,7 @@ impl SesV2Service {
             raw_data: None,
             template_name: Some(template_name),
             template_data: None,
+            dkim_signature: None,
             timestamp: Utc::now(),
         };
 

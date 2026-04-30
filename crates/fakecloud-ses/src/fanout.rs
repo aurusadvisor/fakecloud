@@ -378,6 +378,7 @@ mod tests {
             raw_data: None,
             template_name: None,
             template_data: None,
+            dkim_signature: None,
             timestamp: Utc::now(),
         };
         let event = build_ses_event(SesEventType::Send, &email);
@@ -401,6 +402,7 @@ mod tests {
             raw_data: None,
             template_name: None,
             template_data: None,
+            dkim_signature: None,
             timestamp: Utc::now(),
         };
         let event = build_ses_event(SesEventType::Bounce, &email);
@@ -423,6 +425,7 @@ mod tests {
             raw_data: None,
             template_name: None,
             template_data: None,
+            dkim_signature: None,
             timestamp: Utc::now(),
         };
         let event = build_ses_event(SesEventType::Delivery, &email);
@@ -445,6 +448,7 @@ mod tests {
             raw_data: None,
             template_name: None,
             template_data: None,
+            dkim_signature: None,
             timestamp: Utc::now(),
         };
         let event = build_ses_event(SesEventType::Complaint, &email);
@@ -520,6 +524,7 @@ mod tests {
             dkim_domain_signing_private_key: None,
             dkim_domain_signing_selector: None,
             dkim_next_signing_key_length: None,
+            dkim_public_key_b64: None,
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),

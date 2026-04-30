@@ -118,6 +118,8 @@ pub struct SentEmail {
     pub raw_data: Option<String>,
     pub template_name: Option<String>,
     pub template_data: Option<String>,
+    #[serde(default)]
+    pub dkim_signature: Option<String>,
     pub timestamp: String,
 }
 

@@ -2598,6 +2598,7 @@ async fn main() {
                             raw_data: email.raw_data.clone(),
                             template_name: email.template_name.clone(),
                             template_data: email.template_data.clone(),
+                            dkim_signature: email.dkim_signature.clone(),
                             timestamp: email.timestamp.to_rfc3339(),
                         })
                         .collect();
@@ -2876,6 +2877,7 @@ async fn main() {
                                     raw_data: None,
                                     template_name: None,
                                     template_data: None,
+                                    dkim_signature: None,
                                     timestamp: chrono::Utc::now(),
                                 };
                                 {
@@ -4935,6 +4937,7 @@ impl fakecloud_core::delivery::EmailDispatcher for SesEmailDispatcher {
             raw_data: None,
             template_name: None,
             template_data: None,
+            dkim_signature: None,
             timestamp: chrono::Utc::now(),
         });
     }

@@ -22,10 +22,6 @@ fn extract_email_address(from: &str) -> &str {
 }
 
 impl SesV2Service {
-    /// Render `template_name` with `template_data` (JSON object string)
-    /// against the caller's stored templates. Empty result on missing
-    /// template or missing inputs — matches real SES which sends the
-    /// raw template body when data is malformed.
     fn render_template_for_send(
         &self,
         account_id: &str,
@@ -49,6 +45,12 @@ impl SesV2Service {
             return empty;
         };
         super::templates::render_template(template, data_str)
+    }
+
+    fn compute_dkim_signature(&self, account_id: &str, sent: &SentEmail) -> Option<String> {
+        let accounts = self.state.read();
+        let state = accounts.get(account_id)?;
+        crate::dkim::signature_for_sent_email(state, sent)
     }
 
     /// Reject the send if either account-level sending or the resolved
@@ -215,7 +217,14 @@ impl SesV2Service {
             raw_data,
             template_name,
             template_data,
+            dkim_signature: None,
             timestamp: Utc::now(),
+        };
+
+        let dkim_signature = self.compute_dkim_signature(&req.account_id, &sent);
+        let sent = SentEmail {
+            dkim_signature,
+            ..sent
         };
 
         // Event fanout: check suppression list, generate events, deliver to destinations
@@ -295,7 +304,13 @@ impl SesV2Service {
                 raw_data: None,
                 template_name,
                 template_data,
+                dkim_signature: None,
                 timestamp: Utc::now(),
+            };
+            let dkim_signature = self.compute_dkim_signature(&req.account_id, &sent);
+            let sent = SentEmail {
+                dkim_signature,
+                ..sent
             };
 
             // Event fanout for each bulk entry

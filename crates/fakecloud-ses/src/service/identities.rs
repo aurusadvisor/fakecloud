@@ -64,6 +64,10 @@ impl SesV2Service {
             "DOMAIN"
         };
 
+        // Easy DKIM auto-provisions a fresh RSA-2048 keypair when the
+        // identity is created so SendEmail can stamp DKIM-Signature
+        // headers without a follow-up PutEmailIdentityDkimSigningAttributes.
+        let (priv_pem, pub_b64) = crate::dkim::generate_easy_dkim_keypair();
         let identity = EmailIdentity {
             identity_name: identity_name.clone(),
             identity_type: identity_type.to_string(),
@@ -71,9 +75,10 @@ impl SesV2Service {
             created_at: Utc::now(),
             dkim_signing_enabled: true,
             dkim_signing_attributes_origin: "AWS_SES".to_string(),
-            dkim_domain_signing_private_key: None,
-            dkim_domain_signing_selector: None,
-            dkim_next_signing_key_length: None,
+            dkim_domain_signing_private_key: Some(priv_pem),
+            dkim_domain_signing_selector: Some("fakecloudses".to_string()),
+            dkim_next_signing_key_length: Some("RSA_2048_BIT".to_string()),
+            dkim_public_key_b64: Some(pub_b64),
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
@@ -159,20 +164,29 @@ impl SesV2Service {
         let behavior = identity.mail_from_behavior_on_mx_failure.clone();
         let mail_from_dns = mail_from_dns_records(&mail_from_domain, &region);
 
+        let mut dkim_attrs = json!({
+            "SigningEnabled": identity.dkim_signing_enabled,
+            "Status": "SUCCESS",
+            "SigningAttributesOrigin": identity.dkim_signing_attributes_origin,
+            "Tokens": ["token1", "token2", "token3"],
+        });
+        if let Some(ref selector) = identity.dkim_domain_signing_selector {
+            dkim_attrs["LastKeyGenerationTimestamp"] = json!(identity.created_at.timestamp());
+            dkim_attrs["CurrentSigningKeyLength"] = json!(identity
+                .dkim_next_signing_key_length
+                .as_deref()
+                .unwrap_or("RSA_2048_BIT"));
+            dkim_attrs["NextSigningKeyLength"] = json!(identity
+                .dkim_next_signing_key_length
+                .as_deref()
+                .unwrap_or("RSA_2048_BIT"));
+            dkim_attrs["DomainSigningSelector"] = json!(selector);
+        }
         let mut response = json!({
             "IdentityType": identity.identity_type,
             "VerifiedForSendingStatus": true,
             "FeedbackForwardingStatus": identity.email_forwarding_enabled,
-            "DkimAttributes": {
-                "SigningEnabled": identity.dkim_signing_enabled,
-                "Status": "SUCCESS",
-                "SigningAttributesOrigin": identity.dkim_signing_attributes_origin,
-                "Tokens": [
-                    "token1",
-                    "token2",
-                    "token3",
-                ],
-            },
+            "DkimAttributes": dkim_attrs,
             "MailFromAttributes": {
                 "MailFromDomain": mail_from_domain,
                 "MailFromDomainStatus": mail_from_status,
@@ -436,19 +450,34 @@ impl SesV2Service {
             }
         };
 
-        if let Some(origin) = body["SigningAttributesOrigin"].as_str() {
-            identity.dkim_signing_attributes_origin = origin.to_string();
-        }
+        let origin = body["SigningAttributesOrigin"]
+            .as_str()
+            .unwrap_or(&identity.dkim_signing_attributes_origin)
+            .to_string();
+        identity.dkim_signing_attributes_origin = origin.clone();
 
         if let Some(attrs) = body.get("SigningAttributes") {
             if let Some(key) = attrs["DomainSigningPrivateKey"].as_str() {
                 identity.dkim_domain_signing_private_key = Some(key.to_string());
+                identity.dkim_public_key_b64 = None;
             }
             if let Some(selector) = attrs["DomainSigningSelector"].as_str() {
                 identity.dkim_domain_signing_selector = Some(selector.to_string());
             }
             if let Some(length) = attrs["NextSigningKeyLength"].as_str() {
                 identity.dkim_next_signing_key_length = Some(length.to_string());
+            }
+        }
+
+        // Easy DKIM: AWS_SES origin without a caller-supplied key triggers
+        // generation of a fresh RSA-2048 keypair. The public half is what
+        // SES would publish via the `*.dkim.amazonses.com` CNAME chain.
+        if origin == "AWS_SES" && identity.dkim_domain_signing_private_key.is_none() {
+            let (priv_pem, pub_b64) = crate::dkim::generate_easy_dkim_keypair();
+            identity.dkim_domain_signing_private_key = Some(priv_pem);
+            identity.dkim_public_key_b64 = Some(pub_b64);
+            if identity.dkim_domain_signing_selector.is_none() {
+                identity.dkim_domain_signing_selector = Some("fakecloudses".to_string());
             }
         }
 

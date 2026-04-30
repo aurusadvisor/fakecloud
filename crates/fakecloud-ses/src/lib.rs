@@ -1,3 +1,4 @@
+pub mod dkim;
 pub mod fanout;
 pub mod mime;
 pub(crate) mod service;
