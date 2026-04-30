@@ -89,6 +89,20 @@ pub struct StoredHealthCheck {
     pub version: i64,
     pub config: HealthCheckConfig,
     pub created_time: DateTime<Utc>,
+    /// Reported `Status` line for `GetHealthCheckStatus`. Defaults to
+    /// the canonical Route 53 healthy phrase. Flipped via the admin
+    /// endpoint at `PUT /_fakecloud/route53/health-checks/{id}/status`
+    /// so callers can simulate failover scenarios in tests.
+    #[serde(default = "default_health_status")]
+    pub status_line: String,
+    /// Last failure reason returned by `GetHealthCheckLastFailureReason`.
+    /// `None` when the check has never reported a failure.
+    #[serde(default)]
+    pub last_failure_reason: Option<String>,
+}
+
+fn default_health_status() -> String {
+    "Success: HTTP Status Code 200, OK.".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
