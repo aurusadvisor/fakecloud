@@ -4766,8 +4766,10 @@ async fn cognito_well_known_openid_configuration_uses_pool_region() {
 async fn cognito_well_known_jwks_404_for_unknown_pool() {
     let server = TestServer::start().await;
     let http = reqwest::Client::new();
-    let url = format!("{}/us-east-1_NOPE99999/.well-known/jwks.json", server.endpoint());
+    let url = format!(
+        "{}/us-east-1_NOPE99999/.well-known/jwks.json",
+        server.endpoint()
+    );
     let resp = http.get(&url).send().await.unwrap();
     assert_eq!(resp.status(), 404);
 }
-
