@@ -435,9 +435,15 @@ impl S3Service {
                 // IfNoneMatch does NOT apply to re-completions
                 if let Some(obj) = b.objects.get(key) {
                     let etag = obj.etag.clone();
+                    let location = format!(
+                        "https://{bucket_h}.s3.amazonaws.com/{key_h}",
+                        bucket_h = xml_escape(bucket),
+                        key_h = xml_escape(key),
+                    );
                     let body = format!(
                         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                          <CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                         <Location>{location}</Location>\
                          <Bucket>{}</Bucket>\
                          <Key>{}</Key>\
                          <ETag>&quot;{}&quot;</ETag>\
@@ -629,9 +635,15 @@ impl S3Service {
             );
         }
 
+        let location = format!(
+            "https://{bucket_h}.s3.amazonaws.com/{key_h}",
+            bucket_h = xml_escape(bucket),
+            key_h = xml_escape(key),
+        );
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Location>{location}</Location>\
              <Bucket>{}</Bucket>\
              <Key>{}</Key>\
              <ETag>&quot;{}&quot;</ETag>\

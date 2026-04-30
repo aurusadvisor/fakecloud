@@ -14,9 +14,10 @@ use super::{
     canned_acl_grants_for_object, check_get_conditionals, check_head_conditionals,
     check_object_lock_for_overwrite, compute_checksum, deliver_notifications, etag_matches,
     extract_user_metadata, extract_xml_value, is_frozen, is_valid_storage_class,
-    make_delete_marker, no_such_bucket, no_such_key, parse_delete_objects_xml, parse_grant_headers,
-    parse_range_header, parse_url_encoded_tags, precondition_failed, replicate_through_store,
-    resolve_object, s3_xml, url_encode_s3_key, xml_escape, RangeResult, S3Service,
+    make_delete_marker, no_such_bucket, no_such_key, parse_delete_objects_quiet,
+    parse_delete_objects_xml, parse_grant_headers, parse_range_header, parse_url_encoded_tags,
+    precondition_failed, replicate_through_store, resolve_object, s3_xml, url_encode_s3_key,
+    xml_escape, RangeResult, S3Service,
 };
 
 impl S3Service {
@@ -92,6 +93,7 @@ impl S3Service {
                 xml_escape(key)
             };
 
+            // ListObjectsV1 always emits Owner per Contents (no fetch-owner toggle).
             contents.push_str(&format!(
                 "<Contents>\
                  <Key>{}</Key>\
@@ -99,12 +101,14 @@ impl S3Service {
                  <ETag>&quot;{}&quot;</ETag>\
                  <Size>{}</Size>\
                  <StorageClass>{}</StorageClass>\
+                 <Owner><ID>{owner}</ID><DisplayName>{owner}</DisplayName></Owner>\
                  </Contents>",
                 display_key,
                 obj.last_modified.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                 obj.etag,
                 obj.size,
                 obj.storage_class,
+                owner = xml_escape(&b.acl_owner_id),
             ));
             last_key = key.clone();
             count += 1;
@@ -220,7 +224,20 @@ impl S3Service {
             .map(|v| v == "true")
             .unwrap_or(false);
 
-        let effective_start = continuation.as_deref().unwrap_or(&start_after);
+        // continuation token is base64(URL_SAFE_NO_PAD)-encoded key on the way
+        // out; decode it on the way back in. Fall back to treating it as a raw
+        // key for forward-compat with clients that don't round-trip.
+        let decoded_continuation = continuation.as_ref().map(|ct| {
+            use base64::Engine;
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(ct.as_bytes())
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .unwrap_or_else(|| ct.clone())
+        });
+        let effective_start = decoded_continuation
+            .as_deref()
+            .unwrap_or(start_after.as_str());
 
         let mut contents = String::new();
         let mut common_prefixes: Vec<String> = Vec::new();
@@ -328,11 +345,14 @@ impl S3Service {
             ));
         }
 
+        // NextContinuationToken must be opaque and safe for query-string
+        // round-trip. Base64-encode the last_key so keys with `&`/`=`/spaces
+        // don't break the next page.
         let next_token = if is_truncated {
-            format!(
-                "<NextContinuationToken>{}</NextContinuationToken>",
-                xml_escape(&last_key)
-            )
+            use base64::Engine;
+            let encoded =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(last_key.as_bytes());
+            format!("<NextContinuationToken>{encoded}</NextContinuationToken>")
         } else {
             String::new()
         };
@@ -1886,6 +1906,12 @@ impl S3Service {
         if let Some(ref redirect) = obj.website_redirect_location {
             headers.insert("x-amz-website-redirect-location", redirect.parse().unwrap());
         }
+        if !obj.tags.is_empty() {
+            headers.insert(
+                "x-amz-tagging-count",
+                obj.tags.len().to_string().parse().unwrap(),
+            );
+        }
 
         if let Some(vid) = &obj.version_id {
             headers.insert("x-amz-version-id", vid.parse().unwrap());
@@ -2451,6 +2477,7 @@ impl S3Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("");
         let entries = parse_delete_objects_xml(body_str);
+        let quiet = parse_delete_objects_quiet(body_str);
 
         if entries.is_empty() {
             return Err(AwsServiceError::aws_error(
@@ -2553,11 +2580,13 @@ impl S3Service {
                 self.store
                     .delete_object(bucket, key, Some(vid.as_str()))
                     .map_err(super::persistence_error)?;
-                deleted_xml.push_str(&format!(
-                    "<Deleted><Key>{}</Key><VersionId>{}</VersionId></Deleted>",
-                    xml_escape(key),
-                    xml_escape(vid),
-                ));
+                if !quiet {
+                    deleted_xml.push_str(&format!(
+                        "<Deleted><Key>{}</Key><VersionId>{}</VersionId></Deleted>",
+                        xml_escape(key),
+                        xml_escape(vid),
+                    ));
+                }
             } else if versioning_enabled {
                 let dm_id = Uuid::new_v4().to_string();
                 let marker = make_delete_marker(key, &dm_id);
@@ -2569,19 +2598,23 @@ impl S3Service {
                 self.store
                     .delete_object(bucket, key, None)
                     .map_err(super::persistence_error)?;
-                deleted_xml.push_str(&format!(
-                    "<Deleted><Key>{}</Key><DeleteMarker>true</DeleteMarker><DeleteMarkerVersionId>{}</DeleteMarkerVersionId></Deleted>",
-                    xml_escape(key), dm_id,
-                ));
+                if !quiet {
+                    deleted_xml.push_str(&format!(
+                        "<Deleted><Key>{}</Key><DeleteMarker>true</DeleteMarker><DeleteMarkerVersionId>{}</DeleteMarkerVersionId></Deleted>",
+                        xml_escape(key), dm_id,
+                    ));
+                }
             } else {
                 b.objects.remove(key);
                 self.store
                     .delete_object(bucket, key, None)
                     .map_err(super::persistence_error)?;
-                deleted_xml.push_str(&format!(
-                    "<Deleted><Key>{}</Key></Deleted>",
-                    xml_escape(key)
-                ));
+                if !quiet {
+                    deleted_xml.push_str(&format!(
+                        "<Deleted><Key>{}</Key></Deleted>",
+                        xml_escape(key)
+                    ));
+                }
             }
         }
 

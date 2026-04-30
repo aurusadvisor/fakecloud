@@ -2241,6 +2241,14 @@ pub(crate) fn parse_delete_objects_xml(xml: &str) -> Vec<DeleteObjectEntry> {
     entries
 }
 
+/// Returns true when the request body's top-level <Quiet> element is "true".
+/// AWS docs: when Quiet=true, only failed deletes are emitted.
+pub(crate) fn parse_delete_objects_quiet(xml: &str) -> bool {
+    extract_xml_value(xml, "Quiet")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Minimal XML parser for `<Tagging><TagSet><Tag><Key>k</Key><Value>v</Value></Tag>...`.
 /// Returns a Vec to preserve insertion order and detect duplicates.
 pub(crate) fn parse_tagging_xml(xml: &str) -> Vec<(String, String)> {
