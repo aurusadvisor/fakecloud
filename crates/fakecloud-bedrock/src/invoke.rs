@@ -47,14 +47,22 @@ pub(crate) fn invoke_model(
         });
     }
 
+    // Real Bedrock returns dynamic input/output token counts. Approximate
+    // each by whitespace-splitting the relevant text — close enough for
+    // SDKs that gate on usage.input_tokens / usage.output_tokens metering.
+    let input_tokens = approximate_token_count(&extract_input_text(&input));
+    let output_tokens = approximate_token_count(&extract_output_text(model_id, &response_body));
+
     let mut headers = http::HeaderMap::new();
     headers.insert(
         "x-amzn-bedrock-input-token-count",
-        http::HeaderValue::from_static("10"),
+        http::HeaderValue::from_str(&input_tokens.to_string())
+            .unwrap_or(http::HeaderValue::from_static("0")),
     );
     headers.insert(
         "x-amzn-bedrock-output-token-count",
-        http::HeaderValue::from_static("20"),
+        http::HeaderValue::from_str(&output_tokens.to_string())
+            .unwrap_or(http::HeaderValue::from_static("0")),
     );
     headers.insert(
         "x-amzn-bedrock-performanceconfig-latency",
@@ -67,6 +75,115 @@ pub(crate) fn invoke_model(
         body: bytes::Bytes::from(response_body).into(),
         headers,
     })
+}
+
+/// Whitespace-tokenize approximation. Real Bedrock uses the model's BPE
+/// tokenizer; we don't carry one. SDKs almost always treat usage as
+/// opaque metering, so a reasonable scalar is enough.
+pub(crate) fn approximate_token_count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+/// Pull the user-supplied prompt out of an InvokeModel request body.
+/// Each provider lays it out differently; we cover the most common
+/// shapes and fall back to the raw body length when nothing matches.
+fn extract_input_text(input: &Value) -> String {
+    // Anthropic: messages[] with role+content (string or array of content blocks)
+    if let Some(messages) = input.get("messages").and_then(|m| m.as_array()) {
+        let mut text = String::new();
+        for msg in messages {
+            match &msg["content"] {
+                Value::String(s) => {
+                    text.push_str(s);
+                    text.push(' ');
+                }
+                Value::Array(parts) => {
+                    for part in parts {
+                        if let Some(t) = part["text"].as_str() {
+                            text.push_str(t);
+                            text.push(' ');
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !text.is_empty() {
+            return text;
+        }
+    }
+    // Anthropic claim/system field
+    if let Some(s) = input.get("system").and_then(|v| v.as_str()) {
+        return s.to_string();
+    }
+    // Titan / Cohere / Meta single-prompt shape
+    if let Some(s) = input.get("prompt").and_then(|v| v.as_str()) {
+        return s.to_string();
+    }
+    if let Some(s) = input.get("inputText").and_then(|v| v.as_str()) {
+        return s.to_string();
+    }
+    // Cohere generate
+    if let Some(s) = input.get("texts").and_then(|v| v.as_array()) {
+        return s
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    serde_json::to_string(input).unwrap_or_default()
+}
+
+/// Pull the assistant text out of a generated response body so we can
+/// approximate output_tokens. Same provider-specific shapes as
+/// `generate_canned_response`.
+fn extract_output_text(model_id: &str, response_body: &str) -> String {
+    let value: Value = match serde_json::from_str(response_body) {
+        Ok(v) => v,
+        Err(_) => return response_body.to_string(),
+    };
+    if model_id.starts_with("anthropic.") {
+        if let Some(parts) = value.get("content").and_then(|c| c.as_array()) {
+            return parts
+                .iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+    }
+    if model_id.starts_with("amazon.") {
+        if let Some(results) = value.get("results").and_then(|r| r.as_array()) {
+            return results
+                .iter()
+                .filter_map(|r| r["outputText"].as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+    }
+    if model_id.starts_with("meta.") {
+        if let Some(s) = value.get("generation").and_then(|v| v.as_str()) {
+            return s.to_string();
+        }
+    }
+    if model_id.starts_with("cohere.") {
+        if let Some(generations) = value.get("generations").and_then(|g| g.as_array()) {
+            return generations
+                .iter()
+                .filter_map(|g| g["text"].as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+    }
+    if model_id.starts_with("mistral.") {
+        if let Some(outputs) = value.get("outputs").and_then(|o| o.as_array()) {
+            return outputs
+                .iter()
+                .filter_map(|o| o["text"].as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+    }
+    response_body.to_string()
 }
 
 /// Count tokens for the given input text (rough approximation).
@@ -139,7 +256,17 @@ pub(crate) fn count_tokens(
 }
 
 /// Generate a deterministic canned response based on the model provider.
+/// When `BEDROCK_ECHO=1` is set in the environment, the assistant text
+/// reflects the user-supplied prompt instead of the canned phrase, so
+/// tests can pin assertions against their own input.
 fn generate_canned_response(model_id: &str, input: &Value) -> String {
+    if std::env::var("BEDROCK_ECHO").as_deref() == Ok("1") {
+        return echo_response(model_id, input);
+    }
+    canned_response_inner(model_id, input)
+}
+
+fn canned_response_inner(model_id: &str, input: &Value) -> String {
     let provider = if model_id.starts_with("anthropic.") {
         "anthropic"
     } else if model_id.starts_with("amazon.") {
@@ -162,6 +289,67 @@ fn generate_canned_response(model_id: &str, input: &Value) -> String {
         "mistral" => mistral_response(input),
         _ => generic_response(input),
     }
+}
+
+/// Build a response that echoes the caller's prompt instead of the
+/// canned phrase. The shape matches the same provider-specific JSON that
+/// `canned_response_inner` produces — only the assistant text changes.
+fn echo_response(model_id: &str, input: &Value) -> String {
+    let prompt = extract_input_text(input);
+    let echoed = if prompt.is_empty() {
+        "(empty prompt)".to_string()
+    } else {
+        prompt
+    };
+    if model_id.starts_with("anthropic.") {
+        return serde_json::to_string(&json!({
+            "id": "msg_fakecloudtest01",
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "text", "text": echoed }],
+            "model": model_id,
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": { "input_tokens": 0, "output_tokens": 0 }
+        }))
+        .expect("serde_json::Value serialization is infallible");
+    }
+    if model_id.starts_with("amazon.") {
+        return serde_json::to_string(&json!({
+            "inputTextTokenCount": 0,
+            "results": [{
+                "tokenCount": 0,
+                "outputText": echoed,
+                "completionReason": "FINISH"
+            }]
+        }))
+        .expect("serde_json::Value serialization is infallible");
+    }
+    if model_id.starts_with("meta.") {
+        return serde_json::to_string(&json!({
+            "generation": echoed,
+            "prompt_token_count": 0,
+            "generation_token_count": 0,
+            "stop_reason": "stop"
+        }))
+        .expect("serde_json::Value serialization is infallible");
+    }
+    if model_id.starts_with("cohere.") {
+        return serde_json::to_string(&json!({
+            "generations": [{ "id": "gen-fakecloud", "text": echoed, "finish_reason": "COMPLETE" }],
+            "id": "fakecloud-echo",
+            "prompt": echoed
+        }))
+        .expect("serde_json::Value serialization is infallible");
+    }
+    if model_id.starts_with("mistral.") {
+        return serde_json::to_string(&json!({
+            "outputs": [{ "text": echoed, "stop_reason": "stop" }]
+        }))
+        .expect("serde_json::Value serialization is infallible");
+    }
+    serde_json::to_string(&json!({ "completion": echoed }))
+        .expect("serde_json::Value serialization is infallible")
 }
 
 fn anthropic_response(model_id: &str, _input: &Value) -> String {
@@ -299,6 +487,62 @@ mod tests {
         let s = shared();
         let err = invoke_model(&s, &req(), "", b"{}").err().unwrap();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn invoke_emits_dynamic_token_counts_in_headers() {
+        let s = shared();
+        // Anthropic-shaped body: 5 whitespace-separated tokens.
+        let body = br#"{"messages":[{"role":"user","content":"please count my tokens here"}]}"#;
+        let resp = invoke_model(&s, &req(), "anthropic.claude-3", body).unwrap();
+        let input_hdr = resp
+            .headers
+            .get("x-amzn-bedrock-input-token-count")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let output_hdr = resp
+            .headers
+            .get("x-amzn-bedrock-output-token-count")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        // No longer the hardcoded 10/20 — driven by actual prompt /
+        // response text.
+        assert_ne!(input_hdr, "10");
+        let input_n: usize = input_hdr.parse().unwrap();
+        let output_n: usize = output_hdr.parse().unwrap();
+        assert!(input_n >= 5);
+        assert!(output_n > 0);
+    }
+
+    #[test]
+    fn invoke_echo_mode_reflects_prompt() {
+        // SAFETY: BEDROCK_ECHO mutation is process-global; serialize via
+        // a single-threaded test runner is not assumed. We restore on
+        // exit so any sibling tests in the same binary see the prior value.
+        let prev = std::env::var("BEDROCK_ECHO").ok();
+        // SAFETY: tests run with single-threaded harness; env mutation is brief.
+        unsafe { std::env::set_var("BEDROCK_ECHO", "1") };
+
+        let s = shared();
+        let body = br#"{"messages":[{"role":"user","content":"hello world from echo mode"}]}"#;
+        let resp = invoke_model(&s, &req(), "anthropic.claude-3", body).unwrap();
+        let v: Value =
+            serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
+        let text = v["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("hello world from echo mode"),
+            "echo response did not include prompt: {text}"
+        );
+
+        // SAFETY: see comment above.
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("BEDROCK_ECHO", p),
+                None => std::env::remove_var("BEDROCK_ECHO"),
+            }
+        }
     }
 
     #[test]
