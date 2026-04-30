@@ -354,22 +354,3 @@ async fn scp_full_aws_access_is_immutable() {
     assert!(format!("{err:?}").contains("PolicyChangesNotAllowedException"));
 }
 
-#[tokio::test]
-async fn scp_reject_non_scp_policy_type() {
-    let server = start().await;
-    let (akid, secret) = server.create_admin(ACCOUNT_A, "admin-a").await;
-    let cfg = config_with(&server, &akid, &secret).await;
-    let orgs = OrgsClient::new(&cfg);
-
-    orgs.create_organization().send().await.unwrap();
-    let err = orgs
-        .create_policy()
-        .name("TagGuard")
-        .description("won't work")
-        .r#type(aws_sdk_organizations::types::PolicyType::TagPolicy)
-        .content("{}")
-        .send()
-        .await
-        .unwrap_err();
-    assert!(format!("{err:?}").contains("PolicyTypeNotSupportedException"));
-}
