@@ -484,6 +484,7 @@ pub(crate) fn verify_email_identity(
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
+            mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name: None,
         });
     Ok(xml_metadata_only("VerifyEmailIdentity", &req.request_id))
@@ -511,6 +512,7 @@ pub(crate) fn verify_domain_identity(
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
+            mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name: None,
         });
     // Return a verification token
@@ -545,6 +547,7 @@ pub(crate) fn verify_domain_dkim(
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
+            mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name: None,
         });
     // Return 3 DKIM tokens
@@ -824,9 +827,8 @@ pub(crate) fn get_identity_mail_from_domain_attributes(
     state: &SharedSesState,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let accounts = state.read();
-    let empty = SesState::new(&req.account_id, &req.region);
-    let st = accounts.get(&req.account_id).unwrap_or(&empty);
+    let mut accounts = state.write();
+    let st = accounts.get_or_create(&req.account_id);
     let mut inner = String::from("<MailFromDomainAttributes>");
     for i in 1.. {
         let key = format!("Identities.member.{i}");
@@ -835,20 +837,23 @@ pub(crate) fn get_identity_mail_from_domain_attributes(
                 inner.push_str("<entry>");
                 inner.push_str(&format!("<key>{}</key>", xml_escape(identity_name)));
                 inner.push_str("<value>");
-                if let Some(identity) = st.identities.get(identity_name.as_str()) {
-                    let mail_from = identity.mail_from_domain.as_deref().unwrap_or("");
-                    let behavior = &identity.mail_from_behavior_on_mx_failure;
-                    let status = if mail_from.is_empty() {
-                        "NotStarted"
-                    } else {
-                        "Success"
-                    };
+                if let Some(identity) = st.identities.get_mut(identity_name.as_str()) {
+                    let mail_from = identity.mail_from_domain.clone().unwrap_or_default();
+                    if identity.mail_from_domain_status == "Pending" && !mail_from.is_empty() {
+                        identity.mail_from_domain_status = "Success".to_string();
+                    }
+                    if mail_from.is_empty() {
+                        identity.mail_from_domain_status = "NotStarted".to_string();
+                    }
+                    let behavior = identity.mail_from_behavior_on_mx_failure.clone();
+                    let status = identity.mail_from_domain_status.clone();
                     inner.push_str(&format!(
                         "<MailFromDomain>{}</MailFromDomain>\
-                         <MailFromDomainStatus>{status}</MailFromDomainStatus>\
+                         <MailFromDomainStatus>{}</MailFromDomainStatus>\
                          <BehaviorOnMXFailure>{}</BehaviorOnMXFailure>",
-                        xml_escape(mail_from),
-                        xml_escape(behavior),
+                        xml_escape(&mail_from),
+                        xml_escape(&status),
+                        xml_escape(&behavior),
                     ));
                 } else {
                     inner.push_str(
@@ -891,6 +896,11 @@ pub(crate) fn set_identity_mail_from_domain(
     if let Some(id) = st.identities.get_mut(identity) {
         id.mail_from_domain = mail_from_domain.filter(|s| !s.is_empty());
         id.mail_from_behavior_on_mx_failure = behavior;
+        id.mail_from_domain_status = if id.mail_from_domain.is_some() {
+            "Pending".to_string()
+        } else {
+            "NotStarted".to_string()
+        };
     } else {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,

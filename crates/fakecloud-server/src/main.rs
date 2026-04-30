@@ -2606,6 +2606,40 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/ses/identities/{name}/mail-from-status",
+            axum::routing::post({
+                let ss = ses_emails_state.clone();
+                move |axum::extract::Path(name): axum::extract::Path<String>,
+                      axum::Json(body): axum::Json<types::SesMailFromStatusRequest>| async move {
+                    let mut accounts = ss.write();
+                    let state = accounts.default_mut();
+                    let Some(identity) = state.identities.get_mut(&name) else {
+                        return (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "identity not found"})),
+                        );
+                    };
+                    let allowed = ["NotStarted", "Pending", "Success", "Failed"];
+                    if !allowed.contains(&body.status.as_str()) {
+                        return (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(serde_json::json!({
+                                "error": "status must be one of NotStarted/Pending/Success/Failed",
+                            })),
+                        );
+                    }
+                    identity.mail_from_domain_status = body.status.clone();
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "identity": name,
+                            "mailFromDomainStatus": body.status,
+                        })),
+                    )
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/ses/inbound",
             axum::routing::post({
                 let ss = ses_inbound_state.clone();

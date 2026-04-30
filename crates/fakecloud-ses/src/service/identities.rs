@@ -9,6 +9,27 @@ use crate::state::SesState;
 
 use super::SesV2Service;
 
+/// Expected DNS records the customer must publish for SES to accept the
+/// configured mail-from domain. Mirrors the JSON shape SES returns in
+/// `GetEmailIdentity.MailFromAttributes.MailFromDomainDnsRecords`.
+pub(crate) fn mail_from_dns_records(domain: &str, region: &str) -> Vec<Value> {
+    if domain.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        json!({
+            "Name": domain,
+            "Type": "MX",
+            "Value": format!("10 feedback-smtp.{region}.amazonses.com"),
+        }),
+        json!({
+            "Name": domain,
+            "Type": "TXT",
+            "Value": "\"v=spf1 include:amazonses.com ~all\"",
+        }),
+    ]
+}
+
 impl SesV2Service {
     pub(super) fn create_email_identity(
         &self,
@@ -56,6 +77,7 @@ impl SesV2Service {
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
+            mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name: None,
         };
 
@@ -109,10 +131,10 @@ impl SesV2Service {
         identity_name: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let accounts = self.state.read();
-        let empty = SesState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let identity = match state.identities.get(identity_name) {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let region = state.region.clone();
+        let identity = match state.identities.get_mut(identity_name) {
             Some(id) => id,
             None => {
                 return Ok(Self::json_error(
@@ -123,12 +145,19 @@ impl SesV2Service {
             }
         };
 
-        let mail_from_domain = identity.mail_from_domain.as_deref().unwrap_or("");
-        let mail_from_status = if mail_from_domain.is_empty() {
-            "FAILED"
-        } else {
-            "SUCCESS"
-        };
+        let mail_from_domain = identity.mail_from_domain.clone().unwrap_or_default();
+        // Auto-advance Pending -> Success on next read; matches real SES once
+        // it observes the expected MX/TXT records on the configured mail-from
+        // domain. Admin endpoint flips back to Failed for tests.
+        if identity.mail_from_domain_status == "Pending" && !mail_from_domain.is_empty() {
+            identity.mail_from_domain_status = "Success".to_string();
+        }
+        if mail_from_domain.is_empty() {
+            identity.mail_from_domain_status = "NotStarted".to_string();
+        }
+        let mail_from_status = identity.mail_from_domain_status.clone();
+        let behavior = identity.mail_from_behavior_on_mx_failure.clone();
+        let mail_from_dns = mail_from_dns_records(&mail_from_domain, &region);
 
         let mut response = json!({
             "IdentityType": identity.identity_type,
@@ -147,10 +176,13 @@ impl SesV2Service {
             "MailFromAttributes": {
                 "MailFromDomain": mail_from_domain,
                 "MailFromDomainStatus": mail_from_status,
-                "BehaviorOnMxFailure": identity.mail_from_behavior_on_mx_failure,
+                "BehaviorOnMxFailure": behavior,
             },
             "Tags": [],
         });
+        if !mail_from_dns.is_empty() {
+            response["MailFromAttributes"]["MailFromDomainDnsRecords"] = json!(mail_from_dns);
+        }
 
         if let Some(ref cs) = identity.configuration_set_name {
             response["ConfigurationSetName"] = json!(cs);
@@ -476,7 +508,14 @@ impl SesV2Service {
         };
 
         if let Some(domain) = body["MailFromDomain"].as_str() {
-            identity.mail_from_domain = Some(domain.to_string());
+            let trimmed = domain.trim();
+            if trimmed.is_empty() {
+                identity.mail_from_domain = None;
+                identity.mail_from_domain_status = "NotStarted".to_string();
+            } else {
+                identity.mail_from_domain = Some(trimmed.to_string());
+                identity.mail_from_domain_status = "Pending".to_string();
+            }
         }
         if let Some(behavior) = body["BehaviorOnMxFailure"].as_str() {
             identity.mail_from_behavior_on_mx_failure = behavior.to_string();
