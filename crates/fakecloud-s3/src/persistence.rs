@@ -29,6 +29,7 @@ pub fn bucket_meta_snapshot(b: &S3Bucket) -> BucketMeta {
         acl_owner_id: b.acl_owner_id.clone(),
         accelerate_status: b.accelerate_status.clone(),
         eventbridge_enabled: b.eventbridge_enabled,
+        lifecycle_transition_default_min_size: b.lifecycle_transition_default_min_size.clone(),
     }
 }
 
@@ -218,6 +219,7 @@ pub fn s3_bucket_from_snapshot(
         acl: meta.acl.clone(),
         encryption_config: None,
         lifecycle_config: None,
+        lifecycle_transition_default_min_size: meta.lifecycle_transition_default_min_size.clone(),
         policy: None,
         cors_config: None,
         notification_config: None,

@@ -109,6 +109,11 @@ pub struct S3Bucket {
     pub acl: Option<String>,
     pub encryption_config: Option<String>,
     pub lifecycle_config: Option<String>,
+    /// Value of the `x-amz-transition-default-minimum-object-size` header
+    /// supplied on PutBucketLifecycleConfiguration. Echoed back as a header
+    /// on the corresponding GET (and PUT) response. Real AWS defaults to
+    /// `all_storage_classes_128K` for general purpose buckets.
+    pub lifecycle_transition_default_min_size: Option<String>,
     pub policy: Option<String>,
     pub cors_config: Option<String>,
     pub notification_config: Option<String>,
@@ -160,6 +165,7 @@ impl S3Bucket {
             acl: None,
             encryption_config: None,
             lifecycle_config: None,
+            lifecycle_transition_default_min_size: None,
             policy: None,
             cors_config: None,
             notification_config: None,
