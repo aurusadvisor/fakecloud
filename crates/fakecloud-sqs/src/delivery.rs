@@ -87,11 +87,14 @@ impl SqsDelivery for SqsDeliveryImpl {
                 .map(|v| v.as_str())
                 == Some("true");
             if !content_based {
-                tracing::debug!(
-                    queue_arn,
-                    "skipping delivery: FIFO queue requires dedup ID or content-based dedup"
-                );
-                return Ok(());
+                // Real AWS surfaces InvalidParameterValue for FIFO sends
+                // missing a dedup ID; silently dropping defeats DLQ
+                // routing on the upstream service (SNS / EventBridge /
+                // Scheduler). Bubble the error so callers can route to
+                // their configured failure target.
+                return Err(SqsDeliveryError::InvalidParameter(format!(
+                    "FIFO queue {queue_arn} requires MessageDeduplicationId or ContentBasedDeduplication=true"
+                )));
             }
         }
 
@@ -101,6 +104,19 @@ impl SqsDelivery for SqsDeliveryImpl {
             message_dedup_id.map(|s| s.to_string())
         } else if queue.is_fifo {
             Some(crate::service::sha256_hex(message_body))
+        } else {
+            None
+        };
+
+        // FIFO queues stamp every accepted message with a monotonic
+        // sequence_number — receivers depend on it for in-order delivery
+        // and replay detection. The sync SendMessage path already does
+        // this; cross-service deliveries used to leave it as None,
+        // which broke FIFO consumers downstream.
+        let sequence_number = if queue.is_fifo {
+            let seq = queue.next_sequence_number;
+            queue.next_sequence_number = queue.next_sequence_number.saturating_add(1);
+            Some(seq.to_string())
         } else {
             None
         };
@@ -135,7 +151,7 @@ impl SqsDelivery for SqsDeliveryImpl {
             message_group_id: message_group_id.map(|s| s.to_string()),
             message_dedup_id: effective_dedup_id,
             created_at: now,
-            sequence_number: None,
+            sequence_number,
         };
         queue.messages.push_back(msg);
         tracing::debug!(queue_arn, "delivered message to SQS queue");
@@ -234,6 +250,37 @@ mod tests {
         let q = guard.default_ref().queues.get(&url).unwrap();
         assert_eq!(q.messages.len(), 1);
         assert!(q.messages.front().unwrap().message_dedup_id.is_some());
+    }
+
+    #[test]
+    fn deliver_fifo_assigns_sequence_number() {
+        let queue = make_queue("fifo.fifo", true, true);
+        let arn = queue.arn.clone();
+        let url = queue.queue_url.clone();
+        let state = make_state_with_queue(queue);
+        let delivery = SqsDeliveryImpl::new(state.clone());
+        delivery.deliver_to_queue_with_attrs(&arn, "first", &HashMap::new(), Some("g1"), None);
+        delivery.deliver_to_queue_with_attrs(&arn, "second", &HashMap::new(), Some("g1"), None);
+        let guard = state.read();
+        let q = guard.default_ref().queues.get(&url).unwrap();
+        assert_eq!(q.messages.len(), 2);
+        let s0 = q.messages[0].sequence_number.as_deref().unwrap();
+        let s1 = q.messages[1].sequence_number.as_deref().unwrap();
+        let n0: u64 = s0.parse().expect("decimal sequence number");
+        let n1: u64 = s1.parse().expect("decimal sequence number");
+        assert_eq!(n1, n0 + 1, "sequence_number must be monotonic");
+    }
+
+    #[test]
+    fn try_deliver_fifo_no_dedup_returns_invalid_parameter() {
+        let queue = make_queue("fifo.fifo", true, false);
+        let arn = queue.arn.clone();
+        let state = make_state_with_queue(queue);
+        let delivery = SqsDeliveryImpl::new(state.clone());
+        let err = delivery
+            .try_deliver_to_queue_with_attrs(&arn, "body", &HashMap::new(), Some("g1"), None)
+            .expect_err("should reject FIFO send without dedup id");
+        assert!(matches!(err, SqsDeliveryError::InvalidParameter(_)));
     }
 
     #[test]

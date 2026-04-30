@@ -39,6 +39,11 @@ pub enum SqsDeliveryError {
     QueueNotFound(String),
     /// The ARN could not be parsed into a valid SQS queue identifier.
     InvalidArn(String),
+    /// The message violated a constraint required by the target queue
+    /// (e.g. FIFO send missing MessageDeduplicationId without
+    /// content-based dedup enabled). Surfaces as a non-retriable
+    /// failure so the upstream service can route to its configured DLQ.
+    InvalidParameter(String),
 }
 
 impl std::fmt::Display for SqsDeliveryError {
@@ -46,6 +51,7 @@ impl std::fmt::Display for SqsDeliveryError {
         match self {
             Self::QueueNotFound(arn) => write!(f, "queue not found: {arn}"),
             Self::InvalidArn(arn) => write!(f, "invalid queue ARN: {arn}"),
+            Self::InvalidParameter(msg) => write!(f, "invalid parameter: {msg}"),
         }
     }
 }
