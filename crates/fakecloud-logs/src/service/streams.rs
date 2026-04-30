@@ -712,11 +712,20 @@ impl LogsService {
             )
         })?;
 
+        let retention_cutoff = group
+            .retention_in_days
+            .map(|d| Utc::now().timestamp_millis() - (d as i64) * 86_400_000);
+
         // All events are indexed 0..n
         let all_events: Vec<&LogEvent> = stream
             .events
             .iter()
             .filter(|e| {
+                if let Some(cutoff) = retention_cutoff {
+                    if e.timestamp < cutoff {
+                        return false;
+                    }
+                }
                 if let Some(start) = start_time {
                     if e.timestamp < start {
                         return false;
@@ -893,6 +902,10 @@ impl LogsService {
 
         let mut filtered_events: Vec<Value> = Vec::new();
 
+        let retention_cutoff = group
+            .retention_in_days
+            .map(|d| Utc::now().timestamp_millis() - (d as i64) * 86_400_000);
+
         let streams: Vec<(&String, &LogStream)> = if !stream_names.is_empty() {
             group
                 .log_streams
@@ -911,6 +924,11 @@ impl LogsService {
 
         for (_, stream) in streams {
             for event in &stream.events {
+                if let Some(cutoff) = retention_cutoff {
+                    if event.timestamp < cutoff {
+                        continue;
+                    }
+                }
                 if let Some(start) = start_time {
                     if event.timestamp < start {
                         continue;
@@ -1989,6 +2007,68 @@ mod tests {
             json!({"logGroupName": "g", "logStreamName": "missing"}),
         );
         assert!(svc.get_log_events(&req).is_err());
+    }
+
+    // ── retention enforcement ──
+
+    #[test]
+    fn get_log_events_drops_events_older_than_retention() {
+        let svc = make_service();
+        create_group(&svc, "g");
+        create_stream(&svc, "g", "s");
+        let now = chrono::Utc::now().timestamp_millis();
+        // 12 days ago: still inside the 14-day PutLogEvents window,
+        // but older than a 1-day retention.
+        let twelve_days_ago = now - 12 * 86_400_000;
+        put_events_at(&svc, "g", "s", &["old1", "old2"], twelve_days_ago);
+        put_events(&svc, "g", "s", &["fresh"]);
+        put_retention(&svc, "g", 1);
+
+        let req = make_request(
+            "GetLogEvents",
+            json!({"logGroupName": "g", "logStreamName": "s", "startFromHead": true}),
+        );
+        let resp = svc.get_log_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let events = body["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1, "expected only the fresh event");
+        assert_eq!(events[0]["message"].as_str().unwrap(), "fresh");
+    }
+
+    #[test]
+    fn get_log_events_no_retention_returns_all_events() {
+        let svc = make_service();
+        create_group(&svc, "g");
+        create_stream(&svc, "g", "s");
+        let now = chrono::Utc::now().timestamp_millis();
+        put_events_at(&svc, "g", "s", &["old"], now - 12 * 86_400_000);
+        put_events(&svc, "g", "s", &["fresh"]);
+
+        let req = make_request(
+            "GetLogEvents",
+            json!({"logGroupName": "g", "logStreamName": "s", "startFromHead": true}),
+        );
+        let resp = svc.get_log_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["events"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn filter_log_events_drops_events_older_than_retention() {
+        let svc = make_service();
+        create_group(&svc, "g");
+        create_stream(&svc, "g", "s");
+        let now = chrono::Utc::now().timestamp_millis();
+        put_events_at(&svc, "g", "s", &["stale"], now - 12 * 86_400_000);
+        put_events(&svc, "g", "s", &["recent"]);
+        put_retention(&svc, "g", 1);
+
+        let req = make_request("FilterLogEvents", json!({"logGroupName": "g"}));
+        let resp = svc.filter_log_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let events = body["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["message"].as_str().unwrap(), "recent");
     }
 
     // ── deliveries coverage ──

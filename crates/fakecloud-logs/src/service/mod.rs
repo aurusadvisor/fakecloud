@@ -766,6 +766,39 @@ pub(crate) mod test_helpers {
         svc.put_log_events(&req).unwrap();
     }
 
+    pub fn put_events_at(
+        svc: &LogsService,
+        group: &str,
+        stream: &str,
+        messages: &[&str],
+        timestamp: i64,
+    ) {
+        let events: Vec<serde_json::Value> = messages
+            .iter()
+            .enumerate()
+            .map(
+                |(i, msg)| serde_json::json!({ "timestamp": timestamp + i as i64, "message": msg }),
+            )
+            .collect();
+        let req = make_request(
+            "PutLogEvents",
+            serde_json::json!({
+                "logGroupName": group,
+                "logStreamName": stream,
+                "logEvents": events,
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+    }
+
+    pub fn put_retention(svc: &LogsService, group: &str, days: i32) {
+        let req = make_request(
+            "PutRetentionPolicy",
+            serde_json::json!({ "logGroupName": group, "retentionInDays": days }),
+        );
+        svc.put_retention_policy(&req).unwrap();
+    }
+
     #[test]
     fn array_filter_pattern_does_not_match() {
         assert!(
