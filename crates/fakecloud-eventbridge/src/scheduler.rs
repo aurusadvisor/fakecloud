@@ -554,6 +554,7 @@ mod tests {
                     input_path: None,
                     input_transformer: None,
                     sqs_parameters: None,
+                    ..Default::default()
                 }],
                 tags: BTreeMap::new(),
                 last_fired: None,

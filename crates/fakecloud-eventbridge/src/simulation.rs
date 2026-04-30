@@ -284,6 +284,7 @@ mod tests {
                 input_path: None,
                 input_transformer: None,
                 sqs_parameters: None,
+                ..Default::default()
             }],
         );
 
@@ -343,6 +344,7 @@ mod tests {
                 input_path: None,
                 input_transformer: None,
                 sqs_parameters: None,
+                ..Default::default()
             }],
         );
 
@@ -407,6 +409,7 @@ mod tests {
                     input_path: None,
                     input_transformer: None,
                     sqs_parameters: None,
+                    ..Default::default()
                 },
                 EventTarget {
                     id: "t-lambda".to_string(),
@@ -415,6 +418,7 @@ mod tests {
                     input_path: None,
                     input_transformer: None,
                     sqs_parameters: None,
+                    ..Default::default()
                 },
                 EventTarget {
                     id: "t-logs".to_string(),
@@ -423,6 +427,7 @@ mod tests {
                     input_path: None,
                     input_transformer: None,
                     sqs_parameters: None,
+                    ..Default::default()
                 },
             ],
         );
@@ -456,6 +461,7 @@ mod tests {
                 input_path: None,
                 input_transformer: None,
                 sqs_parameters: Some(json!({"MessageGroupId": "g1"})),
+                ..Default::default()
             }],
         );
         let ctx = FireRuleContext {
@@ -479,6 +485,7 @@ mod tests {
             input_path: None,
             input_transformer: None,
             sqs_parameters: None,
+            ..Default::default()
         };
         let body = resolve_target_body(&target, &json!({"ignored": 1}), "ignored");
         assert_eq!(body, "{\"literal\":true}");
@@ -493,6 +500,7 @@ mod tests {
             input_path: Some("$.detail".to_string()),
             input_transformer: None,
             sqs_parameters: None,
+            ..Default::default()
         };
         let event = json!({"detail": {"k": 1}, "other": 2});
         let body = resolve_target_body(&target, &event, "fallback");
@@ -508,6 +516,7 @@ mod tests {
             input_path: Some("$.detail.nested".to_string()),
             input_transformer: None,
             sqs_parameters: None,
+            ..Default::default()
         };
         let body = resolve_target_body(&target, &json!({}), "full-event");
         assert_eq!(body, "full-event");
@@ -522,6 +531,7 @@ mod tests {
             input_path: None,
             input_transformer: None,
             sqs_parameters: None,
+            ..Default::default()
         };
         let body = resolve_target_body(&target, &json!({}), "full-event");
         assert_eq!(body, "full-event");

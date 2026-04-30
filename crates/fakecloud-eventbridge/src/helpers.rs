@@ -117,6 +117,17 @@ pub(crate) fn parse_target(target: &Value) -> EventTarget {
         input_path: target["InputPath"].as_str().map(|s| s.to_string()),
         input_transformer: target.get("InputTransformer").cloned(),
         sqs_parameters: target.get("SqsParameters").cloned(),
+        role_arn: target["RoleArn"].as_str().map(|s| s.to_string()),
+        dead_letter_config: target.get("DeadLetterConfig").cloned(),
+        retry_policy: target.get("RetryPolicy").cloned(),
+        ecs_parameters: target.get("EcsParameters").cloned(),
+        batch_parameters: target.get("BatchParameters").cloned(),
+        kinesis_parameters: target.get("KinesisParameters").cloned(),
+        redshift_data_parameters: target.get("RedshiftDataParameters").cloned(),
+        http_parameters: target.get("HttpParameters").cloned(),
+        sage_maker_pipeline_parameters: target.get("SageMakerPipelineParameters").cloned(),
+        app_sync_parameters: target.get("AppSyncParameters").cloned(),
+        run_command_parameters: target.get("RunCommandParameters").cloned(),
     }
 }
 
@@ -133,6 +144,39 @@ pub(crate) fn target_to_json(t: &EventTarget) -> Value {
     }
     if let Some(ref sp) = t.sqs_parameters {
         obj["SqsParameters"] = sp.clone();
+    }
+    if let Some(ref ra) = t.role_arn {
+        obj["RoleArn"] = json!(ra);
+    }
+    if let Some(ref dlc) = t.dead_letter_config {
+        obj["DeadLetterConfig"] = dlc.clone();
+    }
+    if let Some(ref rp) = t.retry_policy {
+        obj["RetryPolicy"] = rp.clone();
+    }
+    if let Some(ref p) = t.ecs_parameters {
+        obj["EcsParameters"] = p.clone();
+    }
+    if let Some(ref p) = t.batch_parameters {
+        obj["BatchParameters"] = p.clone();
+    }
+    if let Some(ref p) = t.kinesis_parameters {
+        obj["KinesisParameters"] = p.clone();
+    }
+    if let Some(ref p) = t.redshift_data_parameters {
+        obj["RedshiftDataParameters"] = p.clone();
+    }
+    if let Some(ref p) = t.http_parameters {
+        obj["HttpParameters"] = p.clone();
+    }
+    if let Some(ref p) = t.sage_maker_pipeline_parameters {
+        obj["SageMakerPipelineParameters"] = p.clone();
+    }
+    if let Some(ref p) = t.app_sync_parameters {
+        obj["AppSyncParameters"] = p.clone();
+    }
+    if let Some(ref p) = t.run_command_parameters {
+        obj["RunCommandParameters"] = p.clone();
     }
     obj
 }
