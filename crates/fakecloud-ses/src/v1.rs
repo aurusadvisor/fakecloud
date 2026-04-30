@@ -23,6 +23,11 @@ pub const V1_ACTIONS: &[&str] = &[
     "VerifyEmailIdentity",
     "VerifyDomainIdentity",
     "VerifyDomainDkim",
+    // Legacy v1 email-verification aliases. Real SES still accepts
+    // these; the v2 surface uses the *Identity ops above.
+    "VerifyEmailAddress",
+    "ListVerifiedEmailAddresses",
+    "DeleteVerifiedEmailAddress",
     "ListIdentities",
     "GetIdentityVerificationAttributes",
     "GetIdentityDkimAttributes",

@@ -698,6 +698,72 @@ fn test_verify_email_identity() {
 }
 
 #[test]
+fn test_verify_email_address_legacy_alias() {
+    let state = make_state();
+    let req = make_v1_request("VerifyEmailAddress", vec![("EmailAddress", "legacy@x.io")]);
+    let resp = handle_v1_action(&state, &req).unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let mas = state.read();
+    let st = mas.default_ref();
+    let identity = st.identities.get("legacy@x.io").unwrap();
+    assert!(identity.verified);
+    assert_eq!(identity.identity_type, "EmailAddress");
+}
+
+#[test]
+fn test_list_verified_email_addresses_returns_only_email_identities() {
+    let state = make_state();
+    handle_v1_action(
+        &state,
+        &make_v1_request("VerifyEmailAddress", vec![("EmailAddress", "u1@x.io")]),
+    )
+    .unwrap();
+    handle_v1_action(
+        &state,
+        &make_v1_request("VerifyEmailAddress", vec![("EmailAddress", "u2@x.io")]),
+    )
+    .unwrap();
+    handle_v1_action(
+        &state,
+        &make_v1_request("VerifyDomainIdentity", vec![("Domain", "x.io")]),
+    )
+    .unwrap();
+
+    let resp = handle_v1_action(
+        &state,
+        &make_v1_request("ListVerifiedEmailAddresses", vec![]),
+    )
+    .unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("u1@x.io"));
+    assert!(body.contains("u2@x.io"));
+    assert!(body.contains("<VerifiedEmailAddresses>"));
+    // Domain identities don't appear here.
+    assert!(!body.contains("<member>x.io</member>"));
+}
+
+#[test]
+fn test_delete_verified_email_address_legacy_alias() {
+    let state = make_state();
+    handle_v1_action(
+        &state,
+        &make_v1_request("VerifyEmailAddress", vec![("EmailAddress", "drop@x.io")]),
+    )
+    .unwrap();
+    let resp = handle_v1_action(
+        &state,
+        &make_v1_request(
+            "DeleteVerifiedEmailAddress",
+            vec![("EmailAddress", "drop@x.io")],
+        ),
+    )
+    .unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let mas = state.read();
+    assert!(!mas.default_ref().identities.contains_key("drop@x.io"));
+}
+
+#[test]
 fn test_verify_domain_identity() {
     let state = make_state();
     let req = make_v1_request("VerifyDomainIdentity", vec![("Domain", "example.com")]);
