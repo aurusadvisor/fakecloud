@@ -2165,7 +2165,8 @@ async fn ssm_command_invocations() {
         .unwrap();
     let cmd_id = resp.command().unwrap().command_id().unwrap().to_string();
 
-    // GetCommandInvocation
+    // GetCommandInvocation: status advances Pending -> InProgress -> Success
+    // across successive calls (matching real SSM lifecycle).
     let resp = client
         .get_command_invocation()
         .command_id(&cmd_id)
@@ -2175,6 +2176,18 @@ async fn ssm_command_invocations() {
         .unwrap();
     assert_eq!(resp.command_id().unwrap(), cmd_id);
     assert_eq!(resp.instance_id().unwrap(), "i-1234567890abcdef0");
+    assert_eq!(
+        resp.status(),
+        Some(&aws_sdk_ssm::types::CommandInvocationStatus::InProgress)
+    );
+
+    let resp = client
+        .get_command_invocation()
+        .command_id(&cmd_id)
+        .instance_id("i-1234567890abcdef0")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(
         resp.status(),
         Some(&aws_sdk_ssm::types::CommandInvocationStatus::Success)
