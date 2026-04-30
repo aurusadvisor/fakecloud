@@ -3887,3 +3887,55 @@ async fn bucket_owner_enforced_rejects_put_object_with_acl_header() {
     };
     assert_eq!(err.status(), StatusCode::BAD_REQUEST);
 }
+
+#[test]
+fn put_bucket_encryption_aws_kms_requires_kms_master_key_id() {
+    // AWS rejects PutBucketEncryption with aws:kms but no
+    // KMSMasterKeyID — there's no key for the bucket to default
+    // encrypt against. fakecloud was silently accepting it.
+    let svc = make_service();
+    seed_bucket(&svc, "kmsenc");
+
+    let body = b"<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+    let req = make_request(Method::PUT, "/kmsenc", &[("encryption", "")], body);
+    let err = match svc.put_bucket_encryption("123456789012", &req, "kmsenc") {
+        Err(e) => e,
+        Ok(_) => panic!("expected InvalidArgument when KMSMasterKeyID is missing"),
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+    let body = b"<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID>alias/aws/s3</KMSMasterKeyID></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+    let req = make_request(Method::PUT, "/kmsenc", &[("encryption", "")], body);
+    svc.put_bucket_encryption("123456789012", &req, "kmsenc")
+        .unwrap();
+}
+
+#[test]
+fn get_bucket_policy_status_uses_real_json_parse() {
+    // Substring scan would falsely flag a Description string as
+    // public. Real JSON parse only flags actual Principal=*.
+    let svc = make_service();
+    seed_bucket(&svc, "polstat");
+
+    let policy = br#"{"Version":"2012-10-17","Id":"some \"Principal\":\"*\" string","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::123456789012:role/r"},"Action":"s3:GetObject","Resource":"arn:aws:s3:::polstat/*"}]}"#;
+    let req = make_request(Method::PUT, "/polstat", &[("policy", "")], policy);
+    svc.put_bucket_policy("123456789012", &req, "polstat")
+        .unwrap();
+    let resp = svc
+        .get_bucket_policy_status("123456789012", "polstat")
+        .unwrap();
+    assert!(std::str::from_utf8(resp.body.expect_bytes())
+        .unwrap()
+        .contains("<IsPublic>false</IsPublic>"));
+
+    let policy = br#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::polstat/*"}]}"#;
+    let req = make_request(Method::PUT, "/polstat", &[("policy", "")], policy);
+    svc.put_bucket_policy("123456789012", &req, "polstat")
+        .unwrap();
+    let resp = svc
+        .get_bucket_policy_status("123456789012", "polstat")
+        .unwrap();
+    assert!(std::str::from_utf8(resp.body.expect_bytes())
+        .unwrap()
+        .contains("<IsPublic>true</IsPublic>"));
+}

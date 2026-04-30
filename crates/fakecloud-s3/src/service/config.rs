@@ -60,6 +60,21 @@ impl PublicAccessBlockFlags {
     }
 }
 
+/// Validate that a `PutBucketEncryption` body referencing `aws:kms`
+/// or `aws:kms:dsse` includes a non-empty `KMSMasterKeyID`. Real
+/// AWS rejects these as `InvalidArgument` since there's no key the
+/// bucket can encrypt against.
+fn has_kms_master_key_id(xml: &str) -> bool {
+    let Some(start) = xml.find("<KMSMasterKeyID>") else {
+        return false;
+    };
+    let value_start = start + "<KMSMasterKeyID>".len();
+    let Some(end_offset) = xml[value_start..].find("</KMSMasterKeyID>") else {
+        return false;
+    };
+    !xml[value_start..value_start + end_offset].trim().is_empty()
+}
+
 /// Detect whether a parsed bucket-policy document grants access to an
 /// anonymous principal. Mirrors AWS's "is public" classifier:
 /// `Effect=Allow` with `Principal:"*"` or `{"AWS":"*"}` (or a list
@@ -129,6 +144,19 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
+        // aws:kms / aws:kms:dsse rules require KMSMasterKeyID — AWS
+        // rejects these with InvalidArgument when the field is
+        // missing or empty, since the bucket would otherwise have
+        // no key to encrypt against.
+        if (body_str.contains("aws:kms") || body_str.contains("aws:kms:dsse"))
+            && !has_kms_master_key_id(&body_str)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Default KMS encryption requires KMSMasterKeyID",
+            ));
+        }
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
         let b = state
@@ -1602,16 +1630,10 @@ impl S3Service {
             .buckets
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        let is_public = b
-            .policy
-            .as_deref()
-            .map(|p| {
-                // Whitespace-tolerant detection: strip all whitespace
-                // before scanning for the wildcard principal markers.
-                let compact: String = p.chars().filter(|c| !c.is_whitespace()).collect();
-                compact.contains("\"Principal\":\"*\"") || compact.contains("\"AWS\":\"*\"")
-            })
-            .unwrap_or(false);
+        // Real JSON parse instead of substring scanning so a policy
+        // containing the literal string `"Principal":"*"` inside a
+        // Description field doesn't get falsely classified public.
+        let is_public = b.policy.as_deref().map(policy_is_public).unwrap_or(false);
         let body = format!("<PolicyStatus><IsPublic>{is_public}</IsPublic></PolicyStatus>");
         Ok(s3_xml(StatusCode::OK, body))
     }
