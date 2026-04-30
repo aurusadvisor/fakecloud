@@ -346,6 +346,52 @@ async fn test_send_email_template_content() {
 }
 
 #[tokio::test]
+async fn test_send_email_template_renders_subject_and_body() {
+    let state = make_state();
+    {
+        use crate::state::EmailTemplate;
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.templates.insert(
+            "welcome".to_string(),
+            EmailTemplate {
+                template_name: "welcome".to_string(),
+                subject: Some("Hi {{name}}".to_string()),
+                html_body: Some("<p>Hi {{name}}</p>".to_string()),
+                text_body: Some("Hi {{name}}".to_string()),
+                created_at: chrono::Utc::now(),
+            },
+        );
+    }
+    let svc = SesV2Service::new(state.clone());
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["to@example.com"]},
+            "Content": {
+                "Template": {
+                    "TemplateName": "welcome",
+                    "TemplateData": "{\"name\": \"Alice\"}"
+                }
+            }
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let mas_r = state.read();
+    let s = mas_r.default_ref();
+    let sent = &s.sent_emails[0];
+    assert_eq!(sent.subject.as_deref(), Some("Hi Alice"));
+    assert_eq!(sent.html_body.as_deref(), Some("<p>Hi Alice</p>"));
+    assert_eq!(sent.text_body.as_deref(), Some("Hi Alice"));
+    assert_eq!(sent.template_name.as_deref(), Some("welcome"));
+}
+
+#[tokio::test]
 async fn test_send_email_missing_content() {
     let state = make_state();
     let svc = SesV2Service::new(state);

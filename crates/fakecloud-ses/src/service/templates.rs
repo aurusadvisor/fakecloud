@@ -198,35 +198,11 @@ impl SesV2Service {
             }
         };
 
-        // Parse template data JSON
-        let data: HashMap<String, Value> =
-            serde_json::from_str(&template_data_str).unwrap_or_default();
-
-        let substitute = |text: &str| -> String {
-            let mut result = text.to_string();
-            for (key, value) in &data {
-                let placeholder = format!("{{{{{}}}}}", key);
-                let replacement = match value {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                result = result.replace(&placeholder, &replacement);
-            }
-            result
-        };
-
-        let rendered_subject = template
-            .subject
-            .as_deref()
-            .map(&substitute)
-            .unwrap_or_default();
-        let rendered_html = template.html_body.as_deref().map(&substitute);
-        let rendered_text = template.text_body.as_deref().map(&substitute);
-
+        let rendered = render_template(template, &template_data_str);
         let mime = crate::mime::build_message(&crate::mime::MimeInputs {
-            subject: &rendered_subject,
-            text: rendered_text.as_deref(),
-            html: rendered_html.as_deref(),
+            subject: rendered.subject.as_deref().unwrap_or(""),
+            text: rendered.text.as_deref(),
+            html: rendered.html.as_deref(),
         });
 
         let response = json!({
@@ -234,5 +210,37 @@ impl SesV2Service {
         });
 
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
+    }
+}
+
+/// Result of rendering an `EmailTemplate` with caller-supplied JSON
+/// substitutions. All three fields are pre-substituted strings.
+pub struct RenderedTemplate {
+    pub subject: Option<String>,
+    pub html: Option<String>,
+    pub text: Option<String>,
+}
+
+/// Render an `EmailTemplate`'s subject/html/text by substituting
+/// `{{ key }}` placeholders with values from `template_data_str` (a
+/// JSON object). Falls back to empty data when the JSON is malformed.
+pub fn render_template(template: &EmailTemplate, template_data_str: &str) -> RenderedTemplate {
+    let data: HashMap<String, Value> = serde_json::from_str(template_data_str).unwrap_or_default();
+    let substitute = |text: &str| -> String {
+        let mut result = text.to_string();
+        for (key, value) in &data {
+            let placeholder = format!("{{{{{}}}}}", key);
+            let replacement = match value {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            result = result.replace(&placeholder, &replacement);
+        }
+        result
+    };
+    RenderedTemplate {
+        subject: template.subject.as_deref().map(&substitute),
+        html: template.html_body.as_deref().map(&substitute),
+        text: template.text_body.as_deref().map(&substitute),
     }
 }
