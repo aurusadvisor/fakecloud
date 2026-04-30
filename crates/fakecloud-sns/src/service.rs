@@ -509,6 +509,7 @@ impl SnsService {
                 tags,
                 is_fifo,
                 created_at: Utc::now(),
+                subscriptions_deleted: 0,
             };
             state.topics.insert(topic_arn.clone(), topic);
         }
@@ -652,7 +653,10 @@ impl SnsService {
             format_attr("Owner", &state.account_id),
             format_attr("SubscriptionsConfirmed", &subs_confirmed.to_string()),
             format_attr("SubscriptionsPending", &subs_pending.to_string()),
-            format_attr("SubscriptionsDeleted", "0"),
+            format_attr(
+                "SubscriptionsDeleted",
+                &topic.subscriptions_deleted.to_string(),
+            ),
         ];
 
         // EffectiveDeliveryPolicy: merge any user-set DeliveryPolicy
@@ -965,11 +969,22 @@ impl SnsService {
 
     fn unsubscribe(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let sub_arn = required(req, "SubscriptionArn")?;
-        self.state
-            .write()
-            .get_or_create(&req.account_id)
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(&req.account_id);
+        // Snapshot the parent topic ARN before removing the subscription
+        // so we can bump SubscriptionsDeleted on the right topic. Real
+        // SNS exposes this counter on GetTopicAttributes.
+        let parent_topic = state
             .subscriptions
-            .remove(&sub_arn);
+            .get(&sub_arn)
+            .map(|s| s.topic_arn.clone());
+        if state.subscriptions.remove(&sub_arn).is_some() {
+            if let Some(arn) = parent_topic {
+                if let Some(topic) = state.topics.get_mut(&arn) {
+                    topic.subscriptions_deleted = topic.subscriptions_deleted.saturating_add(1);
+                }
+            }
+        }
 
         Ok(xml_resp(
             &format!(

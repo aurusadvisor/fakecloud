@@ -152,6 +152,7 @@ fn add_permission_with_invalid_policy_returns_error_not_panic() {
                 is_fifo: false,
                 tags: vec![],
                 created_at: Utc::now(),
+                subscriptions_deleted: 0,
             },
         );
     }
@@ -388,6 +389,56 @@ fn unsubscribe_removes_subscription() {
     assert!(
         s.default_ref().subscriptions.is_empty(),
         "Subscription should be removed"
+    );
+    // SubscriptionsDeleted on the parent topic must reflect the
+    // unsubscribe so GetTopicAttributes returns a real cumulative count.
+    assert_eq!(
+        s.default_ref()
+            .topics
+            .get(topic_arn)
+            .map(|t| t.subscriptions_deleted),
+        Some(1)
+    );
+}
+
+#[test]
+fn get_topic_attributes_emits_subscriptions_deleted() {
+    let (svc, _state) = make_sns();
+    let req = sns_request("CreateTopic", vec![("Name", "sd-topic")]);
+    assert_ok(&svc.create_topic(&req));
+
+    let topic_arn = "arn:aws:sns:us-east-1:123456789012:sd-topic";
+    // Two subscriptions, then unsubscribe both.
+    for ep in ["a@example.com", "b@example.com"] {
+        let req = sns_request(
+            "Subscribe",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Protocol", "email"),
+                ("Endpoint", ep),
+            ],
+        );
+        assert_ok(&svc.subscribe(&req));
+    }
+    let sub_arns: Vec<String> = svc
+        .state
+        .read()
+        .default_ref()
+        .subscriptions
+        .keys()
+        .cloned()
+        .collect();
+    for arn in sub_arns {
+        let req = sns_request("Unsubscribe", vec![("SubscriptionArn", &arn)]);
+        assert_ok(&svc.unsubscribe(&req));
+    }
+
+    let req = sns_request("GetTopicAttributes", vec![("TopicArn", topic_arn)]);
+    let resp = svc.get_topic_attributes(&req).unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<key>SubscriptionsDeleted</key><value>2</value>"),
+        "expected SubscriptionsDeleted=2 in response, got: {body}"
     );
 }
 
