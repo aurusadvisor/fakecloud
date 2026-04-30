@@ -107,7 +107,7 @@ pub(crate) fn shard_to_json(shard: &KinesisShard) -> Value {
             "EndingHashKey": shard.ending_hash_key,
         },
         "SequenceNumberRange": {
-            "StartingSequenceNumber": format!("{:020}", 1),
+            "StartingSequenceNumber": format!("{:056}", 1),
         },
     });
     if let Some(ref parent) = shard.parent_shard_id {
@@ -118,7 +118,7 @@ pub(crate) fn shard_to_json(shard: &KinesisShard) -> Value {
     }
     if !shard.is_open {
         obj["SequenceNumberRange"]["EndingSequenceNumber"] = json!(format!(
-            "{:020}",
+            "{:056}",
             shard.next_sequence_number.saturating_sub(1).max(1)
         ));
     }
@@ -215,7 +215,7 @@ pub(crate) fn append_record(
     partition_key: &str,
     data: Vec<u8>,
 ) -> String {
-    let sequence_number = format!("{:020}", shard.next_sequence_number);
+    let sequence_number = format!("{:056}", shard.next_sequence_number);
     shard.next_sequence_number += 1;
     shard.records.push(KinesisRecord {
         sequence_number: sequence_number.clone(),
