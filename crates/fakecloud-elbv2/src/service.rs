@@ -359,6 +359,26 @@ impl Elbv2Service {
         let arn = required_query_param(req, "LoadBalancerArn")?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
+        if let Some(lb) = st.load_balancers.get(&arn) {
+            // ELBv2 rejects DeleteLoadBalancer when
+            // `deletion_protection.enabled=true` is in the LB
+            // attribute set. The attribute is opt-in and defaults
+            // off, so absence is permissive.
+            if lb
+                .attributes
+                .get("deletion_protection.enabled")
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "OperationNotPermitted",
+                    format!(
+                        "Load balancer '{arn}' cannot be deleted because deletion protection is enabled"
+                    ),
+                ));
+            }
+        }
         st.load_balancers.remove(&arn);
         let listener_arns: Vec<String> = st
             .listeners

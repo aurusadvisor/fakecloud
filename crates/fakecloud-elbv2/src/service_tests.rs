@@ -74,6 +74,61 @@ async fn create_validates_name() {
 }
 
 #[tokio::test]
+async fn delete_lb_blocked_when_deletion_protection_enabled() {
+    let svc = svc();
+    svc.handle(req(
+        "CreateLoadBalancer",
+        &[("Name", "guarded"), ("Subnets.member.1", "subnet-1")],
+    ))
+    .await
+    .unwrap();
+    let arn = {
+        let st = svc.state.read();
+        st.get("123456789012")
+            .unwrap()
+            .load_balancers
+            .keys()
+            .next()
+            .cloned()
+            .unwrap()
+    };
+
+    // Enable deletion protection.
+    svc.handle(req(
+        "ModifyLoadBalancerAttributes",
+        &[
+            ("LoadBalancerArn", &arn),
+            ("Attributes.member.1.Key", "deletion_protection.enabled"),
+            ("Attributes.member.1.Value", "true"),
+        ],
+    ))
+    .await
+    .unwrap();
+
+    let err = svc
+        .handle(req("DeleteLoadBalancer", &[("LoadBalancerArn", &arn)]))
+        .await
+        .err()
+        .expect("delete must fail under deletion_protection");
+    assert_eq!(err.code(), "OperationNotPermitted");
+
+    // After turning protection off, delete succeeds.
+    svc.handle(req(
+        "ModifyLoadBalancerAttributes",
+        &[
+            ("LoadBalancerArn", &arn),
+            ("Attributes.member.1.Key", "deletion_protection.enabled"),
+            ("Attributes.member.1.Value", "false"),
+        ],
+    ))
+    .await
+    .unwrap();
+    svc.handle(req("DeleteLoadBalancer", &[("LoadBalancerArn", &arn)]))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn delete_lb_is_idempotent() {
     let svc = svc();
     svc.handle(req("CreateLoadBalancer", &[("Name", "foo")]))
