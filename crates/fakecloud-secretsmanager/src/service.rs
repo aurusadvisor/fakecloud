@@ -298,9 +298,24 @@ impl SecretsManagerService {
         validate_optional_string_length("versionId", body["VersionId"].as_str(), 32, 64)?;
         validate_optional_string_length("versionStage", body["VersionStage"].as_str(), 1, 256)?;
 
+        // Resolve owning account from an ARN form. Cross-account
+        // GetSecretValue then evaluates `secret.resource_policy` via
+        // the IAM evaluator before returning the value.
+        let owner_account = secret_owner_account(&secret_id, &req.account_id);
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.get_or_create(&owner_account);
         let secret = self.find_secret_mut(state, &secret_id)?;
+        if owner_account != req.account_id {
+            let policy_doc = secret.resource_policy.as_deref().unwrap_or("");
+            let secret_arn = secret.arn.clone();
+            if !resource_policy_allows(policy_doc, &req.account_id, &secret_arn) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "AccessDeniedException",
+                    "User is not authorized to perform: secretsmanager:GetSecretValue on the requested resource",
+                ));
+            }
+        }
 
         if secret.deleted {
             return Err(AwsServiceError::aws_error(
@@ -2048,6 +2063,57 @@ impl AwsService for SecretsManagerService {
 #[path = "service_helpers.rs"]
 mod service_helpers;
 pub(crate) use service_helpers::*;
+
+/// Extract the owning account-id from an `arn:aws:secretsmanager:...:ACCOUNT:secret:...`
+/// secret id. Returns `caller_account` when the input is a bare name
+/// or a same-account ARN.
+fn secret_owner_account(secret_id: &str, caller_account: &str) -> String {
+    if !secret_id.starts_with("arn:aws:secretsmanager:") {
+        return caller_account.to_string();
+    }
+    let parts: Vec<&str> = secret_id.splitn(7, ':').collect();
+    if parts.len() < 5 {
+        return caller_account.to_string();
+    }
+    let account = parts[4];
+    if account.is_empty() {
+        caller_account.to_string()
+    } else {
+        account.to_string()
+    }
+}
+
+/// Evaluate a Secrets Manager resource policy against a cross-account
+/// caller. Empty policy implicitly denies (real AWS behaviour). Uses
+/// the shared IAM evaluator so the same policy semantics apply
+/// service-wide.
+fn resource_policy_allows(policy_doc: &str, caller_account: &str, secret_arn: &str) -> bool {
+    if policy_doc.is_empty() {
+        return false;
+    }
+    use fakecloud_core::auth::{Principal, PrincipalType};
+    use fakecloud_iam::evaluator::{evaluate, EvalRequest, PolicyDocument};
+    let doc = PolicyDocument::parse(policy_doc);
+    let principal_arn = format!("arn:aws:iam::{caller_account}:root");
+    let principal = Principal {
+        arn: principal_arn.clone(),
+        user_id: principal_arn.clone(),
+        account_id: caller_account.to_string(),
+        principal_type: PrincipalType::User,
+        source_identity: None,
+        tags: None,
+    };
+    let req = EvalRequest {
+        principal: &principal,
+        action: "secretsmanager:GetSecretValue".to_string(),
+        resource: secret_arn.to_string(),
+        context: Default::default(),
+    };
+    matches!(
+        evaluate(&[doc], &req),
+        fakecloud_iam::evaluator::Decision::Allow
+    )
+}
 
 #[cfg(test)]
 #[path = "service_tests.rs"]
