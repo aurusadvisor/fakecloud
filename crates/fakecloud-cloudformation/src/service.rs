@@ -18,6 +18,7 @@ use fakecloud_ssm::SharedSsmState;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::resource_provisioner::ResourceProvisioner;
+use crate::state;
 use crate::state::{
     CloudFormationSnapshot, CloudFormationState, SharedCloudFormationState, Stack, StackResource,
     CLOUDFORMATION_SNAPSHOT_SCHEMA_VERSION,
@@ -272,6 +273,132 @@ impl CloudFormationService {
         }
     }
 
+    /// Build a Fn::ImportValue lookup map across every stack in the
+    /// account: each stack's exported outputs map their `ExportName` to
+    /// the resolved value.
+    fn collect_account_imports(
+        state: &SharedCloudFormationState,
+        account_id: &str,
+        skip_stack: Option<&str>,
+    ) -> BTreeMap<String, String> {
+        let mut imports = BTreeMap::new();
+        let accounts = state.read();
+        let Some(state) = accounts.get(account_id) else {
+            return imports;
+        };
+        for stack in state.stacks.values() {
+            if matches!(skip_stack, Some(skip) if skip == stack.name) {
+                continue;
+            }
+            if stack.status == "DELETE_COMPLETE" {
+                continue;
+            }
+            for output in &stack.outputs {
+                if let Some(export) = &output.export_name {
+                    imports.insert(export.clone(), output.value.clone());
+                }
+            }
+        }
+        imports
+    }
+
+    /// Resolve every `Outputs.*` entry in `template_body` after the stack
+    /// has been provisioned. `resources` is the post-create / post-update
+    /// vec; we rebuild the physical-id and attribute maps from it before
+    /// invoking the template parser.
+    fn resolve_template_outputs(
+        template_body: &str,
+        parameters: &BTreeMap<String, String>,
+        resources: &[StackResource],
+        state: &SharedCloudFormationState,
+    ) -> Vec<state::StackOutput> {
+        let value: serde_json::Value = if template_body.trim_start().starts_with('{') {
+            match serde_json::from_str(template_body) {
+                Ok(v) => v,
+                Err(_) => return Vec::new(),
+            }
+        } else {
+            match serde_yaml::from_str(template_body) {
+                Ok(v) => v,
+                Err(_) => return Vec::new(),
+            }
+        };
+
+        let resources_obj = match value.get("Resources").and_then(|v| v.as_object()) {
+            Some(o) => o.clone(),
+            None => return Vec::new(),
+        };
+
+        let mut physical_ids: BTreeMap<String, String> = BTreeMap::new();
+        let mut attributes: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        for r in resources {
+            physical_ids.insert(r.logical_id.clone(), r.physical_id.clone());
+            attributes.insert(r.logical_id.clone(), r.attributes.clone());
+        }
+
+        let imports = {
+            let accounts = state.read();
+            let mut out = BTreeMap::new();
+            // Walk every account so cross-stack imports work even if
+            // future use-cases serve mixed accounts.
+            for (_account, st) in accounts.iter() {
+                for stack in st.stacks.values() {
+                    if stack.status == "DELETE_COMPLETE" {
+                        continue;
+                    }
+                    for o in &stack.outputs {
+                        if let Some(export) = &o.export_name {
+                            out.insert(export.clone(), o.value.clone());
+                        }
+                    }
+                }
+            }
+            out
+        };
+
+        let parsed = template::parse_outputs(
+            &value,
+            parameters,
+            &resources_obj,
+            &physical_ids,
+            &attributes,
+            &imports,
+        );
+
+        parsed
+            .into_iter()
+            .map(|o| state::StackOutput {
+                key: o.logical_id,
+                value: o.value,
+                description: o.description,
+                export_name: o.export_name,
+            })
+            .collect()
+    }
+
+    /// Reject creates/updates whose outputs would re-export a name that
+    /// another live stack already exports. Mirrors real CloudFormation.
+    fn ensure_export_uniqueness(
+        state: &SharedCloudFormationState,
+        account_id: &str,
+        stack_name: &str,
+        outputs: &[state::StackOutput],
+    ) -> Result<(), AwsServiceError> {
+        let existing = Self::collect_account_imports(state, account_id, Some(stack_name));
+        for o in outputs {
+            if let Some(export) = &o.export_name {
+                if existing.contains_key(export) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationError",
+                        format!("Export with name {export} is already exported by another stack"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn create_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let params = Self::get_all_params(req);
 
@@ -348,6 +475,11 @@ impl CloudFormationService {
         let resources =
             provision_stack_resources(&provisioner, &parsed.resources, template_body, &parameters)?;
 
+        let outputs =
+            Self::resolve_template_outputs(template_body, &parameters, &resources, &self.state);
+
+        Self::ensure_export_uniqueness(&self.state, &req.account_id, stack_name, &outputs)?;
+
         let stack = Stack {
             name: stack_name.clone(),
             stack_id: stack_id.clone(),
@@ -360,6 +492,7 @@ impl CloudFormationService {
             updated_at: None,
             description: parsed.description,
             notification_arns: notification_arns.clone(),
+            outputs,
         };
 
         {
@@ -645,7 +778,7 @@ impl CloudFormationService {
         } else {
             "UPDATE_COMPLETE".to_string()
         };
-        stack.parameters = input.parameters;
+        stack.parameters = input.parameters.clone();
         if !input.tags.is_empty() {
             stack.tags = input.tags;
         }
@@ -654,6 +787,10 @@ impl CloudFormationService {
         if !input.notification_arns.is_empty() {
             stack.notification_arns = input.notification_arns.clone();
         }
+        if update_result.is_ok() {
+            stack.outputs.clear();
+        }
+        let resources_snapshot = stack.resources.clone();
         let notification_arns = stack.notification_arns.clone();
         let stack_name_for_notif = stack.name.clone();
 
@@ -674,6 +811,26 @@ impl CloudFormationService {
         }
 
         drop(accounts);
+
+        let outputs = Self::resolve_template_outputs(
+            &input.template_body,
+            &input.parameters,
+            &resources_snapshot,
+            &self.state,
+        );
+        Self::ensure_export_uniqueness(&self.state, &req.account_id, &input.stack_name, &outputs)?;
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            if let Some(stack) = state
+                .stacks
+                .values_mut()
+                .find(|s| s.stack_id == stack_id && s.status != "DELETE_COMPLETE")
+            {
+                stack.outputs = outputs;
+            }
+        }
+
         Self::send_stack_notification(
             &self.deps.delivery,
             &notification_arns,
@@ -1322,5 +1479,110 @@ mod tests {
         );
         let req = make_request("UpdateStack", params);
         assert!(svc.update_stack(&req).is_err());
+    }
+
+    #[test]
+    fn create_stack_resolves_outputs_and_records_export() {
+        let svc = make_service();
+        let template = r#"{
+            "Resources": {
+                "Q": {"Type":"AWS::SQS::Queue","Properties":{"QueueName":"out-q"}}
+            },
+            "Outputs": {
+                "QueueUrl": {
+                    "Value": {"Ref": "Q"},
+                    "Description": "Url",
+                    "Export": {"Name": "TheQueueUrl"}
+                }
+            }
+        }"#;
+        let mut params = HashMap::new();
+        params.insert("StackName".to_string(), "outs".to_string());
+        params.insert("TemplateBody".to_string(), template.to_string());
+        let req = make_request("CreateStack", params);
+        svc.create_stack(&req).expect("create stack");
+
+        let accounts = svc.state.read();
+        let stack = accounts
+            .get("123456789012")
+            .unwrap()
+            .stacks
+            .get("outs")
+            .unwrap();
+        assert_eq!(stack.outputs.len(), 1);
+        assert_eq!(stack.outputs[0].key, "QueueUrl");
+        assert_eq!(stack.outputs[0].export_name.as_deref(), Some("TheQueueUrl"));
+        assert!(!stack.outputs[0].value.is_empty());
+    }
+
+    #[test]
+    fn create_stack_rejects_duplicate_export_name() {
+        let svc = make_service();
+        let mk = |name: &str| {
+            let template = format!(
+                r#"{{
+                    "Resources": {{"Q":{{"Type":"AWS::SQS::Queue","Properties":{{"QueueName":"q-{name}"}}}}}},
+                    "Outputs": {{"QueueUrl":{{"Value":{{"Ref":"Q"}},"Export":{{"Name":"DupExport"}}}}}}
+                }}"#
+            );
+            let mut params = HashMap::new();
+            params.insert("StackName".to_string(), name.to_string());
+            params.insert("TemplateBody".to_string(), template);
+            make_request("CreateStack", params)
+        };
+        match svc.create_stack(&mk("first")) {
+            Ok(_) => {}
+            Err(e) => panic!("first stack: {e:?}"),
+        }
+        match svc.create_stack(&mk("second")) {
+            Ok(_) => panic!("expected duplicate-export error"),
+            Err(e) => assert!(
+                format!("{e:?}").contains("already exported"),
+                "expected duplicate-export error, got {e:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn import_value_resolves_against_other_stack_export() {
+        let svc = make_service();
+
+        let producer_tpl = r#"{
+            "Resources": {"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"prod-q"}}},
+            "Outputs": {"Out":{"Value":{"Ref":"Q"},"Export":{"Name":"SharedQueueUrl"}}}
+        }"#;
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), "producer".to_string());
+        p.insert("TemplateBody".to_string(), producer_tpl.to_string());
+        svc.create_stack(&make_request("CreateStack", p))
+            .expect("producer");
+
+        let consumer_tpl = r#"{
+            "Resources": {"Q2":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"cons-q"}}},
+            "Outputs": {"Imp":{"Value":{"Fn::ImportValue":"SharedQueueUrl"}}}
+        }"#;
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), "consumer".to_string());
+        p.insert("TemplateBody".to_string(), consumer_tpl.to_string());
+        svc.create_stack(&make_request("CreateStack", p))
+            .expect("consumer");
+
+        let accounts = svc.state.read();
+        let prod_url = accounts
+            .get("123456789012")
+            .unwrap()
+            .stacks
+            .get("producer")
+            .unwrap()
+            .outputs[0]
+            .value
+            .clone();
+        let cons = accounts
+            .get("123456789012")
+            .unwrap()
+            .stacks
+            .get("consumer")
+            .unwrap();
+        assert_eq!(cons.outputs[0].value, prod_url);
     }
 }

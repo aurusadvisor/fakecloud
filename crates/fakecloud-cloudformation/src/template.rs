@@ -7,6 +7,18 @@ use std::collections::BTreeMap;
 pub struct ParsedTemplate {
     pub description: Option<String>,
     pub resources: Vec<ResourceDefinition>,
+    pub outputs: Vec<TemplateOutput>,
+}
+
+/// Resolved Outputs entry from the template's top-level `Outputs` block.
+/// `value` is the post-resolution string; `export_name` is set when the
+/// output declares `Export.Name`.
+#[derive(Debug, Clone)]
+pub struct TemplateOutput {
+    pub logical_id: String,
+    pub value: String,
+    pub description: Option<String>,
+    pub export_name: Option<String>,
 }
 
 /// A single resource from the template.
@@ -105,10 +117,82 @@ pub fn parse_template_with_resolution(
         });
     }
 
+    let outputs = parse_outputs(
+        &value,
+        parameters,
+        resources_obj,
+        resource_physical_ids,
+        resource_attributes,
+        &BTreeMap::new(),
+    );
+
     Ok(ParsedTemplate {
         description,
         resources,
+        outputs,
     })
+}
+
+/// Parse the template's `Outputs` block into resolved entries. Each
+/// `Value` is fully resolved (Ref / GetAtt / Sub / Join / Fn::ImportValue)
+/// to a string. Imports use `imports` for cross-stack lookups.
+pub fn parse_outputs(
+    template: &Value,
+    parameters: &BTreeMap<String, String>,
+    resources: &serde_json::Map<String, Value>,
+    resource_physical_ids: &BTreeMap<String, String>,
+    resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
+    imports: &BTreeMap<String, String>,
+) -> Vec<TemplateOutput> {
+    let outputs_obj = match template.get("Outputs").and_then(|v| v.as_object()) {
+        Some(o) => o,
+        None => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for (logical_id, body) in outputs_obj {
+        let raw_value = match body.get("Value") {
+            Some(v) => v,
+            None => continue,
+        };
+        let resolved = resolve_refs_with_imports(
+            raw_value,
+            parameters,
+            resources,
+            resource_physical_ids,
+            resource_attributes,
+            imports,
+        );
+        let value = match resolved {
+            Value::String(s) => s,
+            other => other.to_string(),
+        };
+        let description = body
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let export_name = body.get("Export").and_then(|e| e.get("Name")).map(|n| {
+            let resolved = resolve_refs_with_imports(
+                n,
+                parameters,
+                resources,
+                resource_physical_ids,
+                resource_attributes,
+                imports,
+            );
+            match resolved {
+                Value::String(s) => s,
+                other => other.to_string(),
+            }
+        });
+        out.push(TemplateOutput {
+            logical_id: logical_id.clone(),
+            value,
+            description,
+            export_name,
+        });
+    }
+    out
 }
 
 /// Re-resolve a single resource definition's properties with updated physical IDs.
@@ -190,13 +274,35 @@ fn pseudo_value(name: &str, parameters: &BTreeMap<String, String>) -> Option<Val
     }
 }
 
-/// Resolve `Ref`, `Fn::GetAtt`, `Fn::Join`, and `Fn::Sub` in property values.
+/// Resolve `Ref`, `Fn::GetAtt`, `Fn::Join`, and `Fn::Sub` in property
+/// values. Cross-stack `Fn::ImportValue` is not consulted; use
+/// `resolve_refs_with_imports` for that.
 fn resolve_refs(
     value: &Value,
     parameters: &BTreeMap<String, String>,
     _resources: &serde_json::Map<String, Value>,
     resource_physical_ids: &BTreeMap<String, String>,
     resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Value {
+    resolve_refs_with_imports(
+        value,
+        parameters,
+        _resources,
+        resource_physical_ids,
+        resource_attributes,
+        &BTreeMap::new(),
+    )
+}
+
+/// Resolve `Ref`, `Fn::GetAtt`, `Fn::Join`, `Fn::Sub`, and
+/// `Fn::ImportValue` in property values.
+fn resolve_refs_with_imports(
+    value: &Value,
+    parameters: &BTreeMap<String, String>,
+    _resources: &serde_json::Map<String, Value>,
+    resource_physical_ids: &BTreeMap<String, String>,
+    resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
+    imports: &BTreeMap<String, String>,
 ) -> Value {
     match value {
         Value::Object(map) => {
@@ -228,6 +334,27 @@ fn resolve_refs(
                     return Value::String(ref_name.to_string());
                 }
             }
+            // Fn::ImportValue: look up an exported value from another stack.
+            // Resolves to the empty string when the export name isn't known
+            // (callers that need strict failure can pre-validate).
+            if let Some(import_val) = map.get("Fn::ImportValue") {
+                let resolved = resolve_refs_with_imports(
+                    import_val,
+                    parameters,
+                    _resources,
+                    resource_physical_ids,
+                    resource_attributes,
+                    imports,
+                );
+                let key = match &resolved {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                if let Some(v) = imports.get(&key) {
+                    return Value::String(v.clone());
+                }
+                return Value::String(String::new());
+            }
             if let Some(getatt_val) = map.get("Fn::GetAtt") {
                 if let Some((logical_id, attr_name)) = parse_getatt(getatt_val) {
                     if let Some(attrs) = resource_attributes.get(&logical_id) {
@@ -249,12 +376,13 @@ fn resolve_refs(
                             let resolved_parts: Vec<String> = parts
                                 .iter()
                                 .map(|p| {
-                                    let resolved = resolve_refs(
+                                    let resolved = resolve_refs_with_imports(
                                         p,
                                         parameters,
                                         _resources,
                                         resource_physical_ids,
                                         resource_attributes,
+                                        imports,
                                     );
                                     match resolved {
                                         Value::String(s) => s,
@@ -270,12 +398,13 @@ fn resolve_refs(
             // Fn::Base64: base64-encode a string (or recursively-resolved
             // value).
             if let Some(b64_val) = map.get("Fn::Base64") {
-                let resolved = resolve_refs(
+                let resolved = resolve_refs_with_imports(
                     b64_val,
                     parameters,
                     _resources,
                     resource_physical_ids,
                     resource_attributes,
+                    imports,
                 );
                 let s = match &resolved {
                     Value::String(s) => s.clone(),
@@ -287,12 +416,13 @@ fn resolve_refs(
             }
             // Fn::Length: number of elements in an array.
             if let Some(len_val) = map.get("Fn::Length") {
-                let resolved = resolve_refs(
+                let resolved = resolve_refs_with_imports(
                     len_val,
                     parameters,
                     _resources,
                     resource_physical_ids,
                     resource_attributes,
+                    imports,
                 );
                 if let Some(arr) = resolved.as_array() {
                     return Value::Number(serde_json::Number::from(arr.len()));
@@ -301,12 +431,13 @@ fn resolve_refs(
             }
             // Fn::ToJsonString: serialize a value as a JSON string.
             if let Some(to_json) = map.get("Fn::ToJsonString") {
-                let resolved = resolve_refs(
+                let resolved = resolve_refs_with_imports(
                     to_json,
                     parameters,
                     _resources,
                     resource_physical_ids,
                     resource_attributes,
+                    imports,
                 );
                 let s = serde_json::to_string(&resolved).unwrap_or_default();
                 return Value::String(s);
@@ -317,12 +448,13 @@ fn resolve_refs(
                 if let Some(arr) = split_val.as_array() {
                     if arr.len() == 2 {
                         let delim = arr[0].as_str().unwrap_or("");
-                        let src_resolved = resolve_refs(
+                        let src_resolved = resolve_refs_with_imports(
                             &arr[1],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
+                            imports,
                         );
                         let src = match src_resolved {
                             Value::String(s) => s,
@@ -341,19 +473,21 @@ fn resolve_refs(
             if let Some(sel_val) = map.get("Fn::Select") {
                 if let Some(arr) = sel_val.as_array() {
                     if arr.len() == 2 {
-                        let idx_val = resolve_refs(
+                        let idx_val = resolve_refs_with_imports(
                             &arr[0],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
+                            imports,
                         );
-                        let list_val = resolve_refs(
+                        let list_val = resolve_refs_with_imports(
                             &arr[1],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
+                            imports,
                         );
                         let idx: usize = match &idx_val {
                             Value::Number(n) => n.as_u64().unwrap_or(0) as usize,
@@ -376,26 +510,29 @@ fn resolve_refs(
             if let Some(cidr_val) = map.get("Fn::Cidr") {
                 if let Some(arr) = cidr_val.as_array() {
                     if arr.len() == 3 {
-                        let block_val = resolve_refs(
+                        let block_val = resolve_refs_with_imports(
                             &arr[0],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
+                            imports,
                         );
-                        let count_val = resolve_refs(
+                        let count_val = resolve_refs_with_imports(
                             &arr[1],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
+                            imports,
                         );
-                        let bits_val = resolve_refs(
+                        let bits_val = resolve_refs_with_imports(
                             &arr[2],
                             parameters,
                             _resources,
                             resource_physical_ids,
                             resource_attributes,
+                            imports,
                         );
                         let block_str = match &block_val {
                             Value::String(s) => s.clone(),
@@ -444,12 +581,13 @@ fn resolve_refs(
             for (k, v) in map {
                 new_map.insert(
                     k.clone(),
-                    resolve_refs(
+                    resolve_refs_with_imports(
                         v,
                         parameters,
                         _resources,
                         resource_physical_ids,
                         resource_attributes,
+                        imports,
                     ),
                 );
             }
@@ -458,12 +596,13 @@ fn resolve_refs(
         Value::Array(arr) => Value::Array(
             arr.iter()
                 .map(|v| {
-                    resolve_refs(
+                    resolve_refs_with_imports(
                         v,
                         parameters,
                         _resources,
                         resource_physical_ids,
                         resource_attributes,
+                        imports,
                     )
                 })
                 .collect(),
