@@ -387,6 +387,29 @@ impl StsService {
         // Look up role in the TARGET account's state to get its role_id
         let target_state = accounts.get_or_create(&account_id);
         let role_name = role_arn.rsplit('/').next().unwrap_or("unknown");
+
+        // Enforce the role's trust policy `sts:ExternalId` Condition
+        // before minting credentials. AWS rejects with `AccessDenied`
+        // when the policy demands an ExternalId and the caller didn't
+        // supply one (or supplied a wrong one). Other Conditions
+        // (PrincipalOrgID / SourceAccount / MFA) follow in subsequent
+        // batches; this batch closes the most-cited security gap.
+        if let Some(role) = target_state.roles.get(role_name) {
+            if let Some(required) = required_external_id(&role.assume_role_policy_document) {
+                let supplied = req.query_params.get("ExternalId");
+                if supplied.map(String::as_str) != Some(required.as_str()) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::FORBIDDEN,
+                        "AccessDenied",
+                        format!(
+                            "User: {} is not authorized to perform: sts:AssumeRole on resource: {} because the role's trust policy requires a matching ExternalId",
+                            req.account_id, role_arn
+                        ),
+                    ));
+                }
+            }
+        }
+
         let role_id = target_state
             .roles
             .get(role_name)
@@ -1020,6 +1043,54 @@ impl StsService {
 }
 
 /// Extract account ID from an ARN like `arn:aws:iam::123456789012:role/name`.
+/// Extract the `sts:ExternalId` value from any Allow statement in
+/// the role's trust policy that has a `StringEquals` or
+/// `StringEqualsIgnoreCase` Condition naming `sts:ExternalId`. The
+/// caller's AssumeRole request must supply a matching ExternalId or
+/// AWS rejects with AccessDenied. Returns `None` when no statement
+/// requires an ExternalId — that's the unconditioned case where
+/// AssumeRole proceeds without further check.
+fn required_external_id(policy_doc: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(policy_doc).ok()?;
+    let statements = match parsed.get("Statement") {
+        Some(serde_json::Value::Array(arr)) => arr.clone(),
+        Some(stmt) => vec![stmt.clone()],
+        None => return None,
+    };
+    for stmt in &statements {
+        if stmt
+            .get("Effect")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.eq_ignore_ascii_case("Allow"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(condition) = stmt.get("Condition") else {
+            continue;
+        };
+        for op in ["StringEquals", "StringEqualsIgnoreCase"] {
+            let Some(map) = condition.get(op).and_then(|v| v.as_object()) else {
+                continue;
+            };
+            for (key, val) in map {
+                if !key.eq_ignore_ascii_case("sts:ExternalId") {
+                    continue;
+                }
+                if let Some(s) = val.as_str() {
+                    return Some(s.to_string());
+                }
+                if let Some(arr) = val.as_array() {
+                    if let Some(first) = arr.iter().find_map(|v| v.as_str()) {
+                        return Some(first.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn extract_account_from_arn(arn: &str) -> Option<String> {
     let parts: Vec<&str> = arn.split(':').collect();
     if parts.len() >= 5 && !parts[4].is_empty() {
@@ -1288,18 +1359,29 @@ mod tests {
     }
 
     fn create_role_in_state(state: &SharedIamState, name: &str) -> String {
+        create_role_in_state_with_trust(state, name, "{}")
+    }
+
+    fn create_role_in_state_with_trust(
+        state: &SharedIamState,
+        name: &str,
+        trust_policy: &str,
+    ) -> String {
         let arn = fakecloud_aws::arn::Arn::global("iam", "123456789012", &format!("role/{name}"))
             .to_string();
         let mut accounts = state.write();
         let s = accounts.get_or_create("123456789012");
+        // Real CreateRole inserts by role_name; assume_role looks up
+        // by role_name too, so the map key must match for the trust
+        // policy gate to actually fire.
         s.roles.insert(
-            arn.clone(),
+            name.to_string(),
             crate::state::IamRole {
                 role_name: name.to_string(),
                 role_id: format!("AROA{}", &uuid::Uuid::new_v4().to_string()[..17]),
                 arn: arn.clone(),
                 path: "/".to_string(),
-                assume_role_policy_document: "{}".to_string(),
+                assume_role_policy_document: trust_policy.to_string(),
                 created_at: Utc::now(),
                 description: None,
                 max_session_duration: 3600,
@@ -1428,6 +1510,78 @@ mod tests {
         let resp = svc.handle(req).await.unwrap();
         let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
         assert!(body.contains("<Account>"));
+    }
+
+    // ── Trust policy: ExternalId enforcement ──
+
+    #[tokio::test]
+    async fn assume_role_rejects_when_external_id_missing() {
+        // Trust policy demands sts:ExternalId; caller didn't supply
+        // one — AssumeRole must 403.
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole","Condition":{"StringEquals":{"sts:ExternalId":"secret-handshake"}}}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "third-party", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "sess")],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected AccessDenied when ExternalId missing"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn assume_role_rejects_when_external_id_mismatches() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole","Condition":{"StringEquals":{"sts:ExternalId":"secret-handshake"}}}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "third-party", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("ExternalId", "wrongguess"),
+            ],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected AccessDenied when ExternalId mismatches"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn assume_role_succeeds_when_external_id_matches() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole","Condition":{"StringEquals":{"sts:ExternalId":"secret-handshake"}}}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "third-party", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("ExternalId", "secret-handshake"),
+            ],
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(body.contains("<AccessKeyId>"));
+    }
+
+    #[tokio::test]
+    async fn assume_role_proceeds_when_no_external_id_required() {
+        // No ExternalId Condition in the trust policy — caller doesn't
+        // need to supply one.
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "open-role", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "sess")],
+        );
+        svc.handle(req).await.unwrap();
     }
 
     // ── Unsupported action ──
