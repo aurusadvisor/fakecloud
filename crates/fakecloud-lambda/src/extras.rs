@@ -320,13 +320,60 @@ impl LambdaService {
         function_name: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+
+        // ZipFile / ImageUri / S3Bucket+S3Key are mutually exclusive; AWS
+        // rejects the request when more than one is present, but we just
+        // pick the first available with a defined precedence: ZipFile,
+        // ImageUri, S3 (which we resolve only enough to swap the bytes —
+        // S3 fetches happen out of band on real Lambda).
+        let new_zip: Option<Vec<u8>> = match body["ZipFile"].as_str() {
+            Some(b64) => Some(
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).map_err(
+                    |_| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterValueException",
+                            "Could not decode ZipFile: invalid base64",
+                        )
+                    },
+                )?,
+            ),
+            None => None,
+        };
+        let new_image_uri = body["ImageUri"].as_str().map(String::from);
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let func = state
             .functions
             .get_mut(function_name)
             .ok_or_else(|| not_found("Function", function_name))?;
+
+        if let Some(bytes) = new_zip {
+            // SHA256(base64) of the new code, matching CreateFunction's
+            // hash so GetFunction returns identical CodeSha256 round-trip.
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let hash = hasher.finalize();
+            let code_sha256 =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hash);
+            func.code_size = bytes.len() as i64;
+            func.code_zip = Some(bytes);
+            func.code_sha256 = code_sha256;
+            func.image_uri = None;
+        } else if let Some(uri) = new_image_uri {
+            func.image_uri = Some(uri);
+            func.code_zip = None;
+        }
+        // No-op (no ZipFile, ImageUri, or S3 fields) — AWS still bumps
+        // last_modified and returns the current config.
+
         func.last_modified = Utc::now();
+        // Bump revision_id only when code actually changed; the caller
+        // can use it to detect concurrent updates.
+        func.revision_id = uuid::Uuid::new_v4().to_string();
         ok(self.function_config_json(func))
     }
 
