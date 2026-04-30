@@ -41,6 +41,7 @@ fn provision_stack_resources(
 ) -> Result<Vec<StackResource>, AwsServiceError> {
     let mut resources = Vec::new();
     let mut physical_ids: BTreeMap<String, String> = BTreeMap::new();
+    let mut attributes: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut pending: Vec<&template::ResourceDefinition> = resource_defs.iter().collect();
     let max_passes = pending.len() + 1;
 
@@ -52,11 +53,12 @@ fn provision_stack_resources(
         let mut made_progress = false;
 
         for resource_def in pending {
-            let resolved_def = template::resolve_resource_properties(
+            let resolved_def = template::resolve_resource_properties_with_attrs(
                 resource_def,
                 template_body,
                 parameters,
                 &physical_ids,
+                &attributes,
             )
             .map_err(|e| {
                 AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
@@ -67,6 +69,10 @@ fn provision_stack_resources(
                     physical_ids.insert(
                         stack_resource.logical_id.clone(),
                         stack_resource.physical_id.clone(),
+                    );
+                    attributes.insert(
+                        stack_resource.logical_id.clone(),
+                        stack_resource.attributes.clone(),
                     );
                     resources.push(stack_resource);
                     made_progress = true;
@@ -80,11 +86,12 @@ fn provision_stack_resources(
             // No progress — report the first failure and rollback anything
             // we already created.
             let resource_def = pending[0];
-            let resolved_def = template::resolve_resource_properties(
+            let resolved_def = template::resolve_resource_properties_with_attrs(
                 resource_def,
                 template_body,
                 parameters,
                 &physical_ids,
+                &attributes,
             )
             .unwrap_or_else(|_| resource_def.clone());
             let err = provisioner.create_resource(&resolved_def).unwrap_err();
@@ -884,21 +891,27 @@ fn apply_resource_updates(
         .resources
         .retain(|r| new_logical_ids.contains(&r.logical_id));
 
-    // Build physical ID map from existing resources
+    // Build physical ID + attribute maps from existing resources
     let mut physical_ids: BTreeMap<String, String> = stack
         .resources
         .iter()
         .map(|r| (r.logical_id.clone(), r.physical_id.clone()))
         .collect();
+    let mut attributes: BTreeMap<String, BTreeMap<String, String>> = stack
+        .resources
+        .iter()
+        .map(|r| (r.logical_id.clone(), r.attributes.clone()))
+        .collect();
 
     // Create new resources
     for resource_def in new_resource_defs {
         if !old_logical_ids.contains(&resource_def.logical_id) {
-            let resolved_def = template::resolve_resource_properties(
+            let resolved_def = template::resolve_resource_properties_with_attrs(
                 resource_def,
                 template_body,
                 parameters,
                 &physical_ids,
+                &attributes,
             )
             .map_err(|e| {
                 format!(
@@ -912,6 +925,10 @@ fn apply_resource_updates(
                     physical_ids.insert(
                         stack_resource.logical_id.clone(),
                         stack_resource.physical_id.clone(),
+                    );
+                    attributes.insert(
+                        stack_resource.logical_id.clone(),
+                        stack_resource.attributes.clone(),
                     );
                     stack.resources.push(stack_resource);
                 }

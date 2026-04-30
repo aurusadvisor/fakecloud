@@ -42,6 +42,23 @@ pub fn parse_template_with_physical_ids(
     parameters: &BTreeMap<String, String>,
     resource_physical_ids: &BTreeMap<String, String>,
 ) -> Result<ParsedTemplate, String> {
+    parse_template_with_resolution(
+        template_body,
+        parameters,
+        resource_physical_ids,
+        &BTreeMap::new(),
+    )
+}
+
+/// Parse a CloudFormation template, resolving `Ref` via `resource_physical_ids`
+/// and `Fn::GetAtt` via `resource_attributes` (keyed by logical id, then
+/// attribute name).
+pub fn parse_template_with_resolution(
+    template_body: &str,
+    parameters: &BTreeMap<String, String>,
+    resource_physical_ids: &BTreeMap<String, String>,
+    resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Result<ParsedTemplate, String> {
     let value: Value = if template_body.trim_start().starts_with('{') {
         serde_json::from_str(template_body).map_err(|e| format!("Invalid JSON template: {e}"))?
     } else {
@@ -77,6 +94,7 @@ pub fn parse_template_with_physical_ids(
             parameters,
             resources_obj,
             resource_physical_ids,
+            resource_attributes,
         );
 
         resources.push(ResourceDefinition {
@@ -99,6 +117,24 @@ pub fn resolve_resource_properties(
     parameters: &BTreeMap<String, String>,
     resource_physical_ids: &BTreeMap<String, String>,
 ) -> Result<ResourceDefinition, String> {
+    resolve_resource_properties_with_attrs(
+        resource,
+        template_body,
+        parameters,
+        resource_physical_ids,
+        &BTreeMap::new(),
+    )
+}
+
+/// Re-resolve a single resource definition's properties with updated physical
+/// IDs and attribute values for `Fn::GetAtt`.
+pub fn resolve_resource_properties_with_attrs(
+    resource: &ResourceDefinition,
+    template_body: &str,
+    parameters: &BTreeMap<String, String>,
+    resource_physical_ids: &BTreeMap<String, String>,
+    resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Result<ResourceDefinition, String> {
     let value: Value = if template_body.trim_start().starts_with('{') {
         serde_json::from_str(template_body).map_err(|e| format!("Invalid JSON template: {e}"))?
     } else {
@@ -116,7 +152,13 @@ pub fn resolve_resource_properties(
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
-    let resolved = resolve_refs(&raw_props, parameters, resources_obj, resource_physical_ids);
+    let resolved = resolve_refs(
+        &raw_props,
+        parameters,
+        resources_obj,
+        resource_physical_ids,
+        resource_attributes,
+    );
 
     Ok(ResourceDefinition {
         logical_id: resource.logical_id.clone(),
@@ -125,12 +167,13 @@ pub fn resolve_resource_properties(
     })
 }
 
-/// Resolve { "Ref": "param_name" } and { "Fn::GetAtt": [...] } in property values.
+/// Resolve `Ref`, `Fn::GetAtt`, `Fn::Join`, and `Fn::Sub` in property values.
 fn resolve_refs(
     value: &Value,
     parameters: &BTreeMap<String, String>,
     _resources: &serde_json::Map<String, Value>,
     resource_physical_ids: &BTreeMap<String, String>,
+    resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Value {
     match value {
         Value::Object(map) => {
@@ -158,6 +201,19 @@ fn resolve_refs(
                     return Value::String(ref_name.to_string());
                 }
             }
+            if let Some(getatt_val) = map.get("Fn::GetAtt") {
+                if let Some((logical_id, attr_name)) = parse_getatt(getatt_val) {
+                    if let Some(attrs) = resource_attributes.get(&logical_id) {
+                        if let Some(attr_value) = attrs.get(&attr_name) {
+                            return Value::String(attr_value.clone());
+                        }
+                    }
+                    // Resource not yet provisioned, or attribute unknown.
+                    // Surface a placeholder so the consumer can still string-format
+                    // it; multi-pass provisioning will retry once attributes land.
+                    return Value::String(format!("{logical_id}.{attr_name}"));
+                }
+            }
             if let Some(join_val) = map.get("Fn::Join") {
                 if let Some(arr) = join_val.as_array() {
                     if arr.len() == 2 {
@@ -171,6 +227,7 @@ fn resolve_refs(
                                         parameters,
                                         _resources,
                                         resource_physical_ids,
+                                        resource_attributes,
                                     );
                                     match resolved {
                                         Value::String(s) => s,
@@ -193,6 +250,12 @@ fn resolve_refs(
                     for (k, v) in resource_physical_ids {
                         result = result.replace(&format!("${{{k}}}"), v);
                     }
+                    // GetAtt-style substitutions: ${LogicalId.AttrName}
+                    for (logical, attrs) in resource_attributes {
+                        for (attr, value) in attrs {
+                            result = result.replace(&format!("${{{logical}.{attr}}}"), value);
+                        }
+                    }
                     return Value::String(result);
                 }
             }
@@ -201,17 +264,55 @@ fn resolve_refs(
             for (k, v) in map {
                 new_map.insert(
                     k.clone(),
-                    resolve_refs(v, parameters, _resources, resource_physical_ids),
+                    resolve_refs(
+                        v,
+                        parameters,
+                        _resources,
+                        resource_physical_ids,
+                        resource_attributes,
+                    ),
                 );
             }
             Value::Object(new_map)
         }
         Value::Array(arr) => Value::Array(
             arr.iter()
-                .map(|v| resolve_refs(v, parameters, _resources, resource_physical_ids))
+                .map(|v| {
+                    resolve_refs(
+                        v,
+                        parameters,
+                        _resources,
+                        resource_physical_ids,
+                        resource_attributes,
+                    )
+                })
                 .collect(),
         ),
         other => other.clone(),
+    }
+}
+
+/// Parse a `Fn::GetAtt` argument. Accepts either the array form
+/// `["LogicalId", "Attr"]` (also nested attribute paths joined with `.`)
+/// or the short string form `"LogicalId.Attr"`.
+fn parse_getatt(value: &Value) -> Option<(String, String)> {
+    match value {
+        Value::Array(arr) if arr.len() >= 2 => {
+            let logical_id = arr[0].as_str()?.to_string();
+            let parts: Vec<String> = arr[1..]
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect();
+            Some((logical_id, parts.join(".")))
+        }
+        Value::String(s) => {
+            let (logical_id, attr) = s.split_once('.')?;
+            Some((logical_id.to_string(), attr.to_string()))
+        }
+        _ => None,
     }
 }
 
@@ -438,6 +539,169 @@ Resources:
         let params = BTreeMap::new();
         let result = parse_template(r#"{"Resources":{"R":{"Properties":{}}}}"#, &params);
         assert!(result.is_err());
+    }
+
+    // ── Fn::GetAtt ──
+
+    #[test]
+    fn fn_getatt_resolves_attribute_in_array_form() {
+        let template = r#"{
+            "Resources": {
+                "MyQueue": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": { "QueueName": "q1" }
+                },
+                "MyTopic": {
+                    "Type": "AWS::SNS::Topic",
+                    "Properties": {
+                        "TopicName": "t1",
+                        "DataProtectionPolicy": {
+                            "Fn::GetAtt": ["MyQueue", "Arn"]
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        let mut attrs = BTreeMap::new();
+        let mut q_attrs = BTreeMap::new();
+        q_attrs.insert(
+            "Arn".to_string(),
+            "arn:aws:sqs:us-east-1:123456789012:q1".to_string(),
+        );
+        attrs.insert("MyQueue".to_string(), q_attrs);
+
+        let parsed =
+            parse_template_with_resolution(template, &BTreeMap::new(), &BTreeMap::new(), &attrs)
+                .unwrap();
+        let topic = parsed
+            .resources
+            .iter()
+            .find(|r| r.logical_id == "MyTopic")
+            .unwrap();
+        assert_eq!(
+            topic.properties["DataProtectionPolicy"],
+            Value::String("arn:aws:sqs:us-east-1:123456789012:q1".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_getatt_resolves_attribute_in_short_string_form() {
+        let template = r#"{
+            "Resources": {
+                "MyTopic": {
+                    "Type": "AWS::SNS::Topic",
+                    "Properties": {
+                        "TopicName": "t1",
+                        "PolicyArn": { "Fn::GetAtt": "MyQueue.Arn" }
+                    }
+                }
+            }
+        }"#;
+
+        let mut attrs = BTreeMap::new();
+        let mut q_attrs = BTreeMap::new();
+        q_attrs.insert(
+            "Arn".to_string(),
+            "arn:aws:sqs:us-east-1:123456789012:q1".to_string(),
+        );
+        attrs.insert("MyQueue".to_string(), q_attrs);
+
+        let parsed =
+            parse_template_with_resolution(template, &BTreeMap::new(), &BTreeMap::new(), &attrs)
+                .unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["PolicyArn"],
+            Value::String("arn:aws:sqs:us-east-1:123456789012:q1".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_getatt_unknown_resource_returns_placeholder() {
+        let template = r#"{
+            "Resources": {
+                "MyTopic": {
+                    "Type": "AWS::SNS::Topic",
+                    "Properties": {
+                        "TopicName": { "Fn::GetAtt": ["MyQueue", "Arn"] }
+                    }
+                }
+            }
+        }"#;
+
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        // Unresolved GetAtt becomes a placeholder; multi-pass provisioning
+        // re-resolves once the target is known.
+        assert_eq!(
+            parsed.resources[0].properties["TopicName"],
+            Value::String("MyQueue.Arn".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_getatt_inside_fn_join_resolves() {
+        let template = r#"{
+            "Resources": {
+                "MyParam": {
+                    "Type": "AWS::SSM::Parameter",
+                    "Properties": {
+                        "Name": "/app/q",
+                        "Type": "String",
+                        "Value": {
+                            "Fn::Join": [":", ["queue", { "Fn::GetAtt": ["MyQueue", "Arn"] }]]
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        let mut attrs = BTreeMap::new();
+        let mut q_attrs = BTreeMap::new();
+        q_attrs.insert(
+            "Arn".to_string(),
+            "arn:aws:sqs:us-east-1:123456789012:q1".to_string(),
+        );
+        attrs.insert("MyQueue".to_string(), q_attrs);
+
+        let parsed =
+            parse_template_with_resolution(template, &BTreeMap::new(), &BTreeMap::new(), &attrs)
+                .unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["Value"],
+            Value::String("queue:arn:aws:sqs:us-east-1:123456789012:q1".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_sub_resolves_getatt_style_substitution() {
+        let template = r#"{
+            "Resources": {
+                "MyParam": {
+                    "Type": "AWS::SSM::Parameter",
+                    "Properties": {
+                        "Name": "/app/q",
+                        "Type": "String",
+                        "Value": { "Fn::Sub": "Queue arn is ${MyQueue.Arn}" }
+                    }
+                }
+            }
+        }"#;
+
+        let mut attrs = BTreeMap::new();
+        let mut q_attrs = BTreeMap::new();
+        q_attrs.insert(
+            "Arn".to_string(),
+            "arn:aws:sqs:us-east-1:123456789012:q1".to_string(),
+        );
+        attrs.insert("MyQueue".to_string(), q_attrs);
+
+        let parsed =
+            parse_template_with_resolution(template, &BTreeMap::new(), &BTreeMap::new(), &attrs)
+                .unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["Value"],
+            Value::String("Queue arn is arn:aws:sqs:us-east-1:123456789012:q1".to_string())
+        );
     }
 
     #[test]

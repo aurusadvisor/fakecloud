@@ -20,6 +20,27 @@ use fakecloud_ssm::{SharedSsmState, SsmParameter};
 use crate::state::StackResource;
 use crate::template::ResourceDefinition;
 
+/// What a resource provisioner returns. The physical id is what `Ref` resolves
+/// to; `attributes` is what `Fn::GetAtt` resolves to (per-resource-type).
+pub struct ProvisionResult {
+    pub physical_id: String,
+    pub attributes: BTreeMap<String, String>,
+}
+
+impl ProvisionResult {
+    pub fn new(physical_id: impl Into<String>) -> Self {
+        Self {
+            physical_id: physical_id.into(),
+            attributes: BTreeMap::new(),
+        }
+    }
+
+    pub fn with(mut self, key: &str, value: impl Into<String>) -> Self {
+        self.attributes.insert(key.to_string(), value.into());
+        self
+    }
+}
+
 /// Holds references to all service states so CloudFormation can provision resources.
 pub struct ResourceProvisioner {
     pub sqs_state: SharedSqsState,
@@ -50,9 +71,9 @@ impl ResourceProvisioner {
             "AWS::Events::Rule" => self.create_eventbridge_rule(resource),
             "AWS::DynamoDB::Table" => self.create_dynamodb_table(resource),
             "AWS::Logs::LogGroup" => self.create_log_group(resource),
-            t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
-                self.create_custom_resource(resource)
-            }
+            t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
+                .create_custom_resource(resource)
+                .map(ProvisionResult::new),
             other => Err(format!("Unsupported resource type: {other}")),
         };
 
@@ -68,12 +89,13 @@ impl ResourceProvisioner {
             None
         };
 
-        result.map(|physical_id| StackResource {
+        result.map(|res| StackResource {
             logical_id: resource.logical_id.clone(),
-            physical_id,
+            physical_id: res.physical_id,
             resource_type: resource.resource_type.clone(),
             status: "CREATE_COMPLETE".to_string(),
             service_token,
+            attributes: res.attributes,
         })
     }
 
@@ -99,7 +121,7 @@ impl ResourceProvisioner {
 
     // --- SQS ---
 
-    fn create_sqs_queue(&self, resource: &ResourceDefinition) -> Result<String, String> {
+    fn create_sqs_queue(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let queue_name = props
             .get("QueueName")
@@ -131,7 +153,7 @@ impl ResourceProvisioner {
         let queue = SqsQueue {
             queue_name: queue_name.to_string(),
             queue_url: queue_url.clone(),
-            arn,
+            arn: arn.clone(),
             created_at: Utc::now(),
             messages: std::collections::VecDeque::new(),
             inflight: Vec::new(),
@@ -150,7 +172,10 @@ impl ResourceProvisioner {
             .insert(queue_name.to_string(), queue_url.clone());
         state.queues.insert(queue_url.clone(), queue);
 
-        Ok(queue_url)
+        Ok(ProvisionResult::new(queue_url.clone())
+            .with("Arn", arn)
+            .with("QueueName", queue_name)
+            .with("QueueUrl", queue_url))
     }
 
     fn delete_sqs_queue(&self, physical_id: &str) -> Result<(), String> {
@@ -164,7 +189,7 @@ impl ResourceProvisioner {
 
     // --- SNS ---
 
-    fn create_sns_topic(&self, resource: &ResourceDefinition) -> Result<String, String> {
+    fn create_sns_topic(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let topic_name = props
             .get("TopicName")
@@ -188,7 +213,9 @@ impl ResourceProvisioner {
         };
 
         state.topics.insert(topic_arn.clone(), topic);
-        Ok(topic_arn)
+        Ok(ProvisionResult::new(topic_arn.clone())
+            .with("TopicArn", topic_arn)
+            .with("TopicName", topic_name))
     }
 
     fn delete_sns_topic(&self, physical_id: &str) -> Result<(), String> {
@@ -204,7 +231,10 @@ impl ResourceProvisioner {
 
     // --- SNS Subscription ---
 
-    fn create_sns_subscription(&self, resource: &ResourceDefinition) -> Result<String, String> {
+    fn create_sns_subscription(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let topic_arn = props
             .get("TopicArn")
@@ -241,7 +271,7 @@ impl ResourceProvisioner {
         };
 
         state.subscriptions.insert(sub_arn.clone(), subscription);
-        Ok(sub_arn)
+        Ok(ProvisionResult::new(sub_arn.clone()).with("Arn", sub_arn))
     }
 
     fn delete_sns_subscription(&self, physical_id: &str) -> Result<(), String> {
@@ -253,7 +283,10 @@ impl ResourceProvisioner {
 
     // --- SSM ---
 
-    fn create_ssm_parameter(&self, resource: &ResourceDefinition) -> Result<String, String> {
+    fn create_ssm_parameter(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let name = props
             .get("Name")
@@ -303,7 +336,9 @@ impl ResourceProvisioner {
         };
 
         state.parameters.insert(name.to_string(), parameter);
-        Ok(name.to_string())
+        Ok(ProvisionResult::new(name)
+            .with("Type", param_type)
+            .with("Value", value))
     }
 
     fn delete_ssm_parameter(&self, physical_id: &str) -> Result<(), String> {
@@ -315,7 +350,7 @@ impl ResourceProvisioner {
 
     // --- IAM Role ---
 
-    fn create_iam_role(&self, resource: &ResourceDefinition) -> Result<String, String> {
+    fn create_iam_role(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let role_name = props
             .get("RoleName")
@@ -350,7 +385,7 @@ impl ResourceProvisioner {
 
         let role = IamRole {
             role_name: role_name.to_string(),
-            role_id,
+            role_id: role_id.clone(),
             arn: arn.clone(),
             path: path.to_string(),
             assume_role_policy_document: assume_role_policy,
@@ -365,7 +400,9 @@ impl ResourceProvisioner {
         };
 
         state.roles.insert(role_name.to_string(), role);
-        Ok(arn)
+        Ok(ProvisionResult::new(arn.clone())
+            .with("Arn", arn)
+            .with("RoleId", role_id))
     }
 
     fn delete_iam_role(&self, physical_id: &str) -> Result<(), String> {
@@ -387,7 +424,7 @@ impl ResourceProvisioner {
 
     // --- IAM Policy ---
 
-    fn create_iam_policy(&self, resource: &ResourceDefinition) -> Result<String, String> {
+    fn create_iam_policy(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let policy_name = props
             .get("PolicyName")
@@ -445,7 +482,7 @@ impl ResourceProvisioner {
         };
 
         state.policies.insert(arn.clone(), policy);
-        Ok(arn)
+        Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
     }
 
     fn delete_iam_policy(&self, physical_id: &str) -> Result<(), String> {
@@ -457,7 +494,7 @@ impl ResourceProvisioner {
 
     // --- S3 ---
 
-    fn create_s3_bucket(&self, resource: &ResourceDefinition) -> Result<String, String> {
+    fn create_s3_bucket(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let bucket_name = props
             .get("BucketName")
@@ -466,9 +503,21 @@ impl ResourceProvisioner {
 
         let mut __s3_mas = self.s3_state.write();
         let state = __s3_mas.get_or_create(&self.account_id);
+        let region = state.region.clone();
         let bucket = S3Bucket::new(bucket_name, &state.region, &state.account_id);
         state.buckets.insert(bucket_name.to_string(), bucket);
-        Ok(bucket_name.to_string())
+
+        let arn = format!("arn:aws:s3:::{bucket_name}");
+        let domain_name = format!("{bucket_name}.s3.amazonaws.com");
+        let regional_domain_name = format!("{bucket_name}.s3.{region}.amazonaws.com");
+        let dual_stack_domain_name = format!("{bucket_name}.s3.dualstack.{region}.amazonaws.com");
+        let website_url = format!("http://{bucket_name}.s3-website-{region}.amazonaws.com");
+        Ok(ProvisionResult::new(bucket_name)
+            .with("Arn", arn)
+            .with("DomainName", domain_name)
+            .with("RegionalDomainName", regional_domain_name)
+            .with("DualStackDomainName", dual_stack_domain_name)
+            .with("WebsiteURL", website_url))
     }
 
     fn delete_s3_bucket(&self, physical_id: &str) -> Result<(), String> {
@@ -480,7 +529,10 @@ impl ResourceProvisioner {
 
     // --- EventBridge ---
 
-    fn create_eventbridge_rule(&self, resource: &ResourceDefinition) -> Result<String, String> {
+    fn create_eventbridge_rule(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let rule_name = props
             .get("Name")
@@ -549,7 +601,7 @@ impl ResourceProvisioner {
         state
             .rules
             .insert((event_bus_name.to_string(), rule_name.to_string()), rule);
-        Ok(arn)
+        Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
     }
 
     fn delete_eventbridge_rule(&self, physical_id: &str) -> Result<(), String> {
@@ -569,7 +621,10 @@ impl ResourceProvisioner {
 
     // --- DynamoDB ---
 
-    fn create_dynamodb_table(&self, resource: &ResourceDefinition) -> Result<String, String> {
+    fn create_dynamodb_table(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let table_name = props
             .get("TableName")
@@ -698,6 +753,7 @@ impl ResourceProvisioner {
         } else {
             None
         };
+        let stream_arn_attr = stream_arn.clone();
 
         let table = DynamoTable {
             name: table_name.to_string(),
@@ -733,7 +789,11 @@ impl ResourceProvisioner {
         };
 
         state.tables.insert(table_name.to_string(), table);
-        Ok(arn)
+        let mut result = ProvisionResult::new(arn.clone()).with("Arn", arn);
+        if let Some(stream_arn_value) = stream_arn_attr {
+            result = result.with("StreamArn", stream_arn_value);
+        }
+        Ok(result)
     }
 
     fn delete_dynamodb_table(&self, physical_id: &str) -> Result<(), String> {
@@ -753,7 +813,7 @@ impl ResourceProvisioner {
 
     // --- CloudWatch Logs ---
 
-    fn create_log_group(&self, resource: &ResourceDefinition) -> Result<String, String> {
+    fn create_log_group(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
         let props = &resource.properties;
         let log_group_name = props
             .get("LogGroupName")
@@ -792,7 +852,7 @@ impl ResourceProvisioner {
         state
             .log_groups
             .insert(log_group_name.to_string(), log_group);
-        Ok(arn)
+        Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
     }
 
     fn delete_log_group(&self, physical_id: &str) -> Result<(), String> {

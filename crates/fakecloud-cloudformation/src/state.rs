@@ -12,6 +12,10 @@ pub struct StackResource {
     pub status: String,
     /// For custom resources, the Lambda ARN (ServiceToken) used for invocation.
     pub service_token: Option<String>,
+    /// Per-resource attributes resolvable via `Fn::GetAtt`. Populated at
+    /// provisioning time by each resource type's create handler.
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
