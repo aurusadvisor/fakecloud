@@ -853,16 +853,53 @@ impl SnsService {
 
         let sub = SnsSubscription {
             subscription_arn: sub_arn.clone(),
-            topic_arn,
-            protocol,
-            endpoint,
+            topic_arn: topic_arn.clone(),
+            protocol: protocol.clone(),
+            endpoint: endpoint.clone(),
             owner: account_id,
             attributes,
             confirmed,
-            confirmation_token,
+            confirmation_token: confirmation_token.clone(),
         };
 
         state.subscriptions.insert(sub_arn.clone(), sub);
+        // Drop the write lock before any async work.
+        drop(accounts);
+
+        // For HTTP/HTTPS protocols, AWS POSTs a SubscriptionConfirmation
+        // envelope to the endpoint and the subscriber must call back with
+        // ConfirmSubscription using the embedded Token. Without this POST
+        // any subscriber following AWS docs sits forever unconfirmed.
+        if !confirmed && (protocol == "http" || protocol == "https") {
+            // Skip the spawn when no Tokio runtime is in scope (sync unit
+            // tests). Production callers always run inside the server
+            // runtime.
+            if tokio::runtime::Handle::try_current().is_err() {
+                // fall through; nothing to spawn
+            } else if let Some(token) = confirmation_token {
+                let endpoint_url = endpoint.clone();
+                let topic = topic_arn.clone();
+                tokio::spawn(async move {
+                    let body = build_subscription_confirmation_envelope(&topic, &token);
+                    let client = reqwest::Client::new();
+                    let result = client
+                        .post(&endpoint_url)
+                        .header("Content-Type", "application/json")
+                        .header("x-amz-sns-message-type", "SubscriptionConfirmation")
+                        .header("x-amz-sns-topic-arn", &topic)
+                        .body(body)
+                        .send()
+                        .await;
+                    if let Err(e) = result {
+                        tracing::warn!(
+                            endpoint = %endpoint_url,
+                            error = %e,
+                            "SNS SubscriptionConfirmation POST failed"
+                        );
+                    }
+                });
+            }
+        }
 
         Ok(xml_resp(
             &format!(
