@@ -2229,8 +2229,11 @@ fn list_attached_role_policies_includes_aws_managed() {
 #[test]
 fn list_attached_user_policies_includes_aws_managed() {
     let svc = make_service();
-    svc.create_user(&make_request("CreateUser", vec![("UserName", "managed-user")]))
-        .unwrap();
+    svc.create_user(&make_request(
+        "CreateUser",
+        vec![("UserName", "managed-user")],
+    ))
+    .unwrap();
 
     let managed_arn = "arn:aws:iam::aws:policy/AdministratorAccess";
     svc.attach_user_policy(&make_request(
@@ -2259,8 +2262,11 @@ fn list_attached_user_policies_includes_aws_managed() {
 #[test]
 fn list_attached_group_policies_includes_aws_managed() {
     let svc = make_service();
-    svc.create_group(&make_request("CreateGroup", vec![("GroupName", "managed-grp")]))
-        .unwrap();
+    svc.create_group(&make_request(
+        "CreateGroup",
+        vec![("GroupName", "managed-grp")],
+    ))
+    .unwrap();
 
     let managed_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess";
     svc.attach_group_policy(&make_request(
