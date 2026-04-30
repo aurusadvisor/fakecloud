@@ -53,6 +53,14 @@ pub struct OrganizationState {
     /// `ACCEPTED` / `DECLINED` / `CANCELED` / `EXPIRED`.
     #[serde(default)]
     pub handshakes: BTreeMap<String, Handshake>,
+    /// AWS service principals enabled via `EnableAWSServiceAccess`.
+    /// Stored as the principal hostname (eg. `config.amazonaws.com`).
+    #[serde(default)]
+    pub trusted_services: HashSet<String>,
+    /// Service principal -> set of member account ids registered as
+    /// delegated administrators for that service.
+    #[serde(default)]
+    pub delegated_administrators: BTreeMap<String, BTreeMap<String, DelegatedAdministrator>>,
 }
 
 impl OrganizationState {
@@ -132,6 +140,8 @@ impl OrganizationState {
             attachments,
             create_account_requests: BTreeMap::new(),
             handshakes: BTreeMap::new(),
+            trusted_services: HashSet::new(),
+            delegated_administrators: BTreeMap::new(),
         }
     }
 
@@ -307,6 +317,121 @@ impl OrganizationState {
             })
             .cloned()
             .collect()
+    }
+
+    /// Mark `service_principal` as a trusted service. Idempotent.
+    pub fn enable_aws_service_access(&mut self, service_principal: &str) {
+        self.trusted_services.insert(service_principal.to_string());
+    }
+
+    /// Drop `service_principal` from the trusted set. Also removes any
+    /// delegated administrators registered for that principal — real
+    /// Organizations rejects DisableAWSServiceAccess if delegates exist;
+    /// we mirror that gate via a separate `disable_aws_service_access`
+    /// returning `Err` when delegates are still registered.
+    pub fn disable_aws_service_access(&mut self, service_principal: &str) -> Result<(), OrgError> {
+        if let Some(delegates) = self.delegated_administrators.get(service_principal) {
+            if !delegates.is_empty() {
+                return Err(OrgError::DelegatedAdministratorAlreadyRegistered(
+                    service_principal.to_string(),
+                ));
+            }
+        }
+        self.trusted_services.remove(service_principal);
+        self.delegated_administrators.remove(service_principal);
+        Ok(())
+    }
+
+    /// Iterate enabled trusted services in alphabetical order.
+    pub fn list_trusted_services(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.trusted_services.iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Register `account_id` as a delegated administrator for the given
+    /// `service_principal`. Requires the service to already be trusted
+    /// (matches AWS Organizations) and the account to already be a member.
+    pub fn register_delegated_administrator(
+        &mut self,
+        account_id: &str,
+        service_principal: &str,
+    ) -> Result<DelegatedAdministrator, OrgError> {
+        if !self.accounts.contains_key(account_id) {
+            return Err(OrgError::AccountNotFound(account_id.to_string()));
+        }
+        if !self.trusted_services.contains(service_principal) {
+            return Err(OrgError::AWSServiceAccessNotEnabled(
+                service_principal.to_string(),
+            ));
+        }
+        let entry = self
+            .delegated_administrators
+            .entry(service_principal.to_string())
+            .or_default();
+        if entry.contains_key(account_id) {
+            return Err(OrgError::DelegatedAdministratorAlreadyRegistered(
+                account_id.to_string(),
+            ));
+        }
+        let admin = DelegatedAdministrator {
+            account_id: account_id.to_string(),
+            service_principal: service_principal.to_string(),
+            registered_at: Utc::now(),
+        };
+        entry.insert(account_id.to_string(), admin.clone());
+        Ok(admin)
+    }
+
+    /// Drop a delegated administrator registration.
+    pub fn deregister_delegated_administrator(
+        &mut self,
+        account_id: &str,
+        service_principal: &str,
+    ) -> Result<(), OrgError> {
+        let entry = self
+            .delegated_administrators
+            .get_mut(service_principal)
+            .ok_or_else(|| {
+                OrgError::DelegatedAdministratorNotRegistered(service_principal.to_string())
+            })?;
+        if entry.remove(account_id).is_none() {
+            return Err(OrgError::DelegatedAdministratorNotRegistered(
+                account_id.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// List delegated administrators, optionally filtered by service.
+    pub fn list_delegated_administrators(
+        &self,
+        service_principal_filter: Option<&str>,
+    ) -> Vec<DelegatedAdministrator> {
+        let mut out = Vec::new();
+        for (svc, admins) in &self.delegated_administrators {
+            if let Some(filter) = service_principal_filter {
+                if filter != svc {
+                    continue;
+                }
+            }
+            for admin in admins.values() {
+                out.push(admin.clone());
+            }
+        }
+        out
+    }
+
+    /// List service principals that `account_id` is a delegated admin for.
+    pub fn list_delegated_services_for_account(&self, account_id: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for (svc, admins) in &self.delegated_administrators {
+            if admins.contains_key(account_id) {
+                out.push(svc.clone());
+            }
+        }
+        out.sort();
+        out
     }
 
     /// Look up a `CreateAccountStatus` by its `car-...` id. If still
@@ -745,6 +870,16 @@ pub enum OrgError {
     InvalidHandshakeParty(String),
     DuplicateHandshakeForAccount(String),
     AccountAlreadyMember(String),
+    AWSServiceAccessNotEnabled(String),
+    DelegatedAdministratorAlreadyRegistered(String),
+    DelegatedAdministratorNotRegistered(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DelegatedAdministrator {
+    pub account_id: String,
+    pub service_principal: String,
+    pub registered_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1176,6 +1311,77 @@ mod tests {
             .collect();
         types.sort();
         assert_eq!(types, vec!["ACCOUNT", "ORGANIZATIONAL_UNIT", "ROOT"]);
+    }
+
+    #[test]
+    fn enable_aws_service_access_is_idempotent() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.enable_aws_service_access("config.amazonaws.com");
+        org.enable_aws_service_access("config.amazonaws.com");
+        let trusted = org.list_trusted_services();
+        assert_eq!(trusted, vec!["config.amazonaws.com"]);
+    }
+
+    #[test]
+    fn disable_aws_service_access_blocked_when_delegates_exist() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.enroll_account_if_missing("222222222222");
+        org.enable_aws_service_access("ssm.amazonaws.com");
+        org.register_delegated_administrator("222222222222", "ssm.amazonaws.com")
+            .unwrap();
+        let err = org
+            .disable_aws_service_access("ssm.amazonaws.com")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            OrgError::DelegatedAdministratorAlreadyRegistered(_)
+        ));
+    }
+
+    #[test]
+    fn disable_aws_service_access_drops_when_clean() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.enable_aws_service_access("ssm.amazonaws.com");
+        org.disable_aws_service_access("ssm.amazonaws.com").unwrap();
+        assert!(org.list_trusted_services().is_empty());
+    }
+
+    #[test]
+    fn register_delegated_administrator_requires_trusted_service() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.enroll_account_if_missing("222222222222");
+        let err = org
+            .register_delegated_administrator("222222222222", "ssm.amazonaws.com")
+            .unwrap_err();
+        assert!(matches!(err, OrgError::AWSServiceAccessNotEnabled(_)));
+    }
+
+    #[test]
+    fn list_delegated_services_for_account_returns_principals() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.enroll_account_if_missing("222222222222");
+        org.enable_aws_service_access("ssm.amazonaws.com");
+        org.enable_aws_service_access("config.amazonaws.com");
+        org.register_delegated_administrator("222222222222", "ssm.amazonaws.com")
+            .unwrap();
+        org.register_delegated_administrator("222222222222", "config.amazonaws.com")
+            .unwrap();
+        let svcs = org.list_delegated_services_for_account("222222222222");
+        assert_eq!(svcs, vec!["config.amazonaws.com", "ssm.amazonaws.com"]);
+    }
+
+    #[test]
+    fn deregister_delegated_administrator_removes_entry() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.enroll_account_if_missing("222222222222");
+        org.enable_aws_service_access("ssm.amazonaws.com");
+        org.register_delegated_administrator("222222222222", "ssm.amazonaws.com")
+            .unwrap();
+        org.deregister_delegated_administrator("222222222222", "ssm.amazonaws.com")
+            .unwrap();
+        assert!(org
+            .list_delegated_services_for_account("222222222222")
+            .is_empty());
     }
 
     #[test]

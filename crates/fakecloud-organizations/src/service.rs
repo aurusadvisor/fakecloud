@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
@@ -49,6 +50,13 @@ pub static ORGANIZATIONS_ACTIONS: &[&str] = &[
     "DescribeHandshake",
     "ListHandshakesForAccount",
     "ListHandshakesForOrganization",
+    "EnableAWSServiceAccess",
+    "DisableAWSServiceAccess",
+    "ListAWSServiceAccessForOrganization",
+    "RegisterDelegatedAdministrator",
+    "DeregisterDelegatedAdministrator",
+    "ListDelegatedAdministrators",
+    "ListDelegatedServicesForAccount",
 ];
 
 pub struct OrganizationsService {
@@ -725,6 +733,137 @@ impl OrganizationsService {
             .collect();
         Ok(AwsResponse::ok_json(json!({ "Handshakes": entries })))
     }
+
+    fn enable_aws_service_access(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let principal = required_str(&body, "ServicePrincipal")?.to_string();
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.enable_aws_service_access(&principal);
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn disable_aws_service_access(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let principal = required_str(&body, "ServicePrincipal")?.to_string();
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.disable_aws_service_access(&principal)
+            .map_err(org_error_to_aws)?;
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_aws_service_access_for_organization(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_ref().expect("management gate proved Some");
+        let entries: Vec<Value> = org
+            .list_trusted_services()
+            .into_iter()
+            .map(|svc| {
+                json!({
+                    "ServicePrincipal": svc,
+                    "DateEnabled": Utc::now().timestamp() as f64,
+                })
+            })
+            .collect();
+        Ok(AwsResponse::ok_json(
+            json!({ "EnabledServicePrincipals": entries }),
+        ))
+    }
+
+    fn register_delegated_administrator(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let account_id = required_str(&body, "AccountId")?.to_string();
+        let principal = required_str(&body, "ServicePrincipal")?.to_string();
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.register_delegated_administrator(&account_id, &principal)
+            .map_err(org_error_to_aws)?;
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn deregister_delegated_administrator(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let account_id = required_str(&body, "AccountId")?.to_string();
+        let principal = required_str(&body, "ServicePrincipal")?.to_string();
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.deregister_delegated_administrator(&account_id, &principal)
+            .map_err(org_error_to_aws)?;
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_delegated_administrators(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let filter = body
+            .get("ServicePrincipal")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_ref().expect("management gate proved Some");
+        let entries: Vec<Value> = org
+            .list_delegated_administrators(filter.as_deref())
+            .into_iter()
+            .filter_map(|admin| {
+                let acct = org.accounts.get(&admin.account_id)?;
+                Some(json!({
+                    "Id": acct.id,
+                    "Arn": acct.arn,
+                    "Email": acct.email,
+                    "Name": acct.name,
+                    "Status": acct.status,
+                    "JoinedMethod": acct.joined_method,
+                    "JoinedTimestamp": acct.joined_timestamp.timestamp() as f64,
+                    "DelegationEnabledDate": admin.registered_at.timestamp() as f64,
+                }))
+            })
+            .collect();
+        Ok(AwsResponse::ok_json(
+            json!({ "DelegatedAdministrators": entries }),
+        ))
+    }
+
+    fn list_delegated_services_for_account(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let account_id = required_str(&body, "AccountId")?.to_string();
+        let guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_ref().expect("management gate proved Some");
+        let entries: Vec<Value> = org
+            .list_delegated_services_for_account(&account_id)
+            .into_iter()
+            .map(|svc| {
+                json!({
+                    "ServicePrincipal": svc,
+                    "DelegationEnabledDate": Utc::now().timestamp() as f64,
+                })
+            })
+            .collect();
+        Ok(AwsResponse::ok_json(
+            json!({ "DelegatedServices": entries }),
+        ))
+    }
 }
 
 #[async_trait]
@@ -770,6 +909,15 @@ impl AwsService for OrganizationsService {
             "DescribeHandshake" => self.describe_handshake(&req),
             "ListHandshakesForAccount" => self.list_handshakes_for_account(&req),
             "ListHandshakesForOrganization" => self.list_handshakes_for_organization(&req),
+            "EnableAWSServiceAccess" => self.enable_aws_service_access(&req),
+            "DisableAWSServiceAccess" => self.disable_aws_service_access(&req),
+            "ListAWSServiceAccessForOrganization" => {
+                self.list_aws_service_access_for_organization(&req)
+            }
+            "RegisterDelegatedAdministrator" => self.register_delegated_administrator(&req),
+            "DeregisterDelegatedAdministrator" => self.deregister_delegated_administrator(&req),
+            "ListDelegatedAdministrators" => self.list_delegated_administrators(&req),
+            "ListDelegatedServicesForAccount" => self.list_delegated_services_for_account(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "organizations",
                 &req.action,
@@ -971,6 +1119,21 @@ fn org_error_to_aws(err: OrgError) -> AwsServiceError {
             StatusCode::BAD_REQUEST,
             "AccountAlreadyRegisteredException",
             format!("Account {account} is already a member of this organization."),
+        ),
+        OrgError::AWSServiceAccessNotEnabled(svc) => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "AWSOrganizationsNotInUseException",
+            format!("AWS service access for {svc} is not enabled."),
+        ),
+        OrgError::DelegatedAdministratorAlreadyRegistered(id) => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "AccountAlreadyRegisteredException",
+            format!("Account {id} is already registered as a delegated administrator."),
+        ),
+        OrgError::DelegatedAdministratorNotRegistered(id) => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "AccountNotRegisteredException",
+            format!("Account {id} is not registered as a delegated administrator."),
         ),
     }
 }
