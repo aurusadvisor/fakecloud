@@ -152,6 +152,27 @@ pub(crate) fn query_param_prefix_exists(req: &AwsRequest, prefix: &str) -> bool 
     req.query_params.keys().any(|key| key.starts_with(prefix))
 }
 
+/// AWS RDS encodes string lists as `{Param}.member.N` 1-indexed entries.
+/// Used by `EnableCloudwatchLogsExports`, `CloudwatchLogsExportConfiguration.EnableLogTypes`,
+/// `ProcessorFeatures.ProcessorFeature.N.{Name,Value}` (caller decides shape).
+pub(crate) fn parse_string_member_list(req: &AwsRequest, base: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 1.. {
+        let key = format!("{base}.member.{i}");
+        match optional_query_param(req, &key) {
+            Some(v) => out.push(v),
+            None => break,
+        }
+    }
+    out
+}
+
+/// Convenience wrapper for the cloudwatch-log-exports list which is
+/// emitted on Create/Modify/Restore paths.
+pub(crate) fn parse_cloudwatch_logs_exports(req: &AwsRequest, base: &str) -> Vec<String> {
+    parse_string_member_list(req, base)
+}
+
 pub(crate) fn parse_optional_bool(value: Option<&str>) -> Result<Option<bool>, AwsServiceError> {
     value
         .map(|raw| match raw {
@@ -456,6 +477,25 @@ pub(crate) fn build_restored_instance(
         option_group_name: None,
         multi_az: false,
         pending_modified_values: None,
+        availability_zone: None,
+        storage_type: None,
+        storage_encrypted: false,
+        kms_key_id: None,
+        iam_database_authentication_enabled: false,
+        iops: None,
+        monitoring_interval: None,
+        monitoring_role_arn: None,
+        performance_insights_enabled: false,
+        performance_insights_kms_key_id: None,
+        performance_insights_retention_period: None,
+        enabled_cloudwatch_logs_exports: Vec::new(),
+        ca_certificate_identifier: None,
+        network_type: None,
+        character_set_name: None,
+        auto_minor_version_upgrade: None,
+        copy_tags_to_snapshot: None,
+        master_user_secret_arn: None,
+        master_user_secret_kms_key_id: None,
     }
 }
 
@@ -502,6 +542,25 @@ pub(crate) fn build_read_replica_instance(
         option_group_name: source.option_group_name.clone(),
         multi_az: source.multi_az,
         pending_modified_values: None,
+        availability_zone: source.availability_zone.clone(),
+        storage_type: source.storage_type.clone(),
+        storage_encrypted: source.storage_encrypted,
+        kms_key_id: source.kms_key_id.clone(),
+        iam_database_authentication_enabled: source.iam_database_authentication_enabled,
+        iops: source.iops,
+        monitoring_interval: source.monitoring_interval,
+        monitoring_role_arn: source.monitoring_role_arn.clone(),
+        performance_insights_enabled: source.performance_insights_enabled,
+        performance_insights_kms_key_id: source.performance_insights_kms_key_id.clone(),
+        performance_insights_retention_period: source.performance_insights_retention_period,
+        enabled_cloudwatch_logs_exports: source.enabled_cloudwatch_logs_exports.clone(),
+        ca_certificate_identifier: source.ca_certificate_identifier.clone(),
+        network_type: source.network_type.clone(),
+        character_set_name: source.character_set_name.clone(),
+        auto_minor_version_upgrade: source.auto_minor_version_upgrade,
+        copy_tags_to_snapshot: source.copy_tags_to_snapshot,
+        master_user_secret_arn: None,
+        master_user_secret_kms_key_id: None,
     }
 }
 
@@ -742,6 +801,118 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
         )
     };
 
+    let availability_zone = instance
+        .availability_zone
+        .clone()
+        .unwrap_or_else(|| "us-east-1a".to_string());
+    let storage_type = instance
+        .storage_type
+        .clone()
+        .unwrap_or_else(|| "gp2".to_string());
+    let kms_key_id_xml = instance
+        .kms_key_id
+        .as_ref()
+        .map(|k| format!("<KmsKeyId>{}</KmsKeyId>", xml_escape(k)))
+        .unwrap_or_default();
+    let iops_xml = instance
+        .iops
+        .map(|n| format!("<Iops>{n}</Iops>"))
+        .unwrap_or_default();
+    let monitoring_interval_xml = instance
+        .monitoring_interval
+        .map(|n| format!("<MonitoringInterval>{n}</MonitoringInterval>"))
+        .unwrap_or_default();
+    let monitoring_role_xml = instance
+        .monitoring_role_arn
+        .as_ref()
+        .map(|a| {
+            format!(
+                "<EnhancedMonitoringResourceArn>{}</EnhancedMonitoringResourceArn>",
+                xml_escape(a)
+            )
+        })
+        .unwrap_or_default();
+    let pi_kms_xml = instance
+        .performance_insights_kms_key_id
+        .as_ref()
+        .map(|k| {
+            format!(
+                "<PerformanceInsightsKMSKeyId>{}</PerformanceInsightsKMSKeyId>",
+                xml_escape(k)
+            )
+        })
+        .unwrap_or_default();
+    let pi_retention_xml = instance
+        .performance_insights_retention_period
+        .map(|n| {
+            format!("<PerformanceInsightsRetentionPeriod>{n}</PerformanceInsightsRetentionPeriod>")
+        })
+        .unwrap_or_default();
+    let cloudwatch_exports_xml = if instance.enabled_cloudwatch_logs_exports.is_empty() {
+        "<EnabledCloudwatchLogsExports/>".to_string()
+    } else {
+        format!(
+            "<EnabledCloudwatchLogsExports>{}</EnabledCloudwatchLogsExports>",
+            instance
+                .enabled_cloudwatch_logs_exports
+                .iter()
+                .map(|e| format!("<member>{}</member>", xml_escape(e)))
+                .collect::<String>()
+        )
+    };
+    let ca_cert_xml = instance
+        .ca_certificate_identifier
+        .as_ref()
+        .map(|c| {
+            format!(
+                "<CACertificateIdentifier>{}</CACertificateIdentifier>",
+                xml_escape(c)
+            )
+        })
+        .unwrap_or_default();
+    let network_type_xml = instance
+        .network_type
+        .as_ref()
+        .map(|n| format!("<NetworkType>{}</NetworkType>", xml_escape(n)))
+        .unwrap_or_default();
+    let charset_xml = instance
+        .character_set_name
+        .as_ref()
+        .map(|c| format!("<CharacterSetName>{}</CharacterSetName>", xml_escape(c)))
+        .unwrap_or_default();
+    let auto_minor_xml = format!(
+        "<AutoMinorVersionUpgrade>{}</AutoMinorVersionUpgrade>",
+        if instance.auto_minor_version_upgrade.unwrap_or(true) {
+            "true"
+        } else {
+            "false"
+        }
+    );
+    let copy_tags_xml = instance
+        .copy_tags_to_snapshot
+        .map(|b| {
+            format!(
+                "<CopyTagsToSnapshot>{}</CopyTagsToSnapshot>",
+                if b { "true" } else { "false" }
+            )
+        })
+        .unwrap_or_default();
+    let master_user_secret_xml = instance
+        .master_user_secret_arn
+        .as_ref()
+        .map(|arn| {
+            let kms = instance
+                .master_user_secret_kms_key_id
+                .as_ref()
+                .map(|k| format!("<KmsKeyId>{}</KmsKeyId>", xml_escape(k)))
+                .unwrap_or_default();
+            format!(
+                "<MasterUserSecret><SecretArn>{}</SecretArn><SecretStatus>active</SecretStatus>{kms}</MasterUserSecret>",
+                xml_escape(arn)
+            )
+        })
+        .unwrap_or_default();
+
     format!(
         "<DBInstanceIdentifier>{identifier}</DBInstanceIdentifier>\
          <DBInstanceClass>{class}</DBInstanceClass>\
@@ -757,20 +928,36 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
          <DBSecurityGroups/>\
          {vpc_security_groups_xml}\
          {db_parameter_groups_xml}\
-         <AvailabilityZone>us-east-1a</AvailabilityZone>\
+         <AvailabilityZone>{availability_zone}</AvailabilityZone>\
          {latest_restorable_time_xml}\
          <PreferredMaintenanceWindow>sun:00:00-sun:00:30</PreferredMaintenanceWindow>\
          <MultiAZ>{multi_az}</MultiAZ>\
          <EngineVersion>{engine_version}</EngineVersion>\
-         <AutoMinorVersionUpgrade>true</AutoMinorVersionUpgrade>\
+         {auto_minor_xml}\
          {read_replica_identifiers_xml}\
          {read_replica_source_xml}\
          <LicenseModel>{license_model}</LicenseModel>\
          {option_group_memberships_xml}\
          <PubliclyAccessible>{publicly_accessible}</PubliclyAccessible>\
-         <StorageType>gp2</StorageType>\
+         <StorageType>{storage_type}</StorageType>\
          <DbInstancePort>{port}</DbInstancePort>\
-         <StorageEncrypted>false</StorageEncrypted>\
+         <StorageEncrypted>{storage_encrypted}</StorageEncrypted>\
+         {kms_key_id_xml}\
+         <IAMDatabaseAuthenticationEnabled>{iam_auth}</IAMDatabaseAuthenticationEnabled>\
+         {iops_xml}\
+         {monitoring_interval_xml}\
+         {monitoring_role_xml}\
+         <PerformanceInsightsEnabled>{pi_enabled}</PerformanceInsightsEnabled>\
+         {pi_kms_xml}\
+         {pi_retention_xml}\
+         {cloudwatch_exports_xml}\
+         {ca_cert_xml}\
+         {network_type_xml}\
+         {charset_xml}\
+         {copy_tags_xml}\
+         {master_user_secret_xml}\
+         <ProcessorFeatures/>\
+         <ActivityStreamStatus>stopped</ActivityStreamStatus>\
          <DbiResourceId>{dbi_resource_id}</DbiResourceId>\
          <DeletionProtection>{deletion_protection}</DeletionProtection>\
          {pending_modified_values_xml}\
@@ -789,6 +976,23 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
         engine_version = xml_escape(&instance.engine_version),
         license_model = license_model_for_engine(&instance.engine),
         publicly_accessible = if instance.publicly_accessible {
+            "true"
+        } else {
+            "false"
+        },
+        availability_zone = xml_escape(&availability_zone),
+        storage_type = xml_escape(&storage_type),
+        storage_encrypted = if instance.storage_encrypted {
+            "true"
+        } else {
+            "false"
+        },
+        iam_auth = if instance.iam_database_authentication_enabled {
+            "true"
+        } else {
+            "false"
+        },
+        pi_enabled = if instance.performance_insights_enabled {
             "true"
         } else {
             "false"

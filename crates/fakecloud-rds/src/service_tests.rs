@@ -169,6 +169,25 @@ fn db_instance_xml_renders_endpoint_and_status() {
         option_group_name: None,
         multi_az: false,
         pending_modified_values: None,
+        availability_zone: None,
+        storage_type: None,
+        storage_encrypted: false,
+        kms_key_id: None,
+        iam_database_authentication_enabled: false,
+        iops: None,
+        monitoring_interval: None,
+        monitoring_role_arn: None,
+        performance_insights_enabled: false,
+        performance_insights_kms_key_id: None,
+        performance_insights_retention_period: None,
+        enabled_cloudwatch_logs_exports: Vec::new(),
+        ca_certificate_identifier: None,
+        network_type: None,
+        character_set_name: None,
+        auto_minor_version_upgrade: None,
+        copy_tags_to_snapshot: None,
+        master_user_secret_arn: None,
+        master_user_secret_kms_key_id: None,
     };
 
     let xml = db_instance_xml(&instance, Some("creating"));
@@ -176,6 +195,113 @@ fn db_instance_xml_renders_endpoint_and_status() {
     assert!(xml.contains("<DBInstanceIdentifier>test-db</DBInstanceIdentifier>"));
     assert!(xml.contains("<DBInstanceStatus>creating</DBInstanceStatus>"));
     assert!(xml.contains("<Address>127.0.0.1</Address><Port>15432</Port>"));
+    // Fields AWS always returns and SDKs deserialize unconditionally.
+    assert!(
+        xml.contains("<IAMDatabaseAuthenticationEnabled>false</IAMDatabaseAuthenticationEnabled>")
+    );
+    assert!(xml.contains("<PerformanceInsightsEnabled>false</PerformanceInsightsEnabled>"));
+    assert!(xml.contains("<EnabledCloudwatchLogsExports/>"));
+    assert!(xml.contains("<ProcessorFeatures/>"));
+    assert!(xml.contains("<ActivityStreamStatus>stopped</ActivityStreamStatus>"));
+    assert!(xml.contains("<StorageEncrypted>false</StorageEncrypted>"));
+}
+
+#[test]
+fn db_instance_xml_renders_dynamic_storage_and_kms() {
+    let mut instance = make_instance_with_defaults("dyn");
+    instance.availability_zone = Some("eu-west-1c".to_string());
+    instance.storage_type = Some("gp3".to_string());
+    instance.storage_encrypted = true;
+    instance.kms_key_id = Some("arn:aws:kms:us-east-1:123456789012:key/abc".to_string());
+    instance.iam_database_authentication_enabled = true;
+    instance.iops = Some(3000);
+    instance.monitoring_interval = Some(60);
+    instance.monitoring_role_arn = Some("arn:aws:iam::123456789012:role/rds-monitor".to_string());
+    instance.performance_insights_enabled = true;
+    instance.performance_insights_retention_period = Some(7);
+    instance.enabled_cloudwatch_logs_exports = vec!["error".to_string(), "general".to_string()];
+    instance.ca_certificate_identifier = Some("rds-ca-rsa2048-g1".to_string());
+    instance.network_type = Some("DUAL".to_string());
+    instance.master_user_secret_arn =
+        Some("arn:aws:secretsmanager:us-east-1:123:secret:rds!sec-abc".to_string());
+    instance.master_user_secret_kms_key_id =
+        Some("arn:aws:kms:us-east-1:123:key/aws/secretsmanager".to_string());
+
+    let xml = db_instance_xml(&instance, None);
+
+    assert!(xml.contains("<AvailabilityZone>eu-west-1c</AvailabilityZone>"));
+    assert!(xml.contains("<StorageType>gp3</StorageType>"));
+    assert!(xml.contains("<StorageEncrypted>true</StorageEncrypted>"));
+    assert!(xml.contains("<KmsKeyId>arn:aws:kms:us-east-1:123456789012:key/abc</KmsKeyId>"));
+    assert!(
+        xml.contains("<IAMDatabaseAuthenticationEnabled>true</IAMDatabaseAuthenticationEnabled>")
+    );
+    assert!(xml.contains("<Iops>3000</Iops>"));
+    assert!(xml.contains("<MonitoringInterval>60</MonitoringInterval>"));
+    assert!(xml.contains("<EnhancedMonitoringResourceArn>arn:aws:iam::123456789012:role/rds-monitor</EnhancedMonitoringResourceArn>"));
+    assert!(xml.contains("<PerformanceInsightsEnabled>true</PerformanceInsightsEnabled>"));
+    assert!(
+        xml.contains("<PerformanceInsightsRetentionPeriod>7</PerformanceInsightsRetentionPeriod>")
+    );
+    assert!(xml.contains("<EnabledCloudwatchLogsExports><member>error</member><member>general</member></EnabledCloudwatchLogsExports>"));
+    assert!(xml.contains("<CACertificateIdentifier>rds-ca-rsa2048-g1</CACertificateIdentifier>"));
+    assert!(xml.contains("<NetworkType>DUAL</NetworkType>"));
+    assert!(xml.contains("<MasterUserSecret>"));
+    assert!(xml.contains("<SecretStatus>active</SecretStatus>"));
+}
+
+fn make_instance_with_defaults(id: &str) -> DbInstance {
+    let created_at = Utc::now();
+    DbInstance {
+        db_instance_identifier: id.to_string(),
+        db_instance_arn: format!("arn:aws:rds:us-east-1:123:db:{id}"),
+        db_instance_class: "db.t3.micro".to_string(),
+        engine: "postgres".to_string(),
+        engine_version: "16.3".to_string(),
+        db_instance_status: "available".to_string(),
+        master_username: "admin".to_string(),
+        db_name: None,
+        endpoint_address: "127.0.0.1".to_string(),
+        port: 5432,
+        allocated_storage: 20,
+        publicly_accessible: true,
+        deletion_protection: false,
+        created_at,
+        dbi_resource_id: format!("db-{}", Uuid::new_v4().simple()),
+        master_user_password: "p".to_string(),
+        container_id: "c".to_string(),
+        host_port: 0,
+        tags: Vec::new(),
+        read_replica_source_db_instance_identifier: None,
+        read_replica_db_instance_identifiers: Vec::new(),
+        vpc_security_group_ids: Vec::new(),
+        db_parameter_group_name: None,
+        backup_retention_period: 0,
+        preferred_backup_window: String::new(),
+        latest_restorable_time: None,
+        option_group_name: None,
+        multi_az: false,
+        pending_modified_values: None,
+        availability_zone: None,
+        storage_type: None,
+        storage_encrypted: false,
+        kms_key_id: None,
+        iam_database_authentication_enabled: false,
+        iops: None,
+        monitoring_interval: None,
+        monitoring_role_arn: None,
+        performance_insights_enabled: false,
+        performance_insights_kms_key_id: None,
+        performance_insights_retention_period: None,
+        enabled_cloudwatch_logs_exports: Vec::new(),
+        ca_certificate_identifier: None,
+        network_type: None,
+        character_set_name: None,
+        auto_minor_version_upgrade: None,
+        copy_tags_to_snapshot: None,
+        master_user_secret_arn: None,
+        master_user_secret_kms_key_id: None,
+    }
 }
 
 #[test]
@@ -419,6 +545,25 @@ fn seed_instance(svc: &RdsService, identifier: &str) -> String {
             option_group_name: None,
             multi_az: false,
             pending_modified_values: None,
+            availability_zone: None,
+            storage_type: None,
+            storage_encrypted: false,
+            kms_key_id: None,
+            iam_database_authentication_enabled: false,
+            iops: None,
+            monitoring_interval: None,
+            monitoring_role_arn: None,
+            performance_insights_enabled: false,
+            performance_insights_kms_key_id: None,
+            performance_insights_retention_period: None,
+            enabled_cloudwatch_logs_exports: Vec::new(),
+            ca_certificate_identifier: None,
+            network_type: None,
+            character_set_name: None,
+            auto_minor_version_upgrade: None,
+            copy_tags_to_snapshot: None,
+            master_user_secret_arn: None,
+            master_user_secret_kms_key_id: None,
         },
     );
     arn
