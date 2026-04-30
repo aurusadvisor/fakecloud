@@ -540,7 +540,7 @@ impl RdsService {
             // ── Account / events / regions / log files / capacity ──
             "DescribeAccountAttributes" => Ok(xml_response("DescribeAccountAttributes", "    <AccountQuotas/>".to_string(), &rid)),
             "DescribeEventCategories" => Ok(xml_response("DescribeEventCategories", "    <EventCategoriesMapList/>".to_string(), &rid)),
-            "DescribeEvents" => Ok(xml_response("DescribeEvents", "    <Events/>".to_string(), &rid)),
+            "DescribeEvents" => self.describe_events(req, &rid),
             "DescribeSourceRegions" => Ok(xml_response("DescribeSourceRegions", "    <SourceRegions/>".to_string(), &rid)),
             "DescribeDBLogFiles" => Ok(xml_response("DescribeDBLogFiles", "    <DescribeDBLogFiles/>".to_string(), &rid)),
             "DownloadDBLogFilePortion" => Ok(xml_response("DownloadDBLogFilePortion", "    <LogFileData></LogFileData>\n    <Marker>0</Marker>\n    <AdditionalDataPending>false</AdditionalDataPending>".to_string(), &rid)),
@@ -657,6 +657,87 @@ fn event_sub_xml(v: &Value) -> String {
         xml_escape(v["Status"].as_str().unwrap_or("active")),
         v["Enabled"].as_bool().unwrap_or(true),
     )
+}
+
+impl RdsService {
+    /// Real DescribeEvents implementation: read the per-account events
+    /// ring written to by `emit_event`. Honour SourceType /
+    /// SourceIdentifier / Duration / StartTime / EndTime / EventCategories
+    /// filters and emit them as the DescribeEventsResult shape.
+    pub(crate) fn describe_events(
+        &self,
+        req: &AwsRequest,
+        rid: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let source_type = get_param(req, "SourceType");
+        let source_identifier = get_param(req, "SourceIdentifier");
+        let event_categories: Vec<String> = (1..=20)
+            .filter_map(|i| get_param(req, &format!("EventCategories.member.{i}")))
+            .collect();
+        let duration_minutes: i64 = get_param(req, "Duration")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
+        let now = chrono::Utc::now();
+        let start_time = get_param(req, "StartTime")
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|| now - chrono::Duration::minutes(duration_minutes));
+        let end_time = get_param(req, "EndTime")
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or(now);
+
+        let state = self.state_handle().read();
+        let events = state
+            .get(&req.account_id)
+            .map(|s| s.events.clone())
+            .unwrap_or_default();
+        drop(state);
+
+        let mut body = String::from("    <Events>\n");
+        for e in events.iter().filter(|e| {
+            source_type.as_deref().is_none_or(|t| e.source_type == t)
+                && source_identifier
+                    .as_deref()
+                    .is_none_or(|i| e.source_identifier == i)
+                && (event_categories.is_empty()
+                    || event_categories
+                        .iter()
+                        .any(|c| e.event_categories.iter().any(|ec| ec == c)))
+                && e.date >= start_time
+                && e.date <= end_time
+        }) {
+            body.push_str("      <Event>\n");
+            body.push_str(&format!(
+                "        <SourceIdentifier>{}</SourceIdentifier>\n",
+                xml_escape(&e.source_identifier),
+            ));
+            body.push_str(&format!(
+                "        <SourceType>{}</SourceType>\n",
+                xml_escape(&e.source_type),
+            ));
+            body.push_str(&format!(
+                "        <Message>{}</Message>\n",
+                xml_escape(&e.message),
+            ));
+            body.push_str(&format!(
+                "        <SourceArn>{}</SourceArn>\n",
+                xml_escape(&e.source_arn),
+            ));
+            body.push_str("        <EventCategories>\n");
+            for cat in &e.event_categories {
+                body.push_str(&format!(
+                    "          <EventCategory>{}</EventCategory>\n",
+                    xml_escape(cat),
+                ));
+            }
+            body.push_str("        </EventCategories>\n");
+            body.push_str(&format!("        <Date>{}</Date>\n", e.date.to_rfc3339(),));
+            body.push_str("      </Event>\n");
+        }
+        body.push_str("    </Events>");
+        Ok(xml_response("DescribeEvents", body, rid))
+    }
 }
 
 fn global_cluster_xml(v: &Value) -> String {
@@ -798,6 +879,70 @@ mod tests {
             Err(e) => panic!("{action} failed: {e:?}"),
         };
         assert!(resp.status.is_success(), "{action} status: {}", resp.status);
+    }
+
+    #[test]
+    fn describe_events_returns_emitted_events() {
+        let svc = svc();
+        // Push two events directly into state.
+        {
+            let state = svc.state_handle();
+            let mut accounts = state.write();
+            let s = accounts.get_or_create("000000000000");
+            s.push_event(crate::state::RdsEventRecord {
+                source_identifier: "instance-a".to_string(),
+                source_type: "db-instance".to_string(),
+                source_arn: "arn:aws:rds:us-east-1:000000000000:db:instance-a".to_string(),
+                event_id: "RDS-EVENT-0001".to_string(),
+                event_categories: vec!["creation".to_string()],
+                message: "DB instance created".to_string(),
+                date: chrono::Utc::now(),
+            });
+            s.push_event(crate::state::RdsEventRecord {
+                source_identifier: "instance-b".to_string(),
+                source_type: "db-instance".to_string(),
+                source_arn: "arn:aws:rds:us-east-1:000000000000:db:instance-b".to_string(),
+                event_id: "RDS-EVENT-0002".to_string(),
+                event_categories: vec!["failure".to_string()],
+                message: "DB instance failed".to_string(),
+                date: chrono::Utc::now(),
+            });
+        }
+        let resp = svc
+            .handle_extra_action(&req("DescribeEvents", &[]))
+            .unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("instance-a"), "missing instance-a in {body}");
+        assert!(body.contains("instance-b"), "missing instance-b in {body}");
+        assert!(body.contains("DB instance created"));
+    }
+
+    #[test]
+    fn describe_events_filters_by_source_identifier() {
+        let svc = svc();
+        {
+            let state = svc.state_handle();
+            let mut accounts = state.write();
+            let s = accounts.get_or_create("000000000000");
+            for id in ["i-a", "i-b", "i-c"] {
+                s.push_event(crate::state::RdsEventRecord {
+                    source_identifier: id.to_string(),
+                    source_type: "db-instance".to_string(),
+                    source_arn: format!("arn:aws:rds:us-east-1:000000000000:db:{id}"),
+                    event_id: "RDS-EVENT-0001".to_string(),
+                    event_categories: vec!["creation".to_string()],
+                    message: format!("created {id}"),
+                    date: chrono::Utc::now(),
+                });
+            }
+        }
+        let resp = svc
+            .handle_extra_action(&req("DescribeEvents", &[("SourceIdentifier", "i-b")]))
+            .unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("created i-b"));
+        assert!(!body.contains("created i-a"));
+        assert!(!body.contains("created i-c"));
     }
 
     #[test]
