@@ -353,4 +353,3 @@ async fn scp_full_aws_access_is_immutable() {
         .unwrap_err();
     assert!(format!("{err:?}").contains("PolicyChangesNotAllowedException"));
 }
-
