@@ -1038,18 +1038,25 @@ pub(crate) fn cleanup_token(
     }
 }
 
-/// Apply Parameters template: keys ending with .$ are treated as JsonPath references.
+/// Apply Parameters template: keys ending with .$ are treated as
+/// JsonPath references *or* ASL intrinsic invocations
+/// (`States.Foo(...)`).
 pub(crate) fn apply_parameters(template: &Value, input: &Value) -> Value {
     match template {
         Value::Object(map) => {
             let mut result = serde_json::Map::new();
             for (key, value) in map {
                 if let Some(stripped) = key.strip_suffix(".$") {
-                    if let Some(path) = value.as_str() {
-                        result.insert(
-                            stripped.to_string(),
-                            crate::io_processing::resolve_path(input, path),
-                        );
+                    if let Some(expr) = value.as_str() {
+                        let resolved = if crate::intrinsics::is_intrinsic_call(expr) {
+                            crate::intrinsics::evaluate(expr, input).unwrap_or_else(|err| {
+                                tracing::warn!(error = %err, "States intrinsic failed");
+                                Value::Null
+                            })
+                        } else {
+                            crate::io_processing::resolve_path(input, expr)
+                        };
+                        result.insert(stripped.to_string(), resolved);
                     }
                 } else {
                     result.insert(key.clone(), apply_parameters(value, input));
@@ -1194,5 +1201,46 @@ pub(crate) fn fail_execution(
         exec.error = Some(error.to_string());
         exec.cause = Some(cause.to_string());
         exec.stop_date = Some(Utc::now());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn apply_parameters_resolves_intrinsic_calls() {
+        // States.Format intrinsic with $-references plus a literal.
+        let template = json!({
+            "greeting.$": "States.Format('Hello {}, count is {}', $.name, $.n)",
+            "literal": "static",
+        });
+        let input = json!({"name": "Eve", "n": 7});
+        let out = apply_parameters(&template, &input);
+        assert_eq!(out["greeting"], json!("Hello Eve, count is 7"));
+        assert_eq!(out["literal"], json!("static"));
+    }
+
+    #[test]
+    fn apply_parameters_falls_back_to_jsonpath_for_non_intrinsics() {
+        let template = json!({"x.$": "$.value"});
+        let input = json!({"value": 42});
+        let out = apply_parameters(&template, &input);
+        assert_eq!(out["x"], json!(42));
+    }
+
+    #[test]
+    fn apply_parameters_intrinsic_failure_yields_null() {
+        // Bad call: missing closing paren.
+        let template = json!({"y.$": "States.Format('{}'"});
+        let out = apply_parameters(&template, &Value::Null);
+        // Falls through resolve_path since not detected as intrinsic
+        // (no `(` after States.Format... actually has `(`, so this *is*
+        // an intrinsic and should return Null on failure).
+        // But this missing-) call is detected: `is_intrinsic_call` =>
+        // contains '(' and starts with States. -> true, then evaluate
+        // returns Err -> Null.
+        assert_eq!(out["y"], Value::Null);
     }
 }
