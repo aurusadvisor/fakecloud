@@ -2937,3 +2937,89 @@ fn list_endpoints_empty_ok() {
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert!(body["Endpoints"].is_array());
 }
+
+// ── filter operators (K8) ──
+
+#[test]
+fn pattern_matches_suffix_operator() {
+    assert!(test_matches(
+        Some(r#"{"source": [{"suffix": ".prod"}]}"#),
+        "my.app.prod",
+        "T",
+        "{}"
+    ));
+    assert!(!test_matches(
+        Some(r#"{"source": [{"suffix": ".prod"}]}"#),
+        "my.app.dev",
+        "T",
+        "{}"
+    ));
+}
+
+#[test]
+fn pattern_matches_equals_ignore_case_operator() {
+    assert!(test_matches(
+        Some(r#"{"detail-type": [{"equals-ignore-case": "ORDER"}]}"#),
+        "x",
+        "Order",
+        "{}"
+    ));
+    assert!(!test_matches(
+        Some(r#"{"detail-type": [{"equals-ignore-case": "ORDER"}]}"#),
+        "x",
+        "Shipment",
+        "{}"
+    ));
+}
+
+#[test]
+fn pattern_matches_cidr_operator() {
+    assert!(test_matches(
+        Some(r#"{"detail": {"ip": [{"cidr": "10.0.0.0/8"}]}}"#),
+        "x",
+        "T",
+        r#"{"ip": "10.5.5.5"}"#
+    ));
+    assert!(!test_matches(
+        Some(r#"{"detail": {"ip": [{"cidr": "10.0.0.0/8"}]}}"#),
+        "x",
+        "T",
+        r#"{"ip": "192.168.1.1"}"#
+    ));
+}
+
+#[test]
+fn pattern_matches_wildcard_operator() {
+    assert!(test_matches(
+        Some(r#"{"source": [{"wildcard": "*.prod.*"}]}"#),
+        "service.prod.us-east-1",
+        "T",
+        "{}"
+    ));
+    assert!(!test_matches(
+        Some(r#"{"source": [{"wildcard": "*.prod.*"}]}"#),
+        "service.dev.us-east-1",
+        "T",
+        "{}"
+    ));
+    // Anchored prefix-suffix
+    assert!(test_matches(
+        Some(r#"{"source": [{"wildcard": "svc.*.app"}]}"#),
+        "svc.x.y.app",
+        "T",
+        "{}"
+    ));
+}
+
+#[test]
+fn pattern_matches_or_alternation() {
+    let pat = Some(
+        r#"{"$or": [
+            {"source": ["a.app"]},
+            {"detail-type": ["Special"]}
+        ]}"#,
+    );
+    assert!(test_matches(pat, "a.app", "Anything", "{}"));
+    assert!(test_matches(pat, "other.app", "Special", "{}"));
+    assert!(!test_matches(pat, "other.app", "Other", "{}"));
+}
