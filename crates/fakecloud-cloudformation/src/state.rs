@@ -19,6 +19,14 @@ pub struct StackResource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackOutput {
+    pub key: String,
+    pub value: String,
+    pub description: Option<String>,
+    pub export_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stack {
     pub name: String,
     pub stack_id: String,
@@ -31,6 +39,8 @@ pub struct Stack {
     pub updated_at: Option<DateTime<Utc>>,
     pub description: Option<String>,
     pub notification_arns: Vec<String>,
+    #[serde(default)]
+    pub outputs: Vec<StackOutput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +138,7 @@ mod tests {
                 updated_at: None,
                 description: None,
                 notification_arns: vec![],
+                outputs: vec![],
             },
         );
         state.reset();

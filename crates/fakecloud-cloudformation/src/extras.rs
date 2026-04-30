@@ -529,8 +529,68 @@ impl CloudFormationService {
             "RecordHandlerProgress" => Ok(xml_response_no_result("RecordHandlerProgress", &rid)),
 
             // ── Imports / exports ──
-            "ListExports" => Ok(xml_response("ListExports", "    <Exports/>".to_string(), &rid)),
-            "ListImports" => Ok(xml_response("ListImports", "    <Imports/>".to_string(), &rid)),
+            "ListExports" => {
+                let accounts = self.state.read();
+                let mut entries = String::new();
+                if let Some(state) = accounts.get(&aid) {
+                    for stack in state.stacks.values() {
+                        if stack.status == "DELETE_COMPLETE" {
+                            continue;
+                        }
+                        for output in &stack.outputs {
+                            if let Some(export) = &output.export_name {
+                                entries.push_str(&format!(
+                                    "      <member>\n        <ExportingStackId>{}</ExportingStackId>\n        <Name>{}</Name>\n        <Value>{}</Value>\n      </member>\n",
+                                    xml_escape(&stack.stack_id),
+                                    xml_escape(export),
+                                    xml_escape(&output.value),
+                                ));
+                            }
+                        }
+                    }
+                }
+                let inner = if entries.is_empty() {
+                    "    <Exports/>".to_string()
+                } else {
+                    format!("    <Exports>\n{entries}    </Exports>")
+                };
+                Ok(xml_response("ListExports", inner, &rid))
+            }
+            "ListImports" => {
+                let export_name = params
+                    .get("ExportName")
+                    .cloned()
+                    .ok_or_else(|| missing("ExportName"))?;
+                let accounts = self.state.read();
+                let mut entries = String::new();
+                if let Some(state) = accounts.get(&aid) {
+                    for stack in state.stacks.values() {
+                        if stack.status == "DELETE_COMPLETE" {
+                            continue;
+                        }
+                        // A stack imports the export if its raw template
+                        // text references `Fn::ImportValue` with that name
+                        // (string-match keeps us protocol-light).
+                        let needle_a = format!("\"{}\"", export_name);
+                        let needle_b = format!("'{}'", export_name);
+                        if stack.template.contains("ImportValue")
+                            && (stack.template.contains(&needle_a)
+                                || stack.template.contains(&needle_b))
+                        {
+                            entries.push_str(&format!(
+                                "      <member>{}</member>\n",
+                                xml_escape(&stack.name)
+                            ));
+                        }
+                    }
+                }
+                let inner = if entries.is_empty() {
+                    "    <Imports/>".to_string()
+                } else {
+                    format!("    <Imports>\n{entries}    </Imports>")
+                };
+                Ok(xml_response("ListImports", inner, &rid))
+            }
 
             // ── Stack policies ──
             "GetStackPolicy" => {
@@ -823,7 +883,7 @@ mod tests {
         ok("ListHookResults", &[]);
         ok("RecordHandlerProgress", &[]);
         ok("ListExports", &[]);
-        ok("ListImports", &[]);
+        ok("ListImports", &[("ExportName", "SomeExport")]);
         ok("GetStackPolicy", &[("StackName", "s")]);
         ok("SetStackPolicy", &[("StackName", "s")]);
         ok("UpdateTerminationProtection", &[("StackName", "s")]);

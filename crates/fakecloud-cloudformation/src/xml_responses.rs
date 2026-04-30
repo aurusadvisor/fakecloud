@@ -120,12 +120,42 @@ fn stack_member_xml(stack: &Stack) -> String {
         format!("\n        <NotificationARNs>\n{members}\n        </NotificationARNs>")
     };
 
+    let outputs_xml = if stack.outputs.is_empty() {
+        String::new()
+    } else {
+        let members: String = stack
+            .outputs
+            .iter()
+            .map(|o| {
+                let desc = o
+                    .description
+                    .as_ref()
+                    .map(|d| format!("\n            <Description>{}</Description>", xml_escape(d)))
+                    .unwrap_or_default();
+                let export = o
+                    .export_name
+                    .as_ref()
+                    .map(|n| format!("\n            <ExportName>{}</ExportName>", xml_escape(n)))
+                    .unwrap_or_default();
+                format!(
+                    "          <member>\n            <OutputKey>{}</OutputKey>\n            <OutputValue>{}</OutputValue>{}{}\n          </member>",
+                    xml_escape(&o.key),
+                    xml_escape(&o.value),
+                    desc,
+                    export,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n        <Outputs>\n{members}\n        </Outputs>")
+    };
+
     format!(
         r#"      <member>
         <StackName>{name}</StackName>
         <StackId>{id}</StackId>
         <StackStatus>{status}</StackStatus>
-        <CreationTime>{created}</CreationTime>{description_xml}{tags_xml}{params_xml}{notification_arns_xml}
+        <CreationTime>{created}</CreationTime>{description_xml}{tags_xml}{params_xml}{notification_arns_xml}{outputs_xml}
       </member>"#,
         name = xml_escape(&stack.name),
         id = xml_escape(&stack.stack_id),
@@ -288,6 +318,7 @@ mod tests {
             updated_at: None,
             description: None,
             notification_arns: vec![],
+            outputs: vec![],
         }
     }
 
