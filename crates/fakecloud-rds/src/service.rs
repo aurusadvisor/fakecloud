@@ -1495,6 +1495,7 @@ impl RdsService {
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
         let db_snapshot_identifier = required_query_param(request, "DBSnapshotIdentifier")?;
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
+        let tags = parse_tags(request)?;
 
         let runtime = self.require_runtime()?;
 
@@ -1579,6 +1580,7 @@ impl RdsService {
             vpc_security_group_ids,
             &snapshot,
             &running,
+            tags,
         );
 
         self.state

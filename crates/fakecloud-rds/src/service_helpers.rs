@@ -446,6 +446,7 @@ pub(crate) fn build_restored_instance(
     vpc_security_group_ids: Vec<String>,
     snapshot: &DbSnapshot,
     running: &crate::runtime::RunningDbContainer,
+    tags: Vec<RdsTag>,
 ) -> DbInstance {
     DbInstance {
         db_instance_identifier: db_instance_identifier.to_string(),
@@ -466,7 +467,7 @@ pub(crate) fn build_restored_instance(
         master_user_password: snapshot.master_user_password.clone(),
         container_id: running.container_id.clone(),
         host_port: running.host_port,
-        tags: Vec::new(),
+        tags,
         read_replica_source_db_instance_identifier: None,
         read_replica_db_instance_identifiers: Vec::new(),
         vpc_security_group_ids,
