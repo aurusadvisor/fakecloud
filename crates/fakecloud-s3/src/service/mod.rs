@@ -2006,6 +2006,28 @@ pub(crate) async fn compute_checksum_streaming(
             }
             Ok(BASE64.encode(hasher.finalize().to_be_bytes()))
         }
+        "CRC32C" => {
+            let mut crc: u32 = 0;
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                crc = crc32c::crc32c_append(crc, &buf[..n]);
+            }
+            Ok(BASE64.encode(crc.to_be_bytes()))
+        }
+        "CRC64NVME" => {
+            let mut hasher = crc64fast_nvme::Digest::new();
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                hasher.write(&buf[..n]);
+            }
+            Ok(BASE64.encode(hasher.sum64().to_be_bytes()))
+        }
         "SHA1" => {
             use sha1::Digest as _;
             let mut hasher = sha1::Sha1::new();
