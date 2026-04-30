@@ -236,6 +236,34 @@ pub struct ConditionContext {
     pub aws_secure_transport: Option<bool>,
     /// `aws:RequestedRegion` — region extracted from SigV4 / config.
     pub aws_requested_region: Option<String>,
+    /// `aws:MultiFactorAuthPresent` — true iff the caller supplied an
+    /// MFA credential when minting the session (AssumeRole with
+    /// SerialNumber + TokenCode, or a long-lived user credential
+    /// re-asserted via STS GetSessionToken with MFA).
+    pub aws_mfa_present: Option<bool>,
+    /// `aws:MultiFactorAuthAge` — seconds since MFA was asserted on
+    /// the session.
+    pub aws_mfa_age_seconds: Option<i64>,
+    /// `aws:CalledVia` — the chain of service principals that have
+    /// re-invoked downstream services on the caller's behalf
+    /// (e.g. `["cloudformation.amazonaws.com"]`). Multi-value key.
+    pub aws_called_via: Vec<String>,
+    /// `aws:SourceVpce` — VPC endpoint id when the request transited
+    /// a VPC interface endpoint.
+    pub aws_source_vpce: Option<String>,
+    /// `aws:SourceVpc` — VPC id when the request originated inside a
+    /// VPC.
+    pub aws_source_vpc: Option<String>,
+    /// `aws:VpcSourceIp` — private source IP inside the VPC (distinct
+    /// from `aws:SourceIp` which is the public NAT/Edge IP).
+    pub aws_vpc_source_ip: Option<IpAddr>,
+    /// `aws:FederatedProvider` — `cognito-identity.amazonaws.com`,
+    /// `accounts.google.com`, or the SAML-provider ARN, depending on
+    /// how the credential was minted.
+    pub aws_federated_provider: Option<String>,
+    /// `aws:TokenIssueTime` — when the temporary credential
+    /// underlying this session was issued (UTC).
+    pub aws_token_issue_time: Option<DateTime<Utc>>,
     /// Service-specific keys (`s3:prefix`, `sqs:MessageAttribute`, …).
     pub service_keys: BTreeMap<String, Vec<String>>,
     /// `aws:ResourceTag/<key>` — tags on the target resource.
@@ -310,6 +338,22 @@ impl ConditionContext {
             "aws:epochtime" => self.aws_epoch_time.map(|e| vec![e.to_string()]),
             "aws:securetransport" => self.aws_secure_transport.map(|b| vec![b.to_string()]),
             "aws:requestedregion" => self.aws_requested_region.as_deref().and_then(one),
+            "aws:multifactorauthpresent" => self.aws_mfa_present.map(|b| vec![b.to_string()]),
+            "aws:multifactorauthage" => self.aws_mfa_age_seconds.map(|s| vec![s.to_string()]),
+            "aws:calledvia" => {
+                if self.aws_called_via.is_empty() {
+                    None
+                } else {
+                    Some(self.aws_called_via.clone())
+                }
+            }
+            "aws:sourcevpce" => self.aws_source_vpce.as_deref().and_then(one),
+            "aws:sourcevpc" => self.aws_source_vpc.as_deref().and_then(one),
+            "aws:vpcsourceip" => self.aws_vpc_source_ip.map(|ip| vec![ip.to_string()]),
+            "aws:federatedprovider" => self.aws_federated_provider.as_deref().and_then(one),
+            "aws:tokenissuetime" => self
+                .aws_token_issue_time
+                .map(|t| vec![t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)]),
             _ => {
                 if let Some(vs) = self.service_keys.get(&lower) {
                     if vs.is_empty() {
@@ -908,6 +952,104 @@ mod tests {
     }
 
     // --- ABAC tag condition key lookup ------------------------------------
+
+    #[test]
+    fn lookup_mfa_present_emits_bool_string() {
+        let ctx = ConditionContext {
+            aws_mfa_present: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            ctx.lookup("aws:MultiFactorAuthPresent"),
+            Some(vec!["true".to_string()])
+        );
+        let ctx = ConditionContext {
+            aws_mfa_present: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(
+            ctx.lookup("aws:multifactorauthpresent"),
+            Some(vec!["false".to_string()])
+        );
+    }
+
+    #[test]
+    fn lookup_mfa_age_emits_seconds() {
+        let ctx = ConditionContext {
+            aws_mfa_age_seconds: Some(900),
+            ..Default::default()
+        };
+        assert_eq!(
+            ctx.lookup("aws:MultiFactorAuthAge"),
+            Some(vec!["900".to_string()])
+        );
+    }
+
+    #[test]
+    fn lookup_called_via_returns_full_chain() {
+        let ctx = ConditionContext {
+            aws_called_via: vec![
+                "cloudformation.amazonaws.com".to_string(),
+                "lambda.amazonaws.com".to_string(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            ctx.lookup("aws:CalledVia"),
+            Some(vec![
+                "cloudformation.amazonaws.com".to_string(),
+                "lambda.amazonaws.com".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn lookup_called_via_empty_returns_none() {
+        let ctx = ConditionContext::default();
+        assert_eq!(ctx.lookup("aws:CalledVia"), None);
+    }
+
+    #[test]
+    fn lookup_source_vpc_keys() {
+        let ctx = ConditionContext {
+            aws_source_vpc: Some("vpc-123".to_string()),
+            aws_source_vpce: Some("vpce-456".to_string()),
+            aws_vpc_source_ip: Some("10.0.1.5".parse::<IpAddr>().unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ctx.lookup("aws:SourceVpc"),
+            Some(vec!["vpc-123".to_string()])
+        );
+        assert_eq!(
+            ctx.lookup("aws:SourceVpce"),
+            Some(vec!["vpce-456".to_string()])
+        );
+        assert_eq!(
+            ctx.lookup("aws:VpcSourceIp"),
+            Some(vec!["10.0.1.5".to_string()])
+        );
+    }
+
+    #[test]
+    fn lookup_federated_provider_and_token_issue_time() {
+        use chrono::TimeZone;
+        let ctx = ConditionContext {
+            aws_federated_provider: Some("cognito-identity.amazonaws.com".to_string()),
+            aws_token_issue_time: Some(
+                chrono::Utc.with_ymd_and_hms(2026, 4, 30, 12, 0, 0).unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            ctx.lookup("aws:FederatedProvider"),
+            Some(vec!["cognito-identity.amazonaws.com".to_string()])
+        );
+        assert_eq!(
+            ctx.lookup("aws:TokenIssueTime"),
+            Some(vec!["2026-04-30T12:00:00Z".to_string()])
+        );
+    }
 
     fn abac_context() -> ConditionContext {
         ConditionContext {

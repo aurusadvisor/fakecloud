@@ -843,6 +843,19 @@ fn build_condition_context(
         aws_epoch_time: Some(now.timestamp()),
         aws_secure_transport: Some(secure_transport),
         aws_requested_region: Some(region.to_string()),
+        // F3 keys: populated from the caller's session context when STS
+        // mints credentials with MFA / SAML / OIDC / VPC-endpoint hints.
+        // Default-None here so tests/dispatch sites that don't set them
+        // safe-fail any policy referencing them — matching AWS for keys
+        // that aren't asserted.
+        aws_mfa_present: None,
+        aws_mfa_age_seconds: None,
+        aws_called_via: Vec::new(),
+        aws_source_vpce: None,
+        aws_source_vpc: None,
+        aws_vpc_source_ip: None,
+        aws_federated_provider: None,
+        aws_token_issue_time: None,
         service_keys: Default::default(),
         resource_tags: None,
         request_tags: None,
