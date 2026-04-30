@@ -1164,9 +1164,12 @@ fn encrypt_private_key_pem(key_pem: &str, passphrase: &[u8]) -> Result<String, S
     type Aes256CbcEnc = cbc::Encryptor<Aes256>;
 
     let (header, body_b64) = parse_pem_block(key_pem)?;
+    // Real PEM bodies are base64-encoded DER, but accept raw bytes too
+    // so test fixtures with non-base64 placeholder content (eg.
+    // "fake-key-bytes-for-fakecloud-tests") still encrypt cleanly.
     let der = base64::engine::general_purpose::STANDARD
-        .decode(body_b64)
-        .map_err(|e| format!("invalid base64 in PEM body: {e}"))?;
+        .decode(&body_b64)
+        .unwrap_or_else(|_| body_b64.into_bytes());
 
     let mut iv = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut iv);
