@@ -1682,5 +1682,204 @@ pub fn oidc_discovery_document(pool_id: &str, region: &str, base_url: &str) -> V
     })
 }
 
+/// Result of `/oauth2/token` handling. The HTTP wrapper translates
+/// `Err(OAuthTokenError)` into the OAuth2-shaped JSON `{"error": ...}`
+/// body with the appropriate HTTP status (400 for client errors, 401
+/// for auth failures).
+#[derive(Debug)]
+pub enum OAuthTokenError {
+    InvalidRequest(&'static str),
+    UnsupportedGrantType,
+    InvalidClient,
+    InvalidGrant,
+}
+
+impl OAuthTokenError {
+    pub fn status_code(&self) -> u16 {
+        match self {
+            OAuthTokenError::InvalidClient => 401,
+            _ => 400,
+        }
+    }
+
+    pub fn as_oauth_code(&self) -> &'static str {
+        match self {
+            OAuthTokenError::InvalidRequest(_) => "invalid_request",
+            OAuthTokenError::UnsupportedGrantType => "unsupported_grant_type",
+            OAuthTokenError::InvalidClient => "invalid_client",
+            OAuthTokenError::InvalidGrant => "invalid_grant",
+        }
+    }
+
+    pub fn description(&self) -> Option<&'static str> {
+        match self {
+            OAuthTokenError::InvalidRequest(msg) => Some(msg),
+            _ => None,
+        }
+    }
+}
+
+/// Cognito-shaped `/oauth2/token` response body.
+#[derive(Debug)]
+pub struct OAuthTokenResponse {
+    pub access_token: String,
+    pub id_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub expires_in: i64,
+    pub token_type: String,
+}
+
+impl OAuthTokenResponse {
+    pub fn to_json(&self) -> Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("access_token".into(), json!(self.access_token));
+        if let Some(ref id) = self.id_token {
+            obj.insert("id_token".into(), json!(id));
+        }
+        if let Some(ref rt) = self.refresh_token {
+            obj.insert("refresh_token".into(), json!(rt));
+        }
+        obj.insert("expires_in".into(), json!(self.expires_in));
+        obj.insert("token_type".into(), json!(self.token_type));
+        Value::Object(obj)
+    }
+}
+
+/// Handle a Cognito `/oauth2/token` POST. Implements the
+/// `refresh_token` and `client_credentials` grants. The
+/// `authorization_code` grant lands in Y4 alongside the
+/// `/oauth2/authorize` endpoint.
+///
+/// `params` is the form-decoded body (Cognito uses
+/// `application/x-www-form-urlencoded`). `region` is the AWS region
+/// for `iss` claim composition.
+pub async fn handle_oauth2_token(
+    state: &SharedCognitoState,
+    params: &BTreeMap<String, String>,
+    region: &str,
+) -> Result<OAuthTokenResponse, OAuthTokenError> {
+    let grant_type = params
+        .get("grant_type")
+        .map(String::as_str)
+        .ok_or(OAuthTokenError::InvalidRequest("grant_type is required"))?;
+    let client_id = params
+        .get("client_id")
+        .map(String::as_str)
+        .ok_or(OAuthTokenError::InvalidRequest("client_id is required"))?;
+
+    let (pool_id, stored_secret) = {
+        let mas = state.read();
+        let mut found = None;
+        for (_, account) in mas.iter() {
+            if let Some(client) = account.user_pool_clients.get(client_id) {
+                found = Some((client.user_pool_id.clone(), client.client_secret.clone()));
+                break;
+            }
+        }
+        found.ok_or(OAuthTokenError::InvalidClient)?
+    };
+
+    if let Some(secret) = stored_secret.as_ref() {
+        let supplied = params.get("client_secret").map(String::as_str);
+        if supplied != Some(secret.as_str()) {
+            return Err(OAuthTokenError::InvalidClient);
+        }
+    }
+
+    match grant_type {
+        "refresh_token" => {
+            let refresh_token = params
+                .get("refresh_token")
+                .map(String::as_str)
+                .ok_or(OAuthTokenError::InvalidRequest("refresh_token is required"))?;
+            let (username, sub) = {
+                let mas = state.read();
+                let mut found = Err(OAuthTokenError::InvalidGrant);
+                for (_, account) in mas.iter() {
+                    if let Some(rt) = account.refresh_tokens.get(refresh_token) {
+                        if rt.client_id != client_id {
+                            found = Err(OAuthTokenError::InvalidGrant);
+                            break;
+                        }
+                        let sub = account
+                            .users
+                            .get(&rt.user_pool_id)
+                            .and_then(|users| users.get(&rt.username))
+                            .map(|u| u.sub.clone())
+                            .unwrap_or_default();
+                        found = Ok((rt.username.clone(), sub));
+                        break;
+                    }
+                }
+                found?
+            };
+            let signing = ensure_pool_signing_key(state, &pool_id).await;
+            let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
+            let tokens = generate_tokens(&pool_id, client_id, &sub, &username, region, signing_ref);
+            // refresh_token grant returns id+access but not a new
+            // refresh_token (Cognito only rotates refresh tokens when
+            // RefreshTokenRotation is ENABLED — that lands in Y7).
+            Ok(OAuthTokenResponse {
+                access_token: tokens.access_token,
+                id_token: Some(tokens.id_token),
+                refresh_token: None,
+                expires_in: 3600,
+                token_type: "Bearer".to_string(),
+            })
+        }
+        "client_credentials" => {
+            // Machine-to-machine: just an access token, no id_token,
+            // no refresh_token. `sub` is the client_id per OIDC core.
+            let signing = ensure_pool_signing_key(state, &pool_id).await;
+            let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
+            let scope = params.get("scope").cloned();
+            let access_token = build_client_credentials_access_token(
+                &pool_id,
+                client_id,
+                scope.as_deref(),
+                region,
+                signing_ref,
+            );
+            Ok(OAuthTokenResponse {
+                access_token,
+                id_token: None,
+                refresh_token: None,
+                expires_in: 3600,
+                token_type: "Bearer".to_string(),
+            })
+        }
+        "authorization_code" => Err(OAuthTokenError::UnsupportedGrantType),
+        _ => Err(OAuthTokenError::UnsupportedGrantType),
+    }
+}
+
+fn build_client_credentials_access_token(
+    pool_id: &str,
+    client_id: &str,
+    scope: Option<&str>,
+    region: &str,
+    signing: Option<(&str, &str)>,
+) -> String {
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let now = Utc::now().timestamp();
+    let jti = Uuid::new_v4().to_string();
+    let iss = format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}");
+    let kid = signing
+        .map(|(_, k)| k.to_string())
+        .unwrap_or_else(|| "fakecloud-key-1".to_string());
+    let header = json!({"kid": kid, "alg": "RS256", "typ": "JWT"});
+    let payload = json!({
+        "sub": client_id,
+        "iss": iss,
+        "client_id": client_id,
+        "token_use": "access",
+        "scope": scope.unwrap_or(""),
+        "jti": jti,
+        "exp": now + 3600,
+        "iat": now,
+    });
+    sign_jwt(&header, &payload, &b64url, signing.map(|(p, _)| p))
+}
+
 #[cfg(test)]
 mod tests;

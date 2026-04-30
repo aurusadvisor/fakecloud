@@ -4773,3 +4773,272 @@ async fn cognito_well_known_jwks_404_for_unknown_pool() {
     let resp = http.get(&url).send().await.unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+#[tokio::test]
+async fn cognito_oauth2_token_refresh_grant() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("oauth2-refresh-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("oauth2-refresh-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("alice")
+        .password("hunter22")
+        .send()
+        .await
+        .expect("sign up");
+    client
+        .confirm_sign_up()
+        .client_id(&client_id)
+        .username("alice")
+        .confirmation_code("123456")
+        .send()
+        .await
+        .expect("confirm");
+
+    let auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "alice")
+        .auth_parameters("PASSWORD", "hunter22")
+        .send()
+        .await
+        .expect("auth");
+    let refresh_token = auth
+        .authentication_result()
+        .unwrap()
+        .refresh_token()
+        .unwrap()
+        .to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/token", server.endpoint());
+    let body =
+        format!("grant_type=refresh_token&client_id={client_id}&refresh_token={refresh_token}");
+    let resp = http
+        .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(json["access_token"].as_str().unwrap().split('.').count() == 3);
+    assert!(json["id_token"].as_str().unwrap().split('.').count() == 3);
+    assert_eq!(json["token_type"], "Bearer");
+    assert_eq!(json["expires_in"], 3600);
+}
+
+#[tokio::test]
+async fn cognito_oauth2_token_client_credentials_grant() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("oauth2-cc-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("oauth2-cc-client")
+        .generate_secret(true)
+        .send()
+        .await
+        .expect("create client");
+    let app_client = app.user_pool_client().unwrap();
+    let client_id = app_client.client_id().unwrap().to_string();
+    let client_secret = app_client.client_secret().unwrap().to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/token", server.endpoint());
+    let body = format!(
+        "grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}&scope=api%2Fread"
+    );
+    let resp = http
+        .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(json["access_token"].as_str().unwrap().split('.').count() == 3);
+    assert!(json.get("id_token").is_none());
+    assert!(json.get("refresh_token").is_none());
+    assert_eq!(json["token_type"], "Bearer");
+}
+
+#[tokio::test]
+async fn cognito_oauth2_token_invalid_client_secret() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("oauth2-bad-secret-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("oauth2-bad-secret-client")
+        .generate_secret(true)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/token", server.endpoint());
+    let body =
+        format!("grant_type=client_credentials&client_id={client_id}&client_secret=wrong-secret");
+    let resp = http
+        .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "invalid_client");
+}
+
+#[tokio::test]
+async fn cognito_oauth2_token_unsupported_grant_type() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("oauth2-ugt-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("oauth2-ugt-client")
+        .send()
+        .await
+        .expect("create client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/token", server.endpoint());
+    let body = format!("grant_type=password&client_id={client_id}");
+    let resp = http
+        .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "unsupported_grant_type");
+}
+
+#[tokio::test]
+async fn cognito_oauth2_token_authorization_code_grant_unsupported() {
+    // /oauth2/authorize lands in Y4; until then authorization_code returns
+    // unsupported_grant_type rather than crashing.
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("oauth2-ac-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("oauth2-ac-client")
+        .send()
+        .await
+        .expect("create client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/token", server.endpoint());
+    let body = format!("grant_type=authorization_code&client_id={client_id}&code=abc");
+    let resp = http
+        .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "unsupported_grant_type");
+}
