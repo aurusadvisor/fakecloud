@@ -141,6 +141,46 @@ const DEFAULT_PAGE_SIZE: usize = 100;
 
 const DEFAULT_EFFECTIVE_DELIVERY_POLICY: &str = r#"{"defaultHealthyRetryPolicy":{"numNoDelayRetries":0,"numMinDelayRetries":0,"minDelayTarget":20,"maxDelayTarget":20,"numMaxDelayRetries":0,"numRetries":3,"backoffFunction":"linear"},"sicklyRetryPolicy":null,"throttlePolicy":null,"guaranteed":false}"#;
 
+/// Merge a user-supplied DeliveryPolicy over the SNS default to produce
+/// the EffectiveDeliveryPolicy real SNS surfaces. Falls back to the
+/// default when the user policy is missing, empty, or unparseable
+/// (matching real SNS behaviour).
+fn compute_effective_delivery_policy(user: Option<&str>) -> String {
+    let default: serde_json::Value =
+        serde_json::from_str(DEFAULT_EFFECTIVE_DELIVERY_POLICY).unwrap();
+    let Some(user) = user else {
+        return DEFAULT_EFFECTIVE_DELIVERY_POLICY.to_string();
+    };
+    let user_trim = user.trim();
+    if user_trim.is_empty() {
+        return DEFAULT_EFFECTIVE_DELIVERY_POLICY.to_string();
+    }
+    let Ok(user_val) = serde_json::from_str::<serde_json::Value>(user_trim) else {
+        return DEFAULT_EFFECTIVE_DELIVERY_POLICY.to_string();
+    };
+    let merged = merge_json(default, user_val);
+    serde_json::to_string(&merged).unwrap_or_else(|_| DEFAULT_EFFECTIVE_DELIVERY_POLICY.to_string())
+}
+
+fn merge_json(mut base: serde_json::Value, overlay: serde_json::Value) -> serde_json::Value {
+    if let (Some(b), Some(o)) = (base.as_object_mut(), overlay.as_object()) {
+        for (k, v) in o {
+            match b.get_mut(k) {
+                Some(existing @ serde_json::Value::Object(_)) if v.is_object() => {
+                    let merged = merge_json(existing.take(), v.clone());
+                    *existing = merged;
+                }
+                _ => {
+                    b.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        base
+    } else {
+        overlay
+    }
+}
+
 const VALID_SNS_ACTIONS: &[&str] = &[
     "GetTopicAttributes",
     "SetTopicAttributes",
@@ -615,11 +655,12 @@ impl SnsService {
             format_attr("SubscriptionsDeleted", "0"),
         ];
 
-        // Add EffectiveDeliveryPolicy
-        entries.push(format_attr(
-            "EffectiveDeliveryPolicy",
-            DEFAULT_EFFECTIVE_DELIVERY_POLICY,
-        ));
+        // EffectiveDeliveryPolicy: merge any user-set DeliveryPolicy
+        // over the SNS default so callers see their tuning reflected
+        // (matching real SNS).
+        let user_policy = topic.attributes.get("DeliveryPolicy").map(|s| s.as_str());
+        let effective = compute_effective_delivery_policy(user_policy);
+        entries.push(format_attr("EffectiveDeliveryPolicy", &effective));
 
         // Add all stored attributes
         for (k, v) in &topic.attributes {
@@ -1047,11 +1088,12 @@ impl SnsService {
             entries.push(format_attr("RawMessageDelivery", "false"));
         }
 
-        // Add EffectiveDeliveryPolicy
-        entries.push(format_attr(
-            "EffectiveDeliveryPolicy",
-            DEFAULT_EFFECTIVE_DELIVERY_POLICY,
-        ));
+        // EffectiveDeliveryPolicy: merge any subscription-level
+        // DeliveryPolicy over the SNS default so callers see their
+        // tuning reflected (matching real SNS).
+        let user_policy = sub.attributes.get("DeliveryPolicy").map(|s| s.as_str());
+        let effective = compute_effective_delivery_policy(user_policy);
+        entries.push(format_attr("EffectiveDeliveryPolicy", &effective));
 
         for (k, v) in &sub.attributes {
             // Skip empty FilterPolicy (unsetting it removes it)
@@ -1562,3 +1604,48 @@ pub(crate) use helpers::*;
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod effective_policy_tests {
+    use super::compute_effective_delivery_policy;
+    use serde_json::Value;
+
+    #[test]
+    fn falls_back_to_default_for_unset_policy() {
+        let v: Value = serde_json::from_str(&compute_effective_delivery_policy(None)).unwrap();
+        assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 3);
+    }
+
+    #[test]
+    fn falls_back_to_default_for_empty_policy() {
+        let v: Value = serde_json::from_str(&compute_effective_delivery_policy(Some(""))).unwrap();
+        assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 3);
+    }
+
+    #[test]
+    fn falls_back_to_default_for_unparseable_policy() {
+        let v: Value =
+            serde_json::from_str(&compute_effective_delivery_policy(Some("not json"))).unwrap();
+        assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 3);
+    }
+
+    #[test]
+    fn merges_user_set_retry_count() {
+        let user = r#"{"defaultHealthyRetryPolicy":{"numRetries":7}}"#;
+        let v: Value =
+            serde_json::from_str(&compute_effective_delivery_policy(Some(user))).unwrap();
+        assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 7);
+        // Default fields the user didn't override stay intact.
+        assert_eq!(v["defaultHealthyRetryPolicy"]["minDelayTarget"], 20);
+        assert_eq!(v["defaultHealthyRetryPolicy"]["backoffFunction"], "linear");
+    }
+
+    #[test]
+    fn user_can_override_top_level_keys() {
+        let user = r#"{"guaranteed":true}"#;
+        let v: Value =
+            serde_json::from_str(&compute_effective_delivery_policy(Some(user))).unwrap();
+        assert_eq!(v["guaranteed"], true);
+        assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 3);
+    }
+}
