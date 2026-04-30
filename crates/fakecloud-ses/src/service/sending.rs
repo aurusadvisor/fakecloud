@@ -8,6 +8,19 @@ use crate::state::SentEmail;
 
 use super::{extract_string_array, SesV2Service};
 
+/// Extract bare email address from a "From" header. Strips display-name
+/// wrappers like `Foo <foo@example.com>` and surrounding whitespace.
+fn extract_email_address(from: &str) -> &str {
+    if let Some(start) = from.rfind('<') {
+        if let Some(end) = from.rfind('>') {
+            if end > start {
+                return from[start + 1..end].trim();
+            }
+        }
+    }
+    from.trim()
+}
+
 impl SesV2Service {
     /// Reject the send if either account-level sending or the resolved
     /// configuration set's sending flag is paused. Real SES surfaces
@@ -41,6 +54,57 @@ impl SesV2Service {
         None
     }
 
+    /// Reject sends where the sender is not a verified identity. Mirrors
+    /// real SES: every From address must either match a verified email
+    /// identity exactly, or its domain must match a verified domain
+    /// identity.
+    pub(super) fn reject_unverified_sender(
+        &self,
+        account_id: &str,
+        from: &str,
+    ) -> Option<AwsResponse> {
+        let email = extract_email_address(from);
+        if email.is_empty() {
+            return Some(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "FromEmailAddress is required",
+            ));
+        }
+        let domain = email.split_once('@').map(|(_, d)| d).unwrap_or("");
+
+        let accounts = self.state.read();
+        let Some(state) = accounts.get(account_id) else {
+            return Some(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "MessageRejected",
+                &format!("Email address is not verified. The following identities failed the check in region {}: {}", "us-east-1", email),
+            ));
+        };
+
+        let email_ok = state
+            .identities
+            .get(email)
+            .map(|id| id.verified)
+            .unwrap_or(false);
+        let domain_ok = !domain.is_empty()
+            && state
+                .identities
+                .get(domain)
+                .map(|id| id.verified)
+                .unwrap_or(false);
+
+        if email_ok || domain_ok {
+            None
+        } else {
+            Some(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "MessageRejected",
+                &format!("Email address is not verified. The following identities failed the check in region {}: {}", "us-east-1", email),
+            ))
+        }
+    }
+
     pub(super) fn send_email(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = Self::parse_body(req)?;
 
@@ -59,6 +123,9 @@ impl SesV2Service {
         let from = body["FromEmailAddress"].as_str().unwrap_or("").to_string();
         let config_set_name = body["ConfigurationSetName"].as_str().map(|s| s.to_string());
         if let Some(err) = self.check_sending_enabled(&req.account_id, config_set_name.as_deref()) {
+            return Ok(err);
+        }
+        if let Some(err) = self.reject_unverified_sender(&req.account_id, &from) {
             return Ok(err);
         }
 
@@ -130,6 +197,9 @@ impl SesV2Service {
         let body: Value = Self::parse_body(req)?;
 
         let from = body["FromEmailAddress"].as_str().unwrap_or("").to_string();
+        if let Some(err) = self.reject_unverified_sender(&req.account_id, &from) {
+            return Ok(err);
+        }
         let config_set_name = body["ConfigurationSetName"].as_str().map(|s| s.to_string());
         if let Some(err) = self.check_sending_enabled(&req.account_id, config_set_name.as_deref()) {
             return Ok(err);
