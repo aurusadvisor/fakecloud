@@ -42,6 +42,13 @@ pub static ORGANIZATIONS_ACTIONS: &[&str] = &[
     "ListCreateAccountStatus",
     "CloseAccount",
     "RemoveAccountFromOrganization",
+    "InviteAccountToOrganization",
+    "AcceptHandshake",
+    "DeclineHandshake",
+    "CancelHandshake",
+    "DescribeHandshake",
+    "ListHandshakesForAccount",
+    "ListHandshakesForOrganization",
 ];
 
 pub struct OrganizationsService {
@@ -581,6 +588,143 @@ impl OrganizationsService {
         org.remove_account(&target).map_err(org_error_to_aws)?;
         Ok(AwsResponse::ok_json(json!({})))
     }
+
+    fn invite_account_to_organization(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let target_obj = body.get("Target").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInputException",
+                "Target is required",
+            )
+        })?;
+        let kind = target_obj
+            .get("Type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ACCOUNT");
+        let id = target_obj
+            .get("Id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidInputException",
+                    "Target.Id is required",
+                )
+            })?
+            .to_string();
+        let notes = body
+            .get("Notes")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let target_email = if kind == "EMAIL" {
+            Some(id.clone())
+        } else {
+            None
+        };
+
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        let handshake = org
+            .invite_account(&req.account_id, &id, target_email, notes)
+            .map_err(org_error_to_aws)?;
+        Ok(AwsResponse::ok_json(
+            json!({ "Handshake": handshake_payload(&handshake) }),
+        ))
+    }
+
+    fn accept_handshake(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.transition_handshake(req, "ACCEPTED")
+    }
+
+    fn decline_handshake(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.transition_handshake(req, "DECLINED")
+    }
+
+    fn cancel_handshake(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.transition_handshake(req, "CANCELED")
+    }
+
+    fn transition_handshake(
+        &self,
+        req: &AwsRequest,
+        new_state: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = required_str(&body, "HandshakeId")?.to_string();
+        let mut guard = self.state.write();
+        let org = guard.as_mut().ok_or_else(organizations_not_in_use)?;
+
+        // AcceptHandshake / DeclineHandshake belong to the *target*
+        // account; CancelHandshake belongs to the *source* (management)
+        // account. Enforce party-correctness so test harnesses catch
+        // misuse before AWS would.
+        let handshake = org.handshakes.get(&id).ok_or_else(|| {
+            org_error_to_aws(crate::state::OrgError::HandshakeNotFound(id.clone()))
+        })?;
+        let allowed = match new_state {
+            "ACCEPTED" | "DECLINED" => req.account_id == handshake.target_account_id,
+            "CANCELED" => req.account_id == handshake.source_account_id,
+            _ => false,
+        };
+        if !allowed {
+            return Err(org_error_to_aws(
+                crate::state::OrgError::InvalidHandshakeParty(req.account_id.clone()),
+            ));
+        }
+        let updated = org
+            .resolve_handshake(&id, new_state)
+            .map_err(org_error_to_aws)?;
+        Ok(AwsResponse::ok_json(
+            json!({ "Handshake": handshake_payload(&updated) }),
+        ))
+    }
+
+    fn describe_handshake(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let id = required_str(&body, "HandshakeId")?.to_string();
+        let guard = self.state.read();
+        let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
+        let handshake = org.handshakes.get(&id).ok_or_else(|| {
+            org_error_to_aws(crate::state::OrgError::HandshakeNotFound(id.clone()))
+        })?;
+        Ok(AwsResponse::ok_json(
+            json!({ "Handshake": handshake_payload(handshake) }),
+        ))
+    }
+
+    fn list_handshakes_for_account(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let guard = self.state.read();
+        let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
+        let entries: Vec<Value> = org
+            .list_handshakes(Some(&req.account_id))
+            .iter()
+            .map(handshake_payload)
+            .collect();
+        Ok(AwsResponse::ok_json(json!({ "Handshakes": entries })))
+    }
+
+    fn list_handshakes_for_organization(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_ref().expect("management gate proved Some");
+        let entries: Vec<Value> = org
+            .list_handshakes(None)
+            .iter()
+            .map(handshake_payload)
+            .collect();
+        Ok(AwsResponse::ok_json(json!({ "Handshakes": entries })))
+    }
 }
 
 #[async_trait]
@@ -619,6 +763,13 @@ impl AwsService for OrganizationsService {
             "ListCreateAccountStatus" => self.list_create_account_status(&req),
             "CloseAccount" => self.close_account(&req),
             "RemoveAccountFromOrganization" => self.remove_account_from_organization(&req),
+            "InviteAccountToOrganization" => self.invite_account_to_organization(&req),
+            "AcceptHandshake" => self.accept_handshake(&req),
+            "DeclineHandshake" => self.decline_handshake(&req),
+            "CancelHandshake" => self.cancel_handshake(&req),
+            "DescribeHandshake" => self.describe_handshake(&req),
+            "ListHandshakesForAccount" => self.list_handshakes_for_account(&req),
+            "ListHandshakesForOrganization" => self.list_handshakes_for_organization(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "organizations",
                 &req.action,
@@ -791,7 +942,62 @@ fn org_error_to_aws(err: OrgError) -> AwsServiceError {
             "CreateAccountStatusNotFoundException",
             format!("Create account status with id {id} was not found."),
         ),
+        OrgError::HandshakeNotFound(id) => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "HandshakeNotFoundException",
+            format!("The handshake with id {id} was not found."),
+        ),
+        OrgError::HandshakeAlreadyResolved(state) => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidHandshakeTransitionException",
+            format!("Handshake is already in terminal state {state}."),
+        ),
+        OrgError::InvalidHandshakeState(state) => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidHandshakeTransitionException",
+            format!("State {state} is not a valid terminal handshake state."),
+        ),
+        OrgError::InvalidHandshakeParty(account) => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "AccessDeniedException",
+            format!("Account {account} is not party to this handshake's transition."),
+        ),
+        OrgError::DuplicateHandshakeForAccount(account) => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "DuplicateHandshakeException",
+            format!("An OPEN handshake already exists for account {account}."),
+        ),
+        OrgError::AccountAlreadyMember(account) => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "AccountAlreadyRegisteredException",
+            format!("Account {account} is already a member of this organization."),
+        ),
     }
+}
+
+fn handshake_payload(h: &crate::state::Handshake) -> Value {
+    let parties = json!([
+        {"Id": h.source_account_id, "Type": "ACCOUNT"},
+        {"Id": h.target_account_id, "Type": h.target_kind},
+    ]);
+    let resources = json!([
+        {"Type": "ORGANIZATION", "Value": h.organization_id},
+        {"Type": "ACCOUNT", "Value": h.target_account_id},
+    ]);
+    let mut obj = json!({
+        "Id": h.id,
+        "Arn": h.arn,
+        "Action": h.action,
+        "State": h.state,
+        "RequestedTimestamp": h.requested_timestamp.timestamp() as f64,
+        "ExpirationTimestamp": h.expiration_timestamp.timestamp() as f64,
+        "Parties": parties,
+        "Resources": resources,
+    });
+    if let Some(notes) = &h.notes {
+        obj["Notes"] = json!(notes);
+    }
+    obj
 }
 
 fn create_account_status_payload(status: &crate::state::CreateAccountStatus) -> Value {
