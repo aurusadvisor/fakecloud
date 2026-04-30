@@ -140,8 +140,12 @@ fn append_record_advances_sequence_numbers() {
     let first = append_record(&mut shard, "key", b"first".to_vec());
     let second = append_record(&mut shard, "key", b"second".to_vec());
 
-    assert_eq!(first, "00000000000000000001");
-    assert_eq!(second, "00000000000000000002");
+    // Real Kinesis emits 56-digit decimal sequence numbers; SDKs that
+    // bind them as opaque strings rely on the width.
+    assert_eq!(first.len(), 56);
+    assert_eq!(second.len(), 56);
+    assert!(first.ends_with("1"));
+    assert!(second.ends_with("2"));
     assert_eq!(shard.records.len(), 2);
 }
 
