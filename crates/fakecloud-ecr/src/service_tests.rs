@@ -205,3 +205,65 @@ fn wildcard_match_basics() {
     assert!(!wildcard_match("exact", "exactly"));
     assert!(!wildcard_match("a*b*c", "a-b"));
 }
+
+// ── Registry-level scan-on-push fallback ───────────────────────
+use super::{registry_filter_matches, registry_scan_on_push_matches};
+use crate::state::{
+    RegistryScanningConfiguration, RegistryScanningRule, RepositoryFilter as RegRepositoryFilter,
+};
+
+fn rule(freq: &str, filters: Vec<(&str, &str)>) -> RegistryScanningRule {
+    RegistryScanningRule {
+        scan_frequency: freq.to_string(),
+        repository_filters: filters
+            .into_iter()
+            .map(|(f, t)| RegRepositoryFilter {
+                filter: f.to_string(),
+                filter_type: t.to_string(),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn registry_scan_matches_when_filter_wildcards_repo() {
+    let cfg = RegistryScanningConfiguration {
+        scan_type: "BASIC".to_string(),
+        rules: vec![rule("SCAN_ON_PUSH", vec![("prod-*", "WILDCARD")])],
+    };
+    assert!(registry_scan_on_push_matches(&cfg, "prod-api"));
+    assert!(!registry_scan_on_push_matches(&cfg, "dev-api"));
+}
+
+#[test]
+fn registry_scan_matches_when_filter_list_empty() {
+    let cfg = RegistryScanningConfiguration {
+        scan_type: "BASIC".to_string(),
+        rules: vec![rule("SCAN_ON_PUSH", vec![])],
+    };
+    assert!(registry_scan_on_push_matches(&cfg, "anything"));
+}
+
+#[test]
+fn registry_scan_skips_continuous_scan_frequency() {
+    let cfg = RegistryScanningConfiguration {
+        scan_type: "ENHANCED".to_string(),
+        rules: vec![rule("CONTINUOUS_SCAN", vec![("*", "WILDCARD")])],
+    };
+    assert!(!registry_scan_on_push_matches(&cfg, "x"));
+}
+
+#[test]
+fn registry_filter_rejects_unknown_filter_type() {
+    let f = RegRepositoryFilter {
+        filter: "x".to_string(),
+        filter_type: "REGEX".to_string(),
+    };
+    assert!(!registry_filter_matches(&f, "x"));
+}
+
+#[test]
+fn registry_scan_no_rules_no_match() {
+    let cfg = RegistryScanningConfiguration::default();
+    assert!(!registry_scan_on_push_matches(&cfg, "x"));
+}
