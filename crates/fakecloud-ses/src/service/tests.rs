@@ -429,6 +429,72 @@ async fn test_send_bulk_email() {
 }
 
 #[tokio::test]
+async fn test_send_email_rejects_when_account_paused() {
+    let state = make_state();
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.account_settings.sending_enabled = false;
+    }
+    let svc = SesV2Service::new(state);
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["r@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["__type"], "AccountSendingPausedException");
+}
+
+#[tokio::test]
+async fn test_send_email_rejects_when_config_set_paused() {
+    let state = make_state();
+    {
+        use crate::state::ConfigurationSet;
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.configuration_sets.insert(
+            "paused".to_string(),
+            ConfigurationSet {
+                name: "paused".to_string(),
+                sending_enabled: false,
+                tls_policy: "OPTIONAL".to_string(),
+                sending_pool_name: None,
+                custom_redirect_domain: None,
+                https_policy: None,
+                suppressed_reasons: Vec::new(),
+                reputation_metrics_enabled: false,
+                vdm_options: None,
+                archive_arn: None,
+            },
+        );
+    }
+    let svc = SesV2Service::new(state);
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["r@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}},
+            "ConfigurationSetName": "paused"
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["__type"], "ConfigurationSetSendingPausedException");
+}
+
+#[tokio::test]
 async fn test_send_bulk_email_empty_entries() {
     let state = make_state();
     let svc = SesV2Service::new(state);
