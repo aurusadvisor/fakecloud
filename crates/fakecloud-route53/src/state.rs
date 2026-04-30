@@ -80,6 +80,24 @@ pub struct StoredChange {
     pub status: String,
     pub submitted_at: DateTime<Utc>,
     pub comment: Option<String>,
+    /// Number of times GetChange has read this row. New changes start
+    /// at PENDING; once a few reads have happened we flip to INSYNC to
+    /// mirror real Route53's propagation delay without making tests
+    /// wait wall-clock seconds.
+    #[serde(default)]
+    pub read_count: u32,
+}
+
+impl StoredChange {
+    pub fn pending(id: String, submitted_at: DateTime<Utc>, comment: Option<String>) -> Self {
+        Self {
+            id,
+            status: "PENDING".to_string(),
+            submitted_at,
+            comment,
+            read_count: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

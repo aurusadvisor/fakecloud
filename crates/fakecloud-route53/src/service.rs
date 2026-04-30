@@ -322,9 +322,10 @@ impl Route53Service {
         let change_id = generate_change_id();
         let change = StoredChange {
             id: change_id.clone(),
-            status: "INSYNC".to_string(),
+            status: "PENDING".to_string(),
             submitted_at: now,
             comment: Some(format!("CreateHostedZone {}", id)),
+            read_count: 0,
         };
         account.changes.insert(change_id.clone(), change.clone());
         drop(state);
@@ -418,9 +419,10 @@ impl Route53Service {
         let change_id = generate_change_id();
         let change = StoredChange {
             id: change_id.clone(),
-            status: "INSYNC".to_string(),
+            status: "PENDING".to_string(),
             submitted_at: Utc::now(),
             comment: Some(format!("DeleteHostedZone {}", id)),
+            read_count: 0,
         };
         account.changes.insert(change_id.clone(), change.clone());
         drop(state);
@@ -687,9 +689,10 @@ impl Route53Service {
         let change_id = generate_change_id();
         let change = StoredChange {
             id: change_id.clone(),
-            status: "INSYNC".to_string(),
+            status: "PENDING".to_string(),
             submitted_at: Utc::now(),
             comment: cfg.change_batch.comment,
+            read_count: 0,
         };
         account.changes.insert(change_id.clone(), change.clone());
         drop(state);
@@ -737,18 +740,32 @@ impl Route53Service {
 impl Route53Service {
     fn get_change(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
         let id = require_id(route)?;
-        let state = self.state.read();
-        let account = state.accounts.get(DEFAULT_ACCOUNT);
-        let change = account
-            .and_then(|a| a.changes.get(&id).cloned())
-            .ok_or_else(|| {
+        // Mirror real Route53's eventual-consistency window: bump the
+        // read counter, and once a few reads have happened (PROPAGATION
+        // threshold) flip the status from PENDING to INSYNC.
+        const PROPAGATION_READS: u32 = 5;
+        let change = {
+            let mut state = self.state.write();
+            let account = state.accounts.get_mut(DEFAULT_ACCOUNT).ok_or_else(|| {
                 aws_error(
                     StatusCode::NOT_FOUND,
                     "NoSuchChange",
                     format!("Change {} not found", id),
                 )
             })?;
-        drop(state);
+            let stored = account.changes.get_mut(&id).ok_or_else(|| {
+                aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NoSuchChange",
+                    format!("Change {} not found", id),
+                )
+            })?;
+            stored.read_count = stored.read_count.saturating_add(1);
+            if stored.status == "PENDING" && stored.read_count >= PROPAGATION_READS {
+                stored.status = "INSYNC".to_string();
+            }
+            stored.clone()
+        };
         let mut body = String::with_capacity(256);
         body.push_str(XML_DECL);
         body.push_str(&format!("<GetChangeResponse xmlns=\"{NS}\">"));
@@ -1977,9 +1994,10 @@ impl Route53Service {
             .insert(zone_id.clone(), "SIGNING".to_string());
         let change = StoredChange {
             id: generate_change_id(),
-            status: "INSYNC".to_string(),
+            status: "PENDING".to_string(),
             submitted_at: Utc::now(),
             comment: Some(format!("EnableHostedZoneDNSSEC {}", zone_id)),
+            read_count: 0,
         };
         account.changes.insert(change.id.clone(), change.clone());
         drop(state);
@@ -2006,9 +2024,10 @@ impl Route53Service {
             .insert(zone_id.clone(), "NOT_SIGNING".to_string());
         let change = StoredChange {
             id: generate_change_id(),
-            status: "INSYNC".to_string(),
+            status: "PENDING".to_string(),
             submitted_at: Utc::now(),
             comment: Some(format!("DisableHostedZoneDNSSEC {}", zone_id)),
+            read_count: 0,
         };
         account.changes.insert(change.id.clone(), change.clone());
         drop(state);
@@ -2073,9 +2092,10 @@ impl Route53Service {
             .insert((zone_id.clone(), cfg.name.clone()), ksk.clone());
         let change = StoredChange {
             id: generate_change_id(),
-            status: "INSYNC".to_string(),
+            status: "PENDING".to_string(),
             submitted_at: now,
             comment: Some(format!("CreateKeySigningKey {}/{}", zone_id, cfg.name)),
+            read_count: 0,
         };
         account.changes.insert(change.id.clone(), change.clone());
         drop(state);
@@ -2124,9 +2144,10 @@ impl Route53Service {
             .remove(&(zone_id.clone(), name.clone()));
         let change = StoredChange {
             id: generate_change_id(),
-            status: "INSYNC".to_string(),
+            status: "PENDING".to_string(),
             submitted_at: Utc::now(),
             comment: Some(format!("DeleteKeySigningKey {}/{}", zone_id, name)),
+            read_count: 0,
         };
         account.changes.insert(change.id.clone(), change.clone());
         drop(state);
@@ -2166,9 +2187,10 @@ impl Route53Service {
         ksk.last_modified_date = Utc::now();
         let change = StoredChange {
             id: generate_change_id(),
-            status: "INSYNC".to_string(),
+            status: "PENDING".to_string(),
             submitted_at: Utc::now(),
             comment: Some(format!("{} {}/{}", op, zone_id, name)),
+            read_count: 0,
         };
         account.changes.insert(change.id.clone(), change.clone());
         drop(state);
@@ -2679,6 +2701,46 @@ mod tests {
             "Failure: connection refused.".to_string(),
             None,
         ));
+    }
+
+    #[test]
+    fn get_change_starts_pending_then_flips_after_threshold_reads() {
+        use crate::state::StoredChange;
+        let state = Arc::new(RwLock::new(Route53Accounts::default()));
+        {
+            let mut s = state.write();
+            let account = s.accounts.entry(DEFAULT_ACCOUNT.to_string()).or_default();
+            account.changes.insert(
+                "C123".to_string(),
+                StoredChange::pending("C123".to_string(), Utc::now(), Some("test".to_string())),
+            );
+        }
+        let svc = Route53Service::new(state);
+        let route =
+            crate::router::route(&http::Method::GET, "/2013-04-01/change/C123", "").unwrap();
+
+        for i in 1..=5 {
+            svc.get_change(&route).unwrap();
+            let st = svc.state.read();
+            let stored = &st.accounts.get(DEFAULT_ACCOUNT).unwrap().changes["C123"];
+            if i < 5 {
+                assert_eq!(stored.status, "PENDING", "read {i}: expected PENDING");
+            } else {
+                assert_eq!(stored.status, "INSYNC", "read {i}: expected INSYNC");
+            }
+        }
+    }
+
+    #[test]
+    fn get_change_unknown_id_returns_404() {
+        let svc = Route53Service::new(Arc::new(RwLock::new(Route53Accounts::default())));
+        let route =
+            crate::router::route(&http::Method::GET, "/2013-04-01/change/CGHOST", "").unwrap();
+        let err = match svc.get_change(&route) {
+            Err(e) => e,
+            Ok(_) => panic!("expected NoSuchChange"),
+        };
+        assert_eq!(err.code(), "NoSuchChange");
     }
 
     #[test]
