@@ -11,6 +11,13 @@ pub struct SnsTopic {
     pub tags: Vec<(String, String)>,
     pub is_fifo: bool,
     pub created_at: DateTime<Utc>,
+    /// Cumulative count of subscriptions that have been deleted from this
+    /// topic. AWS exposes this as `SubscriptionsDeleted` on
+    /// `GetTopicAttributes`; it never decreases. Bumped on every
+    /// successful `Unsubscribe`. Cascade deletions from `DeleteTopic`
+    /// reset along with the topic itself, so we don't bump there.
+    #[serde(default)]
+    pub subscriptions_deleted: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
