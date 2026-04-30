@@ -893,3 +893,69 @@ async fn list_event_source_mappings_empty_ok() {
     let resp = svc.list_event_source_mappings("123456789012").unwrap();
     assert_eq!(resp.status, http::StatusCode::OK);
 }
+
+#[tokio::test]
+async fn add_permission_does_not_double_prefix_lambda_action() {
+    // Callers commonly pass either `InvokeFunction` or
+    // `lambda:InvokeFunction`. Both must canonicalize to the same
+    // single-prefixed form — never `lambda:lambda:InvokeFunction`.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+
+    let body = json!({
+        "StatementId": "already-prefixed",
+        "Action": "lambda:InvokeFunction",
+        "Principal": "s3.amazonaws.com",
+    });
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/f/policy",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let out: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let statement: Value = serde_json::from_str(out["Statement"].as_str().unwrap()).unwrap();
+    assert_eq!(statement["Action"], "lambda:InvokeFunction");
+}
+
+#[tokio::test]
+async fn tag_resource_round_trips_via_get_function_and_list_tags() {
+    // TagResource on a function ARN must surface in GetFunction.Tags
+    // (read from `func.tags`) AND in ListTagsForResource — proving
+    // both code paths read from a single source of truth.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:f";
+    let body = json!({"Tags": {"env": "prod", "team": "core"}});
+    let req = make_request(
+        Method::POST,
+        &format!("/2017-03-31/tags/{arn}"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, &format!("/2017-03-31/tags/{arn}"), "");
+    let resp = svc.handle(req).await.unwrap();
+    let listed: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(listed["Tags"]["env"], "prod");
+    assert_eq!(listed["Tags"]["team"], "core");
+
+    let req = make_request(Method::GET, "/2015-03-31/functions/f", "");
+    let resp = svc.handle(req).await.unwrap();
+    let func: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(func["Tags"]["env"], "prod");
+    assert_eq!(func["Tags"]["team"], "core");
+
+    let mut req = make_request(Method::DELETE, &format!("/2017-03-31/tags/{arn}"), "");
+    req.query_params
+        .insert("tagKeys".to_string(), "env".to_string());
+    req.raw_query = "tagKeys=env".to_string();
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, &format!("/2017-03-31/tags/{arn}"), "");
+    let resp = svc.handle(req).await.unwrap();
+    let listed: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert!(listed["Tags"].get("env").is_none());
+    assert_eq!(listed["Tags"]["team"], "core");
+}

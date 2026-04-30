@@ -70,6 +70,30 @@ fn body(req: &AwsRequest) -> Value {
     serde_json::from_slice(&req.body).unwrap_or_else(|_| Value::Object(Default::default()))
 }
 
+/// Extract the function name from a Lambda function ARN, ignoring any
+/// trailing `:version` / `:alias` qualifier. Returns `None` for ARNs
+/// that name a different resource type (event-source mapping,
+/// code-signing config, layer, …) so the caller can fall through to
+/// the keyed tag bag.
+fn function_name_from_arn(arn: &str) -> Option<String> {
+    let rest = arn.strip_prefix("arn:aws:lambda:")?;
+    let mut parts = rest.splitn(5, ':');
+    let _region = parts.next()?;
+    let _account = parts.next()?;
+    let resource_kind = parts.next()?;
+    if resource_kind != "function" {
+        return None;
+    }
+    let name_with_qualifier = parts.next()?;
+    Some(
+        name_with_qualifier
+            .split(':')
+            .next()
+            .unwrap_or(name_with_qualifier)
+            .to_string(),
+    )
+}
+
 /// Build a fakecloud-hosted download URL for a layer version's ZIP. The URL
 /// is reachable on the same authority the SDK used for the original
 /// request, so test harnesses get a working `Location` they can `GET`
@@ -1514,6 +1538,18 @@ impl LambdaService {
             .unwrap_or_default();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // For function ARNs, write directly onto the function's `tags`
+        // map so `GetFunction` and `ListTagsForResource` agree without
+        // a second lookup. Non-function ARNs (event source mappings,
+        // code-signing configs) fall back to the keyed bag.
+        if let Some(name) = function_name_from_arn(resource_arn) {
+            if let Some(func) = state.functions.get_mut(&name) {
+                for (k, v) in &new_tags {
+                    func.tags.insert(k.clone(), v.clone());
+                }
+                return empty();
+            }
+        }
         let entry = state.tags.entry(resource_arn.to_string()).or_default();
         for (k, v) in new_tags {
             entry.retain(|(ek, _)| ek != &k);
@@ -1527,14 +1563,25 @@ impl LambdaService {
         resource_arn: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // AWS sends keys as repeated `tagKeys=K1&tagKeys=K2` query
+        // params. Some SDKs also serialize `tagKeys.member.1=K1` /
+        // `tagKeys.1=K1` — accept both shapes.
         let mut keys: Vec<String> = Vec::new();
         for (k, v) in &req.query_params {
-            if k.starts_with("tagKeys") {
+            if k == "tagKeys" || k.starts_with("tagKeys.") {
                 keys.push(v.clone());
             }
         }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        if let Some(name) = function_name_from_arn(resource_arn) {
+            if let Some(func) = state.functions.get_mut(&name) {
+                for k in &keys {
+                    func.tags.remove(k);
+                }
+                return empty();
+            }
+        }
         if let Some(entry) = state.tags.get_mut(resource_arn) {
             entry.retain(|(k, _)| !keys.contains(k));
         }
@@ -1548,6 +1595,16 @@ impl LambdaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let region = self.region_for(account_id);
         self.with_state_read(account_id, &region, |state| {
+            if let Some(name) = function_name_from_arn(resource_arn) {
+                if let Some(func) = state.functions.get(&name) {
+                    let tags: serde_json::Map<String, Value> = func
+                        .tags
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                        .collect();
+                    return ok(json!({"Tags": tags}));
+                }
+            }
             let tags: serde_json::Map<String, Value> = state
                 .tags
                 .get(resource_arn)
