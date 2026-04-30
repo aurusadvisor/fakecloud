@@ -1835,6 +1835,55 @@ impl S3Service {
             .get("x-amz-server-side-encryption")
             .and_then(|v| v.to_str().ok())
             .map(String::from);
+        let new_kms_key_id = req
+            .headers
+            .get("x-amz-server-side-encryption-aws-kms-key-id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
+        // Snapshot what we need to crunch the body re-encryption
+        // outside the write lock, so the encrypt/decrypt hooks (which
+        // re-enter KMS state) don't deadlock against an outstanding
+        // S3 write lock.
+        let (existing_bytes, old_alg, body_handle) = {
+            let accts = self.state.read();
+            let __empty = crate::state::S3State::new(account_id, "us-east-1");
+            let state = accts.get(account_id).unwrap_or(&__empty);
+            let b = state
+                .buckets
+                .get(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            let obj = b.objects.get(key).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NoSuchKey",
+                    format!("Key {key} does not exist."),
+                )
+            })?;
+            let bytes = state.read_body(&obj.body).map_err(super::io_to_aws)?;
+            (bytes, obj.sse_algorithm.clone(), obj.body.clone())
+        };
+
+        // Same algorithm, no body work — only flip the kms key id
+        // when the caller bumped that.
+        let same_alg = old_alg == new_alg;
+        let plaintext: bytes::Bytes = if old_alg.as_deref() == Some("aws:kms") && !same_alg {
+            self.decrypt_object_body(account_id, bucket, &existing_bytes)?
+        } else {
+            existing_bytes
+        };
+        let new_bytes = if new_alg.as_deref() == Some("aws:kms") && !same_alg {
+            self.encrypt_object_body(
+                account_id,
+                "us-east-1",
+                bucket,
+                &plaintext,
+                new_kms_key_id.as_deref(),
+            )?
+        } else {
+            plaintext
+        };
+
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
         let b = state
@@ -1848,7 +1897,14 @@ impl S3Service {
                 format!("Key {key} does not exist."),
             )
         })?;
-        obj.sse_algorithm = new_alg;
+        obj.sse_algorithm = new_alg.clone();
+        if let Some(kid) = new_kms_key_id {
+            obj.sse_kms_key_id = if kid.is_empty() { None } else { Some(kid) };
+        }
+        if !same_alg {
+            obj.body = crate::state::memory_body(new_bytes);
+        }
+        let _ = body_handle; // silence unused when same_alg branch wins
         Ok(empty_response(StatusCode::OK))
     }
 
