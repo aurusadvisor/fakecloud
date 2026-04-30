@@ -509,7 +509,11 @@ impl CloudFrontService {
         let stored = StoredDistribution {
             id: id.clone(),
             arn: arn.clone(),
-            status: "Deployed".to_string(),
+            // CloudFront returns InProgress immediately after CreateDistribution
+            // and flips to Deployed once propagation completes. We flip on
+            // the first GetDistribution call so SDK polling loops observe
+            // the lifecycle without us having to spin a background task.
+            status: "InProgress".to_string(),
             last_modified_time: now,
             domain_name: domain,
             in_progress_invalidation_batches: 0,
@@ -534,16 +538,21 @@ impl CloudFrontService {
             .id
             .as_deref()
             .ok_or_else(|| invalid_argument("missing distribution id"))?;
-        let state = self.state.read();
+        let mut state = self.state.write();
         let account = state
             .accounts
-            .get(DEFAULT_ACCOUNT)
+            .get_mut(DEFAULT_ACCOUNT)
             .ok_or_else(|| no_such_distribution(id))?;
-        let dist = account
+        let stored = account
             .distributions
-            .get(id)
-            .ok_or_else(|| no_such_distribution(id))?
-            .clone();
+            .get_mut(id)
+            .ok_or_else(|| no_such_distribution(id))?;
+        // First read after CreateDistribution flips the status; subsequent
+        // reads keep it as Deployed.
+        if stored.status == "InProgress" {
+            stored.status = "Deployed".to_string();
+        }
+        let dist = stored.clone();
         drop(state);
         let body = build_distribution_xml(&dist);
         let mut headers = HeaderMap::new();
@@ -1604,6 +1613,53 @@ mod tests {
         del_req.headers.insert(IF_MATCH, new_etag.parse().unwrap());
         let del = svc.handle(del_req).await.unwrap();
         assert_eq!(del.status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn distribution_status_transitions_in_progress_to_deployed() {
+        let svc = CloudFrontService::new(make_state());
+        let body = minimal_dist_config_xml("status-ref");
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &body,
+            ))
+            .await
+            .unwrap();
+        let xml = std::str::from_utf8(create.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert!(
+            xml.contains("<Status>InProgress</Status>"),
+            "expected initial status InProgress, got: {xml}"
+        );
+        let id = xml
+            .split("<Id>")
+            .nth(1)
+            .unwrap()
+            .split("</Id>")
+            .next()
+            .unwrap()
+            .to_string();
+
+        let get = svc
+            .handle(make_request(
+                http::Method::GET,
+                &format!("/2020-05-31/distribution/{id}"),
+                "",
+                "",
+            ))
+            .await
+            .unwrap();
+        let get_xml = std::str::from_utf8(get.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert!(
+            get_xml.contains("<Status>Deployed</Status>"),
+            "expected Deployed after first GetDistribution, got: {get_xml}"
+        );
     }
 
     #[tokio::test]
