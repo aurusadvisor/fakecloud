@@ -471,6 +471,55 @@ pub(crate) fn task_to_json(task: &Task) -> Value {
     if let Some(ts) = task.connectivity_at {
         map.insert("connectivityAt".into(), json!(ts.timestamp()));
     }
+    // Always-present fields AWS returns. SDKs deserialize these
+    // unconditionally; without them, terraform/cdk plan diffs and
+    // observability hooks see missing keys.
+    map.insert("attachments".into(), json!([]));
+    map.insert("attributes".into(), json!([]));
+    map.insert("availabilityZone".into(), json!("us-east-1a"));
+    map.insert(
+        "containerInstanceArn".into(),
+        if task.launch_type == "EC2" || task.launch_type == "EXTERNAL" {
+            json!(format!(
+                "{}/container-instance/i-fakecloud-1",
+                task.cluster_arn
+            ))
+        } else {
+            Value::Null
+        },
+    );
+    map.insert("enableExecuteCommand".into(), json!(false));
+    map.insert("ephemeralStorage".into(), json!({ "sizeInGiB": 20 }));
+    map.insert(
+        "healthStatus".into(),
+        json!(task
+            .containers
+            .iter()
+            .find_map(|c| c.health_status.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("HEALTHY")),
+    );
+    map.insert("version".into(), json!(1));
+    map.insert(
+        "platformFamily".into(),
+        match task.launch_type.as_str() {
+            "FARGATE" => json!("Linux"),
+            _ => Value::Null,
+        },
+    );
+    if let Some(ts) = task.stopped_at {
+        map.insert("executionStoppedAt".into(), json!(ts.timestamp()));
+    }
+    if !task.tags.is_empty() {
+        map.insert(
+            "tags".into(),
+            json!(task
+                .tags
+                .iter()
+                .map(|t| json!({ "key": t.key, "value": t.value }))
+                .collect::<Vec<_>>()),
+        );
+    }
     Value::Object(map)
 }
 
@@ -789,6 +838,34 @@ pub(crate) fn service_to_json(svc: &Service) -> Value {
         map.insert("createdBy".into(), json!(v));
     }
     map.insert("createdAt".into(), json!(svc.created_at.timestamp()));
+    // Always-present fields AWS returns; SDKs deserialize unconditionally.
+    map.insert("enableExecuteCommand".into(), json!(false));
+    map.insert("enableECSManagedTags".into(), json!(false));
+    map.insert("propagateTags".into(), json!("NONE"));
+    map.insert("healthCheckGracePeriodSeconds".into(), json!(0));
+    map.insert("platformVersion".into(), json!("LATEST"));
+    map.insert(
+        "platformFamily".into(),
+        match svc.launch_type.as_str() {
+            "FARGATE" => json!("Linux"),
+            _ => Value::Null,
+        },
+    );
+    map.insert("availabilityZoneRebalancing".into(), json!("DISABLED"));
+    map.insert("volumeConfigurations".into(), json!([]));
+    map.insert("taskSets".into(), json!([]));
+    map.insert("events".into(), json!([]));
+    map.insert("capacityProviderStrategy".into(), json!([]));
+    if !svc.tags.is_empty() {
+        map.insert(
+            "tags".into(),
+            json!(svc
+                .tags
+                .iter()
+                .map(|t| json!({ "key": t.key, "value": t.value }))
+                .collect::<Vec<_>>()),
+        );
+    }
     Value::Object(map)
 }
 

@@ -292,6 +292,27 @@ pub(crate) fn image_to_details(repo: &Repository, image: &Image, registry_id: &s
     if let Some(t) = image.last_recorded_pull_time {
         out["lastRecordedPullTime"] = json!(t.timestamp());
     }
+    // Surface scan state on the image itself (real ECR returns these
+    // unconditionally; SDK callers that watch scan-on-push completion poll
+    // DescribeImages and previously saw nothing).
+    if let Some(findings) = repo.scan_findings.get(&image.image_digest) {
+        out["imageScanStatus"] = json!({ "status": findings.scan_status });
+        let mut summary = serde_json::Map::new();
+        if let Some(ts) = findings.scan_completed_at {
+            summary.insert("imageScanCompletedAt".into(), json!(ts.timestamp()));
+        }
+        if let Some(ts) = findings.vulnerability_source_updated_at {
+            summary.insert("vulnerabilitySourceUpdatedAt".into(), json!(ts.timestamp()));
+        }
+        summary.insert(
+            "findingSeverityCounts".into(),
+            json!(findings.finding_severity_counts),
+        );
+        out["imageScanFindingsSummary"] = Value::Object(summary);
+    } else if repo.image_scanning_configuration.scan_on_push {
+        // Scan-on-push configured but the scan hasn't kicked yet.
+        out["imageScanStatus"] = json!({ "status": "PENDING" });
+    }
     out
 }
 
