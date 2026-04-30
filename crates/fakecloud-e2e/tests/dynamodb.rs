@@ -368,6 +368,121 @@ async fn dynamodb_scan() {
 }
 
 #[tokio::test]
+async fn dynamodb_scan_with_index_name_applies_projection() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    // Table with a GSI on 'category' projecting only KEYS_ONLY.
+    client
+        .create_table()
+        .table_name("ScanIndexTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("category")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .global_secondary_indexes(
+            GlobalSecondaryIndex::builder()
+                .index_name("ByCategory")
+                .key_schema(
+                    KeySchemaElement::builder()
+                        .attribute_name("category")
+                        .key_type(KeyType::Hash)
+                        .build()
+                        .unwrap(),
+                )
+                .projection(
+                    Projection::builder()
+                        .projection_type(ProjectionType::KeysOnly)
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_item()
+        .table_name("ScanIndexTable")
+        .item("id", AttributeValue::S("a".into()))
+        .item("category", AttributeValue::S("books".into()))
+        .item("title", AttributeValue::S("Rust".into()))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .scan()
+        .table_name("ScanIndexTable")
+        .index_name("ByCategory")
+        .send()
+        .await
+        .unwrap();
+
+    let items = resp.items();
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+    // KEYS_ONLY projection: table PK ('id') + index PK ('category'); 'title' must be absent.
+    assert!(item.contains_key("id"));
+    assert!(item.contains_key("category"));
+    assert!(!item.contains_key("title"));
+}
+
+#[tokio::test]
+async fn dynamodb_scan_with_unknown_index_name_errors() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+    client
+        .create_table()
+        .table_name("NoIdxTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+    let err = client
+        .scan()
+        .table_name("NoIdxTable")
+        .index_name("DoesNotExist")
+        .send()
+        .await
+        .expect_err("unknown index must fail");
+    assert!(format!("{err:?}").contains("DoesNotExist"));
+}
+
+#[tokio::test]
 async fn dynamodb_scan_with_filter() {
     let server = TestServer::start().await;
     let client = server.dynamodb_client().await;
