@@ -342,6 +342,10 @@ impl LambdaService {
         if state.account_settings.is_none() {
             state.account_settings = Some(settings.clone());
         }
+        // Real AccountUsage so clients monitoring deployment quotas see
+        // accurate numbers. AWS sums total code size across all functions.
+        let function_count = state.functions.len() as i64;
+        let total_code_size: i64 = state.functions.values().map(|f| f.code_size).sum();
         ok(json!({
             "AccountLimit": {
                 "ConcurrentExecutions": settings.concurrent_executions,
@@ -351,8 +355,8 @@ impl LambdaService {
                 "UnreservedConcurrentExecutions": settings.concurrent_executions,
             },
             "AccountUsage": {
-                "TotalCodeSize": 0,
-                "FunctionCount": 0,
+                "TotalCodeSize": total_code_size,
+                "FunctionCount": function_count,
             },
         }))
     }
@@ -366,17 +370,28 @@ impl LambdaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let region = self.region_for(account_id);
         self.with_state_read(account_id, &region, |state| {
-            if !state.functions.contains_key(function_name) {
-                return Err(not_found("Function", function_name));
-            }
-            let versions: Vec<&String> = state
-                .function_versions
+            let func = state
+                .functions
                 .get(function_name)
-                .map(|v| v.iter().collect())
-                .unwrap_or_default();
-            ok(json!({
-                "Versions": versions,
-            }))
+                .ok_or_else(|| not_found("Function", function_name))?;
+            // AWS always returns $LATEST first, then numbered versions.
+            // Until PublishVersion snapshots real config (Phase D2), each
+            // numbered version reuses the current configuration with the
+            // Version field swapped — same as Moto.
+            let mut versions: Vec<serde_json::Value> = Vec::new();
+            let mut latest = self.function_config_json(func);
+            latest["Version"] = json!("$LATEST");
+            versions.push(latest);
+            if let Some(numbered) = state.function_versions.get(function_name) {
+                for v in numbered {
+                    let mut cfg = self.function_config_json(func);
+                    cfg["Version"] = json!(v);
+                    cfg["FunctionArn"] = json!(format!("{}:{v}", func.function_arn));
+                    cfg["MasterArn"] = json!(func.function_arn);
+                    versions.push(cfg);
+                }
+            }
+            ok(json!({ "Versions": versions }))
         })
     }
 
