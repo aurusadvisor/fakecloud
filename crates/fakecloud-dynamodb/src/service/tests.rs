@@ -3982,6 +3982,57 @@ fn update_continuous_backups_unknown_table_errors() {
 // ── items.rs: put_item error branches ──
 
 #[test]
+fn put_item_accepts_table_arn() {
+    let svc = make_service();
+    create_test_table(&svc);
+    let req = make_request(
+        "PutItem",
+        json!({
+            "TableName": "arn:aws:dynamodb:us-east-1:123456789012:table/test-table",
+            "Item": {"pk": {"S": "from-arn"}}
+        }),
+    );
+    svc.put_item(&req).unwrap();
+
+    let req = make_request(
+        "GetItem",
+        json!({
+            "TableName": "arn:aws:dynamodb:us-east-1:123456789012:table/test-table/index/idx",
+            "Key": {"pk": {"S": "from-arn"}},
+        }),
+    );
+    let resp = svc.get_item(&req).unwrap();
+    let b = body_json(&resp);
+    assert_eq!(b["Item"]["pk"]["S"], "from-arn");
+}
+
+#[test]
+fn resolve_table_name_strips_arn_and_subresources() {
+    use super::resolve_table_name;
+    assert_eq!(resolve_table_name("plain-name"), "plain-name");
+    assert_eq!(
+        resolve_table_name("arn:aws:dynamodb:us-east-1:123:table/my-tbl"),
+        "my-tbl"
+    );
+    assert_eq!(
+        resolve_table_name("arn:aws:dynamodb:us-east-1:123:table/my-tbl/index/by-foo"),
+        "my-tbl"
+    );
+    assert_eq!(
+        resolve_table_name(
+            "arn:aws:dynamodb:us-east-1:123:table/my-tbl/stream/2025-01-01T00:00:00.000"
+        ),
+        "my-tbl"
+    );
+    assert_eq!(
+        resolve_table_name(
+            "arn:aws:dynamodb:us-east-1:123:table/my-tbl/backup/01700000000000-deadbeef"
+        ),
+        "my-tbl"
+    );
+}
+
+#[test]
 fn put_item_unknown_table_errors() {
     let svc = make_service();
     let req = make_request(
