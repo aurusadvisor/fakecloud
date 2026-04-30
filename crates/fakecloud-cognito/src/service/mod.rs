@@ -730,6 +730,17 @@ fn parse_token_validity_units(val: &Value) -> Option<TokenValidityUnits> {
     })
 }
 
+fn parse_refresh_token_rotation(val: &Value) -> Option<crate::state::RefreshTokenRotationConfig> {
+    if !val.is_object() {
+        return None;
+    }
+    let feature = val["Feature"].as_str()?.to_string();
+    Some(crate::state::RefreshTokenRotationConfig {
+        feature,
+        retry_grace_period_seconds: val["RetryGracePeriodSeconds"].as_i64(),
+    })
+}
+
 /// Convert a UserPoolClient to the JSON format AWS returns.
 fn user_pool_client_to_json(client: &UserPoolClient) -> Value {
     let mut obj = json!({
@@ -794,6 +805,13 @@ fn user_pool_client_to_json(client: &UserPoolClient) -> Value {
     }
     if let Some(v) = client.auth_session_validity {
         obj["AuthSessionValidity"] = json!(v);
+    }
+    if let Some(ref rot) = client.refresh_token_rotation {
+        let mut r = json!({"Feature": rot.feature});
+        if let Some(g) = rot.retry_grace_period_seconds {
+            r["RetryGracePeriodSeconds"] = json!(g);
+        }
+        obj["RefreshTokenRotation"] = r;
     }
 
     obj
@@ -1816,27 +1834,52 @@ pub async fn handle_oauth2_token(
             let signing = ensure_pool_signing_key(state, &pool_id).await;
             let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
             let tokens = generate_tokens(&pool_id, client_id, &sub, &username, region, signing_ref);
-            {
+            let rotated_refresh = {
                 let mut mas = state.write();
+                let mut new_rt = None;
                 for (_, account) in mas.iter_mut() {
-                    if account.user_pool_clients.contains_key(client_id) {
-                        account.access_tokens.insert(
-                            tokens.access_token.clone(),
-                            crate::state::AccessTokenData {
-                                user_pool_id: pool_id.clone(),
-                                username: username.clone(),
-                                client_id: client_id.to_string(),
-                                issued_at: Utc::now(),
-                            },
-                        );
-                        break;
+                    if !account.user_pool_clients.contains_key(client_id) {
+                        continue;
                     }
+                    let rotation_enabled = account
+                        .user_pool_clients
+                        .get(client_id)
+                        .and_then(|c| c.refresh_token_rotation.as_ref())
+                        .map(|r| r.feature.eq_ignore_ascii_case("ENABLED"))
+                        .unwrap_or(false);
+                    if rotation_enabled {
+                        if let Some(old) = account.refresh_tokens.get(refresh_token).cloned() {
+                            let token = format!("rt-{}", Uuid::new_v4());
+                            account.refresh_tokens.insert(
+                                token.clone(),
+                                crate::state::RefreshTokenData {
+                                    user_pool_id: old.user_pool_id,
+                                    username: old.username,
+                                    client_id: old.client_id,
+                                    issued_at: Utc::now(),
+                                },
+                            );
+                            account.refresh_tokens.remove(refresh_token);
+                            new_rt = Some(token);
+                        }
+                    }
+                    account.access_tokens.insert(
+                        tokens.access_token.clone(),
+                        crate::state::AccessTokenData {
+                            user_pool_id: pool_id.clone(),
+                            username: username.clone(),
+                            client_id: client_id.to_string(),
+                            issued_at: Utc::now(),
+                        },
+                    );
+                    break;
                 }
-            }
+                new_rt
+            };
             Ok(OAuthTokenResponse {
                 access_token: tokens.access_token,
                 id_token: Some(tokens.id_token),
-                refresh_token: None,
+                refresh_token: rotated_refresh,
                 expires_in: 3600,
                 token_type: "Bearer".to_string(),
             })

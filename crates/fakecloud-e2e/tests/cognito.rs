@@ -5323,3 +5323,299 @@ async fn cognito_oauth2_revoke_unknown_client_id_401() {
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["error"], "invalid_client");
 }
+
+#[tokio::test]
+async fn cognito_refresh_token_rotation_enabled_rotates() {
+    use aws_sdk_cognitoidentityprovider::types::{FeatureType, RefreshTokenRotationType};
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("rotation-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("rotation-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .refresh_token_rotation(
+            RefreshTokenRotationType::builder()
+                .feature(FeatureType::Enabled)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("dave")
+        .password("hunter22")
+        .send()
+        .await
+        .expect("sign up");
+    client
+        .confirm_sign_up()
+        .client_id(&client_id)
+        .username("dave")
+        .confirmation_code("123456")
+        .send()
+        .await
+        .expect("confirm");
+
+    let auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "dave")
+        .auth_parameters("PASSWORD", "hunter22")
+        .send()
+        .await
+        .expect("auth");
+    let original_refresh = auth
+        .authentication_result()
+        .unwrap()
+        .refresh_token()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .get_tokens_from_refresh_token()
+        .client_id(&client_id)
+        .refresh_token(&original_refresh)
+        .send()
+        .await
+        .expect("get tokens");
+    let result = resp.authentication_result().unwrap();
+    let new_refresh = result.refresh_token().expect("rotated refresh present");
+    assert_ne!(new_refresh, original_refresh.as_str());
+
+    let err = client
+        .get_tokens_from_refresh_token()
+        .client_id(&client_id)
+        .refresh_token(&original_refresh)
+        .send()
+        .await;
+    assert!(err.is_err());
+}
+
+#[tokio::test]
+async fn cognito_refresh_token_rotation_disabled_no_new_token() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("no-rotation-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("no-rotation-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("eve")
+        .password("hunter22")
+        .send()
+        .await
+        .expect("sign up");
+    client
+        .confirm_sign_up()
+        .client_id(&client_id)
+        .username("eve")
+        .confirmation_code("123456")
+        .send()
+        .await
+        .expect("confirm");
+
+    let auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "eve")
+        .auth_parameters("PASSWORD", "hunter22")
+        .send()
+        .await
+        .expect("auth");
+    let original_refresh = auth
+        .authentication_result()
+        .unwrap()
+        .refresh_token()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .get_tokens_from_refresh_token()
+        .client_id(&client_id)
+        .refresh_token(&original_refresh)
+        .send()
+        .await
+        .expect("get tokens");
+    let result = resp.authentication_result().unwrap();
+    assert!(result.refresh_token().is_none());
+
+    let resp2 = client
+        .get_tokens_from_refresh_token()
+        .client_id(&client_id)
+        .refresh_token(&original_refresh)
+        .send()
+        .await
+        .expect("get tokens 2nd time");
+    assert!(resp2.authentication_result().is_some());
+}
+
+#[tokio::test]
+async fn cognito_oauth2_token_rotates_refresh_when_enabled() {
+    use aws_sdk_cognitoidentityprovider::types::{FeatureType, RefreshTokenRotationType};
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("oauth2-rotation-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("oauth2-rotation-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .refresh_token_rotation(
+            RefreshTokenRotationType::builder()
+                .feature(FeatureType::Enabled)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("frank")
+        .password("hunter22")
+        .send()
+        .await
+        .expect("sign up");
+    client
+        .confirm_sign_up()
+        .client_id(&client_id)
+        .username("frank")
+        .confirmation_code("123456")
+        .send()
+        .await
+        .expect("confirm");
+
+    let auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "frank")
+        .auth_parameters("PASSWORD", "hunter22")
+        .send()
+        .await
+        .expect("auth");
+    let refresh_token = auth
+        .authentication_result()
+        .unwrap()
+        .refresh_token()
+        .unwrap()
+        .to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/token", server.endpoint());
+    let body =
+        format!("grant_type=refresh_token&client_id={client_id}&refresh_token={refresh_token}");
+    let resp = http
+        .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    let rotated = json["refresh_token"].as_str().expect("rotated rt present");
+    assert_ne!(rotated, refresh_token.as_str());
+}

@@ -389,6 +389,19 @@ pub struct UserPoolClient {
     pub auth_session_validity: Option<i64>,
     /// Additional client secrets (beyond the primary client_secret)
     pub client_secrets: Vec<ClientSecretDescriptor>,
+    /// "ENABLED" rotates refresh token on every refresh-token grant
+    /// (old token invalidated). Default "DISABLED".
+    #[serde(default)]
+    pub refresh_token_rotation: Option<RefreshTokenRotationConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RefreshTokenRotationConfig {
+    /// "ENABLED" or "DISABLED"
+    pub feature: String,
+    /// grace period in seconds during which old token still works
+    #[serde(default)]
+    pub retry_grace_period_seconds: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

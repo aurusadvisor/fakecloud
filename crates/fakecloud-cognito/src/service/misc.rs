@@ -8,7 +8,8 @@ use uuid::Uuid;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::{
-    AccessTokenData, CognitoState, CustomDomainConfig, Device, UserImportJob, UserPoolDomain,
+    AccessTokenData, CognitoState, CustomDomainConfig, Device, RefreshTokenData, UserImportJob,
+    UserPoolDomain,
 };
 
 use super::{
@@ -691,8 +692,31 @@ impl CognitoService {
             .map(|(p, k)| (p.as_str(), k.as_str()));
         let tokens = super::generate_tokens(&pool_id, client_id, &sub, &username, &region, signing);
 
-        // Store the new access token
+        let rotation_enabled = state
+            .user_pool_clients
+            .get(client_id)
+            .and_then(|c| c.refresh_token_rotation.as_ref())
+            .map(|r| r.feature.eq_ignore_ascii_case("ENABLED"))
+            .unwrap_or(false);
+
         let now = Utc::now();
+        let rotated_refresh = if rotation_enabled {
+            let new_token = format!("rt-{}", Uuid::new_v4());
+            state.refresh_tokens.insert(
+                new_token.clone(),
+                RefreshTokenData {
+                    user_pool_id: pool_id.clone(),
+                    username: username.clone(),
+                    client_id: client_id.to_string(),
+                    issued_at: now,
+                },
+            );
+            state.refresh_tokens.remove(refresh_token);
+            Some(new_token)
+        } else {
+            None
+        };
+
         state.access_tokens.insert(
             tokens.access_token.clone(),
             AccessTokenData {
@@ -703,13 +727,17 @@ impl CognitoService {
             },
         );
 
+        let mut auth = json!({
+            "AccessToken": tokens.access_token,
+            "IdToken": tokens.id_token,
+            "TokenType": "Bearer",
+            "ExpiresIn": 3600
+        });
+        if let Some(ref rt) = rotated_refresh {
+            auth["RefreshToken"] = json!(rt);
+        }
         Ok(AwsResponse::ok_json(json!({
-            "AuthenticationResult": {
-                "AccessToken": tokens.access_token,
-                "IdToken": tokens.id_token,
-                "TokenType": "Bearer",
-                "ExpiresIn": 3600
-            }
+            "AuthenticationResult": auth,
         })))
     }
 

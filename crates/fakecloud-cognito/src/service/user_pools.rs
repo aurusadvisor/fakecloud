@@ -12,10 +12,11 @@ use crate::state::{
 use super::{
     ensure_user_pool_exists, generate_client_id, generate_client_secret, generate_pool_id,
     parse_account_recovery_setting, parse_admin_create_user_config, parse_email_configuration,
-    parse_password_policy, parse_schema_attribute, parse_sign_in_policy, parse_sms_configuration,
-    parse_string_array, parse_tags, parse_token_validity_units,
-    parse_verification_message_template, require_str, user_pool_client_to_json, user_pool_to_json,
-    validate_enum, validate_range, validate_string_length, CognitoService,
+    parse_password_policy, parse_refresh_token_rotation, parse_schema_attribute,
+    parse_sign_in_policy, parse_sms_configuration, parse_string_array, parse_tags,
+    parse_token_validity_units, parse_verification_message_template, require_str,
+    user_pool_client_to_json, user_pool_to_json, validate_enum, validate_range,
+    validate_string_length, CognitoService,
 };
 
 impl CognitoService {
@@ -503,6 +504,7 @@ impl CognitoService {
             enable_token_revocation: body["EnableTokenRevocation"].as_bool().unwrap_or(true),
             auth_session_validity: body["AuthSessionValidity"].as_i64(),
             client_secrets: Vec::new(),
+            refresh_token_rotation: parse_refresh_token_rotation(&body["RefreshTokenRotation"]),
         };
 
         let response = user_pool_client_to_json(&client);
