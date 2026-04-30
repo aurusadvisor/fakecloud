@@ -15,6 +15,35 @@ fn make_state() -> SharedSesState {
     ))
 }
 
+fn seed_identity(state: &SharedSesState, name: &str) {
+    use crate::state::EmailIdentity;
+    let mut accounts = state.write();
+    let st = accounts.get_or_create("123456789012");
+    let identity_type = if name.contains('@') {
+        "EMAIL_ADDRESS"
+    } else {
+        "DOMAIN"
+    };
+    st.identities.insert(
+        name.to_string(),
+        EmailIdentity {
+            identity_name: name.to_string(),
+            identity_type: identity_type.to_string(),
+            verified: true,
+            created_at: chrono::Utc::now(),
+            dkim_signing_enabled: true,
+            dkim_signing_attributes_origin: "AWS_SES".to_string(),
+            dkim_domain_signing_private_key: None,
+            dkim_domain_signing_selector: None,
+            dkim_next_signing_key_length: None,
+            email_forwarding_enabled: true,
+            mail_from_domain: None,
+            mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
+            configuration_set_name: None,
+        },
+    );
+}
+
 fn make_v1_request(action: &str, params: Vec<(&str, &str)>) -> AwsRequest {
     let mut query_params: HashMap<String, String> = HashMap::new();
     query_params.insert("Action".to_string(), action.to_string());
@@ -937,6 +966,7 @@ fn test_get_identity_mail_from_domain_attributes() {
 #[test]
 fn test_send_email_v1() {
     let state = make_state();
+    seed_identity(&state, "sender@example.com");
     let req = make_v1_request(
         "SendEmail",
         vec![
@@ -969,6 +999,7 @@ fn test_send_email_v1() {
 #[test]
 fn test_send_raw_email() {
     let state = make_state();
+    seed_identity(&state, "sender@example.com");
     let req = make_v1_request(
         "SendRawEmail",
         vec![
@@ -994,6 +1025,7 @@ fn test_send_raw_email() {
 #[test]
 fn test_send_templated_email() {
     let state = make_state();
+    seed_identity(&state, "sender@example.com");
     // Create template first
     handle_v1_action(
         &state,
@@ -1034,6 +1066,7 @@ fn test_send_templated_email() {
 #[test]
 fn test_send_templated_email_missing_template() {
     let state = make_state();
+    seed_identity(&state, "sender@example.com");
     let req = make_v1_request(
         "SendTemplatedEmail",
         vec![
@@ -1052,6 +1085,7 @@ fn test_send_templated_email_missing_template() {
 #[test]
 fn test_send_bulk_templated_email() {
     let state = make_state();
+    seed_identity(&state, "sender@example.com");
     handle_v1_action(
         &state,
         &make_v1_request(
@@ -1330,6 +1364,7 @@ fn test_get_send_quota() {
 #[test]
 fn test_get_send_statistics() {
     let state = make_state();
+    seed_identity(&state, "a@b.com");
     // Send an email first
     handle_v1_action(
         &state,

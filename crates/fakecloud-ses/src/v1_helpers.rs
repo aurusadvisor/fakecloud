@@ -95,6 +95,67 @@ pub(crate) fn required_param<'a>(
     })
 }
 
+/// Gate every SES v1 send path on a verified sender. Mirrors the v2
+/// `reject_unverified_sender` rule: the From address must match a
+/// verified email identity exactly, or its domain must match a verified
+/// domain identity. Real SES surfaces this as `MessageRejected`.
+pub(crate) fn check_v1_verified_sender(
+    state: &SharedSesState,
+    account_id: &str,
+    from: &str,
+) -> Result<(), AwsServiceError> {
+    let email = if let Some(start) = from.rfind('<') {
+        if let Some(end) = from.rfind('>') {
+            if end > start {
+                from[start + 1..end].trim()
+            } else {
+                from.trim()
+            }
+        } else {
+            from.trim()
+        }
+    } else {
+        from.trim()
+    };
+    if email.is_empty() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "MessageRejected",
+            "Email address is not verified.".to_string(),
+        ));
+    }
+    let domain = email.split_once('@').map(|(_, d)| d).unwrap_or("");
+
+    let accounts = state.read();
+    let verified = accounts
+        .get(account_id)
+        .map(|st| {
+            let email_ok = st
+                .identities
+                .get(email)
+                .map(|id| id.verified)
+                .unwrap_or(false);
+            let domain_ok = !domain.is_empty()
+                && st
+                    .identities
+                    .get(domain)
+                    .map(|id| id.verified)
+                    .unwrap_or(false);
+            email_ok || domain_ok
+        })
+        .unwrap_or(false);
+
+    if verified {
+        Ok(())
+    } else {
+        Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "MessageRejected",
+            format!("Email address is not verified. The following identities failed the check in region us-east-1: {email}"),
+        ))
+    }
+}
+
 /// Parse a receipt rule from form parameters (for Create/Update).
 pub(crate) fn parse_receipt_rule(
     params: &HashMap<String, String>,
@@ -861,6 +922,7 @@ pub(crate) fn send_email(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let from = required_param(&req.query_params, "Source")?;
+    check_v1_verified_sender(state, &req.account_id, from)?;
     let to = parse_member_list(&req.query_params, "Destination.ToAddresses");
     let cc = parse_member_list(&req.query_params, "Destination.CcAddresses");
     let bcc = parse_member_list(&req.query_params, "Destination.BccAddresses");
@@ -911,6 +973,9 @@ pub(crate) fn send_raw_email(
 ) -> Result<AwsResponse, AwsServiceError> {
     let raw_data = required_param(&req.query_params, "RawMessage.Data")?;
     let from = req.query_params.get("Source").cloned().unwrap_or_default();
+    if !from.is_empty() {
+        check_v1_verified_sender(state, &req.account_id, &from)?;
+    }
     let to = parse_member_list(&req.query_params, "Destinations");
 
     let message_id = format!(
@@ -954,6 +1019,7 @@ pub(crate) fn send_templated_email(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let from = required_param(&req.query_params, "Source")?;
+    check_v1_verified_sender(state, &req.account_id, from)?;
     let template_name = required_param(&req.query_params, "Template")?;
     let template_data = required_param(&req.query_params, "TemplateData")?;
     let to = parse_member_list(&req.query_params, "Destination.ToAddresses");
@@ -1015,6 +1081,7 @@ pub(crate) fn send_bulk_templated_email(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let from = required_param(&req.query_params, "Source")?;
+    check_v1_verified_sender(state, &req.account_id, from)?;
     let template_name = required_param(&req.query_params, "Template")?;
     let default_template_data = req
         .query_params

@@ -16,6 +16,37 @@ fn make_state() -> SharedSesState {
     ))
 }
 
+/// Seed a verified identity for the default test account so send tests
+/// don't trip the verified-sender gate.
+fn seed_identity(state: &SharedSesState, name: &str) {
+    use crate::state::EmailIdentity;
+    let mut accounts = state.write();
+    let st = accounts.get_or_create("123456789012");
+    let identity_type = if name.contains('@') {
+        "EMAIL_ADDRESS"
+    } else {
+        "DOMAIN"
+    };
+    st.identities.insert(
+        name.to_string(),
+        EmailIdentity {
+            identity_name: name.to_string(),
+            identity_type: identity_type.to_string(),
+            verified: true,
+            created_at: chrono::Utc::now(),
+            dkim_signing_enabled: true,
+            dkim_signing_attributes_origin: "AWS_SES".to_string(),
+            dkim_domain_signing_private_key: None,
+            dkim_domain_signing_selector: None,
+            dkim_next_signing_key_length: None,
+            email_forwarding_enabled: true,
+            mail_from_domain: None,
+            mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
+            configuration_set_name: None,
+        },
+    );
+}
+
 fn make_request(method: Method, path: &str, body: &str) -> AwsRequest {
     make_request_with_query(method, path, body, "", HashMap::new())
 }
@@ -190,6 +221,7 @@ async fn test_template_lifecycle() {
 #[tokio::test]
 async fn test_send_email() {
     let state = make_state();
+    seed_identity(&state, "sender@example.com");
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -279,6 +311,7 @@ async fn test_configuration_set_lifecycle() {
 #[tokio::test]
 async fn test_send_email_raw_content() {
     let state = make_state();
+    seed_identity(&state, "sender@example.com");
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -314,6 +347,7 @@ async fn test_send_email_raw_content() {
 #[tokio::test]
 async fn test_send_email_template_content() {
     let state = make_state();
+    seed_identity(&state, "sender@example.com");
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -408,6 +442,7 @@ async fn test_send_email_missing_content() {
 #[tokio::test]
 async fn test_send_email_with_cc_and_bcc() {
     let state = make_state();
+    seed_identity(&state, "sender@example.com");
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -440,6 +475,7 @@ async fn test_send_email_with_cc_and_bcc() {
 #[tokio::test]
 async fn test_send_bulk_email() {
     let state = make_state();
+    seed_identity(&state, "sender@example.com");
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -538,6 +574,47 @@ async fn test_send_email_rejects_when_config_set_paused() {
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["__type"], "ConfigurationSetSendingPausedException");
+}
+
+#[tokio::test]
+async fn test_send_email_rejects_unverified_sender() {
+    let state = make_state();
+    let svc = SesV2Service::new(state);
+
+    // No identity registered for sender@example.com → MessageRejected.
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["recipient@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["__type"], "MessageRejected");
+}
+
+#[tokio::test]
+async fn test_send_email_accepts_verified_domain() {
+    let state = make_state();
+    // Verify the domain only → full address should be allowed.
+    seed_identity(&state, "example.com");
+    let svc = SesV2Service::new(state);
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["recipient@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
 }
 
 #[tokio::test]
