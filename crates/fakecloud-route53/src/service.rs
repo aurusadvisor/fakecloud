@@ -866,6 +866,8 @@ impl Route53Service {
             version: 1,
             config: cfg.health_check_config,
             created_time: Utc::now(),
+            status_line: "Success: HTTP Status Code 200, OK.".to_string(),
+            last_failure_reason: None,
         };
         account.health_checks.insert(id.clone(), stored.clone());
         drop(state);
@@ -1119,15 +1121,38 @@ impl Route53Service {
                 esc(&checker_ip_for_region(region))
             ));
             body.push_str("<StatusReport>");
-            body.push_str("<Status>Success: HTTP Status Code 200, OK.</Status>");
+            body.push_str(&format!("<Status>{}</Status>", esc(&hc.status_line)));
             body.push_str(&format!("<CheckedTime>{}</CheckedTime>", now));
             body.push_str("</StatusReport>");
             body.push_str("</HealthCheckObservation>");
         }
         body.push_str("</HealthCheckObservations>");
         body.push_str("</GetHealthCheckStatusResponse>");
-        let _ = hc;
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    /// Admin: flip a health check's status + optional last-failure
+    /// reason. Powers the
+    /// `PUT /_fakecloud/route53/health-checks/{id}/status` endpoint
+    /// in fakecloud-server. Returns `false` if the id doesn't exist.
+    pub fn set_health_check_status(
+        &self,
+        id: &str,
+        status_line: String,
+        last_failure_reason: Option<String>,
+    ) -> bool {
+        let mut state = self.state.write();
+        let Some(account) = state.accounts.get_mut(DEFAULT_ACCOUNT) else {
+            return false;
+        };
+        let Some(hc) = account.health_checks.get_mut(id) else {
+            return false;
+        };
+        hc.status_line = status_line;
+        if last_failure_reason.is_some() {
+            hc.last_failure_reason = last_failure_reason;
+        }
+        true
     }
 
     fn get_health_check_last_failure_reason(
@@ -1136,21 +1161,35 @@ impl Route53Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = require_id(route)?;
         let state = self.state.read();
-        let _hc = state
+        let hc = state
             .accounts
             .get(DEFAULT_ACCOUNT)
             .and_then(|a| a.health_checks.get(&id).cloned())
             .ok_or_else(|| no_such_health_check(&id))?;
         drop(state);
-        // Real Route 53 returns an empty observations list when the
-        // checker has not seen a failure yet. fakecloud has no live
-        // checker, so the list is always empty.
         let mut body = String::with_capacity(256);
         body.push_str(XML_DECL);
         body.push_str(&format!(
             "<GetHealthCheckLastFailureReasonResponse xmlns=\"{NS}\">"
         ));
-        body.push_str("<HealthCheckObservations></HealthCheckObservations>");
+        body.push_str("<HealthCheckObservations>");
+        if let Some(reason) = hc.last_failure_reason.as_deref() {
+            let now = rfc3339(&Utc::now());
+            for region in checker_regions() {
+                body.push_str("<HealthCheckObservation>");
+                body.push_str(&format!("<Region>{}</Region>", esc(region)));
+                body.push_str(&format!(
+                    "<IPAddress>{}</IPAddress>",
+                    esc(&checker_ip_for_region(region))
+                ));
+                body.push_str("<StatusReport>");
+                body.push_str(&format!("<Status>{}</Status>", esc(reason)));
+                body.push_str(&format!("<CheckedTime>{}</CheckedTime>", now));
+                body.push_str("</StatusReport>");
+                body.push_str("</HealthCheckObservation>");
+            }
+        }
+        body.push_str("</HealthCheckObservations>");
         body.push_str("</GetHealthCheckLastFailureReasonResponse>");
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }
@@ -2587,3 +2626,77 @@ impl Route53Service {
 #[path = "helpers.rs"]
 mod helpers;
 use helpers::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::HealthCheckConfig;
+    use crate::state::{Route53Accounts, StoredHealthCheck};
+
+    fn svc_with_health_check(id: &str) -> Route53Service {
+        let state = Arc::new(RwLock::new(Route53Accounts::default()));
+        {
+            let mut s = state.write();
+            let account = s.accounts.entry(DEFAULT_ACCOUNT.to_string()).or_default();
+            account.health_checks.insert(
+                id.to_string(),
+                StoredHealthCheck {
+                    id: id.to_string(),
+                    caller_reference: "ref".to_string(),
+                    version: 1,
+                    config: HealthCheckConfig::default(),
+                    created_time: Utc::now(),
+                    status_line: "Success: HTTP Status Code 200, OK.".to_string(),
+                    last_failure_reason: None,
+                },
+            );
+        }
+        Route53Service::new(state)
+    }
+
+    #[test]
+    fn set_health_check_status_flips_status_and_failure_reason() {
+        let svc = svc_with_health_check("hc-1");
+        assert!(svc.set_health_check_status(
+            "hc-1",
+            "Failure: Connection refused.".to_string(),
+            Some("Failure: connect() returned ECONNREFUSED".to_string()),
+        ));
+        let st = svc.state.read();
+        let hc = &st.accounts.get(DEFAULT_ACCOUNT).unwrap().health_checks["hc-1"];
+        assert_eq!(hc.status_line, "Failure: Connection refused.");
+        assert_eq!(
+            hc.last_failure_reason.as_deref().unwrap(),
+            "Failure: connect() returned ECONNREFUSED"
+        );
+    }
+
+    #[test]
+    fn set_health_check_status_returns_false_for_unknown_id() {
+        let svc = svc_with_health_check("hc-1");
+        assert!(!svc.set_health_check_status(
+            "ghost",
+            "Failure: connection refused.".to_string(),
+            None,
+        ));
+    }
+
+    #[test]
+    fn set_health_check_status_preserves_existing_reason_when_none() {
+        let svc = svc_with_health_check("hc-1");
+        svc.set_health_check_status(
+            "hc-1",
+            "Failure: timeout".to_string(),
+            Some("Failure: connect() timed out".to_string()),
+        );
+        // Subsequent flip with None for reason should not clobber.
+        svc.set_health_check_status("hc-1", "Success: HTTP 200".to_string(), None);
+        let st = svc.state.read();
+        let hc = &st.accounts.get(DEFAULT_ACCOUNT).unwrap().health_checks["hc-1"];
+        assert_eq!(hc.status_line, "Success: HTTP 200");
+        assert_eq!(
+            hc.last_failure_reason.as_deref().unwrap(),
+            "Failure: connect() timed out"
+        );
+    }
+}

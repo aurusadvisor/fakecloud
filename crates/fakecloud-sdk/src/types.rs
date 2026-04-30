@@ -1051,3 +1051,21 @@ pub struct CreateAdminResponse {
     pub account_id: String,
     pub arn: String,
 }
+
+/// Body for `PUT /_fakecloud/route53/health-checks/{id}/status`. The
+/// admin endpoint flips a stored Route 53 health check's reported
+/// status (and optionally the last-failure-reason observation) so
+/// tests can simulate failover scenarios without a live checker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Route53HealthCheckStatusRequest {
+    /// New `Status` line returned by `GetHealthCheckStatus`. Use
+    /// AWS's canonical phrases like `Success: HTTP Status Code 200, OK.`
+    /// for healthy or `Failure: Connection refused.` for unhealthy.
+    pub status: String,
+    /// Optional last-failure observation surfaced by
+    /// `GetHealthCheckLastFailureReason`. `None` leaves the prior
+    /// value intact.
+    #[serde(default)]
+    pub last_failure_reason: Option<String>,
+}

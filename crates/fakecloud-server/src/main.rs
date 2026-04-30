@@ -2001,8 +2001,10 @@ async fn main() {
     let cloudfront_service = CloudFrontService::new(cloudfront_state.clone());
     registry.register(Arc::new(cloudfront_service));
 
-    let route53_service = fakecloud_route53::Route53Service::new(route53_state.clone());
-    registry.register(Arc::new(route53_service));
+    let route53_service = Arc::new(fakecloud_route53::Route53Service::new(
+        route53_state.clone(),
+    ));
+    registry.register(route53_service.clone());
 
     let acm_service = fakecloud_acm::AcmService::new(acm_state.clone());
     registry.register(Arc::new(acm_service));
@@ -4637,6 +4639,28 @@ async fn main() {
                             &body.account_id,
                             &body.user_name,
                         ))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/route53/health-checks/{id}/status",
+            axum::routing::put({
+                let svc = route53_service.clone();
+                move |axum::extract::Path(id): axum::extract::Path<String>,
+                      axum::Json(body): axum::Json<types::Route53HealthCheckStatusRequest>| {
+                    let svc = svc.clone();
+                    async move {
+                        let ok = svc.set_health_check_status(
+                            &id,
+                            body.status,
+                            body.last_failure_reason,
+                        );
+                        if ok {
+                            axum::Json(serde_json::json!({"status": "ok"}))
+                        } else {
+                            axum::Json(serde_json::json!({"status": "not_found"}))
+                        }
                     }
                 }
             }),
