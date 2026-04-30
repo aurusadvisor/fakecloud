@@ -979,10 +979,17 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let _serial = required_param(&req.query_params, "SerialNumber")?;
+        let serial = required_param(&req.query_params, "SerialNumber")?;
         let _user = required_param(&req.query_params, "UserName")?;
         let _ = required_param(&req.query_params, "AuthenticationCode1")?;
         let _ = required_param(&req.query_params, "AuthenticationCode2")?;
+        // Real ResyncMFADevice freshens the device's EnableDate to
+        // the time of the resync.
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if let Some(device) = state.virtual_mfa_devices.get_mut(&serial.to_string()) {
+            device.enable_date = Some(chrono::Utc::now());
+        }
         Ok(AwsResponse::xml(
             StatusCode::OK,
             empty_response("ResyncMFADevice", &req.request_id),
@@ -993,7 +1000,10 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let _ = required_param(&req.query_params, "GlobalEndpointTokenVersion")?;
+        let version = required_param(&req.query_params, "GlobalEndpointTokenVersion")?;
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.global_endpoint_token_version = Some(version.to_string());
         Ok(AwsResponse::xml(
             StatusCode::OK,
             empty_response("SetSecurityTokenServicePreferences", &req.request_id),
