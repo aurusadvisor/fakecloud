@@ -1083,11 +1083,25 @@ pub(crate) fn md5_of_message_attributes_from_refs(
     format!("{:032x}", hasher.finalize())
 }
 
-/// Resolve a QueueUrl that might be a queue name, a path, or a full URL
+/// Resolve a QueueUrl that might be a queue name, a path, a full URL, or
+/// an SQS ARN (`arn:aws:sqs:REGION:ACCOUNT:queue-name`). Real SQS accepts
+/// all four interchangeably; SDKs in cross-account or IaC configs often
+/// hand us the ARN.
 pub(crate) fn resolve_queue_url(input: &str, state: &crate::state::SqsState) -> Option<String> {
     // Direct match
     if state.queues.contains_key(input) {
         return Some(input.to_string());
+    }
+    // ARN form: extract queue name (last segment after the colon-prefix)
+    if let Some(rest) = input.strip_prefix("arn:aws:sqs:") {
+        // rest = "REGION:ACCOUNT:queue-name"
+        if let Some(name) = rest.rsplit(':').next() {
+            if !name.is_empty() {
+                if let Some(url) = state.name_to_url.get(name) {
+                    return Some(url.clone());
+                }
+            }
+        }
     }
     // Try as queue name
     if let Some(url) = state.name_to_url.get(input) {
