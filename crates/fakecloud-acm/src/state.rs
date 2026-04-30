@@ -66,6 +66,12 @@ pub struct StoredCertificate {
     pub certificate_authority_arn: Option<String>,
     pub tags: BTreeMap<String, String>,
     pub in_use_by: Vec<String>,
+    /// Number of `DescribeCertificate` reads since the cert was issued.
+    /// Real ACM transitions PENDING_VALIDATION → ISSUED asynchronously
+    /// over minutes; we flip after a small read-count threshold so tests
+    /// don't have to wait wall-clock seconds.
+    #[serde(default)]
+    pub describe_read_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

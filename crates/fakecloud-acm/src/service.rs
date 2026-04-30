@@ -193,6 +193,7 @@ impl AcmService {
             certificate_authority_arn: ca_arn,
             tags,
             in_use_by: Vec::new(),
+            describe_read_count: 0,
         };
         account.certificates.insert(arn.clone(), cert);
         Ok(AwsResponse::ok_json(json!({ "CertificateArn": arn })))
@@ -200,13 +201,28 @@ impl AcmService {
 
     fn describe_certificate(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let arn = require_certificate_arn(req)?;
-        let state = self.state.read();
+        let mut state = self.state.write();
         let cert = state
             .accounts
-            .get(&req.account_id)
-            .and_then(|a| a.certificates.get(&arn))
-            .ok_or_else(|| no_such_certificate(&arn))?
-            .clone();
+            .get_mut(&req.account_id)
+            .and_then(|a| a.certificates.get_mut(&arn))
+            .ok_or_else(|| no_such_certificate(&arn))?;
+        // Flip PENDING_VALIDATION → ISSUED after a small number of reads
+        // so tests can observe the transition without waiting on
+        // wall-clock minutes. Imported certs (non-AMAZON_ISSUED) skip
+        // this — they're "issued" the moment they land.
+        const VALIDATION_READS: u32 = 3;
+        if cert.status == "PENDING_VALIDATION" && cert.cert_type == "AMAZON_ISSUED" {
+            cert.describe_read_count = cert.describe_read_count.saturating_add(1);
+            if cert.describe_read_count >= VALIDATION_READS {
+                cert.status = "ISSUED".to_string();
+                cert.issued_at = Some(Utc::now());
+                for dv in cert.domain_validation.iter_mut() {
+                    dv.validation_status = "SUCCESS".to_string();
+                }
+            }
+        }
+        let cert = cert.clone();
         Ok(AwsResponse::ok_json(json!({
             "Certificate": certificate_detail_json(&cert),
         })))
@@ -386,6 +402,7 @@ impl AcmService {
                     certificate_authority_arn: None,
                     tags,
                     in_use_by: Vec::new(),
+                    describe_read_count: 0,
                 };
                 account.certificates.insert(arn.clone(), cert);
                 arn
@@ -1310,7 +1327,6 @@ mod tests {
         assert!(out.contains("Proc-Type: 4,ENCRYPTED\n"));
         assert!(out.contains("DEK-Info: AES-256-CBC,"));
         assert!(out.ends_with("-----END PRIVATE KEY-----\n"));
-        // Encrypted body must differ from plaintext base64 body.
         assert!(!out.contains("VGVzdEtleU1hdGVyaWFs"));
     }
 
@@ -1428,5 +1444,36 @@ mod tests {
             Err(e) => e,
         };
         assert!(format!("{err:?}").contains("Passphrase"));
+    }
+
+    #[tokio::test]
+    async fn describe_certificate_flips_pending_to_issued_after_reads() {
+        let svc = AcmService::default();
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({"DomainName": "example.com", "ValidationMethod": "DNS"}),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+
+        let mut last_status = String::new();
+        for _ in 0..6 {
+            let resp = svc
+                .handle(make_req(
+                    "DescribeCertificate",
+                    json!({"CertificateArn": arn}),
+                ))
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            last_status = body["Certificate"]["Status"].as_str().unwrap().to_string();
+            if last_status == "ISSUED" {
+                break;
+            }
+        }
+        assert_eq!(last_status, "ISSUED");
     }
 }
