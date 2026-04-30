@@ -1330,6 +1330,7 @@ impl EcrService {
             repo.images.remove(digest);
             repo.image_tags.retain(|_, d| d != digest);
         }
+        repo.lifecycle_policy_last_evaluated_at = Some(Utc::now());
         let registry_id = repo.registry_id.clone();
         Ok(AwsResponse::ok_json(json!({
             "registryId": registry_id,
@@ -1354,11 +1355,15 @@ impl EcrService {
             .lifecycle_policy
             .clone()
             .ok_or_else(|| lifecycle_policy_not_found(&name))?;
+        let last_eval = repo
+            .lifecycle_policy_last_evaluated_at
+            .map(|t| t.timestamp())
+            .unwrap_or(0);
         Ok(AwsResponse::ok_json(json!({
             "registryId": repo.registry_id,
             "repositoryName": name,
             "lifecyclePolicyText": policy,
-            "lastEvaluatedAt": Utc::now().timestamp(),
+            "lastEvaluatedAt": last_eval,
         })))
     }
 
@@ -1381,12 +1386,17 @@ impl EcrService {
             .lifecycle_policy
             .take()
             .ok_or_else(|| lifecycle_policy_not_found(&name))?;
+        let last_eval = repo
+            .lifecycle_policy_last_evaluated_at
+            .take()
+            .map(|t| t.timestamp())
+            .unwrap_or(0);
         let registry_id = repo.registry_id.clone();
         Ok(AwsResponse::ok_json(json!({
             "registryId": registry_id,
             "repositoryName": name,
             "lifecyclePolicyText": policy,
-            "lastEvaluatedAt": Utc::now().timestamp(),
+            "lastEvaluatedAt": last_eval,
         })))
     }
 

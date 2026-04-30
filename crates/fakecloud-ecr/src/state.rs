@@ -121,6 +121,12 @@ pub struct Repository {
     pub policy: Option<String>,
     /// Repository-level lifecycle policy document JSON.
     pub lifecycle_policy: Option<String>,
+    /// Last time the lifecycle policy was evaluated against this
+    /// repository's images. `None` until the policy has been applied
+    /// at least once. Surfaced through `GetLifecyclePolicy`'s
+    /// `lastEvaluatedAt` field.
+    #[serde(default)]
+    pub lifecycle_policy_last_evaluated_at: Option<DateTime<Utc>>,
     /// Per-image scan findings, keyed by manifest digest.
     #[serde(default)]
     pub scan_findings: BTreeMap<String, ImageScanFindings>,
@@ -164,6 +170,7 @@ impl Repository {
             tags: BTreeMap::new(),
             policy: None,
             lifecycle_policy: None,
+            lifecycle_policy_last_evaluated_at: None,
             scan_findings: BTreeMap::new(),
             images: BTreeMap::new(),
             image_tags: BTreeMap::new(),
