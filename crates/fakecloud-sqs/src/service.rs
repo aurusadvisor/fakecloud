@@ -1014,6 +1014,11 @@ impl SqsService {
         } else {
             Some(md5_of_message_attributes(&message_attributes))
         };
+        let md5_of_system_attrs = if system_attributes.is_empty() {
+            None
+        } else {
+            Some(md5_of_message_system_attributes(&system_attributes))
+        };
         // Validate delay seconds range before acquiring lock
         let raw_delay = val_as_i64(&body["DelaySeconds"]);
         if let Some(d) = raw_delay {
@@ -1074,6 +1079,9 @@ impl SqsService {
                         });
                         if let Some(ref md5) = md5_of_attrs {
                             resp["MD5OfMessageAttributes"] = json!(md5);
+                        }
+                        if let Some(ref md5) = md5_of_system_attrs {
+                            resp["MD5OfMessageSystemAttributes"] = json!(md5);
                         }
                         return Ok(sqs_response("SendMessage", resp, &request_id, is_query));
                     }
@@ -1170,6 +1178,9 @@ impl SqsService {
         }
         if let Some(md5) = &md5_of_attrs {
             resp["MD5OfMessageAttributes"] = json!(md5);
+        }
+        if let Some(md5) = &md5_of_system_attrs {
+            resp["MD5OfMessageSystemAttributes"] = json!(md5);
         }
 
         Ok(sqs_response("SendMessage", resp, &request_id, is_query))

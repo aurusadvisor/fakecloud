@@ -217,6 +217,7 @@ pub(crate) fn process_batch_send_entry(
     };
 
     let message_attributes = parse_message_attributes(entry);
+    let system_attributes = parse_message_system_attributes(entry);
 
     let sequence_number = if cfg.is_fifo {
         let seq = queue.next_sequence_number;
@@ -230,6 +231,11 @@ pub(crate) fn process_batch_send_entry(
         None
     } else {
         Some(md5_of_message_attributes(&message_attributes))
+    };
+    let md5_of_system_attrs = if system_attributes.is_empty() {
+        None
+    } else {
+        Some(md5_of_message_system_attributes(&system_attributes))
     };
 
     let msg = SqsMessage {
@@ -258,6 +264,9 @@ pub(crate) fn process_batch_send_entry(
     }
     if let Some(md5) = &md5_of_attrs {
         entry_resp["MD5OfMessageAttributes"] = json!(md5);
+    }
+    if let Some(md5) = &md5_of_system_attrs {
+        entry_resp["MD5OfMessageSystemAttributes"] = json!(md5);
     }
     queue.messages.push_back(msg);
     Ok(BatchEntryOutcome::Success(entry_resp))
@@ -1173,6 +1182,29 @@ pub(crate) fn find_message_id_for_receipt(
         }
     }
     None
+}
+
+/// MD5 of message system attributes per AWS specification. System
+/// attributes (e.g. `AWSTraceHeader`) are always typed as `String`, so
+/// the wire format is the same shape as `md5_of_message_attributes`
+/// with transport type 1 and `String` data type for each entry.
+pub(crate) fn md5_of_message_system_attributes(attrs: &BTreeMap<String, String>) -> String {
+    use md5::Digest;
+    let mut sorted: Vec<(&String, &String)> = attrs.iter().collect();
+    sorted.sort_by_key(|(k, _)| k.as_str());
+
+    let mut hasher = Md5::new();
+    for (name, value) in sorted {
+        hasher.update((name.len() as u32).to_be_bytes());
+        hasher.update(name.as_bytes());
+        let data_type = "String";
+        hasher.update((data_type.len() as u32).to_be_bytes());
+        hasher.update(data_type.as_bytes());
+        hasher.update([1u8]); // STRING transport type
+        hasher.update((value.len() as u32).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    format!("{:032x}", hasher.finalize())
 }
 
 /// Parse MessageSystemAttributes (e.g., AWSTraceHeader) from the request body.
