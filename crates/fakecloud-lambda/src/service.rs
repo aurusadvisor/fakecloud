@@ -400,6 +400,105 @@ fn route_to_destination(
     }
 }
 
+/// Decrements the per-function in-flight counter on drop. Lives as
+/// long as the invocation it gates — for synchronous invokes that's
+/// the function call's stack frame; for `Event` invokes the guard is
+/// moved into the spawned task so the counter drops only when the
+/// async work finishes.
+pub(crate) struct ConcurrencyGuard {
+    pub(crate) map: Arc<parking_lot::RwLock<BTreeMap<String, i64>>>,
+    pub(crate) key: String,
+}
+
+impl Drop for ConcurrencyGuard {
+    fn drop(&mut self) {
+        let mut m = self.map.write();
+        let n = m.get(&self.key).copied().unwrap_or(0);
+        if n <= 1 {
+            m.remove(&self.key);
+        } else {
+            m.insert(self.key.clone(), n - 1);
+        }
+    }
+}
+
+/// Map an Invoke `Qualifier` (alias name, numeric version, or
+/// `$LATEST`) to a concrete numeric version string. Aliases with a
+/// `RoutingConfig.AdditionalVersionWeights` table do a weighted pick
+/// across the alias's primary `function_version` plus the additional
+/// versions in the weight map. Returns `None` for `$LATEST` /
+/// unqualified invokes (caller uses the live `$LATEST` config).
+pub(crate) fn resolve_qualifier_to_version(
+    state: &LambdaState,
+    function_name: &str,
+    qualifier: Option<&str>,
+) -> Option<String> {
+    let q = qualifier?;
+    if q == "$LATEST" {
+        return None;
+    }
+    if q.chars().all(|c| c.is_ascii_digit()) {
+        return Some(q.to_string());
+    }
+    let alias_key = format!("{function_name}:{q}");
+    let alias = state.aliases.get(&alias_key)?;
+    let primary = alias.function_version.clone();
+    let routing = alias
+        .routing_config
+        .as_ref()
+        .and_then(|rc| rc.get("AdditionalVersionWeights"))
+        .and_then(|m| m.as_object());
+    let Some(weights) = routing else {
+        return Some(primary);
+    };
+    // Sum of additional weights ∈ [0,1]; primary gets 1 - sum. Pick
+    // uniformly in [0,1) and walk the cumulative weight axis.
+    let mut additional: Vec<(String, f64)> = Vec::with_capacity(weights.len());
+    let mut sum: f64 = 0.0;
+    for (ver, w) in weights {
+        let weight = w.as_f64().unwrap_or(0.0).clamp(0.0, 1.0);
+        sum += weight;
+        additional.push((ver.clone(), weight));
+    }
+    let primary_weight = (1.0 - sum).max(0.0);
+    let pick: f64 = {
+        // Mix a thread-local LCG state with wall-clock nanos so
+        // back-to-back calls within a single process tick still
+        // produce distinct picks. Invoke routing only needs fairness
+        // over many invokes, not crypto randomness.
+        use std::cell::Cell;
+        thread_local! {
+            static RNG: Cell<u64> = const { Cell::new(0x9E37_79B9_7F4A_7C15) };
+        }
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        RNG.with(|cell| {
+            let mut s = cell.get() ^ now_nanos;
+            // splitmix64 step
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            cell.set(s);
+            (z >> 11) as f64 / ((1u64 << 53) as f64)
+        })
+    };
+    let mut acc = primary_weight;
+    if pick < acc {
+        return Some(primary);
+    }
+    for (ver, w) in &additional {
+        acc += w;
+        if pick < acc {
+            return Some(ver.clone());
+        }
+    }
+    Some(primary)
+}
+
 pub struct LambdaService {
     pub(crate) state: SharedLambdaState,
     runtime: Option<Arc<ContainerRuntime>>,
@@ -407,6 +506,13 @@ pub struct LambdaService {
     snapshot_lock: Arc<AsyncMutex<()>>,
     pub(crate) delivery_bus: Option<Arc<fakecloud_core::delivery::DeliveryBus>>,
     pub(crate) role_trust_validator: Option<Arc<dyn fakecloud_core::auth::RoleTrustValidator>>,
+    /// Per-account-per-function in-flight invocation count, used to
+    /// gate `Invoke` against `PutFunctionConcurrency`'s
+    /// `ReservedConcurrentExecutions` ceiling. Keyed by
+    /// `{account_id}:{function_name}`. Live counter — incremented at
+    /// invoke entry, decremented when the invocation completes (or
+    /// when the spawned async task finishes for `Event` invokes).
+    pub(crate) inflight_invocations: Arc<parking_lot::RwLock<BTreeMap<String, i64>>>,
 }
 
 impl LambdaService {
@@ -418,6 +524,7 @@ impl LambdaService {
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             delivery_bus: None,
             role_trust_validator: None,
+            inflight_invocations: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -1105,7 +1212,27 @@ impl LambdaService {
         payload: &[u8],
         account_id: &str,
         invocation_type: InvocationType,
+        qualifier: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Resolve qualifier (alias / numeric version / $LATEST) to a
+        // concrete version string. Aliases with a
+        // `RoutingConfig.AdditionalVersionWeights` map do a weighted
+        // pick across `function_version` + the additional versions,
+        // mirroring AWS canary routing. The resolved version is
+        // surfaced via `x-amz-executed-version` so callers can verify
+        // which version actually ran. We always invoke against the
+        // live `$LATEST` function record for now — version-snapshot
+        // execution is wired separately once
+        // `function_version_snapshots` lands.
+        let resolved_version: Option<String> = {
+            let accounts = self.state.read();
+            let empty = LambdaState::new(account_id, "");
+            let state = accounts.get(account_id).unwrap_or(&empty);
+            resolve_qualifier_to_version(state, function_name, qualifier)
+        };
+        let executed_version = resolved_version
+            .clone()
+            .unwrap_or_else(|| "$LATEST".to_string());
         let (func, layer_zips) = {
             let accounts = self.state.read();
             let empty = LambdaState::new(account_id, "");
@@ -1147,6 +1274,36 @@ impl LambdaService {
             (func, layer_zips)
         };
 
+        // Reserved-concurrency gate runs before code-zip / DryRun
+        // checks: AWS returns 429 even for functions without a code
+        // package as long as the cap is already hit, since throttling
+        // is request-rate, not deployment-state.
+        let concurrency_key = format!("{account_id}:{function_name}");
+        let _concurrency_guard = {
+            let cap = {
+                let accounts = self.state.read();
+                accounts
+                    .get(account_id)
+                    .and_then(|s| s.function_concurrency.get(function_name).copied())
+            };
+            let mut map = self.inflight_invocations.write();
+            let current = map.get(&concurrency_key).copied().unwrap_or(0);
+            if let Some(limit) = cap {
+                if current >= limit {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "TooManyRequestsException",
+                        "Rate Exceeded.",
+                    ));
+                }
+            }
+            map.insert(concurrency_key.clone(), current + 1);
+            ConcurrencyGuard {
+                map: self.inflight_invocations.clone(),
+                key: concurrency_key.clone(),
+            }
+        };
+
         if func.code_zip.is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -1157,10 +1314,12 @@ impl LambdaService {
 
         if matches!(invocation_type, InvocationType::DryRun) {
             let mut resp = AwsResponse::json(StatusCode::NO_CONTENT, "");
-            resp.headers.insert(
-                http::header::HeaderName::from_static("x-amz-executed-version"),
-                http::header::HeaderValue::from_static("$LATEST"),
-            );
+            if let Ok(v) = http::header::HeaderValue::from_str(&executed_version) {
+                resp.headers.insert(
+                    http::header::HeaderName::from_static("x-amz-executed-version"),
+                    v,
+                );
+            }
             return Ok(resp);
         }
 
@@ -1174,7 +1333,10 @@ impl LambdaService {
 
         match invocation_type {
             InvocationType::Event => {
-                // Fire-and-forget. AWS returns 202 with no body.
+                // Fire-and-forget. AWS returns 202 with no body. Move
+                // the concurrency guard into the spawned task so the
+                // counter only drops once the async invocation
+                // actually finishes.
                 let runtime = runtime.clone();
                 let func_clone = func.clone();
                 let payload_vec = payload.to_vec();
@@ -1182,7 +1344,9 @@ impl LambdaService {
                 let destination_config = self.lookup_destination_config(&func, account_id);
                 let function_arn = func.function_arn.clone();
                 let layer_zips_async = layer_zips.clone();
+                let async_guard = _concurrency_guard;
                 tokio::spawn(async move {
+                    let _g = async_guard;
                     let result = match runtime
                         .invoke(&func_clone, &payload_vec, &layer_zips_async)
                         .await
@@ -1225,20 +1389,24 @@ impl LambdaService {
                     }
                 });
                 let mut resp = AwsResponse::json(StatusCode::ACCEPTED, "");
-                resp.headers.insert(
-                    http::header::HeaderName::from_static("x-amz-executed-version"),
-                    http::header::HeaderValue::from_static("$LATEST"),
-                );
+                if let Ok(v) = http::header::HeaderValue::from_str(&executed_version) {
+                    resp.headers.insert(
+                        http::header::HeaderName::from_static("x-amz-executed-version"),
+                        v,
+                    );
+                }
                 Ok(resp)
             }
             InvocationType::RequestResponse | InvocationType::DryRun => {
                 match runtime.invoke(&func, payload, &layer_zips).await {
                     Ok(response_bytes) => {
                         let mut resp = AwsResponse::json(StatusCode::OK, response_bytes);
-                        resp.headers.insert(
-                            http::header::HeaderName::from_static("x-amz-executed-version"),
-                            http::header::HeaderValue::from_static("$LATEST"),
-                        );
+                        if let Ok(v) = http::header::HeaderValue::from_str(&executed_version) {
+                            resp.headers.insert(
+                                http::header::HeaderName::from_static("x-amz-executed-version"),
+                                v,
+                            );
+                        }
                         Ok(resp)
                     }
                     Err(e) => {
@@ -1508,11 +1676,13 @@ impl AwsService for LambdaService {
                         .get("x-amz-invocation-type")
                         .and_then(|v| v.to_str().ok()),
                 );
+                let qualifier = req.query_params.get("Qualifier").map(String::as_str);
                 self.invoke(
                     resource_name.as_deref().unwrap_or(""),
                     &req.body,
                     aid,
                     invocation_type,
+                    qualifier,
                 )
                 .await
             }
@@ -1522,6 +1692,7 @@ impl AwsService for LambdaService {
                     &req.body,
                     aid,
                     InvocationType::Event,
+                    None,
                 )
                 .await
             }
