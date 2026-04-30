@@ -5042,3 +5042,284 @@ async fn cognito_oauth2_token_authorization_code_grant_unsupported() {
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["error"], "unsupported_grant_type");
 }
+
+#[tokio::test]
+async fn cognito_oauth2_userinfo_returns_user_attrs() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("oauth2-userinfo-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("oauth2-userinfo-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("bob")
+        .password("hunter22")
+        .user_attributes(
+            aws_sdk_cognitoidentityprovider::types::AttributeType::builder()
+                .name("email")
+                .value("bob@example.com")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("sign up");
+    client
+        .confirm_sign_up()
+        .client_id(&client_id)
+        .username("bob")
+        .confirmation_code("123456")
+        .send()
+        .await
+        .expect("confirm");
+
+    let auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "bob")
+        .auth_parameters("PASSWORD", "hunter22")
+        .send()
+        .await
+        .expect("auth");
+    let access_token = auth
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .unwrap()
+        .to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/userInfo", server.endpoint());
+    let resp = http
+        .get(&url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["username"], "bob");
+    assert_eq!(json["email"], "bob@example.com");
+    assert!(!json["sub"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cognito_oauth2_userinfo_invalid_token() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/userInfo", server.endpoint());
+    let resp = http
+        .get(&url)
+        .header("Authorization", "Bearer not-a-real-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "invalid_token");
+}
+
+#[tokio::test]
+async fn cognito_oauth2_userinfo_missing_bearer() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/userInfo", server.endpoint());
+    let resp = http.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn cognito_oauth2_revoke_refresh_token() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("oauth2-revoke-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("oauth2-revoke-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .sign_up()
+        .client_id(&client_id)
+        .username("carol")
+        .password("hunter22")
+        .send()
+        .await
+        .expect("sign up");
+    client
+        .confirm_sign_up()
+        .client_id(&client_id)
+        .username("carol")
+        .confirmation_code("123456")
+        .send()
+        .await
+        .expect("confirm");
+
+    let auth = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "carol")
+        .auth_parameters("PASSWORD", "hunter22")
+        .send()
+        .await
+        .expect("auth");
+    let refresh_token = auth
+        .authentication_result()
+        .unwrap()
+        .refresh_token()
+        .unwrap()
+        .to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/revoke", server.endpoint());
+    let body = format!("token={refresh_token}&client_id={client_id}");
+    let resp = http
+        .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let token_url = format!("{}/oauth2/token", server.endpoint());
+    let token_body =
+        format!("grant_type=refresh_token&client_id={client_id}&refresh_token={refresh_token}");
+    let token_resp = http
+        .post(&token_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(token_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(token_resp.status(), 400);
+    let json: serde_json::Value = token_resp.json().await.unwrap();
+    assert_eq!(json["error"], "invalid_grant");
+}
+
+#[tokio::test]
+async fn cognito_oauth2_revoke_unknown_token_returns_200() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("oauth2-revoke-unknown-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("oauth2-revoke-unknown-client")
+        .send()
+        .await
+        .expect("create client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/revoke", server.endpoint());
+    let body = format!("token=does-not-exist&client_id={client_id}");
+    let resp = http
+        .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn cognito_oauth2_revoke_unknown_client_id_401() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let url = format!("{}/oauth2/revoke", server.endpoint());
+    let body = "token=foo&client_id=nonexistent-client";
+    let resp = http
+        .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["error"], "invalid_client");
+}

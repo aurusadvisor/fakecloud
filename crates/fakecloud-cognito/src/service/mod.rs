@@ -1816,9 +1816,23 @@ pub async fn handle_oauth2_token(
             let signing = ensure_pool_signing_key(state, &pool_id).await;
             let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
             let tokens = generate_tokens(&pool_id, client_id, &sub, &username, region, signing_ref);
-            // refresh_token grant returns id+access but not a new
-            // refresh_token (Cognito only rotates refresh tokens when
-            // RefreshTokenRotation is ENABLED — that lands in Y7).
+            {
+                let mut mas = state.write();
+                for (_, account) in mas.iter_mut() {
+                    if account.user_pool_clients.contains_key(client_id) {
+                        account.access_tokens.insert(
+                            tokens.access_token.clone(),
+                            crate::state::AccessTokenData {
+                                user_pool_id: pool_id.clone(),
+                                username: username.clone(),
+                                client_id: client_id.to_string(),
+                                issued_at: Utc::now(),
+                            },
+                        );
+                        break;
+                    }
+                }
+            }
             Ok(OAuthTokenResponse {
                 access_token: tokens.access_token,
                 id_token: Some(tokens.id_token),
@@ -1879,6 +1893,111 @@ fn build_client_credentials_access_token(
         "iat": now,
     });
     sign_jwt(&header, &payload, &b64url, signing.map(|(p, _)| p))
+}
+
+#[derive(Debug, Clone)]
+pub enum OAuthUserInfoError {
+    InvalidToken,
+}
+
+/// RFC 7662-style userInfo. Resolves bearer access token in
+/// state.access_tokens, returns OIDC standard claims sourced from the
+/// user's attributes.
+pub fn handle_oauth2_userinfo(
+    state: &SharedCognitoState,
+    bearer_token: &str,
+) -> Result<Value, OAuthUserInfoError> {
+    let mas = state.read();
+    for (_, account) in mas.iter() {
+        let Some(token_data) = account.access_tokens.get(bearer_token) else {
+            continue;
+        };
+        let user = account
+            .users
+            .get(&token_data.user_pool_id)
+            .and_then(|users| users.get(&token_data.username))
+            .ok_or(OAuthUserInfoError::InvalidToken)?;
+        let mut info = serde_json::Map::new();
+        info.insert("sub".to_string(), Value::String(user.sub.clone()));
+        info.insert("username".to_string(), Value::String(user.username.clone()));
+        for attr in &user.attributes {
+            info.insert(attr.name.clone(), Value::String(attr.value.clone()));
+        }
+        return Ok(Value::Object(info));
+    }
+    Err(OAuthUserInfoError::InvalidToken)
+}
+
+#[derive(Debug, Clone)]
+pub enum OAuthRevokeError {
+    InvalidClient,
+    UnsupportedTokenType,
+}
+
+/// RFC 7009 token revocation. Cognito accepts refresh tokens; revoking a
+/// refresh token also invalidates every access token issued from it
+/// (matched by client_id + username + issued_at >= refresh issued_at).
+/// Per RFC 7009 §2.2, revoking an unknown token is a 200, not an error.
+pub fn handle_oauth2_revoke(
+    state: &SharedCognitoState,
+    params: &BTreeMap<String, String>,
+) -> Result<(), OAuthRevokeError> {
+    let token = match params.get("token") {
+        Some(t) => t.clone(),
+        None => return Ok(()),
+    };
+    if let Some(hint) = params.get("token_type_hint") {
+        if hint != "refresh_token" {
+            return Err(OAuthRevokeError::UnsupportedTokenType);
+        }
+    }
+    let client_id = params
+        .get("client_id")
+        .map(String::as_str)
+        .ok_or(OAuthRevokeError::InvalidClient)?;
+
+    let stored_secret = {
+        let mas = state.read();
+        let mut found = None;
+        for (_, account) in mas.iter() {
+            if let Some(client) = account.user_pool_clients.get(client_id) {
+                found = Some(client.client_secret.clone());
+                break;
+            }
+        }
+        found.ok_or(OAuthRevokeError::InvalidClient)?
+    };
+    if let Some(secret) = stored_secret.as_ref() {
+        let supplied = params.get("client_secret").map(String::as_str);
+        if supplied != Some(secret.as_str()) {
+            return Err(OAuthRevokeError::InvalidClient);
+        }
+    }
+
+    let mut mas = state.write();
+    for (_, account) in mas.iter_mut() {
+        if let Some(rt) = account.refresh_tokens.get(&token).cloned() {
+            if rt.client_id != client_id {
+                return Err(OAuthRevokeError::InvalidClient);
+            }
+            account.refresh_tokens.remove(&token);
+            account.access_tokens.retain(|_, at| {
+                !(at.client_id == rt.client_id
+                    && at.username == rt.username
+                    && at.user_pool_id == rt.user_pool_id
+                    && at.issued_at >= rt.issued_at)
+            });
+            return Ok(());
+        }
+        if let Some(at) = account.access_tokens.get(&token).cloned() {
+            if at.client_id != client_id {
+                return Err(OAuthRevokeError::InvalidClient);
+            }
+            account.access_tokens.remove(&token);
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

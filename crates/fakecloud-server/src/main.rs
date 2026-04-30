@@ -581,6 +581,8 @@ async fn main() {
     let cognito_jwks_state = cognito_state.clone();
     let cognito_oidc_state = cognito_state.clone();
     let cognito_token_state = cognito_state.clone();
+    let cognito_userinfo_state = cognito_state.clone();
+    let cognito_revoke_state = cognito_state.clone();
 
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
@@ -3565,6 +3567,127 @@ async fn main() {
                                         serde_json::Value::String(desc.to_string()),
                                     );
                                 }
+                                (status, axum::Json(serde_json::Value::Object(body)))
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/oauth2/userInfo",
+            {
+                let cs_get = cognito_userinfo_state.clone();
+                let cs_post = cognito_userinfo_state;
+                axum::routing::get({
+                    move |headers: axum::http::HeaderMap| {
+                        let cs = cs_get.clone();
+                        async move {
+                            let bearer = headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.strip_prefix("Bearer "))
+                                .map(|s| s.to_string());
+                            let Some(token) = bearer else {
+                                let mut body = serde_json::Map::new();
+                                body.insert(
+                                    "error".into(),
+                                    serde_json::Value::String("invalid_token".to_string()),
+                                );
+                                return (
+                                    axum::http::StatusCode::UNAUTHORIZED,
+                                    axum::Json(serde_json::Value::Object(body)),
+                                );
+                            };
+                            match fakecloud_cognito::handle_oauth2_userinfo(&cs, &token) {
+                                Ok(value) => (axum::http::StatusCode::OK, axum::Json(value)),
+                                Err(_) => {
+                                    let mut body = serde_json::Map::new();
+                                    body.insert(
+                                        "error".into(),
+                                        serde_json::Value::String("invalid_token".to_string()),
+                                    );
+                                    (
+                                        axum::http::StatusCode::UNAUTHORIZED,
+                                        axum::Json(serde_json::Value::Object(body)),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                })
+                .post({
+                    move |headers: axum::http::HeaderMap| {
+                        let cs = cs_post.clone();
+                        async move {
+                            let bearer = headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.strip_prefix("Bearer "))
+                                .map(|s| s.to_string());
+                            let Some(token) = bearer else {
+                                let mut body = serde_json::Map::new();
+                                body.insert(
+                                    "error".into(),
+                                    serde_json::Value::String("invalid_token".to_string()),
+                                );
+                                return (
+                                    axum::http::StatusCode::UNAUTHORIZED,
+                                    axum::Json(serde_json::Value::Object(body)),
+                                );
+                            };
+                            match fakecloud_cognito::handle_oauth2_userinfo(&cs, &token) {
+                                Ok(value) => (axum::http::StatusCode::OK, axum::Json(value)),
+                                Err(_) => {
+                                    let mut body = serde_json::Map::new();
+                                    body.insert(
+                                        "error".into(),
+                                        serde_json::Value::String("invalid_token".to_string()),
+                                    );
+                                    (
+                                        axum::http::StatusCode::UNAUTHORIZED,
+                                        axum::Json(serde_json::Value::Object(body)),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                })
+            },
+        )
+        .route(
+            "/oauth2/revoke",
+            axum::routing::post({
+                let cs = cognito_revoke_state;
+                move |body: String| {
+                    let cs = cs.clone();
+                    async move {
+                        let params: std::collections::BTreeMap<String, String> =
+                            match serde_urlencoded::from_str::<Vec<(String, String)>>(&body) {
+                                Ok(pairs) => pairs.into_iter().collect(),
+                                Err(_) => std::collections::BTreeMap::new(),
+                            };
+                        match fakecloud_cognito::handle_oauth2_revoke(&cs, &params) {
+                            Ok(()) => (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::Value::Object(serde_json::Map::new())),
+                            ),
+                            Err(err) => {
+                                let (code, status) = match err {
+                                    fakecloud_cognito::OAuthRevokeError::InvalidClient => (
+                                        "invalid_client",
+                                        axum::http::StatusCode::UNAUTHORIZED,
+                                    ),
+                                    fakecloud_cognito::OAuthRevokeError::UnsupportedTokenType => (
+                                        "unsupported_token_type",
+                                        axum::http::StatusCode::BAD_REQUEST,
+                                    ),
+                                };
+                                let mut body = serde_json::Map::new();
+                                body.insert(
+                                    "error".into(),
+                                    serde_json::Value::String(code.to_string()),
+                                );
                                 (status, axum::Json(serde_json::Value::Object(body)))
                             }
                         }
