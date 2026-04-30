@@ -758,3 +758,137 @@ async fn kms_cancel_key_deletion() {
     let desc = client.describe_key().key_id(&key_id).send().await.unwrap();
     assert!(desc.key_metadata().unwrap().enabled());
 }
+
+#[tokio::test]
+async fn kms_encryption_context_round_trips() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+    let resp = client.create_key().send().await.unwrap();
+    let key_id = resp.key_metadata().unwrap().key_id().to_string();
+
+    let enc = client
+        .encrypt()
+        .key_id(&key_id)
+        .plaintext(Blob::new(b"secret-data".to_vec()))
+        .encryption_context("Purpose", "test")
+        .encryption_context("Tenant", "alpha")
+        .send()
+        .await
+        .unwrap();
+    let ciphertext = enc.ciphertext_blob().unwrap().clone();
+
+    let dec = client
+        .decrypt()
+        .ciphertext_blob(ciphertext)
+        .encryption_context("Purpose", "test")
+        .encryption_context("Tenant", "alpha")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dec.plaintext().unwrap().as_ref(), b"secret-data");
+}
+
+#[tokio::test]
+async fn kms_decrypt_with_mismatched_encryption_context_fails() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+    let resp = client.create_key().send().await.unwrap();
+    let key_id = resp.key_metadata().unwrap().key_id().to_string();
+
+    let enc = client
+        .encrypt()
+        .key_id(&key_id)
+        .plaintext(Blob::new(b"secret".to_vec()))
+        .encryption_context("Purpose", "encrypt")
+        .send()
+        .await
+        .unwrap();
+    let ciphertext = enc.ciphertext_blob().unwrap().clone();
+
+    let err = client
+        .decrypt()
+        .ciphertext_blob(ciphertext.clone())
+        .encryption_context("Purpose", "different")
+        .send()
+        .await
+        .expect_err("mismatched EC must fail");
+    assert!(format!("{err:?}").contains("InvalidCiphertext"));
+
+    let err2 = client
+        .decrypt()
+        .ciphertext_blob(ciphertext)
+        .send()
+        .await
+        .expect_err("missing EC must fail when EC was supplied at encrypt");
+    assert!(format!("{err2:?}").contains("InvalidCiphertext"));
+}
+
+#[tokio::test]
+async fn kms_decrypt_without_context_round_trips_when_encrypt_had_no_context() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+    let resp = client.create_key().send().await.unwrap();
+    let key_id = resp.key_metadata().unwrap().key_id().to_string();
+
+    let enc = client
+        .encrypt()
+        .key_id(&key_id)
+        .plaintext(Blob::new(b"plain".to_vec()))
+        .send()
+        .await
+        .unwrap();
+    let ct = enc.ciphertext_blob().unwrap().clone();
+
+    let dec = client.decrypt().ciphertext_blob(ct).send().await.unwrap();
+    assert_eq!(dec.plaintext().unwrap().as_ref(), b"plain");
+}
+
+#[tokio::test]
+async fn kms_re_encrypt_with_destination_context_changes_required_decrypt_context() {
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+    let k1 = client.create_key().send().await.unwrap();
+    let key1_id = k1.key_metadata().unwrap().key_id().to_string();
+    let k2 = client.create_key().send().await.unwrap();
+    let key2_id = k2.key_metadata().unwrap().key_id().to_string();
+
+    let enc = client
+        .encrypt()
+        .key_id(&key1_id)
+        .plaintext(Blob::new(b"x".to_vec()))
+        .encryption_context("src", "1")
+        .send()
+        .await
+        .unwrap();
+    let ct = enc.ciphertext_blob().unwrap().clone();
+
+    let re = client
+        .re_encrypt()
+        .ciphertext_blob(ct)
+        .source_encryption_context("src", "1")
+        .destination_key_id(&key2_id)
+        .destination_encryption_context("dst", "2")
+        .send()
+        .await
+        .unwrap();
+    let new_ct = re.ciphertext_blob().unwrap().clone();
+
+    // Source EC no longer applies after re-encrypt.
+    let err = client
+        .decrypt()
+        .ciphertext_blob(new_ct.clone())
+        .encryption_context("src", "1")
+        .send()
+        .await
+        .expect_err("source EC should not work on re-encrypted ciphertext");
+    assert!(format!("{err:?}").contains("InvalidCiphertext"));
+
+    let dec = client
+        .decrypt()
+        .ciphertext_blob(new_ct)
+        .encryption_context("dst", "2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dec.plaintext().unwrap().as_ref(), b"x");
+}
