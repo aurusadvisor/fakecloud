@@ -578,6 +578,8 @@ async fn main() {
     let cognito_tokens_state = cognito_state.clone();
     let cognito_expire_state = cognito_state.clone();
     let cognito_events_state = cognito_state.clone();
+    let cognito_jwks_state = cognito_state.clone();
+    let cognito_oidc_state = cognito_state.clone();
 
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
@@ -3454,6 +3456,72 @@ async fn main() {
                         axum::Json(types::ExpireTokensResponse {
                             expired_tokens: expired as u64,
                         })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/{pool_id}/.well-known/jwks.json",
+            axum::routing::get({
+                let cs = cognito_jwks_state;
+                move |axum::extract::Path(pool_id): axum::extract::Path<String>| {
+                    let cs = cs.clone();
+                    async move {
+                        match fakecloud_cognito::pool_jwks_document(&cs, &pool_id).await {
+                            Some(doc) => (axum::http::StatusCode::OK, axum::Json(doc)),
+                            None => (
+                                axum::http::StatusCode::NOT_FOUND,
+                                axum::Json(serde_json::json!({
+                                    "error": "User pool not found",
+                                    "pool_id": pool_id,
+                                })),
+                            ),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/{pool_id}/.well-known/openid-configuration",
+            axum::routing::get({
+                let cs = cognito_oidc_state;
+                move |headers: axum::http::HeaderMap,
+                      axum::extract::Path(pool_id): axum::extract::Path<String>| {
+                    let cs = cs.clone();
+                    async move {
+                        let exists = {
+                            let mas = cs.read();
+                            let found = mas
+                                .iter()
+                                .any(|(_, account)| account.user_pools.contains_key(&pool_id));
+                            drop(mas);
+                            found
+                        };
+                        if !exists {
+                            return (
+                                axum::http::StatusCode::NOT_FOUND,
+                                axum::Json(serde_json::json!({
+                                    "error": "User pool not found",
+                                    "pool_id": pool_id,
+                                })),
+                            );
+                        }
+                        let region = pool_id
+                            .split_once('_')
+                            .map(|(r, _)| r.to_string())
+                            .unwrap_or_else(|| "us-east-1".to_string());
+                        let host = headers
+                            .get(axum::http::header::HOST)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("localhost")
+                            .to_string();
+                        let base_url = format!("http://{host}");
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(fakecloud_cognito::oidc_discovery_document(
+                                &pool_id, &region, &base_url,
+                            )),
+                        )
                     }
                 }
             }),

@@ -17,7 +17,6 @@ use serde_json::Value;
 
 /// Generate a fresh RSA-2048 keypair, returning the PKCS#8 PEM-encoded
 /// private key (which embeds the public half).
-#[allow(dead_code)]
 pub(crate) fn generate_pool_signing_key() -> String {
     let mut rng = rand::thread_rng();
     // 2048 bits matches what Cognito issues today; the PKCS#8 encoding
@@ -58,8 +57,7 @@ pub(crate) fn sign_rs256(header: &Value, payload: &Value, private_key_pem: &str)
 /// (`{"keys": [<jwk>]}`) with the `kid` baked in. Matches the shape the
 /// AWS-published `/.well-known/jwks.json` endpoints serve. Used by the
 /// JWKS HTTP endpoint (Y2) which is wired in fakecloud-server.
-#[allow(dead_code)]
-pub(crate) fn jwks_document(private_key_pem: &str, kid: &str) -> Value {
+pub fn jwks_document(private_key_pem: &str, kid: &str) -> Value {
     use rsa::pkcs8::DecodePrivateKey;
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let Ok(private_key) = RsaPrivateKey::from_pkcs8_pem(private_key_pem) else {

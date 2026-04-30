@@ -4701,3 +4701,73 @@ async fn cognito_simulation_auth_events() {
     assert_eq!(failure["username"], "evuser");
     assert_eq!(failure["success"], false);
 }
+
+#[tokio::test]
+async fn cognito_well_known_jwks_returns_public_key() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("jwks-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/{}/.well-known/jwks.json", server.endpoint(), pool_id);
+    let body: serde_json::Value = http.get(&url).send().await.unwrap().json().await.unwrap();
+    let keys = body["keys"].as_array().expect("keys array");
+    assert_eq!(keys.len(), 1);
+    let key = &keys[0];
+    assert_eq!(key["alg"], "RS256");
+    assert_eq!(key["kty"], "RSA");
+    assert_eq!(key["use"], "sig");
+    assert!(key["kid"].as_str().unwrap().contains(&pool_id));
+    assert!(key["n"].as_str().unwrap().len() > 100);
+    assert!(!key["e"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cognito_well_known_openid_configuration_uses_pool_region() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("oidc-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!(
+        "{}/{}/.well-known/openid-configuration",
+        server.endpoint(),
+        pool_id
+    );
+    let body: serde_json::Value = http.get(&url).send().await.unwrap().json().await.unwrap();
+    let issuer = body["issuer"].as_str().unwrap();
+    assert!(issuer.contains(&pool_id));
+    assert!(issuer.contains("us-east-1"));
+    assert!(body["jwks_uri"]
+        .as_str()
+        .unwrap()
+        .ends_with(&format!("/{pool_id}/.well-known/jwks.json")));
+    let algs = body["id_token_signing_alg_values_supported"]
+        .as_array()
+        .unwrap();
+    assert_eq!(algs[0], "RS256");
+}
+
+#[tokio::test]
+async fn cognito_well_known_jwks_404_for_unknown_pool() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let url = format!("{}/us-east-1_NOPE99999/.well-known/jwks.json", server.endpoint());
+    let resp = http.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+}
+

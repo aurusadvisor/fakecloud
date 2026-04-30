@@ -1591,5 +1591,96 @@ fn sign_jwt(
     format!("{header_b64}.{payload_b64}.{sig_b64}")
 }
 
+/// Look up a pool's signing key, generating one off the runtime thread if
+/// missing. Returns `(pkcs8_pem, kid)` for callers that need to sign a
+/// JWT or render a JWKS document. The expensive RSA-2048 keygen only
+/// runs once per pool — subsequent calls hit the cache.
+pub async fn ensure_pool_signing_key(
+    state: &SharedCognitoState,
+    pool_id: &str,
+) -> Option<(String, String)> {
+    {
+        let mas = state.read();
+        for (_, account) in mas.iter() {
+            if let Some(pool) = account.user_pools.get(pool_id) {
+                if let (Some(p), Some(k)) = (&pool.signing_key_pem, &pool.signing_kid) {
+                    return Some((p.clone(), k.clone()));
+                }
+                break;
+            }
+        }
+    }
+    let generated = tokio::task::spawn_blocking(crate::jwt::generate_pool_signing_key)
+        .await
+        .ok()?;
+    let mut mas = state.write();
+    let mut result = None;
+    for (_, account) in mas.iter_mut() {
+        if let Some(pool) = account.user_pools.get_mut(pool_id) {
+            if pool.signing_key_pem.is_none() {
+                pool.signing_key_pem = Some(generated.clone());
+            }
+            if let (Some(p), Some(k)) = (&pool.signing_key_pem, &pool.signing_kid) {
+                result = Some((p.clone(), k.clone()));
+            }
+            break;
+        }
+    }
+    result
+}
+
+/// JWKS document for a pool (`{"keys": [<jwk>]}`). Triggers lazy keypair
+/// generation when the pool was created before any sign call ran.
+pub async fn pool_jwks_document(state: &SharedCognitoState, pool_id: &str) -> Option<Value> {
+    let (pem, kid) = ensure_pool_signing_key(state, pool_id).await?;
+    Some(crate::jwt::jwks_document(&pem, &kid))
+}
+
+/// Cognito-shaped OpenID-Connect discovery document for a pool. Mirrors
+/// the document AWS publishes at
+/// `https://cognito-idp.<region>.amazonaws.com/<pool>/.well-known/openid-configuration`.
+/// `base_url` is the externally-reachable origin (scheme+host+port) that
+/// clients use to reach fakecloud, so the URLs we hand back resolve.
+pub fn oidc_discovery_document(pool_id: &str, region: &str, base_url: &str) -> Value {
+    let issuer = format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}");
+    let trimmed = base_url.trim_end_matches('/');
+    serde_json::json!({
+        "issuer": issuer,
+        "authorization_endpoint": format!("{trimmed}/oauth2/authorize"),
+        "token_endpoint": format!("{trimmed}/oauth2/token"),
+        "userinfo_endpoint": format!("{trimmed}/oauth2/userInfo"),
+        "revocation_endpoint": format!("{trimmed}/oauth2/revoke"),
+        "jwks_uri": format!("{trimmed}/{pool_id}/.well-known/jwks.json"),
+        "response_types_supported": ["code", "token"],
+        "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": ["RS256"],
+        "token_endpoint_auth_methods_supported": [
+            "client_secret_basic",
+            "client_secret_post",
+            "none",
+        ],
+        "scopes_supported": ["openid", "email", "phone", "profile", "aws.cognito.signin.user.admin"],
+        "claims_supported": [
+            "sub",
+            "iss",
+            "aud",
+            "name",
+            "email",
+            "email_verified",
+            "phone_number",
+            "phone_number_verified",
+            "cognito:username",
+            "cognito:groups",
+            "auth_time",
+            "exp",
+            "iat",
+            "token_use",
+            "jti",
+        ],
+        "code_challenge_methods_supported": ["S256", "plain"],
+        "grant_types_supported": ["authorization_code", "implicit", "refresh_token", "client_credentials"],
+    })
+}
+
 #[cfg(test)]
 mod tests;
