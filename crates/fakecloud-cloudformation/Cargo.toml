@@ -19,6 +19,7 @@ fakecloud-s3 = { workspace = true }
 fakecloud-eventbridge = { workspace = true }
 fakecloud-dynamodb = { workspace = true }
 fakecloud-logs = { workspace = true }
+fakecloud-lambda = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }

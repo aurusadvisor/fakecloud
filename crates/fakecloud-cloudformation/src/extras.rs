@@ -647,6 +647,7 @@ mod tests {
         use fakecloud_dynamodb::DynamoDbState;
         use fakecloud_eventbridge::EventBridgeState;
         use fakecloud_iam::IamState;
+        use fakecloud_lambda::LambdaState;
         use fakecloud_logs::LogsState;
         use fakecloud_s3::S3State;
         use fakecloud_sns::SnsState;
@@ -670,6 +671,7 @@ mod tests {
             eventbridge: shared::<EventBridgeState>(),
             dynamodb: shared::<DynamoDbState>(),
             logs: shared::<LogsState>(),
+            lambda: shared::<LambdaState>(),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }

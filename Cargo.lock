@@ -2538,6 +2538,7 @@ dependencies = [
  "fakecloud-dynamodb",
  "fakecloud-eventbridge",
  "fakecloud-iam",
+ "fakecloud-lambda",
  "fakecloud-logs",
  "fakecloud-persistence",
  "fakecloud-s3",
