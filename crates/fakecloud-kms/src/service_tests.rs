@@ -2062,6 +2062,29 @@ fn disable_key_unknown_errors() {
 }
 
 #[test]
+fn enable_key_rotation_accepts_alias() {
+    let svc = make_service();
+    let key_id = create_key(&svc);
+
+    let req = make_request(
+        "CreateAlias",
+        json!({
+            "AliasName": "alias/my-key",
+            "TargetKeyId": key_id,
+        }),
+    );
+    svc.create_alias(&req).unwrap();
+
+    let req = make_request("EnableKeyRotation", json!({ "KeyId": "alias/my-key" }));
+    svc.enable_key_rotation(&req).unwrap();
+
+    let req = make_request("GetKeyRotationStatus", json!({ "KeyId": "alias/my-key" }));
+    let resp = svc.get_key_rotation_status(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert!(body["KeyRotationEnabled"].as_bool().unwrap());
+}
+
+#[test]
 fn enable_disable_key_rotation_unknown_errors() {
     let svc = make_service();
     let req = make_request(

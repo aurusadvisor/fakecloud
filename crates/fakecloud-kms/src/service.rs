@@ -950,15 +950,7 @@ impl KmsService {
         let body = req.json_body();
         let key_id = Self::require_key_id(&body)?;
 
-        // Aliases should fail for rotation operations
-        if key_id.starts_with("alias/") {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotFoundException",
-                format!("Invalid keyId {key_id}"),
-            ));
-        }
-
+        // Real KMS resolves alias/* and alias-ARNs identically to a key id.
         let resolved = self
             .resolve_key_id_for(&req.account_id, &req.region, &key_id)
             .ok_or_else(|| {
@@ -993,14 +985,9 @@ impl KmsService {
         let body = req.json_body();
         let key_id = Self::require_key_id(&body)?;
 
-        if key_id.starts_with("alias/") {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotFoundException",
-                format!("Invalid keyId {key_id}"),
-            ));
-        }
-
+        // Real KMS resolves alias/* and alias-ARNs identically to a key id
+        // here. Earlier code rejected `alias/*` outright, breaking IaC
+        // configs that reference keys by alias.
         let resolved = self
             .resolve_key_id_for(&req.account_id, &req.region, &key_id)
             .ok_or_else(|| {
@@ -1029,14 +1016,7 @@ impl KmsService {
         let body = req.json_body();
         let key_id = Self::require_key_id(&body)?;
 
-        if key_id.starts_with("alias/") {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotFoundException",
-                format!("Invalid keyId {key_id}"),
-            ));
-        }
-
+        // Real KMS resolves alias/* and alias-ARNs identically to a key id.
         let resolved = self
             .resolve_key_id_for(&req.account_id, &req.region, &key_id)
             .ok_or_else(|| {
