@@ -2078,7 +2078,6 @@ async fn iam_policy_simulation() {
 
 #[test_action("iam", "ChangePassword", checksum = "afd8c998")]
 #[test_action("iam", "SetSecurityTokenServicePreferences", checksum = "b48dcc82")]
-#[test_action("iam", "GetSecurityTokenServicePreferences", checksum = "b48dcc82")]
 #[tokio::test]
 async fn iam_misc_account_ops() {
     let server = TestServer::start().await;
@@ -2100,7 +2099,5 @@ async fn iam_misc_account_ops() {
         ],
     )
     .await;
-    assert!(r.status().is_success());
-    let r = iam_post_raw(&server, &[("Action", "GetSecurityTokenServicePreferences")]).await;
     assert!(r.status().is_success());
 }

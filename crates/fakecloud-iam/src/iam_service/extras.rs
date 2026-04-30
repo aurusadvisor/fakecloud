@@ -1010,27 +1010,6 @@ impl IamService {
         ))
     }
 
-    pub(super) fn get_security_token_service_preferences(
-        &self,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let accounts = self.state.read();
-        let version = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.global_endpoint_token_version.clone())
-            .unwrap_or_else(|| "v1Token".to_string());
-        let body = format!(
-            "<GetSecurityTokenServicePreferencesResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\">\
-             <GetSecurityTokenServicePreferencesResult>\
-             <GlobalEndpointTokenVersion>{version}</GlobalEndpointTokenVersion>\
-             </GetSecurityTokenServicePreferencesResult>\
-             <ResponseMetadata><RequestId>{}</RequestId></ResponseMetadata>\
-             </GetSecurityTokenServicePreferencesResponse>",
-            req.request_id
-        );
-        Ok(AwsResponse::xml(StatusCode::OK, body))
-    }
-
     pub(super) fn update_server_certificate(
         &self,
         req: &AwsRequest,
