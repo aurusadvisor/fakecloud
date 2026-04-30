@@ -11,6 +11,7 @@ use fakecloud_dynamodb::{
 };
 use fakecloud_eventbridge::{EventRule, SharedEventBridgeState};
 use fakecloud_iam::{IamPolicy, IamRole, PolicyVersion, SharedIamState};
+use fakecloud_lambda::SharedLambdaState;
 use fakecloud_logs::SharedLogsState;
 use fakecloud_s3::{S3Bucket, SharedS3State};
 use fakecloud_sns::{SharedSnsState, SnsSubscription, SnsTopic};
@@ -51,6 +52,7 @@ pub struct ResourceProvisioner {
     pub eventbridge_state: SharedEventBridgeState,
     pub dynamodb_state: SharedDynamoDbState,
     pub logs_state: SharedLogsState,
+    pub lambda_state: SharedLambdaState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -71,6 +73,7 @@ impl ResourceProvisioner {
             "AWS::Events::Rule" => self.create_eventbridge_rule(resource),
             "AWS::DynamoDB::Table" => self.create_dynamodb_table(resource),
             "AWS::Logs::LogGroup" => self.create_log_group(resource),
+            "AWS::Lambda::Function" => self.create_lambda_function(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -112,6 +115,7 @@ impl ResourceProvisioner {
             "AWS::Events::Rule" => self.delete_eventbridge_rule(&resource.physical_id),
             "AWS::DynamoDB::Table" => self.delete_dynamodb_table(&resource.physical_id),
             "AWS::Logs::LogGroup" => self.delete_log_group(&resource.physical_id),
+            "AWS::Lambda::Function" => self.delete_lambda_function(&resource.physical_id),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -855,6 +859,139 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
     }
 
+    fn create_lambda_function(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let function_name = props
+            .get("FunctionName")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                format!(
+                    "{}-{}-{}",
+                    self.stack_id
+                        .rsplit('/')
+                        .nth(1)
+                        .unwrap_or(&resource.logical_id),
+                    resource.logical_id,
+                    Uuid::new_v4()
+                        .to_string()
+                        .split('-')
+                        .next()
+                        .unwrap_or("rand")
+                )
+            });
+
+        let runtime = props
+            .get("Runtime")
+            .and_then(|v| v.as_str())
+            .unwrap_or("provided.al2023")
+            .to_string();
+        let role = props
+            .get("Role")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let handler = props
+            .get("Handler")
+            .and_then(|v| v.as_str())
+            .unwrap_or("index.handler")
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let timeout = props.get("Timeout").and_then(|v| v.as_i64()).unwrap_or(3);
+        let memory_size = props
+            .get("MemorySize")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(128);
+        let architectures = props
+            .get("Architectures")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec!["x86_64".to_string()]);
+        let package_type = props
+            .get("PackageType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Zip")
+            .to_string();
+        let environment = props
+            .get("Environment")
+            .and_then(|v| v.get("Variables"))
+            .and_then(|v| v.as_object())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect::<BTreeMap<String, String>>()
+            })
+            .unwrap_or_default();
+
+        let function_arn = format!(
+            "arn:aws:lambda:{}:{}:function:{}",
+            self.region, self.account_id, function_name
+        );
+
+        let func = fakecloud_lambda::LambdaFunction {
+            function_name: function_name.clone(),
+            function_arn: function_arn.clone(),
+            runtime,
+            role,
+            handler,
+            description,
+            timeout,
+            memory_size,
+            code_sha256: String::new(),
+            code_size: 0,
+            version: "$LATEST".to_string(),
+            last_modified: Utc::now(),
+            tags: BTreeMap::new(),
+            environment,
+            architectures,
+            package_type,
+            code_zip: None,
+            image_uri: None,
+            policy: None,
+            layers: Vec::new(),
+            revision_id: Uuid::new_v4().to_string(),
+            tracing_mode: None,
+            kms_key_arn: None,
+            ephemeral_storage_size: None,
+            vpc_config: None,
+            snap_start: None,
+            dead_letter_config_arn: None,
+            file_system_configs: Vec::new(),
+            logging_config: None,
+            image_config: None,
+            signing_profile_version_arn: None,
+            signing_job_arn: None,
+            runtime_version_config: None,
+            master_arn: None,
+        };
+
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.functions.insert(function_name.clone(), func);
+
+        Ok(ProvisionResult::new(function_name.clone())
+            .with("Arn", function_arn)
+            .with("FunctionName", function_name))
+    }
+
+    fn delete_lambda_function(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.default_mut();
+        state.functions.remove(physical_id);
+        Ok(())
+    }
+
     fn delete_log_group(&self, physical_id: &str) -> Result<(), String> {
         let mut logs_accounts = self.logs_state.write();
         let state = logs_accounts.default_mut();
@@ -1020,6 +1157,9 @@ mod tests {
                 "us-east-1", "",
             ))),
             logs_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            lambda_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),
@@ -1348,6 +1488,43 @@ mod tests {
         let sr = prov.create_resource(&res).unwrap();
         assert!(sr.physical_id.contains("/app/logs"));
         prov.delete_resource(&sr).unwrap();
+    }
+
+    #[test]
+    fn lambda_function_create_and_delete() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::Lambda::Function",
+            "MyFn",
+            serde_json::json!({
+                "FunctionName": "my-fn",
+                "Runtime": "nodejs20.x",
+                "Role": "arn:aws:iam::123456789012:role/lambda-role",
+                "Handler": "index.handler",
+                "MemorySize": 256,
+                "Timeout": 10,
+                "Environment": {"Variables": {"FOO": "bar"}}
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "my-fn");
+        assert_eq!(
+            sr.attributes.get("Arn").map(String::as_str),
+            Some("arn:aws:lambda:us-east-1:123456789012:function:my-fn")
+        );
+        // Verify it landed in lambda state
+        {
+            let lam = prov.lambda_state.read();
+            let st = lam.get("123456789012").unwrap();
+            let f = st.functions.get("my-fn").unwrap();
+            assert_eq!(f.runtime, "nodejs20.x");
+            assert_eq!(f.memory_size, 256);
+            assert_eq!(f.environment.get("FOO").unwrap(), "bar");
+        }
+        prov.delete_resource(&sr).unwrap();
+        let lam = prov.lambda_state.read();
+        let st = lam.get("123456789012").unwrap();
+        assert!(!st.functions.contains_key("my-fn"));
     }
 
     #[test]

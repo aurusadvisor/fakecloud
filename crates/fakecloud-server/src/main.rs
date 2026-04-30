@@ -698,6 +698,7 @@ async fn main() {
             eventbridge: eb_state.clone(),
             dynamodb: dynamodb_state.clone(),
             logs: logs_state.clone(),
+            lambda: lambda_state.clone(),
             delivery: delivery_for_cf,
         },
     );

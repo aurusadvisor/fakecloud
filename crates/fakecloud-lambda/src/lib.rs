@@ -7,5 +7,6 @@ pub(crate) mod state;
 
 pub use service::LambdaService;
 pub use state::{
-    LambdaInvocation, LambdaSnapshot, SharedLambdaState, LAMBDA_SNAPSHOT_SCHEMA_VERSION,
+    LambdaFunction, LambdaInvocation, LambdaSnapshot, LambdaState, SharedLambdaState,
+    LAMBDA_SNAPSHOT_SCHEMA_VERSION,
 };

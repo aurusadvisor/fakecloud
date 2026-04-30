@@ -122,6 +122,7 @@ pub struct CloudFormationDeps {
     pub eventbridge: SharedEventBridgeState,
     pub dynamodb: SharedDynamoDbState,
     pub logs: SharedLogsState,
+    pub lambda: fakecloud_lambda::SharedLambdaState,
     pub delivery: Arc<DeliveryBus>,
 }
 
@@ -180,6 +181,7 @@ impl CloudFormationService {
             eventbridge_state: self.deps.eventbridge.clone(),
             dynamodb_state: self.deps.dynamodb.clone(),
             logs_state: self.deps.logs.clone(),
+            lambda_state: self.deps.lambda.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1065,6 +1067,13 @@ mod tests {
                 ),
             )),
             logs: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            lambda: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",
                     "us-east-1",
