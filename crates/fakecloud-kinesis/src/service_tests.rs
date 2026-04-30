@@ -217,6 +217,16 @@ fn describe_stream_returns_shard_descriptions() {
     assert_eq!(desc["StreamName"], json!("orders"));
     assert_eq!(desc["StreamStatus"], json!("ACTIVE"));
     assert_eq!(desc["Shards"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        desc["StreamModeDetails"]["StreamMode"],
+        json!("PROVISIONED")
+    );
+    assert!(desc["EnhancedMonitoring"].is_array());
+    assert_eq!(
+        desc["EnhancedMonitoring"][0]["ShardLevelMetrics"],
+        json!(Vec::<String>::new())
+    );
+    assert!(desc.get("KeyId").is_some());
 }
 
 #[test]
@@ -270,6 +280,15 @@ fn list_streams_sorts_and_paginates() {
     let names: Vec<String> = serde_json::from_value(body["StreamNames"].clone()).unwrap();
     assert_eq!(names, vec!["charlie"]);
     assert_eq!(body["HasMoreStreams"], json!(false));
+    let summaries = body["StreamSummaries"].as_array().expect("array");
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0]["StreamName"], json!("charlie"));
+    assert_eq!(summaries[0]["StreamStatus"], json!("ACTIVE"));
+    assert_eq!(
+        summaries[0]["StreamModeDetails"]["StreamMode"],
+        json!("PROVISIONED")
+    );
+    assert!(summaries[0]["StreamARN"].is_string());
 }
 
 #[test]

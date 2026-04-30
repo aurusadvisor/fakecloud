@@ -228,14 +228,25 @@ impl KinesisService {
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
         let stream = state.lookup_stream(&body)?;
 
+        let enhanced_monitoring = if stream.enhanced_metrics.is_empty() {
+            json!([{ "ShardLevelMetrics": Vec::<String>::new() }])
+        } else {
+            json!([{ "ShardLevelMetrics": stream.enhanced_metrics }])
+        };
+
         Ok(AwsResponse::ok_json(json!({
             "StreamDescription": {
                 "EncryptionType": stream.encryption_type,
+                "EnhancedMonitoring": enhanced_monitoring,
                 "HasMoreShards": false,
+                "KeyId": stream.key_id,
                 "RetentionPeriodHours": stream.retention_period_hours,
                 "Shards": stream.shards.iter().map(shard_to_json).collect::<Vec<_>>(),
                 "StreamARN": stream.stream_arn,
                 "StreamCreationTimestamp": stream.stream_creation_timestamp.timestamp_millis() as f64 / 1000.0,
+                "StreamModeDetails": {
+                    "StreamMode": stream.stream_mode,
+                },
                 "StreamName": stream.stream_name,
                 "StreamStatus": stream.stream_status
             }
@@ -301,11 +312,26 @@ impl KinesisService {
         let page_len = remaining.min(limit as usize);
         let has_more_streams = remaining > page_len;
         let selected: Vec<String> = names.into_iter().skip(start).take(page_len).collect();
+        let summaries: Vec<Value> = selected
+            .iter()
+            .filter_map(|name| state.streams.get(name))
+            .map(|s| {
+                json!({
+                    "StreamName": s.stream_name,
+                    "StreamARN": s.stream_arn,
+                    "StreamStatus": s.stream_status,
+                    "StreamModeDetails": {
+                        "StreamMode": s.stream_mode,
+                    },
+                    "StreamCreationTimestamp": s.stream_creation_timestamp.timestamp_millis() as f64 / 1000.0,
+                })
+            })
+            .collect();
 
         Ok(AwsResponse::ok_json(json!({
             "HasMoreStreams": has_more_streams,
             "StreamNames": selected,
-            "StreamSummaries": []
+            "StreamSummaries": summaries
         })))
     }
 
