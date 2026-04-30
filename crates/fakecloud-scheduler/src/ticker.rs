@@ -73,10 +73,12 @@ impl Ticker {
                     let Some(expr) = expr::parse(&sched.schedule_expression) else {
                         continue;
                     };
+                    let tz = sched.schedule_expression_timezone.clone();
                     if !is_due_with_dedup(
                         &expr,
                         sched.last_fired,
                         now,
+                        tz.as_deref(),
                         &(account_id.clone(), key.clone()),
                         cron_last_minute,
                     ) {
@@ -158,7 +160,10 @@ fn post_fire_action(expr: &Expr, schedule: &crate::state::Schedule) -> PostFire 
 
 /// Identity of the last minute-slot a cron schedule fired in. Keyed
 /// by full (year, ordinal, hour, minute) so subsequent days of the
-/// same (hour, minute) are treated as fresh fires.
+/// same (hour, minute) are treated as fresh fires. The fields come
+/// from the schedule's local timezone (or UTC when no tz is set) so
+/// a cron firing at local midnight dedupes across the whole 24-hour
+/// window even when UTC has already rolled over.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct CronFireStamp {
     year: i32,
@@ -168,12 +173,27 @@ struct CronFireStamp {
 }
 
 impl CronFireStamp {
-    fn from(now: DateTime<Utc>) -> Self {
+    fn from_utc(now: DateTime<Utc>) -> Self {
         Self {
             year: now.year(),
             ordinal: now.ordinal(),
             hour: now.hour(),
             minute: now.minute(),
+        }
+    }
+
+    fn from_local(now: DateTime<Utc>, tz: &str) -> Self {
+        match tz.parse::<chrono_tz::Tz>() {
+            Ok(tz) => {
+                let local = now.with_timezone(&tz);
+                Self {
+                    year: local.year(),
+                    ordinal: local.ordinal(),
+                    hour: local.hour(),
+                    minute: local.minute(),
+                }
+            }
+            Err(_) => Self::from_utc(now),
         }
     }
 }
@@ -182,15 +202,23 @@ fn is_due_with_dedup(
     expr: &Expr,
     last_fired: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
+    tz: Option<&str>,
     key: &(String, ScheduleKey),
     cron_last_minute: &mut HashMap<(String, ScheduleKey), CronFireStamp>,
 ) -> bool {
     match expr {
         Expr::Cron(c) => {
-            if !expr::matches_cron(c, now) {
+            let matched = match tz {
+                Some(tz) => expr::matches_cron_in_tz(c, now, tz),
+                None => expr::matches_cron(c, now),
+            };
+            if !matched {
                 return false;
             }
-            let current = CronFireStamp::from(now);
+            let current = match tz {
+                Some(tz) => CronFireStamp::from_local(now, tz),
+                None => CronFireStamp::from_utc(now),
+            };
             if cron_last_minute.get(key) == Some(&current) {
                 return false;
             }
