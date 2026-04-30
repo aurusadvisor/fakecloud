@@ -1222,6 +1222,83 @@ fn public_access_block_put_get_delete_round_trip() {
 }
 
 #[test]
+fn block_public_policy_rejects_wildcard_principal_policy() {
+    // PAB.BlockPublicPolicy=true must reject PutBucketPolicy that
+    // grants Allow to Principal "*" — the canonical "public read"
+    // shape — with AccessDenied.
+    let svc = make_service();
+    seed_bucket(&svc, "locked");
+
+    let pab_body = br#"<PublicAccessBlockConfiguration><BlockPublicPolicy>true</BlockPublicPolicy></PublicAccessBlockConfiguration>"#;
+    let req = make_request(
+        Method::PUT,
+        "/locked",
+        &[("publicAccessBlock", "")],
+        pab_body,
+    );
+    svc.put_public_access_block("123456789012", &req, "locked")
+        .unwrap();
+
+    let policy = br#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::locked/*"}]}"#;
+    let req = make_request(Method::PUT, "/locked", &[("policy", "")], policy);
+    let err = match svc.put_bucket_policy("123456789012", &req, "locked") {
+        Err(e) => e,
+        Ok(_) => panic!("expected BlockPublicPolicy to reject public policy"),
+    };
+    assert_eq!(err.status(), StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn block_public_policy_allows_non_public_policy() {
+    // A policy that names a specific AWS principal must not be
+    // blocked even when BlockPublicPolicy is set.
+    let svc = make_service();
+    seed_bucket(&svc, "locked");
+
+    let pab_body = br#"<PublicAccessBlockConfiguration><BlockPublicPolicy>true</BlockPublicPolicy></PublicAccessBlockConfiguration>"#;
+    let req = make_request(
+        Method::PUT,
+        "/locked",
+        &[("publicAccessBlock", "")],
+        pab_body,
+    );
+    svc.put_public_access_block("123456789012", &req, "locked")
+        .unwrap();
+
+    let policy = br#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::123456789012:role/r"},"Action":"s3:GetObject","Resource":"arn:aws:s3:::locked/*"}]}"#;
+    let req = make_request(Method::PUT, "/locked", &[("policy", "")], policy);
+    svc.put_bucket_policy("123456789012", &req, "locked")
+        .expect("named-principal policy should be allowed");
+}
+
+#[test]
+fn block_public_acls_rejects_canned_public_read() {
+    // PAB.BlockPublicAcls=true must reject `x-amz-acl: public-read`
+    // on PutBucketAcl, which adds an AllUsers READ grant.
+    let svc = make_service();
+    seed_bucket(&svc, "locked");
+
+    let pab_body = br#"<PublicAccessBlockConfiguration><BlockPublicAcls>true</BlockPublicAcls></PublicAccessBlockConfiguration>"#;
+    let req = make_request(
+        Method::PUT,
+        "/locked",
+        &[("publicAccessBlock", "")],
+        pab_body,
+    );
+    svc.put_public_access_block("123456789012", &req, "locked")
+        .unwrap();
+
+    let mut req = make_request(Method::PUT, "/locked", &[("acl", "")], &[]);
+    req.headers
+        .insert("x-amz-acl", "public-read".parse().unwrap());
+    let err = match svc.put_bucket_acl("123456789012", &req, "locked") {
+        Err(e) => e,
+        Ok(_) => panic!("expected BlockPublicAcls to reject public-read canned ACL"),
+    };
+    assert_eq!(err.status(), StatusCode::FORBIDDEN);
+}
+
+#[test]
 fn bucket_website_put_get_delete_round_trip() {
     let svc = make_service();
     seed_bucket(&svc, "b");
