@@ -2057,6 +2057,20 @@ fn get_command_invocation_success() {
     let svc = make_service();
     let cmd_id = send_command(&svc, "AWS-RunShellScript");
 
+    // Real SSM cycles Pending -> InProgress -> Success across polls.
+    // fakecloud auto-advances on every Get; two reads pin the
+    // InProgress and Success states respectively.
+    let req = make_request(
+        "GetCommandInvocation",
+        json!({
+            "CommandId": cmd_id,
+            "InstanceId": "i-1234567890abcdef0",
+        }),
+    );
+    let resp = svc.get_command_invocation(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Status"].as_str().unwrap(), "InProgress");
+
     let req = make_request(
         "GetCommandInvocation",
         json!({
@@ -2069,6 +2083,21 @@ fn get_command_invocation_success() {
     assert_eq!(body["CommandId"].as_str().unwrap(), cmd_id);
     assert_eq!(body["InstanceId"].as_str().unwrap(), "i-1234567890abcdef0");
     assert_eq!(body["Status"].as_str().unwrap(), "Success");
+    assert_eq!(body["ResponseCode"].as_i64().unwrap(), 0);
+}
+
+#[test]
+fn send_command_starts_pending() {
+    let svc = make_service();
+    let cmd_id = send_command(&svc, "AWS-RunShellScript");
+    let req = make_request("ListCommands", json!({"CommandId": cmd_id}));
+    let resp = svc.list_commands(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["Commands"][0]["Status"].as_str().unwrap(),
+        "Pending",
+        "SendCommand returns Pending until first poll advances it"
+    );
 }
 
 #[test]
