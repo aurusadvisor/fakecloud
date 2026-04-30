@@ -255,6 +255,41 @@ pub(crate) fn parse_cache_usage_limits(
 ///   `{param}.{member_name}.1=val1&{param}.{member_name}.2=val2`
 ///
 /// Returns the values sorted by index.
+/// Parse `LogDeliveryConfigurations.LogDeliveryConfigurationRequest.N.*`
+/// into structured records. ElastiCache emits two destination types:
+/// `cloudwatch-logs` and `kinesis-firehose`; details vary by type but
+/// we keep the raw payload string.
+pub(crate) fn parse_log_delivery_configs(req: &AwsRequest) -> Vec<LogDeliveryConfiguration> {
+    let mut out = Vec::new();
+    for i in 1.. {
+        let base = format!("LogDeliveryConfigurations.LogDeliveryConfigurationRequest.{i}");
+        let log_type = optional_query_param(req, &format!("{base}.LogType"));
+        let dest_type = optional_query_param(req, &format!("{base}.DestinationType"));
+        if log_type.is_none() && dest_type.is_none() {
+            break;
+        }
+        let log_format = optional_query_param(req, &format!("{base}.LogFormat"))
+            .unwrap_or_else(|| "json".into());
+        let cw_group = optional_query_param(
+            req,
+            &format!("{base}.DestinationDetails.CloudWatchLogsDetails.LogGroup"),
+        );
+        let kinesis = optional_query_param(
+            req,
+            &format!("{base}.DestinationDetails.KinesisFirehoseDetails.DeliveryStream"),
+        );
+        let destination_details = cw_group.or(kinesis);
+        out.push(LogDeliveryConfiguration {
+            log_type: log_type.unwrap_or_default(),
+            destination_type: dest_type.unwrap_or_default(),
+            destination_details,
+            log_format,
+            status: "active".to_string(),
+        });
+    }
+    out
+}
+
 pub(crate) fn parse_member_list(
     params: &std::collections::HashMap<String, String>,
     param: &str,
@@ -669,61 +704,188 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
         .unwrap_or_default();
 
     let primary_az = format!("{region}a");
+    let kms_xml = g
+        .kms_key_id
+        .as_ref()
+        .map(|k| format!("<KmsKeyId>{}</KmsKeyId>", xml_escape(k)))
+        .unwrap_or_default();
+    let user_groups_xml = if g.user_group_ids.is_empty() {
+        "<UserGroupIds/>".to_string()
+    } else {
+        format!(
+            "<UserGroupIds>{}</UserGroupIds>",
+            g.user_group_ids
+                .iter()
+                .map(|u| format!("<member>{}</member>", xml_escape(u)))
+                .collect::<String>()
+        )
+    };
+    let log_delivery_xml = if g.log_delivery_configurations.is_empty() {
+        "<LogDeliveryConfigurations/>".to_string()
+    } else {
+        let entries: String = g
+            .log_delivery_configurations
+            .iter()
+            .map(log_delivery_configuration_xml)
+            .collect();
+        format!("<LogDeliveryConfigurations>{entries}</LogDeliveryConfigurations>")
+    };
+    let data_tiering_xml = g
+        .data_tiering
+        .as_ref()
+        .map(|d| format!("<DataTiering>{}</DataTiering>", xml_escape(d)))
+        .unwrap_or_default();
+    let ip_discovery_xml = g
+        .ip_discovery
+        .as_ref()
+        .map(|v| format!("<IpDiscovery>{}</IpDiscovery>", xml_escape(v)))
+        .unwrap_or_default();
+    let network_type_xml = g
+        .network_type
+        .as_ref()
+        .map(|v| format!("<NetworkType>{}</NetworkType>", xml_escape(v)))
+        .unwrap_or_default();
+    let transit_encryption_mode_xml = g
+        .transit_encryption_mode
+        .as_ref()
+        .map(|v| {
+            format!(
+                "<TransitEncryptionMode>{}</TransitEncryptionMode>",
+                xml_escape(v)
+            )
+        })
+        .unwrap_or_default();
+    let configuration_endpoint_xml = match (
+        g.configuration_endpoint_address.as_ref(),
+        g.configuration_endpoint_port,
+    ) {
+        (Some(addr), Some(port)) => format!(
+            "<ConfigurationEndpoint><Address>{}</Address><Port>{}</Port></ConfigurationEndpoint>",
+            xml_escape(addr),
+            port
+        ),
+        _ => String::new(),
+    };
+    let replication_group_create_time_xml = format!(
+        "<ReplicationGroupCreateTime>{}</ReplicationGroupCreateTime>",
+        xml_escape(&g.created_at)
+    );
+
+    let id = xml_escape(&g.replication_group_id);
+    let description = xml_escape(&g.description);
+    let status = xml_escape(&g.status);
+    let endpoint_address = xml_escape(&g.endpoint_address);
+    let endpoint_port = g.endpoint_port;
+    let primary_cluster = xml_escape(g.member_clusters.first().map(|s| s.as_str()).unwrap_or(""));
+    let primary_az_xml = xml_escape(&primary_az);
+    let automatic_failover = if g.automatic_failover_enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let multi_az = if g.multi_az_enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let snapshot_retention = g.snapshot_retention_limit;
+    let snapshot_window = xml_escape(&g.snapshot_window);
+    let cache_node_type = xml_escape(&g.cache_node_type);
+    let cluster_enabled = if g.cluster_enabled { "true" } else { "false" };
+    let auth_token_enabled = if g.auth_token_enabled {
+        "true"
+    } else {
+        "false"
+    };
+    let transit_enc = if g.transit_encryption_enabled {
+        "true"
+    } else {
+        "false"
+    };
+    let at_rest_enc = if g.at_rest_encryption_enabled {
+        "true"
+    } else {
+        "false"
+    };
+    let arn = xml_escape(&g.arn);
 
     format!(
-        "<ReplicationGroupId>{}</ReplicationGroupId>\
-         <Description>{}</Description>\
+        "<ReplicationGroupId>{id}</ReplicationGroupId>\
+         <Description>{description}</Description>\
          {global_replication_group_info_xml}\
-         <Status>{}</Status>\
+         <Status>{status}</Status>\
+         {replication_group_create_time_xml}\
          <MemberClusters>{member_clusters_xml}</MemberClusters>\
          <NodeGroups>\
          <NodeGroup>\
          <NodeGroupId>0001</NodeGroupId>\
          <Status>available</Status>\
          <PrimaryEndpoint>\
-         <Address>{}</Address>\
-         <Port>{}</Port>\
+         <Address>{endpoint_address}</Address>\
+         <Port>{endpoint_port}</Port>\
          </PrimaryEndpoint>\
          <ReaderEndpoint>\
-         <Address>{}</Address>\
-         <Port>{}</Port>\
+         <Address>{endpoint_address}</Address>\
+         <Port>{endpoint_port}</Port>\
          </ReaderEndpoint>\
          <NodeGroupMembers>\
          <NodeGroupMember>\
-         <CacheClusterId>{}</CacheClusterId>\
+         <CacheClusterId>{primary_cluster}</CacheClusterId>\
          <CacheNodeId>0001</CacheNodeId>\
-         <PreferredAvailabilityZone>{}</PreferredAvailabilityZone>\
+         <PreferredAvailabilityZone>{primary_az_xml}</PreferredAvailabilityZone>\
          <CurrentRole>primary</CurrentRole>\
          </NodeGroupMember>\
          </NodeGroupMembers>\
          </NodeGroup>\
          </NodeGroups>\
-         <AutomaticFailover>{}</AutomaticFailover>\
-         <SnapshotRetentionLimit>{}</SnapshotRetentionLimit>\
-         <SnapshotWindow>{}</SnapshotWindow>\
-         <ClusterEnabled>false</ClusterEnabled>\
-         <CacheNodeType>{}</CacheNodeType>\
-         <TransitEncryptionEnabled>false</TransitEncryptionEnabled>\
-         <AtRestEncryptionEnabled>false</AtRestEncryptionEnabled>\
-         <ARN>{}</ARN>",
-        xml_escape(&g.replication_group_id),
-        xml_escape(&g.description),
-        xml_escape(&g.status),
-        xml_escape(&g.endpoint_address),
-        g.endpoint_port,
-        xml_escape(&g.endpoint_address),
-        g.endpoint_port,
-        xml_escape(g.member_clusters.first().map(|s| s.as_str()).unwrap_or("")),
-        xml_escape(&primary_az),
-        if g.automatic_failover_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        },
-        g.snapshot_retention_limit,
-        xml_escape(&g.snapshot_window),
-        xml_escape(&g.cache_node_type),
-        xml_escape(&g.arn),
+         <AutomaticFailover>{automatic_failover}</AutomaticFailover>\
+         <MultiAZ>{multi_az}</MultiAZ>\
+         <SnapshotRetentionLimit>{snapshot_retention}</SnapshotRetentionLimit>\
+         <SnapshotWindow>{snapshot_window}</SnapshotWindow>\
+         <ClusterEnabled>{cluster_enabled}</ClusterEnabled>\
+         <CacheNodeType>{cache_node_type}</CacheNodeType>\
+         <AuthTokenEnabled>{auth_token_enabled}</AuthTokenEnabled>\
+         <TransitEncryptionEnabled>{transit_enc}</TransitEncryptionEnabled>\
+         <AtRestEncryptionEnabled>{at_rest_enc}</AtRestEncryptionEnabled>\
+         {kms_xml}\
+         {user_groups_xml}\
+         {log_delivery_xml}\
+         {data_tiering_xml}\
+         {ip_discovery_xml}\
+         {network_type_xml}\
+         {transit_encryption_mode_xml}\
+         {configuration_endpoint_xml}\
+         <PendingModifiedValues/>\
+         <ARN>{arn}</ARN>",
+    )
+}
+
+pub(crate) fn log_delivery_configuration_xml(c: &LogDeliveryConfiguration) -> String {
+    let detail = c
+        .destination_details
+        .as_deref()
+        .map(|d| {
+            if c.destination_type == "cloudwatch-logs" {
+                format!(
+                    "<DestinationDetails><CloudWatchLogsDetails><LogGroup>{}</LogGroup></CloudWatchLogsDetails></DestinationDetails>",
+                    xml_escape(d)
+                )
+            } else if c.destination_type == "kinesis-firehose" {
+                format!(
+                    "<DestinationDetails><KinesisFirehoseDetails><DeliveryStream>{}</DeliveryStream></KinesisFirehoseDetails></DestinationDetails>",
+                    xml_escape(d)
+                )
+            } else {
+                String::new()
+            }
+        })
+        .unwrap_or_default();
+    format!(
+        "<LogDeliveryConfiguration><LogType>{}</LogType><DestinationType>{}</DestinationType>{detail}<LogFormat>{}</LogFormat><Status>{}</Status></LogDeliveryConfiguration>",
+        xml_escape(&c.log_type),
+        xml_escape(&c.destination_type),
+        xml_escape(&c.log_format),
+        xml_escape(&c.status),
     )
 }
 

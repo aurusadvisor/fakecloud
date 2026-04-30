@@ -15,8 +15,8 @@ use crate::state::{
     default_engine_versions, default_parameters_for_family, CacheCluster, CacheEngineVersion,
     CacheParameterGroup, CacheSnapshot, CacheSubnetGroup, ElastiCacheSnapshot, ElastiCacheState,
     ElastiCacheUser, ElastiCacheUserGroup, EngineDefaultParameter, GlobalReplicationGroup,
-    GlobalReplicationGroupMember, RecurringCharge, ReplicationGroup, ReservedCacheNode,
-    ReservedCacheNodesOffering, ServerlessCache, ServerlessCacheDataStorage,
+    GlobalReplicationGroupMember, LogDeliveryConfiguration, RecurringCharge, ReplicationGroup,
+    ReservedCacheNode, ReservedCacheNodesOffering, ServerlessCache, ServerlessCacheDataStorage,
     ServerlessCacheEcpuPerSecond, ServerlessCacheEndpoint, ServerlessCacheSnapshot,
     ServerlessCacheUsageLimits, SharedElastiCacheState, ELASTICACHE_SNAPSHOT_SCHEMA_VERSION,
 };
@@ -1103,6 +1103,33 @@ impl ElastiCacheService {
             optional_query_param(request, "AutomaticFailoverEnabled").as_deref(),
         )?
         .unwrap_or(false);
+        let transit_encryption_enabled = parse_optional_bool(
+            optional_query_param(request, "TransitEncryptionEnabled").as_deref(),
+        )?
+        .unwrap_or(false);
+        let at_rest_encryption_enabled = parse_optional_bool(
+            optional_query_param(request, "AtRestEncryptionEnabled").as_deref(),
+        )?
+        .unwrap_or(false);
+        let multi_az_enabled =
+            parse_optional_bool(optional_query_param(request, "MultiAZEnabled").as_deref())?
+                .unwrap_or(false);
+        let auth_token_enabled = optional_query_param(request, "AuthToken").is_some();
+        let kms_key_id = optional_query_param(request, "KmsKeyId");
+        let user_group_ids = parse_query_list_param(request, "UserGroupIds", "UserGroupId");
+        let num_node_groups = optional_query_param(request, "NumNodeGroups")
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(1);
+        let cluster_enabled = num_node_groups > 1;
+        let replicas_per_node_group = optional_query_param(request, "ReplicasPerNodeGroup")
+            .and_then(|v| v.parse::<i32>().ok());
+        let data_tiering =
+            parse_optional_bool(optional_query_param(request, "DataTieringEnabled").as_deref())?
+                .map(|b| if b { "enabled" } else { "disabled" }.to_string());
+        let ip_discovery = optional_query_param(request, "IpDiscovery");
+        let network_type = optional_query_param(request, "NetworkType");
+        let transit_encryption_mode = optional_query_param(request, "TransitEncryptionMode");
+        let log_delivery_configurations = parse_log_delivery_configs(request);
         // Reserve the ID under a write lock before starting the container.
         {
             let mut accounts = self.state.write();
@@ -1175,6 +1202,30 @@ impl ElastiCacheService {
             member_clusters,
             snapshot_retention_limit: 0,
             snapshot_window: "05:00-09:00".to_string(),
+            transit_encryption_enabled,
+            at_rest_encryption_enabled,
+            cluster_enabled,
+            kms_key_id,
+            auth_token_enabled,
+            user_group_ids,
+            multi_az_enabled,
+            log_delivery_configurations,
+            data_tiering,
+            ip_discovery,
+            network_type,
+            transit_encryption_mode,
+            num_node_groups,
+            configuration_endpoint_address: if cluster_enabled {
+                Some("127.0.0.1".to_string())
+            } else {
+                None
+            },
+            configuration_endpoint_port: if cluster_enabled {
+                Some(running.host_port)
+            } else {
+                None
+            },
+            replicas_per_node_group,
         };
 
         let xml = replication_group_xml(&group, &region);
