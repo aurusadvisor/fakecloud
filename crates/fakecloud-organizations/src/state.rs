@@ -48,6 +48,11 @@ pub struct OrganizationState {
     /// via `DescribeCreateAccountStatus` and `ListCreateAccountStatus`.
     #[serde(default)]
     pub create_account_requests: BTreeMap<String, CreateAccountStatus>,
+    /// `InviteAccountToOrganization` handshakes keyed by id (`h-...`).
+    /// Lifecycles transition `REQUESTED` -> `OPEN` (peer side) ->
+    /// `ACCEPTED` / `DECLINED` / `CANCELED` / `EXPIRED`.
+    #[serde(default)]
+    pub handshakes: BTreeMap<String, Handshake>,
 }
 
 impl OrganizationState {
@@ -126,6 +131,7 @@ impl OrganizationState {
             policies,
             attachments,
             create_account_requests: BTreeMap::new(),
+            handshakes: BTreeMap::new(),
         }
     }
 
@@ -189,6 +195,118 @@ impl OrganizationState {
         self.create_account_requests
             .insert(request_id, status.clone());
         status
+    }
+
+    /// Issue a new pending invitation handshake to `target_account_id`.
+    /// Idempotent: a duplicate live handshake to the same account
+    /// returns `DuplicateHandshakeForAccount`.
+    pub fn invite_account(
+        &mut self,
+        source_account_id: &str,
+        target_account_id: &str,
+        target_email: Option<String>,
+        notes: Option<String>,
+    ) -> Result<Handshake, OrgError> {
+        if self.accounts.contains_key(target_account_id) {
+            return Err(OrgError::AccountAlreadyMember(
+                target_account_id.to_string(),
+            ));
+        }
+        for h in self.handshakes.values() {
+            if h.target_account_id == target_account_id
+                && matches!(h.state.as_str(), "REQUESTED" | "OPEN")
+            {
+                return Err(OrgError::DuplicateHandshakeForAccount(
+                    target_account_id.to_string(),
+                ));
+            }
+        }
+        let now = Utc::now();
+        let id = format!("h-{}", random_id(32));
+        let arn = format!(
+            "arn:aws:organizations::{}:handshake/{}/invite/{}",
+            self.management_account_id, self.org_id, id
+        );
+        let kind = if target_account_id.chars().all(|c| c.is_ascii_digit()) {
+            "ACCOUNT".to_string()
+        } else {
+            "EMAIL".to_string()
+        };
+        let handshake = Handshake {
+            id: id.clone(),
+            arn,
+            action: "INVITE".to_string(),
+            state: "OPEN".to_string(),
+            requested_timestamp: now,
+            expiration_timestamp: now + chrono::Duration::days(15),
+            source_account_id: source_account_id.to_string(),
+            target_account_id: target_account_id.to_string(),
+            target_email,
+            target_kind: kind,
+            notes,
+            organization_id: self.org_id.clone(),
+        };
+        self.handshakes.insert(id, handshake.clone());
+        Ok(handshake)
+    }
+
+    /// Move a live handshake from `OPEN` into `new_state`. Caller decides
+    /// whether the transition is allowed for the current API caller —
+    /// this just enforces lifecycle (open -> terminal) and stamps
+    /// `expiration_timestamp` to now on accept/decline/cancel so the
+    /// resolved-at moment is recoverable.
+    pub fn resolve_handshake(&mut self, id: &str, new_state: &str) -> Result<Handshake, OrgError> {
+        let handshake = self
+            .handshakes
+            .get_mut(id)
+            .ok_or_else(|| OrgError::HandshakeNotFound(id.to_string()))?;
+        if !matches!(handshake.state.as_str(), "OPEN" | "REQUESTED") {
+            return Err(OrgError::HandshakeAlreadyResolved(handshake.state.clone()));
+        }
+        if !matches!(new_state, "ACCEPTED" | "DECLINED" | "CANCELED" | "EXPIRED") {
+            return Err(OrgError::InvalidHandshakeState(new_state.to_string()));
+        }
+        handshake.state = new_state.to_string();
+        handshake.expiration_timestamp = Utc::now();
+        let snapshot = handshake.clone();
+        if new_state == "ACCEPTED" && !self.accounts.contains_key(&snapshot.target_account_id) {
+            let now = Utc::now();
+            let arn = format!(
+                "arn:aws:organizations::{}:account/{}/{}",
+                self.management_account_id, self.org_id, snapshot.target_account_id
+            );
+            let email = snapshot
+                .target_email
+                .clone()
+                .unwrap_or_else(|| format!("{}@example.com", snapshot.target_account_id));
+            self.accounts.insert(
+                snapshot.target_account_id.clone(),
+                MemberAccount {
+                    id: snapshot.target_account_id.clone(),
+                    arn,
+                    email,
+                    name: format!("Account {}", snapshot.target_account_id),
+                    status: "ACTIVE".to_string(),
+                    joined_method: "INVITED".to_string(),
+                    joined_timestamp: now,
+                    parent_id: self.root_id.clone(),
+                },
+            );
+        }
+        Ok(snapshot)
+    }
+
+    /// Return a clone of every handshake currently tracked for the org,
+    /// optionally filtered by destination account id.
+    pub fn list_handshakes(&self, only_target_account: Option<&str>) -> Vec<Handshake> {
+        self.handshakes
+            .values()
+            .filter(|h| match only_target_account {
+                Some(acct) => h.target_account_id == acct,
+                None => true,
+            })
+            .cloned()
+            .collect()
     }
 
     /// Look up a `CreateAccountStatus` by its `car-...` id. If still
@@ -621,6 +739,12 @@ pub enum OrgError {
     TargetNotFound(String),
     AccountChangesNotAllowed(String),
     CreateAccountStatusNotFound(String),
+    HandshakeNotFound(String),
+    HandshakeAlreadyResolved(String),
+    InvalidHandshakeState(String),
+    InvalidHandshakeParty(String),
+    DuplicateHandshakeForAccount(String),
+    AccountAlreadyMember(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -656,6 +780,25 @@ pub struct MemberAccount {
     pub joined_method: String,
     pub joined_timestamp: DateTime<Utc>,
     pub parent_id: String,
+}
+
+/// `InviteAccountToOrganization` handshake. Captures both parties so
+/// `ListHandshakesForAccount` can filter by destination, and stores
+/// the resolved state plus when each transition happened.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Handshake {
+    pub id: String,
+    pub arn: String,
+    pub action: String,
+    pub state: String,
+    pub requested_timestamp: DateTime<Utc>,
+    pub expiration_timestamp: DateTime<Utc>,
+    pub source_account_id: String,
+    pub target_account_id: String,
+    pub target_email: Option<String>,
+    pub target_kind: String,
+    pub notes: Option<String>,
+    pub organization_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1046,5 +1189,71 @@ mod tests {
         org.attach_policy(&p.id, &root).unwrap();
         let targets = org.targets_for_policy(&p.id).unwrap();
         assert_eq!(targets.len(), 1);
+    }
+
+    #[test]
+    fn invite_account_creates_open_handshake() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        let h = org
+            .invite_account("111111111111", "222222222222", None, None)
+            .unwrap();
+        assert_eq!(h.state, "OPEN");
+        assert!(h.id.starts_with("h-"));
+        assert!(org.handshakes.contains_key(&h.id));
+    }
+
+    #[test]
+    fn invite_rejects_existing_member() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        let err = org
+            .invite_account("111111111111", "111111111111", None, None)
+            .unwrap_err();
+        assert!(matches!(err, OrgError::AccountAlreadyMember(_)));
+    }
+
+    #[test]
+    fn duplicate_open_invite_rejected() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.invite_account("111111111111", "333333333333", None, None)
+            .unwrap();
+        let err = org
+            .invite_account("111111111111", "333333333333", None, None)
+            .unwrap_err();
+        assert!(matches!(err, OrgError::DuplicateHandshakeForAccount(_)));
+    }
+
+    #[test]
+    fn accept_handshake_enrolls_account() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        let h = org
+            .invite_account("111111111111", "444444444444", None, None)
+            .unwrap();
+        assert!(!org.accounts.contains_key("444444444444"));
+        let resolved = org.resolve_handshake(&h.id, "ACCEPTED").unwrap();
+        assert_eq!(resolved.state, "ACCEPTED");
+        let acct = org.accounts.get("444444444444").unwrap();
+        assert_eq!(acct.joined_method, "INVITED");
+    }
+
+    #[test]
+    fn decline_handshake_does_not_enroll() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        let h = org
+            .invite_account("111111111111", "555555555555", None, None)
+            .unwrap();
+        let resolved = org.resolve_handshake(&h.id, "DECLINED").unwrap();
+        assert_eq!(resolved.state, "DECLINED");
+        assert!(!org.accounts.contains_key("555555555555"));
+    }
+
+    #[test]
+    fn resolve_handshake_terminal_locked() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        let h = org
+            .invite_account("111111111111", "666666666666", None, None)
+            .unwrap();
+        org.resolve_handshake(&h.id, "ACCEPTED").unwrap();
+        let err = org.resolve_handshake(&h.id, "DECLINED").unwrap_err();
+        assert!(matches!(err, OrgError::HandshakeAlreadyResolved(_)));
     }
 }
