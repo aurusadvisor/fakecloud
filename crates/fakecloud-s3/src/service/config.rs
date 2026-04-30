@@ -271,21 +271,17 @@ impl S3Service {
             self.store
                 .put_bucket_subresource(bucket, BucketSubresource::Lifecycle, &body_str)
                 .map_err(super::persistence_error)?;
-            let meta = bucket_meta_snapshot(b);
-            self.store
-                .put_bucket_meta(bucket, &meta)
-                .map_err(super::persistence_error)?;
         } else {
             b.lifecycle_config = None;
             b.lifecycle_transition_default_min_size = None;
             self.store
                 .delete_bucket_subresource(bucket, BucketSubresource::Lifecycle)
                 .map_err(super::persistence_error)?;
-            let meta = bucket_meta_snapshot(b);
-            self.store
-                .put_bucket_meta(bucket, &meta)
-                .map_err(super::persistence_error)?;
         }
+        let meta = bucket_meta_snapshot(b);
+        self.store
+            .put_bucket_meta(bucket, &meta)
+            .map_err(super::persistence_error)?;
         let mut resp = empty_response(StatusCode::OK);
         insert_tdmos_header(&mut resp.headers, tdmos.as_deref());
         Ok(resp)
