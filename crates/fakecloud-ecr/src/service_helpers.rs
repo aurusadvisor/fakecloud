@@ -665,3 +665,30 @@ pub(crate) fn template_to_json(tpl: &crate::state::RepositoryCreationTemplate) -
     }
     out
 }
+
+/// Match a registry-level scanning rule's WILDCARD `repository_filters`
+/// against a repository name. AWS supports `*` as multi-char wildcard
+/// in `WILDCARD` filters; an empty filter list matches everything.
+pub(crate) fn registry_filter_matches(filter: &crate::state::RepositoryFilter, repo: &str) -> bool {
+    if !filter.filter_type.eq_ignore_ascii_case("WILDCARD") {
+        return false;
+    }
+    wildcard_match(&filter.filter, repo)
+}
+
+/// Decide whether a registry scanning configuration would scan-on-push
+/// for a given repo name. Returns true when any rule has
+/// `scan_frequency=SCAN_ON_PUSH` and at least one of its filters
+/// matches (or the filter list is empty, which AWS treats as "all").
+pub(crate) fn registry_scan_on_push_matches(
+    cfg: &crate::state::RegistryScanningConfiguration,
+    repo: &str,
+) -> bool {
+    cfg.rules.iter().any(|r| {
+        r.scan_frequency.eq_ignore_ascii_case("SCAN_ON_PUSH")
+            && (r.repository_filters.is_empty()
+                || r.repository_filters
+                    .iter()
+                    .any(|f| registry_filter_matches(f, repo)))
+    })
+}

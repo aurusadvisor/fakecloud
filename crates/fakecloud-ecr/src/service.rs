@@ -688,6 +688,8 @@ impl EcrService {
         let state = accounts
             .get_mut(&account)
             .ok_or_else(|| repository_not_found(&name))?;
+        let registry_match =
+            registry_scan_on_push_matches(&state.registry_scanning_configuration, &name);
         let repo = state
             .repositories
             .get_mut(&name)
@@ -724,6 +726,10 @@ impl EcrService {
 
         let snapshot = repo.images.get(&digest).cloned().unwrap();
         let scan_on_push = repo.image_scanning_configuration.scan_on_push;
+        // Registry-level fallback: when the per-repo flag is off but a
+        // registry scanning rule with frequency=SCAN_ON_PUSH matches the
+        // repo's name via its WILDCARD filter, real ECR still scans.
+        let should_scan = scan_on_push || registry_match;
         let tag_ref = supplied_tag.as_deref();
         let response = AwsResponse::ok_json(json!({
             "image": {
@@ -737,7 +743,7 @@ impl EcrService {
         // Drop the lock before kicking the async scan; trigger_scan
         // re-acquires it to mark IN_PROGRESS and spawn the scanner.
         drop(accounts);
-        if scan_on_push {
+        if should_scan {
             self.trigger_scan(&account, &name, &digest);
         }
         Ok(response)
