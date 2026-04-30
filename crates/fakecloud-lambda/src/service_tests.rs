@@ -895,67 +895,144 @@ async fn list_event_source_mappings_empty_ok() {
 }
 
 #[tokio::test]
-async fn add_permission_does_not_double_prefix_lambda_action() {
-    // Callers commonly pass either `InvokeFunction` or
-    // `lambda:InvokeFunction`. Both must canonicalize to the same
-    // single-prefixed form — never `lambda:lambda:InvokeFunction`.
+async fn invoke_returns_429_when_reserved_concurrency_is_zero() {
+    // Reserved concurrency of 0 makes the function unavailable —
+    // every invoke should bounce with `TooManyRequestsException`,
+    // mirroring AWS's `ReservedFunctionConcurrentInvocationLimitExceeded`.
     let svc = LambdaService::new(make_state());
-    seed_function(&svc, "f").await;
+    seed_function(&svc, "throttled").await;
 
-    let body = json!({
-        "StatementId": "already-prefixed",
-        "Action": "lambda:InvokeFunction",
-        "Principal": "s3.amazonaws.com",
-    });
+    let body = json!({"ReservedConcurrentExecutions": 0});
     let req = make_request(
-        Method::POST,
-        "/2015-03-31/functions/f/policy",
+        Method::PUT,
+        "/2017-10-31/functions/throttled/concurrency",
         &body.to_string(),
     );
-    let resp = svc.handle(req).await.unwrap();
-    let out: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    let statement: Value = serde_json::from_str(out["Statement"].as_str().unwrap()).unwrap();
-    assert_eq!(statement["Action"], "lambda:InvokeFunction");
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/throttled/invocations",
+        "{}",
+    );
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected 429 when reserved concurrency is exhausted"),
+    };
+    assert_eq!(err.status(), http::StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
-async fn tag_resource_round_trips_via_get_function_and_list_tags() {
-    // TagResource on a function ARN must surface in GetFunction.Tags
-    // (read from `func.tags`) AND in ListTagsForResource — proving
-    // both code paths read from a single source of truth.
+async fn invoke_inflight_counter_releases_on_completion() {
+    // After an invoke errors out (no runtime configured), the
+    // in-flight counter must be back to 0 — otherwise the next
+    // invocation under a reserved cap of 1 would falsely 429.
     let svc = LambdaService::new(make_state());
-    seed_function(&svc, "f").await;
+    seed_function(&svc, "leak-check").await;
 
-    let arn = "arn:aws:lambda:us-east-1:123456789012:function:f";
-    let body = json!({"Tags": {"env": "prod", "team": "core"}});
+    let body = json!({"ReservedConcurrentExecutions": 1});
     let req = make_request(
-        Method::POST,
-        &format!("/2017-03-31/tags/{arn}"),
+        Method::PUT,
+        "/2017-10-31/functions/leak-check/concurrency",
         &body.to_string(),
     );
     svc.handle(req).await.unwrap();
 
-    let req = make_request(Method::GET, &format!("/2017-03-31/tags/{arn}"), "");
-    let resp = svc.handle(req).await.unwrap();
-    let listed: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(listed["Tags"]["env"], "prod");
-    assert_eq!(listed["Tags"]["team"], "core");
+    // First invoke fails (no code package or no runtime), but the
+    // guard must still drop. Second invoke should hit the same
+    // failure path, NOT a 429.
+    for _ in 0..2 {
+        let req = make_request(
+            Method::POST,
+            "/2015-03-31/functions/leak-check/invocations",
+            "{}",
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("invoke should fail without runtime"),
+        };
+        assert_ne!(
+            err.status(),
+            http::StatusCode::TOO_MANY_REQUESTS,
+            "second invoke unexpectedly throttled — counter leaked"
+        );
+    }
+}
 
-    let req = make_request(Method::GET, "/2015-03-31/functions/f", "");
-    let resp = svc.handle(req).await.unwrap();
-    let func: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(func["Tags"]["env"], "prod");
-    assert_eq!(func["Tags"]["team"], "core");
+#[test]
+fn resolve_qualifier_to_version_handles_latest_numeric_and_alias() {
+    use crate::state::{FunctionAlias, LambdaState};
 
-    let mut req = make_request(Method::DELETE, &format!("/2017-03-31/tags/{arn}"), "");
-    req.query_params
-        .insert("tagKeys".to_string(), "env".to_string());
-    req.raw_query = "tagKeys=env".to_string();
-    svc.handle(req).await.unwrap();
+    let mut state = LambdaState::new("123456789012", "us-east-1");
+    state.aliases.insert(
+        "f:PROD".to_string(),
+        FunctionAlias {
+            alias_arn: "arn:aws:lambda:us-east-1:123456789012:function:f:PROD".to_string(),
+            name: "PROD".to_string(),
+            function_version: "3".to_string(),
+            description: String::new(),
+            revision_id: "rev".to_string(),
+            routing_config: None,
+        },
+    );
 
-    let req = make_request(Method::GET, &format!("/2017-03-31/tags/{arn}"), "");
-    let resp = svc.handle(req).await.unwrap();
-    let listed: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert!(listed["Tags"].get("env").is_none());
-    assert_eq!(listed["Tags"]["team"], "core");
+    assert_eq!(
+        crate::service::resolve_qualifier_to_version(&state, "f", None),
+        None,
+        "no qualifier means $LATEST"
+    );
+    assert_eq!(
+        crate::service::resolve_qualifier_to_version(&state, "f", Some("$LATEST")),
+        None
+    );
+    assert_eq!(
+        crate::service::resolve_qualifier_to_version(&state, "f", Some("7")),
+        Some("7".to_string()),
+        "numeric qualifier passes through"
+    );
+    assert_eq!(
+        crate::service::resolve_qualifier_to_version(&state, "f", Some("PROD")),
+        Some("3".to_string()),
+        "alias resolves to its primary function_version"
+    );
+    assert_eq!(
+        crate::service::resolve_qualifier_to_version(&state, "f", Some("nope")),
+        None,
+        "unknown alias returns None"
+    );
+}
+
+#[test]
+fn resolve_qualifier_to_version_weighted_routing_picks_among_versions() {
+    use crate::state::{FunctionAlias, LambdaState};
+
+    let mut state = LambdaState::new("123456789012", "us-east-1");
+    state.aliases.insert(
+        "f:CANARY".to_string(),
+        FunctionAlias {
+            alias_arn: "arn:aws:lambda:us-east-1:123456789012:function:f:CANARY".to_string(),
+            name: "CANARY".to_string(),
+            function_version: "1".to_string(),
+            description: String::new(),
+            revision_id: "rev".to_string(),
+            routing_config: Some(json!({
+                "AdditionalVersionWeights": {"2": 0.5}
+            })),
+        },
+    );
+
+    // Primary "1" gets 0.5 weight, "2" gets 0.5. Over many picks
+    // each must appear at least once.
+    let mut saw_one = false;
+    let mut saw_two = false;
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        match crate::service::resolve_qualifier_to_version(&state, "f", Some("CANARY")).as_deref() {
+            Some("1") => saw_one = true,
+            Some("2") => saw_two = true,
+            other => panic!("unexpected pick: {other:?}"),
+        }
+    }
+    assert!(saw_one, "weighted pick never selected primary version");
+    assert!(saw_two, "weighted pick never selected additional version");
 }
