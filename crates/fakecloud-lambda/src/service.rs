@@ -157,6 +157,15 @@ struct CreateFunctionInput {
     code_fallback: Vec<u8>,
     image_uri: Option<String>,
     layer_arns: Vec<String>,
+    tracing_mode: Option<String>,
+    kms_key_arn: Option<String>,
+    ephemeral_storage_size: Option<i64>,
+    vpc_config: Option<serde_json::Value>,
+    snap_start: Option<serde_json::Value>,
+    dead_letter_config_arn: Option<String>,
+    file_system_configs: Vec<serde_json::Value>,
+    logging_config: Option<serde_json::Value>,
+    image_config: Option<serde_json::Value>,
 }
 
 impl CreateFunctionInput {
@@ -247,6 +256,29 @@ impl CreateFunctionInput {
             })
             .unwrap_or_default();
 
+        let tracing_mode = body["TracingConfig"]["Mode"].as_str().map(String::from);
+        let kms_key_arn = body["KMSKeyArn"].as_str().map(String::from);
+        let ephemeral_storage_size = body["EphemeralStorage"]["Size"].as_i64();
+        let vpc_config = body["VpcConfig"]
+            .is_object()
+            .then(|| body["VpcConfig"].clone());
+        let snap_start = body["SnapStart"]
+            .is_object()
+            .then(|| body["SnapStart"].clone());
+        let dead_letter_config_arn = body["DeadLetterConfig"]["TargetArn"]
+            .as_str()
+            .map(String::from);
+        let file_system_configs = body["FileSystemConfigs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let logging_config = body["LoggingConfig"]
+            .is_object()
+            .then(|| body["LoggingConfig"].clone());
+        let image_config = body["ImageConfig"]
+            .is_object()
+            .then(|| body["ImageConfig"].clone());
+
         Ok(Self {
             function_name,
             runtime: body["Runtime"].as_str().unwrap_or("python3.12").to_string(),
@@ -266,6 +298,15 @@ impl CreateFunctionInput {
             code_fallback,
             image_uri,
             layer_arns,
+            tracing_mode,
+            kms_key_arn,
+            ephemeral_storage_size,
+            vpc_config,
+            snap_start,
+            dead_letter_config_arn,
+            file_system_configs,
+            logging_config,
+            image_config,
         })
     }
 }
@@ -937,6 +978,20 @@ impl LambdaService {
             image_uri: input.image_uri,
             policy: None,
             layers: layer_attachments,
+            revision_id: uuid::Uuid::new_v4().to_string(),
+            tracing_mode: input.tracing_mode,
+            kms_key_arn: input.kms_key_arn,
+            ephemeral_storage_size: input.ephemeral_storage_size,
+            vpc_config: input.vpc_config,
+            snap_start: input.snap_start,
+            dead_letter_config_arn: input.dead_letter_config_arn,
+            file_system_configs: input.file_system_configs,
+            logging_config: input.logging_config,
+            image_config: input.image_config,
+            signing_profile_version_arn: None,
+            signing_job_arn: None,
+            runtime_version_config: None,
+            master_arn: None,
         };
 
         let response = self.function_config_json(&func);
@@ -1241,10 +1296,15 @@ impl LambdaService {
     }
 
     pub(crate) fn function_config_json(&self, func: &LambdaFunction) -> Value {
-        let mut env_vars = json!({});
-        if !func.environment.is_empty() {
-            env_vars = json!({ "Variables": func.environment });
-        }
+        // AWS always emits Environment with at least an empty Variables map.
+        let env_vars = if func.environment.is_empty() {
+            json!({ "Variables": {} })
+        } else {
+            json!({ "Variables": func.environment })
+        };
+
+        let tracing_mode = func.tracing_mode.as_deref().unwrap_or("PassThrough");
+        let ephemeral_size = func.ephemeral_storage_size.unwrap_or(512);
 
         let mut config = json!({
             "FunctionName": func.function_name,
@@ -1264,9 +1324,44 @@ impl LambdaService {
             "Environment": env_vars,
             "State": "Active",
             "LastUpdateStatus": "Successful",
-            "TracingConfig": { "Mode": "PassThrough" },
-            "RevisionId": uuid::Uuid::new_v4().to_string(),
+            "TracingConfig": { "Mode": tracing_mode },
+            "RevisionId": func.revision_id,
+            "EphemeralStorage": { "Size": ephemeral_size },
+            "SnapStart": func.snap_start.clone().unwrap_or_else(|| json!({
+                "ApplyOn": "None",
+                "OptimizationStatus": "Off",
+            })),
         });
+        if let Some(ref kms) = func.kms_key_arn {
+            config["KMSKeyArn"] = json!(kms);
+        }
+        if let Some(ref vpc) = func.vpc_config {
+            config["VpcConfig"] = vpc.clone();
+        }
+        if let Some(ref dlq) = func.dead_letter_config_arn {
+            config["DeadLetterConfig"] = json!({ "TargetArn": dlq });
+        }
+        if !func.file_system_configs.is_empty() {
+            config["FileSystemConfigs"] = json!(func.file_system_configs);
+        }
+        if let Some(ref lg) = func.logging_config {
+            config["LoggingConfig"] = lg.clone();
+        }
+        if let Some(ref ic) = func.image_config {
+            config["ImageConfigResponse"] = json!({ "ImageConfig": ic });
+        }
+        if let Some(ref s) = func.signing_profile_version_arn {
+            config["SigningProfileVersionArn"] = json!(s);
+        }
+        if let Some(ref s) = func.signing_job_arn {
+            config["SigningJobArn"] = json!(s);
+        }
+        if let Some(ref rv) = func.runtime_version_config {
+            config["RuntimeVersionConfig"] = rv.clone();
+        }
+        if let Some(ref m) = func.master_arn {
+            config["MasterArn"] = json!(m);
+        }
         if let Some(ref uri) = func.image_uri {
             config["Code"] = json!({
                 "ImageUri": uri,

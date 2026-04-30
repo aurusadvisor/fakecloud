@@ -46,6 +46,61 @@ pub struct LambdaFunction {
     /// cached size never goes stale.
     #[serde(default)]
     pub layers: Vec<AttachedLayer>,
+    /// `RevisionId` is a stable token AWS expects to round-trip through
+    /// optimistic-concurrency calls (`UpdateFunctionConfiguration`,
+    /// `UpdateFunctionCode`, `AddPermission`, …). It only changes when
+    /// the function config changes; we used to mint a fresh UUID per
+    /// `function_config_json` call which broke client-side ETag-style
+    /// guards.
+    #[serde(default = "default_revision_id")]
+    pub revision_id: String,
+    /// `TracingConfig.Mode` — `PassThrough` (default) or `Active`.
+    #[serde(default)]
+    pub tracing_mode: Option<String>,
+    /// `KMSKeyArn` for env-var encryption (defaults to AWS-managed
+    /// `aws/lambda` when unset, which we represent as `None`).
+    #[serde(default)]
+    pub kms_key_arn: Option<String>,
+    /// `EphemeralStorage.Size` in MiB. AWS default is 512.
+    #[serde(default)]
+    pub ephemeral_storage_size: Option<i64>,
+    /// `VpcConfig` (`SubnetIds`, `SecurityGroupIds`, `Ipv6AllowedForDualStack`).
+    /// fakecloud doesn't network-isolate; we just round-trip the shape.
+    #[serde(default)]
+    pub vpc_config: Option<serde_json::Value>,
+    /// `SnapStart` (`ApplyOn`, `OptimizationStatus`).
+    #[serde(default)]
+    pub snap_start: Option<serde_json::Value>,
+    /// `DeadLetterConfig.TargetArn` for async-invoke failures.
+    #[serde(default)]
+    pub dead_letter_config_arn: Option<String>,
+    /// `FileSystemConfigs` (EFS access points). Round-tripped only.
+    #[serde(default)]
+    pub file_system_configs: Vec<serde_json::Value>,
+    /// `LoggingConfig` (LogFormat, ApplicationLogLevel, SystemLogLevel,
+    /// LogGroup).
+    #[serde(default)]
+    pub logging_config: Option<serde_json::Value>,
+    /// `ImageConfigResponse.ImageConfig` for container-package functions.
+    #[serde(default)]
+    pub image_config: Option<serde_json::Value>,
+    /// `SigningProfileVersionArn` populated by code signing.
+    #[serde(default)]
+    pub signing_profile_version_arn: Option<String>,
+    /// `SigningJobArn` populated by code signing.
+    #[serde(default)]
+    pub signing_job_arn: Option<String>,
+    /// `RuntimeVersionConfig` (`RuntimeVersionArn`).
+    #[serde(default)]
+    pub runtime_version_config: Option<serde_json::Value>,
+    /// `MasterArn` — only set on numbered versions; points at the parent
+    /// `$LATEST` ARN.
+    #[serde(default)]
+    pub master_arn: Option<String>,
+}
+
+fn default_revision_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
