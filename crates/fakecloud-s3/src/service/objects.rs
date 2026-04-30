@@ -2605,6 +2605,24 @@ impl S3Service {
                     ));
                 }
             } else {
+                // Mirror single-DeleteObject's lock check: an
+                // unversioned-bucket batch delete must respect
+                // COMPLIANCE retention and legal-hold per key,
+                // otherwise compliance can be sidestepped via the
+                // batch endpoint.
+                let lock_denied = b
+                    .objects
+                    .get(key)
+                    .filter(|existing| !existing.is_delete_marker)
+                    .and_then(|existing| check_object_lock_for_overwrite(existing, req));
+                if let Some(code) = lock_denied {
+                    error_xml.push_str(&format!(
+                        "<Error><Key>{}</Key><Code>{}</Code><Message>Access Denied</Message></Error>",
+                        xml_escape(key),
+                        code,
+                    ));
+                    continue;
+                }
                 b.objects.remove(key);
                 self.store
                     .delete_object(bucket, key, None)

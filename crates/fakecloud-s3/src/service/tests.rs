@@ -3691,3 +3691,48 @@ fn bucket_tagging_lifecycle() {
     svc.delete_bucket_tagging("123456789012", &req, "bt")
         .unwrap();
 }
+
+#[tokio::test]
+async fn delete_objects_batch_respects_compliance_retention() {
+    // Single DeleteObject already gates COMPLIANCE retention; the
+    // batch DeleteObjects unversioned arm previously skipped the
+    // gate, letting a caller sidestep compliance via the batch
+    // endpoint. This test pins the gate in place.
+    let svc = make_service();
+    seed_bucket(&svc, "comp-batch");
+    seed_object(&svc, "comp-batch", "locked.txt", b"x");
+    seed_object(&svc, "comp-batch", "free.txt", b"y");
+
+    // Apply COMPLIANCE retention to one of the two objects.
+    let body = b"<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate></Retention>";
+    let req = make_request(
+        Method::PUT,
+        "/comp-batch/locked.txt",
+        &[("retention", "")],
+        body,
+    );
+    svc.put_object_retention("123456789012", &req, "comp-batch", "locked.txt")
+        .unwrap();
+
+    // Batch delete both — compliance object must come back as Error.
+    let xml = r#"<Delete><Object><Key>locked.txt</Key></Object><Object><Key>free.txt</Key></Object></Delete>"#;
+    let req = make_request(
+        Method::POST,
+        "/comp-batch",
+        &[("delete", "")],
+        xml.as_bytes(),
+    );
+    let resp = svc
+        .delete_objects("123456789012", &req, "comp-batch")
+        .unwrap();
+    let body_str = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body_str.contains("<Key>locked.txt</Key>") && body_str.contains("InvalidRequest")
+            || body_str.contains("<Key>locked.txt</Key>") && body_str.contains("AccessDenied"),
+        "expected locked.txt to surface as Error in DeleteResult, got: {body_str}"
+    );
+    assert!(
+        body_str.contains("<Deleted><Key>free.txt</Key>"),
+        "expected free.txt to be deleted, got: {body_str}"
+    );
+}
