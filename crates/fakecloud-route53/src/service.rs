@@ -798,28 +798,29 @@ impl Route53Service {
         let edns0_subnet = req.query_params.get("edns0clientsubnetip").cloned();
         let zone_id = strip_zone_prefix(&zone_id);
         let state = self.state.read();
-        let zone = state
-            .accounts
-            .get(DEFAULT_ACCOUNT)
+        let account = state.accounts.get(DEFAULT_ACCOUNT);
+        let zone = account
             .and_then(|a| a.hosted_zones.get(&zone_id).cloned())
             .ok_or_else(|| no_such_hosted_zone(&zone_id))?;
+        let health_checks = account.map(|a| a.health_checks.clone()).unwrap_or_default();
         drop(state);
         let normalized_name = if record_name.ends_with('.') {
             record_name.clone()
         } else {
             format!("{record_name}.")
         };
-        let answers: Vec<String> = zone
+
+        let candidates: Vec<&crate::model::ResourceRecordSet> = zone
             .resource_record_sets
             .iter()
-            .find(|r| r.name == normalized_name && r.record_type == record_type)
-            .map(|r| {
-                r.resource_records
-                    .as_ref()
-                    .map(|rr| rr.resource_record.iter().map(|x| x.value.clone()).collect())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+            .filter(|r| r.name == normalized_name && r.record_type == record_type)
+            .collect();
+
+        let answers: Vec<String> = if candidates.is_empty() {
+            Vec::new()
+        } else {
+            resolve_routing_policy(&candidates, &health_checks, edns0_subnet.as_deref())
+        };
         let mut body = String::with_capacity(512);
         body.push_str(XML_DECL);
         body.push_str(&format!("<TestDNSAnswerResponse xmlns=\"{NS}\">"));
@@ -2649,6 +2650,122 @@ impl Route53Service {
 mod helpers;
 use helpers::*;
 
+/// Resolve a TestDNSAnswer query against the candidate RRsets honoring
+/// the routing policy fields each set may carry. Mirrors real Route 53:
+/// - Failover (PRIMARY+SECONDARY): primary if healthy, otherwise secondary
+/// - Multi-value answer: up to 8 healthy values combined
+/// - Weighted: deterministic pick keyed by the resolver subnet
+/// - Latency / Geolocation: stable pick based on subnet hash
+/// - Default (no routing fields): first set's records
+fn resolve_routing_policy(
+    candidates: &[&crate::model::ResourceRecordSet],
+    health_checks: &std::collections::BTreeMap<String, crate::state::StoredHealthCheck>,
+    edns0_subnet: Option<&str>,
+) -> Vec<String> {
+    fn rr_values(r: &crate::model::ResourceRecordSet) -> Vec<String> {
+        r.resource_records
+            .as_ref()
+            .map(|rr| rr.resource_record.iter().map(|x| x.value.clone()).collect())
+            .unwrap_or_default()
+    }
+    fn is_healthy(
+        r: &crate::model::ResourceRecordSet,
+        health_checks: &std::collections::BTreeMap<String, crate::state::StoredHealthCheck>,
+    ) -> bool {
+        match r.health_check_id.as_ref() {
+            None => true,
+            Some(id) => health_checks
+                .get(id)
+                .map(|hc| hc.status_line.starts_with("Success"))
+                .unwrap_or(true),
+        }
+    }
+    fn subnet_hash(subnet: Option<&str>) -> u64 {
+        subnet
+            .map(|s| {
+                let mut h: u64 = 0xcbf29ce484222325;
+                for b in s.bytes() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                h
+            })
+            .unwrap_or(0)
+    }
+
+    if candidates.iter().any(|r| r.failover.is_some()) {
+        let primary = candidates
+            .iter()
+            .find(|r| r.failover.as_deref() == Some("PRIMARY"));
+        let secondary = candidates
+            .iter()
+            .find(|r| r.failover.as_deref() == Some("SECONDARY"));
+        if let Some(p) = primary {
+            if is_healthy(p, health_checks) {
+                return rr_values(p);
+            }
+        }
+        if let Some(s) = secondary {
+            return rr_values(s);
+        }
+        return primary.map(|p| rr_values(p)).unwrap_or_default();
+    }
+
+    if candidates
+        .iter()
+        .any(|r| r.multi_value_answer == Some(true))
+    {
+        return candidates
+            .iter()
+            .filter(|r| is_healthy(r, health_checks))
+            .flat_map(|r| rr_values(r))
+            .take(8)
+            .collect();
+    }
+
+    if candidates.iter().any(|r| r.weight.is_some()) {
+        let healthy: Vec<&&crate::model::ResourceRecordSet> = candidates
+            .iter()
+            .filter(|r| is_healthy(r, health_checks) && r.weight.is_some())
+            .collect();
+        let total: i64 = healthy.iter().map(|r| r.weight.unwrap_or(0)).sum();
+        if total == 0 || healthy.is_empty() {
+            return candidates.first().map(|r| rr_values(r)).unwrap_or_default();
+        }
+        let mut pick = (subnet_hash(edns0_subnet) % total as u64) as i64;
+        for r in &healthy {
+            let w = r.weight.unwrap_or(0);
+            if pick < w {
+                return rr_values(r);
+            }
+            pick -= w;
+        }
+        return rr_values(healthy[0]);
+    }
+
+    if candidates
+        .iter()
+        .any(|r| r.region.is_some() || r.geo_location.is_some())
+    {
+        let healthy: Vec<&&crate::model::ResourceRecordSet> = candidates
+            .iter()
+            .filter(|r| is_healthy(r, health_checks))
+            .collect();
+        if healthy.is_empty() {
+            return Vec::new();
+        }
+        let idx = (subnet_hash(edns0_subnet) as usize) % healthy.len();
+        return rr_values(healthy[idx]);
+    }
+
+    candidates
+        .iter()
+        .find(|r| is_healthy(r, health_checks))
+        .or_else(|| candidates.first())
+        .map(|r| rr_values(r))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2701,6 +2818,92 @@ mod tests {
             "Failure: connection refused.".to_string(),
             None,
         ));
+    }
+
+    fn rrset(value: &str) -> crate::model::ResourceRecordSet {
+        crate::model::ResourceRecordSet {
+            name: "x.example.com.".to_string(),
+            record_type: "A".to_string(),
+            ttl: Some(60),
+            resource_records: Some(crate::model::ResourceRecords {
+                resource_record: vec![crate::model::ResourceRecord {
+                    value: value.to_string(),
+                }],
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn routing_policy_failover_picks_secondary_when_primary_unhealthy() {
+        let mut p = rrset("1.1.1.1");
+        p.failover = Some("PRIMARY".to_string());
+        p.health_check_id = Some("hc-down".to_string());
+        let mut s = rrset("2.2.2.2");
+        s.failover = Some("SECONDARY".to_string());
+        let mut hcs = std::collections::BTreeMap::new();
+        hcs.insert(
+            "hc-down".to_string(),
+            StoredHealthCheck {
+                id: "hc-down".to_string(),
+                caller_reference: "r".to_string(),
+                version: 1,
+                config: HealthCheckConfig::default(),
+                created_time: Utc::now(),
+                status_line: "Failure: connection refused".to_string(),
+                last_failure_reason: None,
+            },
+        );
+        let answers = resolve_routing_policy(&[&p, &s], &hcs, None);
+        assert_eq!(answers, vec!["2.2.2.2".to_string()]);
+    }
+
+    #[test]
+    fn routing_policy_multivalue_returns_only_healthy() {
+        let mut a = rrset("1.1.1.1");
+        a.multi_value_answer = Some(true);
+        a.health_check_id = Some("hc-down".to_string());
+        let mut b = rrset("2.2.2.2");
+        b.multi_value_answer = Some(true);
+        let mut c = rrset("3.3.3.3");
+        c.multi_value_answer = Some(true);
+        let mut hcs = std::collections::BTreeMap::new();
+        hcs.insert(
+            "hc-down".to_string(),
+            StoredHealthCheck {
+                id: "hc-down".to_string(),
+                caller_reference: "r".to_string(),
+                version: 1,
+                config: HealthCheckConfig::default(),
+                created_time: Utc::now(),
+                status_line: "Failure".to_string(),
+                last_failure_reason: None,
+            },
+        );
+        let answers = resolve_routing_policy(&[&a, &b, &c], &hcs, None);
+        assert_eq!(answers, vec!["2.2.2.2".to_string(), "3.3.3.3".to_string()]);
+    }
+
+    #[test]
+    fn routing_policy_weighted_picks_deterministically_by_subnet() {
+        let mut a = rrset("1.1.1.1");
+        a.weight = Some(10);
+        let mut b = rrset("2.2.2.2");
+        b.weight = Some(90);
+        let hcs = std::collections::BTreeMap::new();
+        // Same subnet should always produce the same answer.
+        let one = resolve_routing_policy(&[&a, &b], &hcs, Some("203.0.113.5"));
+        let two = resolve_routing_policy(&[&a, &b], &hcs, Some("203.0.113.5"));
+        assert_eq!(one, two);
+        assert_eq!(one.len(), 1);
+    }
+
+    #[test]
+    fn routing_policy_default_returns_first_records() {
+        let a = rrset("1.1.1.1");
+        let hcs = std::collections::BTreeMap::new();
+        let answers = resolve_routing_policy(&[&a], &hcs, None);
+        assert_eq!(answers, vec!["1.1.1.1".to_string()]);
     }
 
     #[test]
