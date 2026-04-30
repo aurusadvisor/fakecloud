@@ -907,9 +907,10 @@ async fn main() {
     let eb_state_for_scheduler = eb_state.clone();
     let eb_state_for_rds = eb_state.clone();
     let eb_state_for_lambda = eb_state.clone();
-    let mut scheduler = fakecloud_eventbridge::scheduler::Scheduler::new(eb_state.clone(), delivery_for_eb)
-        .with_lambda(lambda_state.clone())
-        .with_logs(logs_state.clone());
+    let mut scheduler =
+        fakecloud_eventbridge::scheduler::Scheduler::new(eb_state.clone(), delivery_for_eb)
+            .with_lambda(lambda_state.clone())
+            .with_logs(logs_state.clone());
     if let Some(ref rt) = container_runtime {
         scheduler = scheduler.with_runtime(rt.clone());
     }

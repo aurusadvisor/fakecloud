@@ -184,9 +184,7 @@ mod tests {
     #[test]
     fn is_event_bus_arn_rejects_empty_segments() {
         assert!(!is_event_bus_arn("arn:aws:events:::event-bus/b"));
-        assert!(!is_event_bus_arn(
-            "arn:aws:events:us-east-1::event-bus/b"
-        ));
+        assert!(!is_event_bus_arn("arn:aws:events:us-east-1::event-bus/b"));
         assert!(!is_event_bus_arn(
             "arn:aws:events:us-east-1:123456789012:event-bus/"
         ));
