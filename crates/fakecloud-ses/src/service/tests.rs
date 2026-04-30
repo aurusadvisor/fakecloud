@@ -42,6 +42,7 @@ fn seed_identity(state: &SharedSesState, name: &str) {
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
+            mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name: None,
         },
     );
@@ -1973,6 +1974,51 @@ async fn test_put_email_identity_mail_from_attributes() {
         body["MailFromAttributes"]["BehaviorOnMxFailure"],
         "REJECT_MESSAGE"
     );
+}
+
+#[tokio::test]
+async fn test_mail_from_status_lifecycle() {
+    let state = make_state();
+    let svc = SesV2Service::new(state.clone());
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/identities",
+        r#"{"EmailIdentity": "example.com"}"#,
+    );
+    svc.handle(req).await.unwrap();
+
+    // No mail-from configured -> NotStarted, no DNS records.
+    let req = make_request(Method::GET, "/v2/email/identities/example.com", "");
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["MailFromAttributes"]["MailFromDomainStatus"],
+        "NotStarted"
+    );
+    assert!(body["MailFromAttributes"]["MailFromDomainDnsRecords"].is_null());
+
+    // Set mail-from -> first read auto-advances Pending -> Success +
+    // emits expected MX/TXT records.
+    let req = make_request(
+        Method::PUT,
+        "/v2/email/identities/example.com/mail-from",
+        r#"{"MailFromDomain": "mail.example.com", "BehaviorOnMxFailure": "USE_DEFAULT_VALUE"}"#,
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, "/v2/email/identities/example.com", "");
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["MailFromAttributes"]["MailFromDomainStatus"],
+        "Success"
+    );
+    let dns = &body["MailFromAttributes"]["MailFromDomainDnsRecords"];
+    assert_eq!(dns.as_array().map(|a| a.len()), Some(2));
+    assert_eq!(dns[0]["Name"], "mail.example.com");
+    assert_eq!(dns[0]["Type"], "MX");
+    assert_eq!(dns[1]["Type"], "TXT");
 }
 
 #[tokio::test]

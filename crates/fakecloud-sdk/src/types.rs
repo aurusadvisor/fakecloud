@@ -127,6 +127,13 @@ pub struct SesEmailsResponse {
     pub emails: Vec<SentEmail>,
 }
 
+/// Admin payload to flip an identity's `MailFromDomainStatus` for tests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesMailFromStatusRequest {
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundEmailRequest {

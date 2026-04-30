@@ -39,6 +39,7 @@ fn seed_identity(state: &SharedSesState, name: &str) {
             email_forwarding_enabled: true,
             mail_from_domain: None,
             mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
+            mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name: None,
         },
     );

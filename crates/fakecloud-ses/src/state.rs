@@ -21,6 +21,11 @@ pub struct EmailIdentity {
     // Mail-from attributes
     pub mail_from_domain: Option<String>,
     pub mail_from_behavior_on_mx_failure: String,
+    /// Real SES walks PENDING -> SUCCESS once it observes MX/TXT records.
+    /// Default `NotStarted`; set to `Pending` on first PutMailFromAttributes;
+    /// auto-advances to `Success` on next read or via admin endpoint.
+    #[serde(default)]
+    pub mail_from_domain_status: String,
     // Configuration set association
     pub configuration_set_name: Option<String>,
 }
