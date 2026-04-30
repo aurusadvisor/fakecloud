@@ -140,11 +140,21 @@ impl LambdaService {
             );
         }
 
+        // Normalize Action: callers commonly pass either `InvokeFunction`
+        // or `lambda:InvokeFunction`. Always store as `lambda:<verb>` —
+        // double-prefixing (`lambda:lambda:InvokeFunction`) breaks the
+        // evaluator's resource-action matcher and confuses any client
+        // that round-trips the policy doc.
+        let normalized_action = if action.contains(':') {
+            action.clone()
+        } else {
+            format!("lambda:{action}")
+        };
         let mut new_statement = serde_json::Map::new();
         new_statement.insert("Sid".to_string(), json!(statement_id));
         new_statement.insert("Effect".to_string(), json!("Allow"));
         new_statement.insert("Principal".to_string(), principal_value);
-        new_statement.insert("Action".to_string(), json!(format!("lambda:{action}")));
+        new_statement.insert("Action".to_string(), json!(normalized_action));
         new_statement.insert("Resource".to_string(), json!(func.function_arn));
         if !condition.is_empty() {
             new_statement.insert("Condition".to_string(), Value::Object(condition));
