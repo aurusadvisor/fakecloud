@@ -334,20 +334,53 @@ impl ApiGatewayService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let accounts = self.state.read();
-        let api = accounts
+        let account_state = accounts
             .get(&request_account(req))
-            .and_then(|s| s.apis.get(&api_id))
+            .ok_or_else(|| not_found("RestApi not found"))?;
+        let api = account_state
+            .apis
+            .get(&api_id)
             .cloned()
             .ok_or_else(|| not_found("RestApi not found"))?;
-        // Return either the originally imported source (if any) or a
-        // minimal OpenAPI 3.0 skeleton derived from state.
+        // Round-trip the imported source verbatim if the API was created
+        // via `ImportRestApi`; otherwise build OpenAPI 3.0 from the
+        // current resources + methods.
         let body = if let Some(src) = api.import_source.clone() {
             src
         } else {
+            let mut paths = serde_json::Map::new();
+            if let Some(api_resources) = account_state.resources.get(&api_id) {
+                for resource in api_resources.values() {
+                    let mut path_item = serde_json::Map::new();
+                    for method in account_state
+                        .methods
+                        .values()
+                        .filter(|m| m.rest_api_id == api_id && m.resource_id == resource.id)
+                    {
+                        if method.http_method.eq_ignore_ascii_case("ANY") {
+                            for verb in ["get", "post", "put", "delete", "patch", "head", "options"]
+                            {
+                                path_item.insert(verb.to_string(), method_to_openapi_op(method));
+                            }
+                        } else {
+                            path_item.insert(
+                                method.http_method.to_lowercase(),
+                                method_to_openapi_op(method),
+                            );
+                        }
+                    }
+                    if !path_item.is_empty() {
+                        paths.insert(resource.path.clone(), serde_json::Value::Object(path_item));
+                    }
+                }
+            }
             json!({
                 "openapi": "3.0.1",
-                "info": {"title": api.name, "version": api.version.unwrap_or_default()},
-                "paths": serde_json::Value::Object(serde_json::Map::new()),
+                "info": {
+                    "title": api.name,
+                    "version": api.version.unwrap_or_default(),
+                },
+                "paths": serde_json::Value::Object(paths),
             })
             .to_string()
         };
@@ -432,4 +465,55 @@ impl ApiGatewayService {
             .unwrap_or_default();
         ok(json!({"tags": map}))
     }
+}
+
+/// Build an OpenAPI 3.0 operation object from the stored Method.
+fn method_to_openapi_op(method: &crate::state::Method) -> Value {
+    let mut op = serde_json::Map::new();
+    if let Some(name) = &method.operation_name {
+        op.insert("operationId".to_string(), json!(name));
+    }
+    let mut params = Vec::new();
+    for (key, required) in &method.request_parameters {
+        // AWS request parameter keys look like
+        // `method.request.querystring.foo`, `.header.foo`, `.path.foo`.
+        let parts: Vec<&str> = key.split('.').collect();
+        if parts.len() < 4 || parts[0] != "method" || parts[1] != "request" {
+            continue;
+        }
+        let r#in = match parts[2] {
+            "querystring" => "query",
+            "header" => "header",
+            "path" => "path",
+            _ => continue,
+        };
+        let name = parts[3..].join(".");
+        params.push(json!({
+            "name": name,
+            "in": r#in,
+            "required": *required || r#in == "path",
+            "schema": {"type": "string"},
+        }));
+    }
+    if !params.is_empty() {
+        op.insert("parameters".to_string(), json!(params));
+    }
+    if !method.request_models.is_empty() {
+        let mut content = serde_json::Map::new();
+        for (ct, model) in &method.request_models {
+            content.insert(
+                ct.clone(),
+                json!({"schema": {"$ref": format!("#/components/schemas/{model}")}}),
+            );
+        }
+        op.insert(
+            "requestBody".to_string(),
+            json!({"required": true, "content": content}),
+        );
+    }
+    op.insert(
+        "responses".to_string(),
+        json!({"200": {"description": "OK"}}),
+    );
+    Value::Object(op)
 }

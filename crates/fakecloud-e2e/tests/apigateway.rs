@@ -165,3 +165,86 @@ async fn api_keys_and_usage_plans() {
         .await
         .expect("delete_api_key");
 }
+
+#[tokio::test]
+async fn get_export_returns_openapi_with_real_paths() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+
+    let api = client
+        .create_rest_api()
+        .name("export-target")
+        .send()
+        .await
+        .expect("create_rest_api");
+    let api_id = api.id().unwrap().to_string();
+    let root = api.root_resource_id().unwrap().to_string();
+
+    let resource = client
+        .create_resource()
+        .rest_api_id(&api_id)
+        .parent_id(&root)
+        .path_part("widgets")
+        .send()
+        .await
+        .expect("create_resource");
+    let res_id = resource.id().unwrap().to_string();
+
+    client
+        .put_method()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .authorization_type("NONE")
+        .operation_name("GetWidgets")
+        .request_parameters("method.request.querystring.limit", false)
+        .send()
+        .await
+        .expect("put_method GET");
+
+    client
+        .put_integration()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .r#type(aws_sdk_apigateway::types::IntegrationType::Mock)
+        .send()
+        .await
+        .expect("put_integration");
+
+    client
+        .create_deployment()
+        .rest_api_id(&api_id)
+        .stage_name("v1")
+        .send()
+        .await
+        .expect("create_deployment");
+
+    let export = client
+        .get_export()
+        .rest_api_id(&api_id)
+        .stage_name("v1")
+        .export_type("oas30")
+        .send()
+        .await
+        .expect("get_export");
+    let body_blob = export.body().expect("export body should be present");
+    let body: serde_json::Value =
+        serde_json::from_slice(body_blob.as_ref()).expect("export body must be JSON");
+    assert_eq!(body["openapi"], "3.0.1");
+    assert_eq!(body["info"]["title"], "export-target");
+    let paths = body["paths"].as_object().expect("paths object");
+    let widgets = paths
+        .get("/widgets")
+        .expect("widgets path should be in OpenAPI export");
+    let get_op = widgets
+        .as_object()
+        .unwrap()
+        .get("get")
+        .expect("GET operation should be present");
+    assert_eq!(get_op["operationId"], "GetWidgets");
+    let params = get_op["parameters"].as_array().expect("parameters array");
+    assert!(params
+        .iter()
+        .any(|p| p["name"] == "limit" && p["in"] == "query"));
+}
