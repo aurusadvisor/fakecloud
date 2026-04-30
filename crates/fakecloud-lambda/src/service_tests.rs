@@ -484,6 +484,53 @@ async fn update_function_code_replaces_image_uri() {
 }
 
 #[tokio::test]
+async fn publish_version_increments_and_snapshots_config() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "vfn").await;
+
+    // Publish v1 with the seed Description ("")
+    let req = make_request(Method::POST, "/2015-03-31/functions/vfn/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let v1: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v1["Version"], "1");
+    assert!(v1["FunctionArn"].as_str().unwrap().ends_with(":1"));
+    assert_eq!(
+        v1["MasterArn"].as_str().unwrap(),
+        "arn:aws:lambda:us-east-1:123456789012:function:vfn"
+    );
+
+    // Mutate $LATEST description via UpdateFunctionConfiguration
+    let body = json!({ "Description": "after-v1" });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/vfn/configuration",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Publish v2 with the new Description
+    let req = make_request(Method::POST, "/2015-03-31/functions/vfn/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let v2: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v2["Version"], "2");
+    assert_eq!(v2["Description"].as_str().unwrap(), "after-v1");
+
+    // ListVersionsByFunction returns $LATEST + v1 + v2 with snapshots intact:
+    // v1 keeps its old description even after $LATEST was mutated.
+    let req = make_request(Method::GET, "/2015-03-31/functions/vfn/versions", "");
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let versions = body["Versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 3);
+    assert_eq!(versions[0]["Version"], "$LATEST");
+    assert_eq!(versions[0]["Description"].as_str().unwrap(), "after-v1");
+    assert_eq!(versions[1]["Version"], "1");
+    assert_eq!(versions[1]["Description"].as_str().unwrap(), "");
+    assert_eq!(versions[2]["Version"], "2");
+    assert_eq!(versions[2]["Description"].as_str().unwrap(), "after-v1");
+}
+
+#[tokio::test]
 async fn add_permission_builds_canonical_statement() {
     let svc = LambdaService::new(make_state());
     seed_function(&svc, "f").await;

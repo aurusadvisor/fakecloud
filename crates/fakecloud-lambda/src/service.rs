@@ -1278,9 +1278,8 @@ impl LambdaService {
         function_name: &str,
         account_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let accounts = self.state.read();
-        let empty = LambdaState::new(account_id, "");
-        let state = accounts.get(account_id).unwrap_or(&empty);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
         let func = state.functions.get(function_name).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
@@ -1292,10 +1291,43 @@ impl LambdaService {
             )
         })?;
 
-        let mut config = self.function_config_json(func);
-        // Stub: always return version "1"
-        config["Version"] = json!("1");
-        config["FunctionArn"] = json!(format!("{}:1", func.function_arn));
+        // Pick the next version number per function, monotonic per
+        // function arn, never reused. AWS uses sequential decimal
+        // strings starting at 1.
+        let existing = state
+            .function_versions
+            .get(function_name)
+            .cloned()
+            .unwrap_or_default();
+        let next: u64 = existing
+            .iter()
+            .filter_map(|v| v.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let next_str = next.to_string();
+
+        // Snapshot the function config + code for the new immutable version.
+        let mut snapshot = func.clone();
+        snapshot.version = next_str.clone();
+        snapshot.master_arn = Some(func.function_arn.clone());
+
+        // Append to numbered list and store the snapshot.
+        state
+            .function_versions
+            .entry(function_name.to_string())
+            .or_default()
+            .push(next_str.clone());
+        state
+            .function_version_snapshots
+            .entry(function_name.to_string())
+            .or_default()
+            .insert(next_str.clone(), snapshot.clone());
+
+        let mut config = self.function_config_json(&snapshot);
+        config["Version"] = json!(next_str);
+        config["FunctionArn"] = json!(format!("{}:{next_str}", func.function_arn));
+        config["MasterArn"] = json!(func.function_arn);
 
         Ok(AwsResponse::json(StatusCode::CREATED, config.to_string()))
     }
