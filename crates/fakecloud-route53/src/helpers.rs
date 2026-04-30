@@ -683,9 +683,10 @@ impl Route53Service {
         let change_id = generate_change_id();
         let change = StoredChange {
             id: change_id.clone(),
-            status: "INSYNC".to_string(),
+            status: "PENDING".to_string(),
             submitted_at: now,
             comment: cfg.comment,
+            read_count: 0,
         };
         account.changes.insert(change_id.clone(), change.clone());
         drop(state);
@@ -740,9 +741,10 @@ impl Route53Service {
         let change_id = generate_change_id();
         let change = StoredChange {
             id: change_id.clone(),
-            status: "INSYNC".to_string(),
+            status: "PENDING".to_string(),
             submitted_at: now,
             comment: cfg.comment,
+            read_count: 0,
         };
         account.changes.insert(change_id.clone(), change.clone());
         drop(state);
