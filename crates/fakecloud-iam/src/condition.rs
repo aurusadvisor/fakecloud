@@ -39,6 +39,14 @@
 //! - `aws:EpochTime`
 //! - `aws:SecureTransport`
 //! - `aws:RequestedRegion`
+//! - `aws:MultiFactorAuthPresent`
+//! - `aws:MultiFactorAuthAge`
+//! - `aws:CalledVia`
+//! - `aws:SourceVpc`
+//! - `aws:SourceVpce`
+//! - `aws:VpcSourceIp`
+//! - `aws:FederatedProvider`
+//! - `aws:TokenIssueTime`
 //!
 //! Service-specific keys (`s3:prefix`, `sqs:MessageAttribute`, …) are
 //! deferred to a follow-up batch; the [`ConditionContext::service_keys`]
