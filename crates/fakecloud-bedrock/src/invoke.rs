@@ -451,9 +451,22 @@ mod tests {
     use bytes::Bytes;
     use fakecloud_core::multi_account::MultiAccountState;
     use http::{HeaderMap, Method};
-    use parking_lot::RwLock;
+    use parking_lot::{Mutex, RwLock};
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::OnceLock;
+
+    /// Global mutex to serialize tests that mutate the process-wide
+    /// `BEDROCK_ECHO` env var with sibling tests in the same binary that
+    /// observe model behavior. Without it the parallel test harness
+    /// races: e.g. `invoke_amazon_titan_embed_returns_vector` runs while
+    /// `invoke_echo_mode_reflects_prompt` still has the flag flipped, and
+    /// the embed handler returns the echo branch's text instead of the
+    /// embedding vector.
+    fn echo_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn shared() -> SharedBedrockState {
         let multi: MultiAccountState<BedrockState> =
@@ -518,11 +531,12 @@ mod tests {
 
     #[test]
     fn invoke_echo_mode_reflects_prompt() {
-        // SAFETY: BEDROCK_ECHO mutation is process-global; serialize via
-        // a single-threaded test runner is not assumed. We restore on
-        // exit so any sibling tests in the same binary see the prior value.
+        // BEDROCK_ECHO mutation is process-global; the lock serializes
+        // this test with sibling tests in the same binary that observe
+        // model output (e.g. titan-embed) so they don't race the flag.
+        let _g = echo_lock().lock();
         let prev = std::env::var("BEDROCK_ECHO").ok();
-        // SAFETY: tests run with single-threaded harness; env mutation is brief.
+        // SAFETY: lock above pins us to a single mutation window.
         unsafe { std::env::set_var("BEDROCK_ECHO", "1") };
 
         let s = shared();
@@ -567,6 +581,9 @@ mod tests {
 
     #[test]
     fn invoke_amazon_titan_embed_returns_vector() {
+        // Lock against `invoke_echo_mode_reflects_prompt` so we don't
+        // observe the echo branch's text when the flag is mid-flip.
+        let _g = echo_lock().lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "amazon.titan-embed-text-v1", b"{}").unwrap();
         let v: Value =
