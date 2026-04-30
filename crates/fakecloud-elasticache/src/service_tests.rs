@@ -2897,15 +2897,65 @@ fn modify_unknown_cache_cluster_errors() {
     assert_eq!(err.code(), "CacheClusterNotFound");
 }
 
-#[test]
-fn reboot_unknown_cluster_errors() {
+#[tokio::test]
+async fn reboot_unknown_cluster_errors() {
     let svc = fresh_service();
     let req = request("RebootCacheCluster", &[("CacheClusterId", "ghost")]);
-    let err = match svc.reboot_cache_cluster(&req) {
+    let err = match svc.reboot_cache_cluster(&req).await {
         Err(e) => e,
         Ok(_) => panic!("expected error"),
     };
     assert_eq!(err.code(), "CacheClusterNotFound");
+}
+
+#[tokio::test]
+async fn reboot_cache_cluster_marks_rebooting_when_no_runtime() {
+    // Without a wired-up container runtime the API still flips status
+    // to "rebooting cache cluster nodes" so SDK clients can observe
+    // the reboot transition.
+    let svc = fresh_service();
+    {
+        let mut state = svc.state.write();
+        let account = state.get_or_create("123456789012");
+        account.cache_clusters.insert(
+            "test-cc".to_string(),
+            CacheCluster {
+                cache_cluster_id: "test-cc".to_string(),
+                cache_node_type: "cache.t4g.micro".to_string(),
+                engine: "redis".to_string(),
+                engine_version: "7.1".to_string(),
+                cache_cluster_status: "available".to_string(),
+                num_cache_nodes: 1,
+                preferred_availability_zone: "us-east-1a".to_string(),
+                cache_subnet_group_name: None,
+                auto_minor_version_upgrade: true,
+                arn: "arn:aws:elasticache:us-east-1:123456789012:cluster:test-cc".to_string(),
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                endpoint_address: "127.0.0.1".to_string(),
+                endpoint_port: 6379,
+                container_id: "abc123".to_string(),
+                host_port: 6379,
+                replication_group_id: None,
+            },
+        );
+    }
+    let req = request("RebootCacheCluster", &[("CacheClusterId", "test-cc")]);
+    let resp = svc.reboot_cache_cluster(&req).await.unwrap();
+    let body_str = body(resp);
+    assert!(body_str.contains("rebooting cache cluster nodes"));
+    let state = svc.state.read();
+    let cluster = state
+        .get("123456789012")
+        .unwrap()
+        .cache_clusters
+        .get("test-cc")
+        .unwrap();
+    // Without a runtime, status remains in the rebooting transition
+    // since fakecloud has nothing to verify the engine came back up.
+    assert_eq!(
+        cluster.cache_cluster_status,
+        "rebooting cache cluster nodes"
+    );
 }
 
 #[test]

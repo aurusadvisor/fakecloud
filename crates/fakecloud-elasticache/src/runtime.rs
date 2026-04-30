@@ -156,6 +156,33 @@ impl ElastiCacheRuntime {
         }
     }
 
+    /// Restart the underlying container (`docker restart`) for an
+    /// ElastiCache resource, mirroring real ElastiCache's
+    /// RebootCacheCluster behaviour. Returns `Unavailable` if the
+    /// resource has no live container tracked here. Any failure from
+    /// the CLI surfaces as `ContainerStartFailed` so the caller can
+    /// translate it to an AWS error.
+    pub async fn restart_container(&self, resource_id: &str) -> Result<(), RuntimeError> {
+        let container_id = {
+            let containers = self.containers.read();
+            containers
+                .get(resource_id)
+                .map(|c| c.container_id.clone())
+                .ok_or(RuntimeError::Unavailable)?
+        };
+        let output = tokio::process::Command::new(&self.cli)
+            .args(["restart", &container_id])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        if !output.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn stop_all(&self) {
         let containers: Vec<String> = {
             let mut containers = self.containers.write();

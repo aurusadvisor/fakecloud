@@ -282,7 +282,7 @@ impl AwsService for ElastiCacheService {
             "ResetCacheParameterGroup" => self.reset_cache_parameter_group(&request),
             "DescribeCacheParameters" => self.describe_cache_parameters(&request),
             "ModifyCacheCluster" => self.modify_cache_cluster(&request),
-            "RebootCacheCluster" => self.reboot_cache_cluster(&request),
+            "RebootCacheCluster" => self.reboot_cache_cluster(&request).await,
             "ListAllowedNodeTypeModifications" => {
                 self.list_allowed_node_type_modifications(&request)
             }
@@ -3692,19 +3692,43 @@ impl ElastiCacheService {
         ))
     }
 
-    fn reboot_cache_cluster(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn reboot_cache_cluster(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let id = required_query_param(request, "CacheClusterId")?;
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
-        let cluster = state.cache_clusters.get_mut(&id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "CacheClusterNotFound",
-                format!("CacheCluster {id} not found."),
-            )
-        })?;
-        cluster.cache_cluster_status = "rebooting cache cluster nodes".to_string();
-        let xml = cache_cluster_xml(cluster, true);
+        let xml = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            let cluster = state.cache_clusters.get_mut(&id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "CacheClusterNotFound",
+                    format!("CacheCluster {id} not found."),
+                )
+            })?;
+            cluster.cache_cluster_status = "rebooting cache cluster nodes".to_string();
+            cache_cluster_xml(cluster, true)
+        };
+        // Restart the underlying engine container so a real client
+        // observes the reboot. Best-effort: if no runtime is wired up
+        // (eg. tests, environments without docker) the API call still
+        // reflects the rebooting state.
+        if let Some(runtime) = &self.runtime {
+            if let Err(error) = runtime.restart_container(&id).await {
+                tracing::warn!(
+                    cluster_id = %id,
+                    %error,
+                    "RebootCacheCluster: container restart failed, returning rebooting state anyway"
+                );
+            } else {
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(&request.account_id);
+                if let Some(cluster) = state.cache_clusters.get_mut(&id) {
+                    cluster.cache_cluster_status = "available".to_string();
+                }
+            }
+        }
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
