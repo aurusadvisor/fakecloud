@@ -560,10 +560,12 @@ impl S3Service {
             std::collections::BTreeMap::new()
         };
 
+        let region = state.region.clone();
         let b = state
             .buckets
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
+        let notification_config = b.notification_config.clone();
         let version_id = if b.versioning.as_deref() == Some("Enabled") {
             Some(uuid::Uuid::new_v4().to_string())
         } else {
@@ -640,6 +642,20 @@ impl S3Service {
             bucket_h = xml_escape(bucket),
             key_h = xml_escape(key),
         );
+        // Surface the per-algorithm checksum element AWS emits so
+        // SDK clients that round-trip Complete -> Get can verify
+        // integrity end-to-end.
+        let checksum_xml = match (
+            upload.checksum_algorithm.as_deref(),
+            b.objects.get(key).and_then(|o| o.checksum_value.clone()),
+        ) {
+            (Some(algo), Some(value)) => format!(
+                "<Checksum{algo}>{val}</Checksum{algo}>",
+                algo = algo,
+                val = xml_escape(&value),
+            ),
+            _ => String::new(),
+        };
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
@@ -647,11 +663,37 @@ impl S3Service {
              <Bucket>{}</Bucket>\
              <Key>{}</Key>\
              <ETag>&quot;{}&quot;</ETag>\
+             {checksum_xml}\
              </CompleteMultipartUploadResult>",
             xml_escape(bucket),
             xml_escape(key),
             xml_escape(&etag),
         );
+
+        // Drop the write lock before firing event delivery so any
+        // listener that re-enters the S3 service to read state
+        // doesn't deadlock against our outstanding write.
+        let bucket_name = bucket.to_string();
+        let obj_key = key.to_string();
+        let obj_size = store_body.len() as u64;
+        let obj_etag = etag.clone();
+        drop(accts);
+        if let Some(ref config) = notification_config {
+            super::deliver_notifications(
+                &self.delivery,
+                config,
+                &super::notifications::ObjectEvent {
+                    event_name: "ObjectCreated:CompleteMultipartUpload",
+                    bucket_name: &bucket_name,
+                    key: &obj_key,
+                    size: obj_size,
+                    etag: &obj_etag,
+                    region: &region,
+                },
+                Some(&self.state),
+            );
+        }
+
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: "application/xml".to_string(),
