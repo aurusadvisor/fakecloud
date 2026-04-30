@@ -9,6 +9,35 @@ use crate::state::SentEmail;
 use super::{extract_string_array, SesV2Service};
 
 impl SesV2Service {
+    /// Render `template_name` with `template_data` (JSON object string)
+    /// against the caller's stored templates. Empty result on missing
+    /// template or missing inputs — matches real SES which sends the
+    /// raw template body when data is malformed.
+    fn render_template_for_send(
+        &self,
+        account_id: &str,
+        template_name: Option<&str>,
+        template_data: Option<&str>,
+    ) -> super::templates::RenderedTemplate {
+        let empty = super::templates::RenderedTemplate {
+            subject: None,
+            html: None,
+            text: None,
+        };
+        let Some(name) = template_name else {
+            return empty;
+        };
+        let data_str = template_data.unwrap_or("{}");
+        let accounts = self.state.read();
+        let Some(state) = accounts.get(account_id) else {
+            return empty;
+        };
+        let Some(template) = state.templates.get(name) else {
+            return empty;
+        };
+        super::templates::render_template(template, data_str)
+    }
+
     /// Reject the send if either account-level sending or the resolved
     /// configuration set's sending flag is paused. Real SES surfaces
     /// these as `AccountSendingPausedException` and
@@ -86,7 +115,21 @@ impl SesV2Service {
                 let tmpl = &body["Content"]["Template"];
                 let tmpl_name = tmpl["TemplateName"].as_str().map(|s| s.to_string());
                 let tmpl_data = tmpl["TemplateData"].as_str().map(|s| s.to_string());
-                (None, None, None, None, tmpl_name, tmpl_data)
+                // Render via the same engine RenderEmailTemplate uses so
+                // SentEmail captures the materialized subject/html/text.
+                let rendered = self.render_template_for_send(
+                    &req.account_id,
+                    tmpl_name.as_deref(),
+                    tmpl_data.as_deref(),
+                );
+                (
+                    rendered.subject,
+                    rendered.html,
+                    rendered.text,
+                    None,
+                    tmpl_name,
+                    tmpl_data,
+                )
             } else {
                 (None, None, None, None, None, None)
             };
@@ -164,15 +207,21 @@ impl SesV2Service {
                 .or_else(|| body["DefaultContent"]["Template"]["TemplateData"].as_str())
                 .map(|s| s.to_string());
 
+            let rendered = self.render_template_for_send(
+                &req.account_id,
+                template_name.as_deref(),
+                template_data.as_deref(),
+            );
+
             let sent = SentEmail {
                 message_id: message_id.clone(),
                 from: from.clone(),
                 to,
                 cc,
                 bcc,
-                subject: None,
-                html_body: None,
-                text_body: None,
+                subject: rendered.subject,
+                html_body: rendered.html,
+                text_body: rendered.text,
                 raw_data: None,
                 template_name,
                 template_data,
