@@ -308,14 +308,11 @@ impl CloudFormationService {
         }
 
         let tags = Self::extract_tags(&params);
-        let parameters = Self::extract_parameters(&params);
+        let mut parameters = Self::extract_parameters(&params);
         let notification_arns = Self::extract_notification_arns(&params);
 
-        // First pass: parse to get resource definitions (without physical ID resolution)
-        let parsed = template::parse_template(template_body, &parameters).map_err(|e| {
-            AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
-        })?;
-
+        // Seed AWS::* pseudo-parameters with stack-context values so
+        // resolve_refs can substitute them into resource properties.
         let stack_id = format!(
             "arn:aws:cloudformation:{}:{}:stack/{}/{}",
             req.region,
@@ -323,6 +320,29 @@ impl CloudFormationService {
             stack_name,
             uuid::Uuid::new_v4()
         );
+        parameters
+            .entry("AWS::Region".to_string())
+            .or_insert_with(|| req.region.clone());
+        parameters
+            .entry("AWS::AccountId".to_string())
+            .or_insert_with(|| req.account_id.clone());
+        parameters
+            .entry("AWS::StackId".to_string())
+            .or_insert_with(|| stack_id.clone());
+        parameters
+            .entry("AWS::StackName".to_string())
+            .or_insert_with(|| stack_name.clone());
+        parameters
+            .entry("AWS::Partition".to_string())
+            .or_insert_with(|| "aws".to_string());
+        parameters
+            .entry("AWS::URLSuffix".to_string())
+            .or_insert_with(|| "amazonaws.com".to_string());
+
+        // First pass: parse to get resource definitions (without physical ID resolution)
+        let parsed = template::parse_template(template_body, &parameters).map_err(|e| {
+            AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
+        })?;
 
         let provisioner = self.provisioner(&stack_id, &req.account_id, &req.region);
         let resources =
@@ -540,11 +560,7 @@ impl CloudFormationService {
     }
 
     fn update_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let input = UpdateStackInput::from_params(req)?;
-        let parsed =
-            template::parse_template(&input.template_body, &input.parameters).map_err(|e| {
-                AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
-            })?;
+        let mut input = UpdateStackInput::from_params(req)?;
 
         // Get stack_id before write lock for the provisioner
         let found_stack_id = {
@@ -561,6 +577,39 @@ impl CloudFormationService {
                 .map(|s| s.stack_id.clone())
                 .unwrap_or_default()
         };
+
+        // Seed pseudo-parameters before parsing — the StackId is now known
+        // (after the read above) so resolve_refs sees the same values that
+        // the original CreateStack invocation used.
+        input
+            .parameters
+            .entry("AWS::Region".to_string())
+            .or_insert_with(|| req.region.clone());
+        input
+            .parameters
+            .entry("AWS::AccountId".to_string())
+            .or_insert_with(|| req.account_id.clone());
+        input
+            .parameters
+            .entry("AWS::StackId".to_string())
+            .or_insert_with(|| found_stack_id.clone());
+        input
+            .parameters
+            .entry("AWS::StackName".to_string())
+            .or_insert_with(|| input.stack_name.clone());
+        input
+            .parameters
+            .entry("AWS::Partition".to_string())
+            .or_insert_with(|| "aws".to_string());
+        input
+            .parameters
+            .entry("AWS::URLSuffix".to_string())
+            .or_insert_with(|| "amazonaws.com".to_string());
+
+        let parsed =
+            template::parse_template(&input.template_body, &input.parameters).map_err(|e| {
+                AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
+            })?;
 
         let provisioner = self.provisioner(&found_stack_id, &req.account_id, &req.region);
 

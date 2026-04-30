@@ -167,6 +167,28 @@ pub fn resolve_resource_properties_with_attrs(
     })
 }
 
+/// Substitute a pseudo-parameter with the value provided through the
+/// stack `parameters` map (keyed by the same `AWS::*` name). When the
+/// caller hasn't supplied a value, fall back to the canonical default
+/// for that parameter (commercial partition / us-east-1 / empty list).
+fn pseudo_value(name: &str, parameters: &BTreeMap<String, String>) -> Option<Value> {
+    if let Some(v) = parameters.get(name) {
+        return Some(Value::String(v.clone()));
+    }
+    match name {
+        "AWS::Partition" => Some(Value::String("aws".to_string())),
+        "AWS::URLSuffix" => Some(Value::String("amazonaws.com".to_string())),
+        "AWS::Region" => Some(Value::String("us-east-1".to_string())),
+        // NotificationARNs is an array; default to empty.
+        "AWS::NotificationARNs" => Some(Value::Array(Vec::new())),
+        // NoValue is sentinel - emit an explicit JSON null so callers can
+        // treat it as "drop this property". CloudFormation strips it from
+        // the resolved object; we leave that responsibility to consumers.
+        "AWS::NoValue" => Some(Value::Null),
+        _ => None,
+    }
+}
+
 /// Resolve `Ref`, `Fn::GetAtt`, `Fn::Join`, and `Fn::Sub` in property values.
 fn resolve_refs(
     value: &Value,
@@ -187,8 +209,12 @@ fn resolve_refs(
                     if let Some(physical_id) = resource_physical_ids.get(ref_name) {
                         return Value::String(physical_id.clone());
                     }
-                    // 3. Allow pseudo-references to pass through as the ref name
+                    // 3. Substitute pseudo-references with their stack-context
+                    //    value (or a sane default for shape-only parity).
                     if PSEUDO_REFS.contains(&ref_name) {
+                        if let Some(v) = pseudo_value(ref_name, parameters) {
+                            return v;
+                        }
                         return Value::String(ref_name.to_string());
                     }
                     // 4. If it's a known logical resource in the template but not yet
@@ -448,6 +474,61 @@ Resources:
         assert_eq!(
             sub.properties["TopicArn"],
             Value::String("MyTopic".to_string())
+        );
+    }
+
+    #[test]
+    fn pseudo_ref_substitutes_when_param_provided() {
+        let template = r#"{
+            "Resources": {
+                "MyQueue": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueArn": {
+                            "Fn::Join": ["", [
+                                "arn:", {"Ref": "AWS::Partition"}, ":sqs:",
+                                {"Ref": "AWS::Region"}, ":", {"Ref": "AWS::AccountId"},
+                                ":", {"Ref": "AWS::StackName"}, "-q"
+                            ]]
+                        }
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("AWS::Region".to_string(), "us-west-2".to_string());
+        params.insert("AWS::AccountId".to_string(), "111122223333".to_string());
+        params.insert("AWS::Partition".to_string(), "aws".to_string());
+        params.insert("AWS::StackName".to_string(), "demo".to_string());
+
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["QueueArn"],
+            Value::String("arn:aws:sqs:us-west-2:111122223333:demo-q".to_string())
+        );
+    }
+
+    #[test]
+    fn pseudo_ref_partition_default_when_unset() {
+        let template = r#"{
+            "Resources": {
+                "MyQueue": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "Partition": {"Ref": "AWS::Partition"},
+                        "Suffix": {"Ref": "AWS::URLSuffix"}
+                    }
+                }
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["Partition"],
+            Value::String("aws".to_string())
+        );
+        assert_eq!(
+            parsed.resources[0].properties["Suffix"],
+            Value::String("amazonaws.com".to_string())
         );
     }
 
