@@ -61,6 +61,17 @@ pub struct OrganizationState {
     /// delegated administrators for that service.
     #[serde(default)]
     pub delegated_administrators: BTreeMap<String, BTreeMap<String, DelegatedAdministrator>>,
+    /// Policy types currently `ENABLED` for the org's root. SCP is
+    /// auto-enabled at bootstrap; everything else flips through
+    /// EnablePolicyType / DisablePolicyType.
+    #[serde(default = "default_enabled_policy_types")]
+    pub enabled_policy_types: HashSet<String>,
+}
+
+fn default_enabled_policy_types() -> HashSet<String> {
+    let mut s = HashSet::new();
+    s.insert(POLICY_TYPE_SCP.to_string());
+    s
 }
 
 impl OrganizationState {
@@ -142,7 +153,54 @@ impl OrganizationState {
             handshakes: BTreeMap::new(),
             trusted_services: HashSet::new(),
             delegated_administrators: BTreeMap::new(),
+            enabled_policy_types: default_enabled_policy_types(),
         }
+    }
+
+    /// Promote a `CONSOLIDATED_BILLING` org to `ALL`. Idempotent.
+    /// Real AWS Organizations sends an invitation to every member to
+    /// confirm the upgrade; we shortcut to immediate success.
+    pub fn enable_all_features(&mut self) {
+        self.feature_set = FEATURE_SET_ALL.to_string();
+    }
+
+    /// Mark `policy_type` as enabled on the root.
+    pub fn enable_policy_type(&mut self, policy_type: &str) {
+        self.enabled_policy_types.insert(policy_type.to_string());
+    }
+
+    /// Mark `policy_type` as disabled on the root. Refuses to drop
+    /// SCP — real Organizations doesn't allow it once an org exists.
+    pub fn disable_policy_type(&mut self, policy_type: &str) -> Result<(), OrgError> {
+        if policy_type == POLICY_TYPE_SCP {
+            return Err(OrgError::PolicyTypeNotSupported(
+                "SCP cannot be disabled".to_string(),
+            ));
+        }
+        self.enabled_policy_types.remove(policy_type);
+        Ok(())
+    }
+
+    /// List policy types in stable alphabetical order, with each
+    /// type's enabled state.
+    pub fn list_policy_type_statuses(&self) -> Vec<(String, String)> {
+        let known = [
+            POLICY_TYPE_SCP,
+            "TAG_POLICY",
+            "BACKUP_POLICY",
+            "AISERVICES_OPT_OUT_POLICY",
+            "RESOURCE_CONTROL_POLICY",
+        ];
+        let mut out = Vec::new();
+        for t in known {
+            let status = if self.enabled_policy_types.contains(t) {
+                "ENABLED"
+            } else {
+                "DISABLED"
+            };
+            out.push((t.to_string(), status.to_string()));
+        }
+        out
     }
 
     /// Allocate the next pseudo-random 12-digit account id that's not
@@ -1382,6 +1440,53 @@ mod tests {
         assert!(org
             .list_delegated_services_for_account("222222222222")
             .is_empty());
+    }
+
+    #[test]
+    fn enable_all_features_promotes_feature_set() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.feature_set = FEATURE_SET_CONSOLIDATED_BILLING.to_string();
+        org.enable_all_features();
+        assert_eq!(org.feature_set, FEATURE_SET_ALL);
+    }
+
+    #[test]
+    fn enable_policy_type_idempotent() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.enable_policy_type("TAG_POLICY");
+        org.enable_policy_type("TAG_POLICY");
+        let statuses = org.list_policy_type_statuses();
+        let tag = statuses.iter().find(|(t, _)| t == "TAG_POLICY").unwrap();
+        assert_eq!(tag.1, "ENABLED");
+    }
+
+    #[test]
+    fn disable_policy_type_drops_to_disabled() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.enable_policy_type("TAG_POLICY");
+        org.disable_policy_type("TAG_POLICY").unwrap();
+        let statuses = org.list_policy_type_statuses();
+        let tag = statuses.iter().find(|(t, _)| t == "TAG_POLICY").unwrap();
+        assert_eq!(tag.1, "DISABLED");
+    }
+
+    #[test]
+    fn disable_policy_type_refuses_scp() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        let err = org.disable_policy_type(POLICY_TYPE_SCP).unwrap_err();
+        assert!(matches!(err, OrgError::PolicyTypeNotSupported(_)));
+    }
+
+    #[test]
+    fn list_policy_type_statuses_includes_all_known_types() {
+        let org = OrganizationState::bootstrap("111111111111");
+        let statuses = org.list_policy_type_statuses();
+        let types: Vec<_> = statuses.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(types.contains(&"SERVICE_CONTROL_POLICY"));
+        assert!(types.contains(&"TAG_POLICY"));
+        assert!(types.contains(&"BACKUP_POLICY"));
+        assert!(types.contains(&"AISERVICES_OPT_OUT_POLICY"));
+        assert!(types.contains(&"RESOURCE_CONTROL_POLICY"));
     }
 
     #[test]

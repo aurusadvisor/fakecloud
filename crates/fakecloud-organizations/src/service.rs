@@ -57,6 +57,9 @@ pub static ORGANIZATIONS_ACTIONS: &[&str] = &[
     "DeregisterDelegatedAdministrator",
     "ListDelegatedAdministrators",
     "ListDelegatedServicesForAccount",
+    "EnableAllFeatures",
+    "EnablePolicyType",
+    "DisablePolicyType",
 ];
 
 pub struct OrganizationsService {
@@ -159,13 +162,17 @@ impl OrganizationsService {
     fn list_roots(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let guard = self.state.read();
         let org = self.require_member(&guard, &req.account_id)?;
+        let policy_types: Vec<Value> = org
+            .list_policy_type_statuses()
+            .into_iter()
+            .filter(|(_, status)| status == "ENABLED")
+            .map(|(t, status)| json!({"Type": t, "Status": status}))
+            .collect();
         let root = json!({
             "Id": org.root_id,
             "Arn": org.root_arn,
             "Name": org.root_name,
-            "PolicyTypes": [
-                {"Type": "SERVICE_CONTROL_POLICY", "Status": "ENABLED"}
-            ],
+            "PolicyTypes": policy_types,
         });
         Ok(AwsResponse::ok_json(json!({ "Roots": [root] })))
     }
@@ -864,6 +871,74 @@ impl OrganizationsService {
             json!({ "DelegatedServices": entries }),
         ))
     }
+
+    fn enable_all_features(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.enable_all_features();
+        // AWS returns a Handshake here; we synthesize a minimal accepted
+        // shape so SDKs can deserialize the response.
+        let handshake = json!({
+            "Id": "h-enableallfeatures",
+            "Arn": format!(
+                "arn:aws:organizations::{}:handshake/{}/enable-all-features/h-enableallfeatures",
+                org.management_account_id, org.org_id
+            ),
+            "Action": "ENABLE_ALL_FEATURES",
+            "State": "ACCEPTED",
+            "Parties": [],
+            "Resources": [],
+        });
+        Ok(AwsResponse::ok_json(json!({ "Handshake": handshake })))
+    }
+
+    fn enable_policy_type(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let policy_type = required_str(&body, "PolicyType")?.to_string();
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.enable_policy_type(&policy_type);
+        let policy_types: Vec<Value> = org
+            .list_policy_type_statuses()
+            .into_iter()
+            .filter(|(_, status)| status == "ENABLED")
+            .map(|(t, status)| json!({"Type": t, "Status": status}))
+            .collect();
+        Ok(AwsResponse::ok_json(json!({
+            "Root": {
+                "Id": org.root_id,
+                "Arn": org.root_arn,
+                "Name": org.root_name,
+                "PolicyTypes": policy_types,
+            }
+        })))
+    }
+
+    fn disable_policy_type(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let policy_type = required_str(&body, "PolicyType")?.to_string();
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.disable_policy_type(&policy_type)
+            .map_err(org_error_to_aws)?;
+        let policy_types: Vec<Value> = org
+            .list_policy_type_statuses()
+            .into_iter()
+            .filter(|(_, status)| status == "ENABLED")
+            .map(|(t, status)| json!({"Type": t, "Status": status}))
+            .collect();
+        Ok(AwsResponse::ok_json(json!({
+            "Root": {
+                "Id": org.root_id,
+                "Arn": org.root_arn,
+                "Name": org.root_name,
+                "PolicyTypes": policy_types,
+            }
+        })))
+    }
 }
 
 #[async_trait]
@@ -918,6 +993,9 @@ impl AwsService for OrganizationsService {
             "DeregisterDelegatedAdministrator" => self.deregister_delegated_administrator(&req),
             "ListDelegatedAdministrators" => self.list_delegated_administrators(&req),
             "ListDelegatedServicesForAccount" => self.list_delegated_services_for_account(&req),
+            "EnableAllFeatures" => self.enable_all_features(&req),
+            "EnablePolicyType" => self.enable_policy_type(&req),
+            "DisablePolicyType" => self.disable_policy_type(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "organizations",
                 &req.action,
