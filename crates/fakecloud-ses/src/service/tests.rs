@@ -382,6 +382,7 @@ async fn test_send_email_template_content() {
 #[tokio::test]
 async fn test_send_email_template_renders_subject_and_body() {
     let state = make_state();
+    seed_identity(&state, "sender@example.com");
     {
         use crate::state::EmailTemplate;
         let mut accounts = state.write();
