@@ -619,11 +619,12 @@ fn resource_policy_lifecycle() {
     let req = make_request("DeleteResourcePolicy", json!({ "ResourceArn": table_arn }));
     svc.delete_resource_policy(&req).unwrap();
 
-    // Get should return null now
+    // Get should now return PolicyNotFoundException, matching real DynamoDB.
     let req = make_request("GetResourcePolicy", json!({ "ResourceArn": table_arn }));
-    let resp = svc.get_resource_policy(&req).unwrap();
-    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert!(body["Policy"].is_null());
+    match svc.get_resource_policy(&req) {
+        Err(e) => assert_eq!(e.code(), "PolicyNotFoundException"),
+        Ok(_) => panic!("GetResourcePolicy after delete must error"),
+    }
 }
 
 #[test]

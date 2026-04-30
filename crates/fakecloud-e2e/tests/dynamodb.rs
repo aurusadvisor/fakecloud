@@ -1146,14 +1146,14 @@ async fn dynamodb_resource_policy_lifecycle() {
         .await
         .unwrap();
 
-    // Get should return no policy
-    let resp = client
+    // Get should now error with PolicyNotFoundException, matching real DynamoDB.
+    let err = client
         .get_resource_policy()
         .resource_arn(&table_arn)
         .send()
         .await
-        .unwrap();
-    assert!(resp.policy().is_none());
+        .expect_err("GetResourcePolicy after delete must error");
+    assert!(format!("{err:?}").contains("PolicyNotFound"));
 }
 
 #[tokio::test]
