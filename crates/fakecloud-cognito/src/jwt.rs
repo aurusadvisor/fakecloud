@@ -17,6 +17,7 @@ use serde_json::Value;
 
 /// Generate a fresh RSA-2048 keypair, returning the PKCS#8 PEM-encoded
 /// private key (which embeds the public half).
+#[allow(dead_code)]
 pub(crate) fn generate_pool_signing_key() -> String {
     let mut rng = rand::thread_rng();
     // 2048 bits matches what Cognito issues today; the PKCS#8 encoding
