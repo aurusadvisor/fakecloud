@@ -748,6 +748,72 @@ async fn iam_list_attached_role_policies_includes_aws_managed() {
     );
 }
 
+#[tokio::test]
+async fn iam_list_attached_user_policies_includes_aws_managed() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("managed-user")
+        .send()
+        .await
+        .unwrap();
+
+    let managed_arn = "arn:aws:iam::aws:policy/AdministratorAccess";
+    client
+        .attach_user_policy()
+        .user_name("managed-user")
+        .policy_arn(managed_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let attached = client
+        .list_attached_user_policies()
+        .user_name("managed-user")
+        .send()
+        .await
+        .unwrap();
+    let policies = attached.attached_policies();
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0].policy_arn(), Some(managed_arn));
+    assert_eq!(policies[0].policy_name(), Some("AdministratorAccess"));
+}
+
+#[tokio::test]
+async fn iam_list_attached_group_policies_includes_aws_managed() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_group()
+        .group_name("managed-grp")
+        .send()
+        .await
+        .unwrap();
+
+    let managed_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess";
+    client
+        .attach_group_policy()
+        .group_name("managed-grp")
+        .policy_arn(managed_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let attached = client
+        .list_attached_group_policies()
+        .group_name("managed-grp")
+        .send()
+        .await
+        .unwrap();
+    let policies = attached.attached_policies();
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0].policy_arn(), Some(managed_arn));
+    assert_eq!(policies[0].policy_name(), Some("ReadOnlyAccess"));
+}
+
 // ---- IAM Inline Policy Tests ----
 
 #[tokio::test]

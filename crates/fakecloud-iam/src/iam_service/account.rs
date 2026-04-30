@@ -6,7 +6,7 @@ use fakecloud_core::validation::*;
 
 use crate::state::{AccountPasswordPolicy, IamState, VirtualMfaDevice};
 
-use super::{empty_response, parse_tags, tags_xml, url_encode, IamService};
+use super::{attached_policy_name, empty_response, parse_tags, tags_xml, url_encode, IamService};
 use fakecloud_core::query::required_param;
 
 use fakecloud_aws::xml::xml_escape;
@@ -43,13 +43,11 @@ fn build_user_details_xml(state: &IamState) -> String {
                 .get(&u.user_name)
                 .map(|arns| {
                     arns.iter()
-                        .filter_map(|arn| {
-                            state.policies.get(arn).map(|p| {
-                                format!(
-                                    "          <member>\n            <PolicyName>{}</PolicyName>\n            <PolicyArn>{}</PolicyArn>\n          </member>",
-                                    p.policy_name, p.arn
-                                )
-                            })
+                        .map(|arn| {
+                            let policy_name = attached_policy_name(state, arn);
+                            format!(
+                                "          <member>\n            <PolicyName>{policy_name}</PolicyName>\n            <PolicyArn>{arn}</PolicyArn>\n          </member>"
+                            )
                         })
                         .collect::<Vec<_>>()
                         .join("\n")
@@ -106,13 +104,11 @@ fn build_role_details_xml(state: &IamState) -> String {
                 .get(&r.role_name)
                 .map(|arns| {
                     arns.iter()
-                        .filter_map(|arn| {
-                            state.policies.get(arn).map(|p| {
-                                format!(
-                                    "          <member>\n            <PolicyName>{}</PolicyName>\n            <PolicyArn>{}</PolicyArn>\n          </member>",
-                                    p.policy_name, p.arn
-                                )
-                            })
+                        .map(|arn| {
+                            let policy_name = attached_policy_name(state, arn);
+                            format!(
+                                "          <member>\n            <PolicyName>{policy_name}</PolicyName>\n            <PolicyArn>{arn}</PolicyArn>\n          </member>"
+                            )
                         })
                         .collect::<Vec<_>>()
                         .join("\n")
@@ -168,13 +164,11 @@ fn build_group_details_xml(state: &IamState) -> String {
             let attached: String = g
                 .attached_policies
                 .iter()
-                .filter_map(|arn| {
-                    state.policies.get(arn).map(|p| {
-                        format!(
-                            "          <member>\n            <PolicyName>{}</PolicyName>\n            <PolicyArn>{}</PolicyArn>\n          </member>",
-                            p.policy_name, p.arn
-                        )
-                    })
+                .map(|arn| {
+                    let policy_name = attached_policy_name(state, arn);
+                    format!(
+                        "          <member>\n            <PolicyName>{policy_name}</PolicyName>\n            <PolicyArn>{arn}</PolicyArn>\n          </member>"
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join("\n");

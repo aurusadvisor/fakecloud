@@ -634,13 +634,7 @@ impl IamService {
         let members: String = policy_arns
             .iter()
             .map(|arn| {
-                let policy_name = state
-                    .policies
-                    .get(arn)
-                    .map(|p| p.policy_name.clone())
-                    .unwrap_or_else(|| {
-                        arn.rsplit('/').next().unwrap_or(arn.as_str()).to_string()
-                    });
+                let policy_name = super::attached_policy_name(state, arn);
                 format!(
                     "      <member>\n        <PolicyName>{policy_name}</PolicyName>\n        <PolicyArn>{arn}</PolicyArn>\n      </member>"
                 )
