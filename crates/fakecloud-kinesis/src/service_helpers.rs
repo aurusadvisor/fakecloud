@@ -256,6 +256,29 @@ pub(crate) fn shard_iterator_start_index(
             let sequence_number = require_starting_sequence_number(body)?;
             Ok(find_record_index_by_sequence_number(shard, sequence_number)? + 1)
         }
+        "AT_TIMESTAMP" => {
+            // AWS encodes Timestamp as epoch seconds (float, with optional
+            // fractional millis). Find the first record whose
+            // approximate_arrival_timestamp is at or after that mark; fall
+            // through to past-the-end when no record qualifies, so the
+            // following GetRecords returns an empty page rather than 400.
+            let ts_value = body["Timestamp"]
+                .as_f64()
+                .ok_or_else(|| invalid_argument("Timestamp is required"))?;
+            if !ts_value.is_finite() || ts_value < 0.0 {
+                return Err(invalid_argument("Timestamp must be a non-negative epoch"));
+            }
+            let secs = ts_value.trunc() as i64;
+            let nanos = ((ts_value - ts_value.trunc()) * 1_000_000_000.0) as u32;
+            let target = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)
+                .ok_or_else(|| invalid_argument("Timestamp is invalid"))?;
+            let idx = shard
+                .records
+                .iter()
+                .position(|r| r.approximate_arrival_timestamp >= target)
+                .unwrap_or(shard.records.len());
+            Ok(idx)
+        }
         _ => Err(invalid_argument("Unsupported ShardIteratorType")),
     }
 }

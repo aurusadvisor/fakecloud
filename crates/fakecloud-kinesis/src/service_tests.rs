@@ -168,6 +168,44 @@ fn latest_iterator_starts_after_existing_records() {
     assert_eq!(index, 2);
 }
 
+#[test]
+fn at_timestamp_iterator_finds_first_record_at_or_after() {
+    let mut shard = test_shard();
+    append_record(&mut shard, "key", b"first".to_vec());
+    append_record(&mut shard, "key", b"second".to_vec());
+
+    // Stamp the second record well after the first so we can target it.
+    let early = chrono::Utc::now() - chrono::Duration::hours(2);
+    let later = chrono::Utc::now() - chrono::Duration::minutes(30);
+    shard.records[0].approximate_arrival_timestamp = early;
+    shard.records[1].approximate_arrival_timestamp = later;
+
+    // Pick a timestamp between the two — must land on record index 1.
+    let between = (early + chrono::Duration::hours(1)).timestamp() as f64;
+    let index =
+        shard_iterator_start_index(&shard, "AT_TIMESTAMP", &json!({"Timestamp": between})).unwrap();
+    assert_eq!(index, 1);
+
+    // Timestamp before everything — index 0.
+    let before = (early - chrono::Duration::minutes(1)).timestamp() as f64;
+    let index =
+        shard_iterator_start_index(&shard, "AT_TIMESTAMP", &json!({"Timestamp": before})).unwrap();
+    assert_eq!(index, 0);
+
+    // Timestamp after everything — points past the end (empty page).
+    let after = (later + chrono::Duration::hours(1)).timestamp() as f64;
+    let index =
+        shard_iterator_start_index(&shard, "AT_TIMESTAMP", &json!({"Timestamp": after})).unwrap();
+    assert_eq!(index, 2);
+}
+
+#[test]
+fn at_timestamp_iterator_rejects_missing_field() {
+    let shard = test_shard();
+    let err = shard_iterator_start_index(&shard, "AT_TIMESTAMP", &json!({})).unwrap_err();
+    assert_eq!(err.code(), "InvalidArgumentException");
+}
+
 // ── Helpers for the expanded test suite ─────────────────────────
 
 fn make_service() -> (KinesisService, SharedKinesisState) {
