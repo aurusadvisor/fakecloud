@@ -327,6 +327,13 @@ async fn test_send_email_v1() {
     let server = TestServer::start().await;
     let client = server.ses_client().await;
 
+    client
+        .verify_email_identity()
+        .email_address("sender@example.com")
+        .send()
+        .await
+        .expect("verify identity");
+
     let resp = client
         .send_email()
         .source("sender@example.com")
@@ -502,6 +509,13 @@ async fn test_template_lifecycle_v1() {
 async fn test_send_templated_email_v1() {
     let server = TestServer::start().await;
     let client = server.ses_client().await;
+
+    client
+        .verify_email_identity()
+        .email_address("sender@example.com")
+        .send()
+        .await
+        .expect("verify identity");
 
     // Create template first
     client
