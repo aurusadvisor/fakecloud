@@ -670,6 +670,21 @@ impl S3Service {
             ));
         }
 
+        // BucketOwnerEnforced disables object ACLs at write-time too:
+        // any x-amz-acl or x-amz-grant-* header rejects with
+        // AccessControlListNotSupported. Plain PutObject without ACL
+        // headers continues to work — only attempts to set a grant
+        // are rejected.
+        if (acl_header.is_some() || has_grant_headers)
+            && self.bucket_owner_enforced(account_id, bucket)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AccessControlListNotSupported",
+                "The bucket does not allow ACLs",
+            ));
+        }
+
         // Parse tags from header
         let tags = if let Some(tagging) = &tagging_header {
             let parsed = parse_url_encoded_tags(tagging);

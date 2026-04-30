@@ -977,6 +977,18 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        // BucketOwnerEnforced disables ACLs on this bucket entirely;
+        // any ACL-mutating call rejects with
+        // `AccessControlListNotSupported` so the caller can't write a
+        // grant the bucket would silently ignore.
+        if self.bucket_owner_enforced(account_id, bucket) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AccessControlListNotSupported",
+                "The bucket does not allow ACLs",
+            ));
+        }
+
         let pab = self.pab_flags(account_id, bucket);
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
@@ -1172,6 +1184,26 @@ impl S3Service {
             .delete_bucket_subresource(bucket, BucketSubresource::Replication)
             .map_err(super::persistence_error)?;
         Ok(empty_response(StatusCode::NO_CONTENT))
+    }
+
+    /// Returns true when the bucket has
+    /// `ObjectOwnership=BucketOwnerEnforced` set in its
+    /// `OwnershipControls` configuration. Under that mode AWS
+    /// disables ACLs entirely — every ACL-mutating call must reject
+    /// with `AccessControlListNotSupported` so callers don't
+    /// silently no-op against a bucket that ignores their grants.
+    pub(super) fn bucket_owner_enforced(&self, account_id: &str, bucket: &str) -> bool {
+        let accts = self.state.read();
+        let Some(state) = accts.get(account_id) else {
+            return false;
+        };
+        let Some(b) = state.buckets.get(bucket) else {
+            return false;
+        };
+        b.ownership_controls
+            .as_deref()
+            .map(|xml| xml.contains("BucketOwnerEnforced"))
+            .unwrap_or(false)
     }
 
     pub(super) fn put_bucket_ownership_controls(

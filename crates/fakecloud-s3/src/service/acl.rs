@@ -45,6 +45,14 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        if self.bucket_owner_enforced(account_id, bucket) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AccessControlListNotSupported",
+                "The bucket does not allow ACLs",
+            ));
+        }
+
         // Snapshot PAB before taking the write lock — `pab_flags`
         // reads its own lock and would deadlock under the same
         // upgrade.
