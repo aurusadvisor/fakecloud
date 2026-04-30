@@ -136,7 +136,11 @@ impl SsmService {
             document_name: input.document_name.clone(),
             instance_ids: effective_instance_ids.clone(),
             parameters: input.parameters.clone(),
-            status: "Success".to_string(),
+            // Real SSM returns `Pending` on submit; transitions to
+            // `InProgress` and then `Success` (or `Failed`) as the
+            // agent reports back. fakecloud auto-advances the state
+            // on each read so callers see realistic lifecycle.
+            status: "Pending".to_string(),
             requested_date_time: now,
             comment: input.comment.clone(),
             output_s3_bucket_name: input.output_s3_bucket.clone(),
@@ -161,8 +165,8 @@ impl SsmService {
             "InstanceIds": effective_instance_ids,
             "Targets": input.targets,
             "Parameters": input.parameters,
-            "Status": "Success",
-            "StatusDetails": "Success",
+            "Status": "Pending",
+            "StatusDetails": "Pending",
             "RequestedDateTime": now.timestamp_millis() as f64 / 1000.0,
             "ExpiresAfter": expires.timestamp_millis() as f64 / 1000.0,
             "MaxConcurrency": input.max_concurrency.clone().unwrap_or_default(),
@@ -274,6 +278,26 @@ impl SsmService {
         let plugin_name = body["PluginName"].as_str();
         validate_optional_string_length("PluginName", plugin_name, 4, 500)?;
 
+        // Auto-advance lifecycle so callers polling Get see Pending
+        // -> InProgress -> Success across successive reads. This runs
+        // under the write lock to avoid clobbering admin-set
+        // `Failed` / `Cancelled` statuses.
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            if let Some(c) = state
+                .commands
+                .iter_mut()
+                .find(|c| c.command_id == command_id)
+            {
+                c.status = match c.status.as_str() {
+                    "Pending" => "InProgress".to_string(),
+                    "InProgress" => "Success".to_string(),
+                    other => other.to_string(),
+                };
+            }
+        }
+
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -310,13 +334,18 @@ impl SsmService {
             }
         }
 
+        let response_code = match cmd.status.as_str() {
+            "Success" => 0,
+            "Failed" => 1,
+            _ => -1,
+        };
         Ok(AwsResponse::ok_json(json!({
             "CommandId": cmd.command_id,
             "InstanceId": instance_id,
             "DocumentName": cmd.document_name,
-            "Status": "Success",
-            "StatusDetails": "Success",
-            "ResponseCode": 0,
+            "Status": cmd.status,
+            "StatusDetails": cmd.status,
+            "ResponseCode": response_code,
             "StandardOutputContent": "",
             "StandardOutputUrl": "",
             "StandardErrorContent": "",
@@ -353,8 +382,8 @@ impl SsmService {
                         "CommandId": c.command_id,
                         "InstanceId": iid,
                         "DocumentName": c.document_name,
-                        "Status": "Success",
-                        "StatusDetails": "Success",
+                        "Status": c.status,
+                        "StatusDetails": c.status,
                         "RequestedDateTime": c.requested_date_time.timestamp_millis() as f64 / 1000.0,
                         "Comment": c.comment,
                     })
