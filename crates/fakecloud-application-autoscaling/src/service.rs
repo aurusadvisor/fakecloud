@@ -119,9 +119,11 @@ impl ApplicationAutoScalingService {
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         let now = Utc::now();
-        let arn = if let Some(existing) = account.scalable_targets.get_mut(&key) {
-            // Validate the merged bounds before mutating so a bad re-register
-            // can't leave the target with min > max (real AWS rejects this).
+        let (arn, prev_min, prev_max, was_existing) = if let Some(existing) =
+            account.scalable_targets.get_mut(&key)
+        {
+            let prev_min = existing.min_capacity;
+            let prev_max = existing.max_capacity;
             let new_min = min_capacity.unwrap_or(existing.min_capacity);
             let new_max = max_capacity.unwrap_or(existing.max_capacity);
             if new_min > new_max {
@@ -135,7 +137,7 @@ impl ApplicationAutoScalingService {
             if let Some(sus) = suspended_state {
                 existing.suspended_state = Some(sus);
             }
-            existing.arn.clone()
+            (existing.arn.clone(), Some(prev_min), Some(prev_max), true)
         } else {
             let min = min_capacity
                 .ok_or_else(|| invalid_param("MinCapacity is required for new scalable targets"))?;
@@ -161,8 +163,43 @@ impl ApplicationAutoScalingService {
                 predicted_capacity: None,
             };
             account.scalable_targets.insert(key, target);
-            arn
+            (arn, None, None, false)
         };
+
+        // Real Application Auto Scaling appends a ScalingActivity row
+        // whenever bounds change so DescribeScalingActivities surfaces a
+        // history. Synthesize matching rows here for both the initial
+        // register and any subsequent bound update.
+        let cur_min = min_capacity.or(prev_min).unwrap_or(0);
+        let cur_max = max_capacity.or(prev_max).unwrap_or(0);
+        let bounds_changed =
+            !was_existing || prev_min != Some(cur_min) || prev_max != Some(cur_max);
+        if bounds_changed {
+            let description = if was_existing {
+                format!(
+                    "Updated min capacity to {cur_min} and max capacity to {cur_max} for {resource_id}"
+                )
+            } else {
+                format!(
+                    "Setting min capacity to {cur_min} and max capacity to {cur_max} for {resource_id}"
+                )
+            };
+            let activity = ScalingActivity {
+                activity_id: synth_activity_id(),
+                service_namespace: service_namespace.clone(),
+                resource_id: resource_id.clone(),
+                scalable_dimension: scalable_dimension.clone(),
+                description,
+                cause: "User initiated capacity change via RegisterScalableTarget".to_string(),
+                start_time: now,
+                end_time: Some(now),
+                status_code: "Successful".to_string(),
+                status_message: Some("Successfully set scaling target.".to_string()),
+                details: None,
+                not_scaled_reasons: Vec::new(),
+            };
+            account.scaling_activities.push(activity);
+        }
         Ok(AwsResponse::ok_json(json!({
             "ScalableTargetARN": arn,
         })))
@@ -821,6 +858,10 @@ fn resource_exists(account: &AccountState, arn: &str) -> bool {
         || account.scaling_policies.values().any(|p| p.arn == arn)
 }
 
+fn synth_activity_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
 fn synth_scalable_target_arn(account_id: &str, region: &str) -> String {
     let region = if region.is_empty() {
         "us-east-1"
@@ -1085,4 +1126,124 @@ fn not_scaled_reason_json(r: &NotScaledReason) -> Value {
             .insert("CurrentCapacity".to_string(), json!(v));
     }
     obj
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::Method;
+    use std::collections::HashMap;
+
+    fn make_req(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "application-autoscaling".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "rid".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    #[test]
+    fn register_scalable_target_emits_scaling_activity() {
+        let svc = ApplicationAutoScalingService::default();
+        let req = make_req(
+            "RegisterScalableTarget",
+            json!({
+                "ServiceNamespace": "ecs",
+                "ResourceId": "service/cluster1/svc1",
+                "ScalableDimension": "ecs:service:DesiredCount",
+                "MinCapacity": 1,
+                "MaxCapacity": 5,
+            }),
+        );
+        svc.register_scalable_target(&req).unwrap();
+        let state = svc.state.read();
+        let activities = &state
+            .accounts
+            .get("123456789012")
+            .unwrap()
+            .scaling_activities;
+        assert_eq!(
+            activities.len(),
+            1,
+            "expected 1 activity, got {activities:?}"
+        );
+        let a = &activities[0];
+        assert_eq!(a.service_namespace, "ecs");
+        assert_eq!(a.status_code, "Successful");
+        assert!(a.description.contains("min capacity to 1"));
+        assert!(a.description.contains("max capacity to 5"));
+    }
+
+    #[test]
+    fn updating_bounds_appends_another_activity() {
+        let svc = ApplicationAutoScalingService::default();
+        let initial = make_req(
+            "RegisterScalableTarget",
+            json!({
+                "ServiceNamespace": "ecs",
+                "ResourceId": "service/cluster1/svc1",
+                "ScalableDimension": "ecs:service:DesiredCount",
+                "MinCapacity": 1,
+                "MaxCapacity": 5,
+            }),
+        );
+        svc.register_scalable_target(&initial).unwrap();
+        let update = make_req(
+            "RegisterScalableTarget",
+            json!({
+                "ServiceNamespace": "ecs",
+                "ResourceId": "service/cluster1/svc1",
+                "ScalableDimension": "ecs:service:DesiredCount",
+                "MinCapacity": 2,
+                "MaxCapacity": 10,
+            }),
+        );
+        svc.register_scalable_target(&update).unwrap();
+        let state = svc.state.read();
+        let activities = &state
+            .accounts
+            .get("123456789012")
+            .unwrap()
+            .scaling_activities;
+        assert_eq!(activities.len(), 2);
+        assert!(activities[1].description.contains("Updated"));
+    }
+
+    #[test]
+    fn re_register_with_same_bounds_does_not_log_activity() {
+        let svc = ApplicationAutoScalingService::default();
+        let req = make_req(
+            "RegisterScalableTarget",
+            json!({
+                "ServiceNamespace": "ecs",
+                "ResourceId": "service/cluster1/svc1",
+                "ScalableDimension": "ecs:service:DesiredCount",
+                "MinCapacity": 1,
+                "MaxCapacity": 5,
+            }),
+        );
+        svc.register_scalable_target(&req).unwrap();
+        // Same bounds again -> no new activity row.
+        svc.register_scalable_target(&req).unwrap();
+        let state = svc.state.read();
+        let activities = &state
+            .accounts
+            .get("123456789012")
+            .unwrap()
+            .scaling_activities;
+        assert_eq!(activities.len(), 1);
+    }
 }

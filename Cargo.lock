@@ -2445,6 +2445,7 @@ name = "fakecloud-application-autoscaling"
 version = "0.13.3"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
