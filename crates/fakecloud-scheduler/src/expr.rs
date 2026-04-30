@@ -138,14 +138,53 @@ pub fn is_due(expr: &Expr, last_fired: Option<DateTime<Utc>>, now: DateTime<Utc>
 /// per-minute dedupe has to live in the ticker because we need to
 /// track fires across multiple calls without mutating the cron state.
 pub fn matches_cron(c: &CronExpr, now: DateTime<Utc>) -> bool {
+    matches_cron_fields(
+        c,
+        now.minute(),
+        now.hour(),
+        now.day(),
+        now.month(),
+        now.weekday().num_days_from_sunday(),
+    )
+}
+
+/// `matches_cron` evaluated against the local time in IANA timezone `tz`.
+/// AWS Scheduler interprets cron in `ScheduleExpressionTimezone` rather
+/// than UTC; unknown names fall back to UTC so we never silently lose a
+/// schedule (the service layer rejects bad names at create time).
+pub fn matches_cron_in_tz(c: &CronExpr, now: DateTime<Utc>, tz: &str) -> bool {
+    match tz.parse::<chrono_tz::Tz>() {
+        Ok(tz) => {
+            let local = now.with_timezone(&tz);
+            matches_cron_fields(
+                c,
+                local.minute(),
+                local.hour(),
+                local.day(),
+                local.month(),
+                local.weekday().num_days_from_sunday(),
+            )
+        }
+        Err(_) => matches_cron(c, now),
+    }
+}
+
+fn matches_cron_fields(
+    c: &CronExpr,
+    minute: u32,
+    hour: u32,
+    day: u32,
+    month: u32,
+    day_of_week: u32,
+) -> bool {
     let match_field = |f: &CronField, actual: u32| -> bool {
         matches!(f, CronField::Any) || matches!(f, CronField::Value(v) if *v == actual)
     };
-    match_field(&c.minute, now.minute())
-        && match_field(&c.hour, now.hour())
-        && match_field(&c.day_of_month, now.day())
-        && match_field(&c.month, now.month())
-        && match_field(&c.day_of_week, now.weekday().num_days_from_sunday())
+    match_field(&c.minute, minute)
+        && match_field(&c.hour, hour)
+        && match_field(&c.day_of_month, day)
+        && match_field(&c.month, month)
+        && match_field(&c.day_of_week, day_of_week)
 }
 
 #[cfg(test)]
@@ -207,6 +246,32 @@ mod tests {
         assert!(parse("every day at noon").is_none());
         assert!(parse("").is_none());
         assert!(parse("at").is_none());
+    }
+
+    #[test]
+    fn matches_cron_in_tz_uses_local_hour() {
+        // 12:00 UTC == 04:00 America/Los_Angeles in winter.
+        // A schedule of "cron(0 4 * * ? *)" in LA tz must match,
+        // but the same schedule against the UTC-only matcher must miss.
+        let now = Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
+        let cron = parse("cron(0 4 * * ? *)").unwrap();
+        let cron = match cron {
+            Expr::Cron(c) => c,
+            _ => panic!("expected Cron"),
+        };
+        assert!(matches_cron_in_tz(&cron, now, "America/Los_Angeles"));
+        assert!(!matches_cron(&cron, now));
+    }
+
+    #[test]
+    fn matches_cron_in_tz_falls_back_to_utc_for_unknown_zone() {
+        // Hour 12 UTC matches "cron(0 12 * * ? *)" if tz is unparseable.
+        let now = Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
+        let cron = match parse("cron(0 12 * * ? *)").unwrap() {
+            Expr::Cron(c) => c,
+            _ => panic!("expected Cron"),
+        };
+        assert!(matches_cron_in_tz(&cron, now, "Not/A_Real_Zone"));
     }
 
     #[test]
