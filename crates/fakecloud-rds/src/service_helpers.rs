@@ -621,6 +621,11 @@ pub(crate) fn tag_xml(tag: &RdsTag) -> String {
 
 /// Free-standing version of `emit_event` so background tasks (which
 /// don't have a `&self`) can publish RDS events through the same path.
+///
+/// When `state` and `account_id` are provided the event is also
+/// recorded in the per-account events ring so DescribeEvents can serve
+/// it. Background tasks that already cleared their account state pass
+/// `None` for those parameters.
 pub(crate) fn emit_event_static(
     delivery_bus: Option<&Arc<DeliveryBus>>,
     source_type: RdsSourceType,
@@ -630,6 +635,45 @@ pub(crate) fn emit_event_static(
     event_categories: &[&str],
     message: &str,
 ) {
+    emit_event_static_with_state(
+        delivery_bus,
+        None,
+        None,
+        source_type,
+        source_identifier,
+        source_arn,
+        event_id,
+        event_categories,
+        message,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_event_static_with_state(
+    delivery_bus: Option<&Arc<DeliveryBus>>,
+    state: Option<&crate::state::SharedRdsState>,
+    account_id: Option<&str>,
+    source_type: RdsSourceType,
+    source_identifier: &str,
+    source_arn: &str,
+    event_id: &str,
+    event_categories: &[&str],
+    message: &str,
+) {
+    let now = Utc::now();
+    if let (Some(state), Some(account_id)) = (state, account_id) {
+        let mut accounts = state.write();
+        let s = accounts.get_or_create(account_id);
+        s.push_event(crate::state::RdsEventRecord {
+            source_identifier: source_identifier.to_string(),
+            source_type: source_type.as_str().to_string(),
+            source_arn: source_arn.to_string(),
+            event_id: event_id.to_string(),
+            event_categories: event_categories.iter().map(|s| s.to_string()).collect(),
+            message: message.to_string(),
+            date: now,
+        });
+    }
     let Some(bus) = delivery_bus else {
         return;
     };
@@ -637,7 +681,7 @@ pub(crate) fn emit_event_static(
         "EventCategories": event_categories,
         "SourceType": source_type.as_str(),
         "SourceArn": source_arn,
-        "Date": Utc::now().to_rfc3339(),
+        "Date": now.to_rfc3339(),
         "Message": message,
         "SourceIdentifier": source_identifier,
         "EventID": event_id,

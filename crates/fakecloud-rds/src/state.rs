@@ -233,6 +233,22 @@ pub struct RdsState {
     /// without proliferating per-category fields.
     #[serde(default)]
     pub extras: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    /// In-memory ring of RDS events emitted by the service, used by
+    /// `DescribeEvents`. Capped at the most recent ~14 days of events
+    /// (matching real RDS retention) by [`Self::push_event`].
+    #[serde(default)]
+    pub events: Vec<RdsEventRecord>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RdsEventRecord {
+    pub source_identifier: String,
+    pub source_type: String,
+    pub source_arn: String,
+    pub event_id: String,
+    pub event_categories: Vec<String>,
+    pub message: String,
+    pub date: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +304,7 @@ impl RdsState {
             subnet_groups: BTreeMap::new(),
             parameter_groups: default_parameter_groups(account_id, region),
             extras: BTreeMap::new(),
+            events: Vec::new(),
         }
     }
 
@@ -298,6 +315,16 @@ impl RdsState {
         self.subnet_groups.clear();
         self.parameter_groups = default_parameter_groups(&self.account_id, &self.region);
         self.extras.clear();
+        self.events.clear();
+    }
+
+    /// Append an event row to the in-memory ring, dropping the oldest
+    /// entries beyond a 14-day window (matching real RDS retention).
+    pub fn push_event(&mut self, event: RdsEventRecord) {
+        const RETENTION_DAYS: i64 = 14;
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(RETENTION_DAYS);
+        self.events.retain(|e| e.date >= cutoff);
+        self.events.push(event);
     }
 
     pub fn db_instance_arn(&self, db_instance_identifier: &str) -> String {

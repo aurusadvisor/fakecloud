@@ -256,7 +256,9 @@ impl RdsService {
     }
 
     /// Emit an `aws.rds` EventBridge event mirroring the AWS RDS event schema.
-    /// No-op when the delivery bus isn't wired (tests, minimal configs).
+    /// Also records into the per-account events ring so DescribeEvents
+    /// can serve the row. No-op for the EventBridge side when the bus
+    /// isn't wired (tests, minimal configs).
     pub(crate) fn emit_event(
         &self,
         source_type: RdsSourceType,
@@ -266,8 +268,17 @@ impl RdsService {
         event_categories: &[&str],
         message: &str,
     ) {
-        emit_event_static(
+        // Source the account_id off the source_arn (segment 4) — that's
+        // the canonical ARN form for RDS resources.
+        let account_id = source_arn.split(':').nth(4).unwrap_or("");
+        emit_event_static_with_state(
             self.delivery_bus.as_ref(),
+            Some(&self.state),
+            if account_id.is_empty() {
+                None
+            } else {
+                Some(account_id)
+            },
             source_type,
             source_identifier,
             source_arn,
