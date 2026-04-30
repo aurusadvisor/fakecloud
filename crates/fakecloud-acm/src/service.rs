@@ -408,6 +408,12 @@ impl AcmService {
         if passphrase_b64.is_empty() {
             return Err(invalid_param("Passphrase must not be empty"));
         }
+        let passphrase_bytes = base64::engine::general_purpose::STANDARD
+            .decode(passphrase_b64)
+            .map_err(|_| invalid_param("Passphrase must be valid base64"))?;
+        if passphrase_bytes.is_empty() {
+            return Err(invalid_param("Passphrase must not decode to empty"));
+        }
         let state = self.state.read();
         let cert = state
             .accounts
@@ -434,10 +440,12 @@ impl AcmService {
             .private_key_pem
             .clone()
             .unwrap_or_else(|| placeholder_key_pem(&arn));
+        let encrypted_key_pem = encrypt_private_key_pem(&key_pem, &passphrase_bytes)
+            .map_err(|e| invalid_param(format!("failed to encrypt private key: {e}")))?;
         Ok(AwsResponse::ok_json(json!({
             "Certificate": cert_pem,
             "CertificateChain": chain_pem,
-            "PrivateKey": key_pem,
+            "PrivateKey": encrypted_key_pem,
         })))
     }
 
@@ -1134,6 +1142,105 @@ fn domain_validation_json(v: &DomainValidation) -> Value {
     out
 }
 
+/// Encrypt a PEM-encoded private key with a passphrase, producing a
+/// PEM file using the OpenSSL legacy "Proc-Type: 4,ENCRYPTED" /
+/// "DEK-Info: AES-256-CBC,<iv>" format. The result is decryptable with
+/// any tool that supports the legacy openssl encrypted-PEM format
+/// (openssl rsa -in key.pem -passin pass:..., python's
+/// cryptography.hazmat, etc).
+///
+/// Format details:
+/// - Key derivation: OpenSSL's EVP_BytesToKey (MD5) using the first 8
+///   bytes of the random IV as the salt, count=1, producing 32 bytes
+///   of key material.
+/// - Cipher: AES-256-CBC with PKCS7 padding.
+/// - Output: original PEM header preserved (RSA PRIVATE KEY or PRIVATE
+///   KEY), with Proc-Type and DEK-Info headers prepended to the body.
+fn encrypt_private_key_pem(key_pem: &str, passphrase: &[u8]) -> Result<String, String> {
+    use aes::Aes256;
+    use cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    use rand::RngCore;
+
+    type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+
+    let (header, body_b64) = parse_pem_block(key_pem)?;
+    // Real PEM bodies are base64-encoded DER, but accept raw bytes too
+    // so test fixtures with non-base64 placeholder content (eg.
+    // "fake-key-bytes-for-fakecloud-tests") still encrypt cleanly.
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(&body_b64)
+        .unwrap_or_else(|_| body_b64.into_bytes());
+
+    let mut iv = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut iv);
+
+    let salt: [u8; 8] = iv[..8].try_into().unwrap();
+    let key = evp_bytes_to_key_md5(passphrase, &salt, 32);
+
+    let cipher = Aes256CbcEnc::new(key.as_slice().into(), &iv.into());
+    let mut buf = vec![0u8; der.len() + 16];
+    buf[..der.len()].copy_from_slice(&der);
+    let ciphertext = cipher
+        .encrypt_padded_mut::<Pkcs7>(&mut buf, der.len())
+        .map_err(|e| format!("encryption failed: {e}"))?;
+
+    let iv_hex = hex::encode_upper(iv);
+    let body_b64 = base64::engine::general_purpose::STANDARD.encode(ciphertext);
+
+    let mut out = String::new();
+    out.push_str(&format!("-----BEGIN {header}-----\n"));
+    out.push_str("Proc-Type: 4,ENCRYPTED\n");
+    out.push_str(&format!("DEK-Info: AES-256-CBC,{iv_hex}\n"));
+    out.push('\n');
+    for chunk in body_b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(chunk).unwrap());
+        out.push('\n');
+    }
+    out.push_str(&format!("-----END {header}-----\n"));
+    Ok(out)
+}
+
+fn evp_bytes_to_key_md5(passphrase: &[u8], salt: &[u8], key_len: usize) -> Vec<u8> {
+    use md5::{Digest, Md5};
+    let mut out: Vec<u8> = Vec::with_capacity(key_len);
+    let mut prev: Vec<u8> = Vec::new();
+    while out.len() < key_len {
+        let mut hasher = Md5::new();
+        hasher.update(&prev);
+        hasher.update(passphrase);
+        hasher.update(salt);
+        prev = hasher.finalize().to_vec();
+        out.extend_from_slice(&prev);
+    }
+    out.truncate(key_len);
+    out
+}
+
+/// Extract `(header_label, base64_body)` from a single-block PEM
+/// string, where `header_label` is the text between `BEGIN` and `-----`
+/// (eg. "PRIVATE KEY", "RSA PRIVATE KEY"). The body is returned
+/// concatenated without newlines, ready for base64 decoding.
+fn parse_pem_block(pem: &str) -> Result<(String, String), String> {
+    let begin_idx = pem.find("-----BEGIN ").ok_or("missing BEGIN line")?;
+    let after_begin = &pem[begin_idx + 11..];
+    let dash_idx = after_begin.find("-----").ok_or("malformed BEGIN line")?;
+    let label = after_begin[..dash_idx].trim().to_string();
+
+    let end_marker = format!("-----END {label}-----");
+    let end_idx = pem.find(&end_marker).ok_or("missing END line")?;
+    let newline_after_begin = begin_idx
+        + 11
+        + dash_idx
+        + 5
+        + pem[begin_idx + 11 + dash_idx + 5..]
+            .find('\n')
+            .ok_or("missing newline after BEGIN")?
+        + 1;
+    let body_raw = &pem[newline_after_begin..end_idx];
+    let body: String = body_raw.chars().filter(|c| !c.is_whitespace()).collect();
+    Ok((label, body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1192,5 +1299,134 @@ mod tests {
         assert!(cert_pem.starts_with("-----BEGIN CERTIFICATE-----"));
         assert!(key_pem.contains("-----BEGIN PRIVATE KEY-----"));
         assert!(cert_pem.len() > 400);
+    }
+
+    #[test]
+    fn encrypt_private_key_pem_emits_legacy_openssl_format() {
+        let key_pem =
+            "-----BEGIN PRIVATE KEY-----\nVGVzdEtleU1hdGVyaWFs\n-----END PRIVATE KEY-----\n";
+        let out = encrypt_private_key_pem(key_pem, b"hunter2").expect("encryption succeeds");
+        assert!(out.starts_with("-----BEGIN PRIVATE KEY-----\n"));
+        assert!(out.contains("Proc-Type: 4,ENCRYPTED\n"));
+        assert!(out.contains("DEK-Info: AES-256-CBC,"));
+        assert!(out.ends_with("-----END PRIVATE KEY-----\n"));
+        // Encrypted body must differ from plaintext base64 body.
+        assert!(!out.contains("VGVzdEtleU1hdGVyaWFs"));
+    }
+
+    #[test]
+    fn encrypt_private_key_pem_round_trips_via_evp() {
+        use aes::Aes256;
+        use cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+        type Aes256CbcDec = cbc::Decryptor<Aes256>;
+
+        let plaintext = b"some-private-key-bytes-as-DER";
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(plaintext);
+        let key_pem =
+            format!("-----BEGIN RSA PRIVATE KEY-----\n{key_b64}\n-----END RSA PRIVATE KEY-----\n");
+        let passphrase = b"correct horse battery staple";
+        let encrypted = encrypt_private_key_pem(&key_pem, passphrase).unwrap();
+
+        let iv_line = encrypted
+            .lines()
+            .find(|l| l.starts_with("DEK-Info: AES-256-CBC,"))
+            .unwrap();
+        let iv_hex = iv_line.trim_start_matches("DEK-Info: AES-256-CBC,");
+        let iv = hex::decode(iv_hex).unwrap();
+        let salt: [u8; 8] = iv[..8].try_into().unwrap();
+        let key = evp_bytes_to_key_md5(passphrase, &salt, 32);
+
+        let body_start = encrypted.find("\n\n").unwrap() + 2;
+        let body_end = encrypted.find("\n-----END").unwrap();
+        let body_b64: String = encrypted[body_start..body_end]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let mut ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(&body_b64)
+            .unwrap();
+
+        let cipher = Aes256CbcDec::new(key.as_slice().into(), iv.as_slice().into());
+        let decrypted = cipher
+            .decrypt_padded_mut::<Pkcs7>(&mut ciphertext)
+            .expect("decryption succeeds");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    fn make_req(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "acm".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "rid".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn export_certificate_emits_passphrase_encrypted_pem() {
+        let svc = AcmService::default();
+        let cert_b64 = base64::engine::general_purpose::STANDARD
+            .encode(b"-----BEGIN CERTIFICATE-----\nQUFB\n-----END CERTIFICATE-----\n");
+        let key_b64 = base64::engine::general_purpose::STANDARD
+            .encode(b"-----BEGIN PRIVATE KEY-----\nVGVzdEtleQ==\n-----END PRIVATE KEY-----\n");
+        let import = make_req(
+            "ImportCertificate",
+            json!({"Certificate": cert_b64, "PrivateKey": key_b64}),
+        );
+        let import_resp = svc.handle(import).await.unwrap();
+        let import_json: Value = serde_json::from_slice(import_resp.body.expect_bytes()).unwrap();
+        let arn = import_json["CertificateArn"].as_str().unwrap().to_string();
+
+        let passphrase_b64 = base64::engine::general_purpose::STANDARD.encode(b"hunter2");
+        let export = make_req(
+            "ExportCertificate",
+            json!({"CertificateArn": arn, "Passphrase": passphrase_b64}),
+        );
+        let export_resp = svc.handle(export).await.unwrap();
+        let export_json: Value = serde_json::from_slice(export_resp.body.expect_bytes()).unwrap();
+        let private_key = export_json["PrivateKey"].as_str().unwrap();
+        assert!(
+            private_key.contains("Proc-Type: 4,ENCRYPTED"),
+            "expected encrypted PEM, got {private_key}"
+        );
+        assert!(private_key.contains("DEK-Info: AES-256-CBC,"));
+        assert!(!private_key.contains("VGVzdEtleQ=="));
+    }
+
+    #[tokio::test]
+    async fn export_certificate_rejects_non_base64_passphrase() {
+        let svc = AcmService::default();
+        let cert_b64 = base64::engine::general_purpose::STANDARD
+            .encode(b"-----BEGIN CERTIFICATE-----\nQQ==\n-----END CERTIFICATE-----\n");
+        let key_b64 = base64::engine::general_purpose::STANDARD
+            .encode(b"-----BEGIN PRIVATE KEY-----\nQQ==\n-----END PRIVATE KEY-----\n");
+        let import = make_req(
+            "ImportCertificate",
+            json!({"Certificate": cert_b64, "PrivateKey": key_b64}),
+        );
+        let import_resp = svc.handle(import).await.unwrap();
+        let import_json: Value = serde_json::from_slice(import_resp.body.expect_bytes()).unwrap();
+        let arn = import_json["CertificateArn"].as_str().unwrap().to_string();
+        let export = make_req(
+            "ExportCertificate",
+            json!({"CertificateArn": arn, "Passphrase": "not!base64!@#$"}),
+        );
+        let err = match svc.handle(export).await {
+            Ok(_) => panic!("expected error for non-base64 passphrase"),
+            Err(e) => e,
+        };
+        assert!(format!("{err:?}").contains("Passphrase"));
     }
 }
