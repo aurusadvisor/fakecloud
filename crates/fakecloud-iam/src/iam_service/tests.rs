@@ -3536,3 +3536,44 @@ fn misc_extras_smoke() {
     ))
     .unwrap();
 }
+
+#[test]
+fn get_security_token_service_preferences_round_trips_set_value() {
+    let svc = make_service();
+    svc.set_security_token_service_preferences(&make_request(
+        "SetSecurityTokenServicePreferences",
+        vec![("GlobalEndpointTokenVersion", "v2Token")],
+    ))
+    .unwrap();
+    let resp = svc
+        .get_security_token_service_preferences(&make_request(
+            "GetSecurityTokenServicePreferences",
+            vec![],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes())
+        .unwrap()
+        .to_string();
+    assert!(
+        body.contains("<GlobalEndpointTokenVersion>v2Token</GlobalEndpointTokenVersion>"),
+        "expected stored version, got {body}"
+    );
+}
+
+#[test]
+fn get_security_token_service_preferences_default_v1_when_unset() {
+    let svc = make_service();
+    let resp = svc
+        .get_security_token_service_preferences(&make_request(
+            "GetSecurityTokenServicePreferences",
+            vec![],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes())
+        .unwrap()
+        .to_string();
+    assert!(
+        body.contains("<GlobalEndpointTokenVersion>v1Token</GlobalEndpointTokenVersion>"),
+        "expected default v1Token, got {body}"
+    );
+}
