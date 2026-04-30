@@ -414,14 +414,44 @@ impl LambdaService {
             None => None,
         };
         let new_image_uri = body["ImageUri"].as_str().map(String::from);
+        let supplied_signing_profile = body["SigningProfileVersionArn"].as_str().map(String::from);
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+
+        // Code-signing gate: if a CSC is bound to this function and at
+        // least one allowed publisher is registered, the caller must
+        // supply a SigningProfileVersionArn from that allow-list when
+        // the policy is Enforce. Warn just lets the upload through.
+        if let Some(csc_arn) = state.function_code_signing.get(function_name).cloned() {
+            let csc_id = extract_csc_id(&csc_arn);
+            if let Some(csc) = state.code_signing_configs.get(&csc_id).cloned() {
+                if !csc.allowed_publishers.is_empty()
+                    && csc
+                        .untrusted_artifact_action
+                        .eq_ignore_ascii_case("Enforce")
+                {
+                    let allowed = match supplied_signing_profile.as_deref() {
+                        Some(arn) => csc.allowed_publishers.iter().any(|p| p == arn),
+                        None => false,
+                    };
+                    if !allowed {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidCodeSignatureException",
+                            "The code signature failed the integrity check or the signing profile is not in the allowed publishers list.",
+                        ));
+                    }
+                }
+            }
+        }
+
         let func = state
             .functions
             .get_mut(function_name)
             .ok_or_else(|| not_found("Function", function_name))?;
 
+        let mut changed = false;
         if let Some(bytes) = new_zip {
             // SHA256(base64) of the new code, matching CreateFunction's
             // hash so GetFunction returns identical CodeSha256 round-trip.
@@ -431,21 +461,36 @@ impl LambdaService {
             let hash = hasher.finalize();
             let code_sha256 =
                 base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hash);
+            if code_sha256 != func.code_sha256 {
+                changed = true;
+            }
             func.code_size = bytes.len() as i64;
             func.code_zip = Some(bytes);
             func.code_sha256 = code_sha256;
             func.image_uri = None;
         } else if let Some(uri) = new_image_uri {
+            if func.image_uri.as_deref() != Some(uri.as_str()) {
+                changed = true;
+            }
             func.image_uri = Some(uri);
             func.code_zip = None;
         }
-        // No-op (no ZipFile, ImageUri, or S3 fields) — AWS still bumps
-        // last_modified and returns the current config.
 
+        if let Some(arn) = supplied_signing_profile {
+            if func.signing_profile_version_arn.as_deref() != Some(arn.as_str()) {
+                changed = true;
+            }
+            func.signing_profile_version_arn = Some(arn);
+        }
+
+        // last_modified is bumped on every call (matches AWS), but
+        // revision_id only rotates when code or signing fields actually
+        // change so optimistic-concurrency callers don't see spurious
+        // updates from no-op pings.
         func.last_modified = Utc::now();
-        // Bump revision_id only when code actually changed; the caller
-        // can use it to detect concurrent updates.
-        func.revision_id = uuid::Uuid::new_v4().to_string();
+        if changed {
+            func.revision_id = uuid::Uuid::new_v4().to_string();
+        }
         ok(self.function_config_json(func))
     }
 
