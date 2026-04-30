@@ -1029,11 +1029,16 @@ impl LambdaService {
                 "RepositoryType": "ECR",
             })
         } else {
+            // fakecloud doesn't expose a presigned-download path yet; we
+            // synthesize a `_fakecloud/`-namespaced URL so it's obvious to
+            // operators that the URL isn't a real S3 link. (Real
+            // download support is tracked under follow-up GG batch.)
+            let region = func.function_arn.split(':').nth(3).unwrap_or("us-east-1");
             json!({
                 "Location": format!(
-                    "https://awslambda-{}-tasks.s3.{}.amazonaws.com/stub",
-                    func.function_arn.split(':').nth(3).unwrap_or("us-east-1"),
-                    func.function_arn.split(':').nth(3).unwrap_or("us-east-1")
+                    "https://prod-{region}-starport-layer-bucket.s3.{region}.amazonaws.com/_fakecloud/{account}/{name}/code.zip",
+                    account = state.account_id,
+                    name = function_name,
                 ),
                 "RepositoryType": "S3",
             })

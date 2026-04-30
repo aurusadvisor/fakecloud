@@ -230,6 +230,13 @@ impl LambdaService {
     }
 
     pub(super) fn event_source_mapping_json(&self, mapping: &EventSourceMapping) -> Value {
+        // EventSourceMappingArn is the EventSourceArn variant prefixed with
+        // the mapping uuid; AWS started returning it in 2024 so newer SDKs
+        // expect to round-trip it.
+        let esm_arn = format!(
+            "{}:event-source-mapping/{}",
+            mapping.function_arn, mapping.uuid
+        );
         let mut out = json!({
             "UUID": mapping.uuid,
             "FunctionArn": mapping.function_arn,
@@ -237,6 +244,18 @@ impl LambdaService {
             "BatchSize": mapping.batch_size,
             "State": mapping.state,
             "LastModified": mapping.last_modified.timestamp_millis() as f64 / 1000.0,
+            "EventSourceMappingArn": esm_arn,
+            // Default fields AWS always returns (zeros / empty arrays / nulls
+            // when unset). Avoids SDK deserialiser breaks on missing keys.
+            "MaximumRetryAttempts": -1,
+            "MaximumRecordAgeInSeconds": -1,
+            "BisectBatchOnFunctionError": false,
+            "TumblingWindowInSeconds": 0,
+            "Topics": [],
+            "Queues": [],
+            "SourceAccessConfigurations": [],
+            "LastProcessingResult": "No records processed",
+            "StateTransitionReason": "User action",
         });
         let obj = out.as_object_mut().expect("json! built object");
         if !mapping.filter_patterns.is_empty() {
