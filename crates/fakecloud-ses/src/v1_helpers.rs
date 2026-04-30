@@ -16,6 +16,9 @@ pub fn handle_v1_action(
         "VerifyEmailIdentity" => verify_email_identity(state, req),
         "VerifyDomainIdentity" => verify_domain_identity(state, req),
         "VerifyDomainDkim" => verify_domain_dkim(state, req),
+        "VerifyEmailAddress" => verify_email_address(state, req),
+        "ListVerifiedEmailAddresses" => list_verified_email_addresses(state, req),
+        "DeleteVerifiedEmailAddress" => delete_verified_email_address(state, req),
         "ListIdentities" => list_identities(state, req),
         "GetIdentityVerificationAttributes" => get_identity_verification_attributes(state, req),
         "GetIdentityDkimAttributes" => get_identity_dkim_attributes(state, req),
@@ -489,6 +492,88 @@ pub(crate) fn verify_email_identity(
             configuration_set_name: None,
         });
     Ok(xml_metadata_only("VerifyEmailIdentity", &req.request_id))
+}
+
+/// Legacy alias: `VerifyEmailAddress` predates `VerifyEmailIdentity` and
+/// is still accepted by real SES. Same effect: idempotently mark the
+/// supplied email address as a verified identity.
+pub(crate) fn verify_email_address(
+    state: &SharedSesState,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let email = required_param(&req.query_params, "EmailAddress")?;
+    let mut accounts = state.write();
+    let st = accounts.get_or_create(&req.account_id);
+    st.identities
+        .entry(email.to_string())
+        .or_insert_with(|| EmailIdentity {
+            identity_name: email.to_string(),
+            identity_type: "EmailAddress".to_string(),
+            verified: true,
+            created_at: Utc::now(),
+            dkim_signing_enabled: false,
+            dkim_signing_attributes_origin: "AWS_SES".to_string(),
+            dkim_domain_signing_private_key: None,
+            dkim_domain_signing_selector: None,
+            dkim_next_signing_key_length: None,
+            dkim_public_key_b64: None,
+            email_forwarding_enabled: true,
+            mail_from_domain: None,
+            mail_from_behavior_on_mx_failure: "USE_DEFAULT_VALUE".to_string(),
+            mail_from_domain_status: "NotStarted".to_string(),
+            configuration_set_name: None,
+        });
+    Ok(xml_metadata_only("VerifyEmailAddress", &req.request_id))
+}
+
+/// Legacy alias: `ListVerifiedEmailAddresses` returns email-type
+/// identities only. New callers should use `ListIdentities` with
+/// `IdentityType=EmailAddress`.
+pub(crate) fn list_verified_email_addresses(
+    state: &SharedSesState,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let accounts = state.read();
+    let empty = SesState::new(&req.account_id, &req.region);
+    let st = accounts.get(&req.account_id).unwrap_or(&empty);
+    let mut emails: Vec<&str> = st
+        .identities
+        .values()
+        .filter(|i| i.identity_type == "EmailAddress" && i.verified)
+        .map(|i| i.identity_name.as_str())
+        .collect();
+    emails.sort();
+    let mut inner = String::from("<VerifiedEmailAddresses>");
+    for email in emails {
+        inner.push_str(&format!("<member>{}</member>", xml_escape(email)));
+    }
+    inner.push_str("</VerifiedEmailAddresses>");
+    Ok(AwsResponse::xml(
+        StatusCode::OK,
+        query_response_xml(
+            "ListVerifiedEmailAddresses",
+            SES_NS,
+            &inner,
+            &req.request_id,
+        ),
+    ))
+}
+
+/// Legacy alias for `DeleteIdentity` scoped to email-type identities.
+pub(crate) fn delete_verified_email_address(
+    state: &SharedSesState,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let email = required_param(&req.query_params, "EmailAddress")?;
+    state
+        .write()
+        .get_or_create(&req.account_id)
+        .identities
+        .remove(email);
+    Ok(xml_metadata_only(
+        "DeleteVerifiedEmailAddress",
+        &req.request_id,
+    ))
 }
 
 pub(crate) fn verify_domain_identity(
