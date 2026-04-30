@@ -383,6 +383,13 @@ async fn test_send_raw_email_v1() {
     let server = TestServer::start().await;
     let client = server.ses_client().await;
 
+    client
+        .verify_email_identity()
+        .email_address("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+
     let raw_message = aws_sdk_ses::types::RawMessage::builder()
         .data(aws_sdk_ses::primitives::Blob::new(
             "From: sender@example.com\r\nTo: to@example.com\r\nSubject: Raw Test\r\n\r\nBody",
@@ -559,6 +566,13 @@ async fn test_send_templated_email_missing_template() {
 async fn test_send_bulk_templated_email_v1() {
     let server = TestServer::start().await;
     let client = server.ses_client().await;
+
+    client
+        .verify_email_identity()
+        .email_address("sender@example.com")
+        .send()
+        .await
+        .unwrap();
 
     client
         .create_template()
