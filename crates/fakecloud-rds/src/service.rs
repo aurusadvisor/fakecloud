@@ -399,6 +399,37 @@ impl RdsService {
         let option_group_name = optional_query_param(request, "OptionGroupName");
         let multi_az = parse_optional_bool(optional_query_param(request, "MultiAZ").as_deref())?
             .unwrap_or(false);
+        let availability_zone = optional_query_param(request, "AvailabilityZone");
+        let storage_type = optional_query_param(request, "StorageType");
+        let storage_encrypted =
+            parse_optional_bool(optional_query_param(request, "StorageEncrypted").as_deref())?
+                .unwrap_or(false);
+        let kms_key_id = optional_query_param(request, "KmsKeyId");
+        let iam_database_authentication_enabled = parse_optional_bool(
+            optional_query_param(request, "EnableIAMDatabaseAuthentication").as_deref(),
+        )?
+        .unwrap_or(false);
+        let iops = optional_i32_param(request, "Iops")?;
+        let monitoring_interval = optional_i32_param(request, "MonitoringInterval")?;
+        let monitoring_role_arn = optional_query_param(request, "MonitoringRoleArn");
+        let performance_insights_enabled = parse_optional_bool(
+            optional_query_param(request, "EnablePerformanceInsights").as_deref(),
+        )?
+        .unwrap_or(false);
+        let performance_insights_kms_key_id =
+            optional_query_param(request, "PerformanceInsightsKMSKeyId");
+        let performance_insights_retention_period =
+            optional_i32_param(request, "PerformanceInsightsRetentionPeriod")?;
+        let enabled_cloudwatch_logs_exports =
+            parse_cloudwatch_logs_exports(request, "EnableCloudwatchLogsExports");
+        let ca_certificate_identifier = optional_query_param(request, "CACertificateIdentifier");
+        let network_type = optional_query_param(request, "NetworkType");
+        let character_set_name = optional_query_param(request, "CharacterSetName");
+        let auto_minor_version_upgrade = parse_optional_bool(
+            optional_query_param(request, "AutoMinorVersionUpgrade").as_deref(),
+        )?;
+        let copy_tags_to_snapshot =
+            parse_optional_bool(optional_query_param(request, "CopyTagsToSnapshot").as_deref())?;
 
         validate_create_request(
             &db_instance_identifier,
@@ -481,6 +512,25 @@ impl RdsService {
                 option_group_name,
                 multi_az,
                 pending_modified_values: None,
+                availability_zone,
+                storage_type,
+                storage_encrypted,
+                kms_key_id,
+                iam_database_authentication_enabled,
+                iops,
+                monitoring_interval,
+                monitoring_role_arn,
+                performance_insights_enabled,
+                performance_insights_kms_key_id,
+                performance_insights_retention_period,
+                enabled_cloudwatch_logs_exports,
+                ca_certificate_identifier,
+                network_type,
+                character_set_name,
+                auto_minor_version_upgrade,
+                copy_tags_to_snapshot,
+                master_user_secret_arn: None,
+                master_user_secret_kms_key_id: None,
             };
             state.finish_instance_creation(placeholder.clone());
             placeholder

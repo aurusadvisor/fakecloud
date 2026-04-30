@@ -57,6 +57,46 @@ pub struct DbInstance {
     pub option_group_name: Option<String>,
     pub multi_az: bool,
     pub pending_modified_values: Option<PendingModifiedValues>,
+    /// Read from input on Create/Modify; defaults preserve existing
+    /// behaviour (non-encrypted, gp2, single AZ, no IAM auth).
+    #[serde(default)]
+    pub availability_zone: Option<String>,
+    #[serde(default)]
+    pub storage_type: Option<String>,
+    #[serde(default)]
+    pub storage_encrypted: bool,
+    #[serde(default)]
+    pub kms_key_id: Option<String>,
+    #[serde(default)]
+    pub iam_database_authentication_enabled: bool,
+    #[serde(default)]
+    pub iops: Option<i32>,
+    #[serde(default)]
+    pub monitoring_interval: Option<i32>,
+    #[serde(default)]
+    pub monitoring_role_arn: Option<String>,
+    #[serde(default)]
+    pub performance_insights_enabled: bool,
+    #[serde(default)]
+    pub performance_insights_kms_key_id: Option<String>,
+    #[serde(default)]
+    pub performance_insights_retention_period: Option<i32>,
+    #[serde(default)]
+    pub enabled_cloudwatch_logs_exports: Vec<String>,
+    #[serde(default)]
+    pub ca_certificate_identifier: Option<String>,
+    #[serde(default)]
+    pub network_type: Option<String>,
+    #[serde(default)]
+    pub character_set_name: Option<String>,
+    #[serde(default)]
+    pub auto_minor_version_upgrade: Option<bool>,
+    #[serde(default)]
+    pub copy_tags_to_snapshot: Option<bool>,
+    #[serde(default)]
+    pub master_user_secret_arn: Option<String>,
+    #[serde(default)]
+    pub master_user_secret_kms_key_id: Option<String>,
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -608,6 +648,25 @@ mod tests {
                 option_group_name: None,
                 multi_az: false,
                 pending_modified_values: None,
+                availability_zone: None,
+                storage_type: None,
+                storage_encrypted: false,
+                kms_key_id: None,
+                iam_database_authentication_enabled: false,
+                iops: None,
+                monitoring_interval: None,
+                monitoring_role_arn: None,
+                performance_insights_enabled: false,
+                performance_insights_kms_key_id: None,
+                performance_insights_retention_period: None,
+                enabled_cloudwatch_logs_exports: Vec::new(),
+                ca_certificate_identifier: None,
+                network_type: None,
+                character_set_name: None,
+                auto_minor_version_upgrade: None,
+                copy_tags_to_snapshot: None,
+                master_user_secret_arn: None,
+                master_user_secret_kms_key_id: None,
             },
         );
 
@@ -720,6 +779,25 @@ mod tests {
             option_group_name: None,
             multi_az: false,
             pending_modified_values: None,
+            availability_zone: None,
+            storage_type: None,
+            storage_encrypted: false,
+            kms_key_id: None,
+            iam_database_authentication_enabled: false,
+            iops: None,
+            monitoring_interval: None,
+            monitoring_role_arn: None,
+            performance_insights_enabled: false,
+            performance_insights_kms_key_id: None,
+            performance_insights_retention_period: None,
+            enabled_cloudwatch_logs_exports: Vec::new(),
+            ca_certificate_identifier: None,
+            network_type: None,
+            character_set_name: None,
+            auto_minor_version_upgrade: None,
+            copy_tags_to_snapshot: None,
+            master_user_secret_arn: None,
+            master_user_secret_kms_key_id: None,
         }
     }
 
