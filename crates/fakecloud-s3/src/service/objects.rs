@@ -940,6 +940,10 @@ impl S3Service {
             // Also detect from checksum value headers
             if req.headers.contains_key("x-amz-checksum-crc32") {
                 Some("CRC32".to_string())
+            } else if req.headers.contains_key("x-amz-checksum-crc32c") {
+                Some("CRC32C".to_string())
+            } else if req.headers.contains_key("x-amz-checksum-crc64nvme") {
+                Some("CRC64NVME".to_string())
             } else if req.headers.contains_key("x-amz-checksum-sha1") {
                 Some("SHA1".to_string())
             } else if req.headers.contains_key("x-amz-checksum-sha256") {

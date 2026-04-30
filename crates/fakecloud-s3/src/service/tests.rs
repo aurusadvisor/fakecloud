@@ -3939,3 +3939,40 @@ fn get_bucket_policy_status_uses_real_json_parse() {
         .unwrap()
         .contains("<IsPublic>true</IsPublic>"));
 }
+
+#[tokio::test]
+async fn compute_checksum_streaming_supports_crc32c() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data");
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(b"hello world").unwrap();
+    let result = super::compute_checksum_streaming("CRC32C", &path)
+        .await
+        .unwrap();
+    // Reference CRC32C("hello world") = 0xC99465AA, big-endian -> base64
+    let expected = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        0xC99465AAu32.to_be_bytes(),
+    );
+    assert_eq!(result, expected);
+}
+
+#[tokio::test]
+async fn compute_checksum_streaming_supports_crc64nvme() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data");
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(b"hello world").unwrap();
+    let result = super::compute_checksum_streaming("CRC64NVME", &path)
+        .await
+        .unwrap();
+    // 8-byte digest, base64 = 12 chars
+    let decoded = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        result.as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(decoded.len(), 8);
+}
