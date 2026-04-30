@@ -311,6 +311,13 @@ impl ContainerRuntime {
         cmd.arg("-e")
             .arg(format!("AWS_LAMBDA_FUNCTION_TIMEOUT={}", func.timeout));
 
+        // EphemeralStorage.Size (MiB) maps to a tmpfs at /tmp so
+        // function code that writes there hits the configured limit
+        // instead of the docker default. Default 512 MiB matches AWS.
+        let ephemeral_mib = func.ephemeral_storage_size.unwrap_or(512).max(64);
+        cmd.arg("--tmpfs")
+            .arg(format!("/tmp:size={ephemeral_mib}m"));
+
         cmd.arg(&run_image);
 
         let output = cmd
@@ -439,6 +446,13 @@ impl ContainerRuntime {
 
         cmd.arg("-e")
             .arg(format!("AWS_LAMBDA_FUNCTION_TIMEOUT={}", func.timeout));
+
+        // EphemeralStorage.Size (MiB) maps to a tmpfs at /tmp so
+        // function code that writes there hits the configured limit
+        // instead of the docker default. Default 512 MiB matches AWS.
+        let ephemeral_mib = func.ephemeral_storage_size.unwrap_or(512).max(64);
+        cmd.arg("--tmpfs")
+            .arg(format!("/tmp:size={ephemeral_mib}m"));
 
         cmd.arg(&image).arg(&func.handler);
 

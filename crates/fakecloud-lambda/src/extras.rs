@@ -332,9 +332,57 @@ impl LambdaService {
         if let Some(desc) = body["Description"].as_str() {
             func.description = desc.to_string();
         }
+        if let Some(rt) = body["Runtime"].as_str() {
+            func.runtime = rt.to_string();
+        }
+        if let Some(env) = body["Environment"]["Variables"].as_object() {
+            func.environment = env
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+        }
+        if let Some(mode) = body["TracingConfig"]["Mode"].as_str() {
+            func.tracing_mode = Some(mode.to_string());
+        }
+        if let Some(arn) = body["KMSKeyArn"].as_str() {
+            func.kms_key_arn = if arn.is_empty() {
+                None
+            } else {
+                Some(arn.to_string())
+            };
+        }
+        if let Some(size) = body["EphemeralStorage"]["Size"].as_i64() {
+            func.ephemeral_storage_size = Some(size);
+        }
+        if body["VpcConfig"].is_object() {
+            func.vpc_config = Some(body["VpcConfig"].clone());
+        }
+        if body["SnapStart"].is_object() {
+            func.snap_start = Some(body["SnapStart"].clone());
+        }
+        if let Some(arn) = body["DeadLetterConfig"]["TargetArn"].as_str() {
+            func.dead_letter_config_arn = if arn.is_empty() {
+                None
+            } else {
+                Some(arn.to_string())
+            };
+        }
+        if let Some(fsc) = body["FileSystemConfigs"].as_array() {
+            func.file_system_configs = fsc.clone();
+        }
+        if body["LoggingConfig"].is_object() {
+            func.logging_config = Some(body["LoggingConfig"].clone());
+        }
+        if body["ImageConfig"].is_object() {
+            func.image_config = Some(body["ImageConfig"].clone());
+        }
         if let Some(attachments) = layer_attachments {
             func.layers = attachments;
         }
+        // RevisionId rotates only on real config changes — clients
+        // round-trip it through optimistic-concurrency calls, so we
+        // mint a fresh one here to signal "config changed".
+        func.revision_id = uuid::Uuid::new_v4().to_string();
         func.last_modified = Utc::now();
         ok(self.function_config_json(func))
     }

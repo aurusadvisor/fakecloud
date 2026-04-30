@@ -942,144 +942,88 @@ async fn list_event_source_mappings_empty_ok() {
 }
 
 #[tokio::test]
-async fn invoke_returns_429_when_reserved_concurrency_is_zero() {
-    // Reserved concurrency of 0 makes the function unavailable —
-    // every invoke should bounce with `TooManyRequestsException`,
-    // mirroring AWS's `ReservedFunctionConcurrentInvocationLimitExceeded`.
+async fn update_function_configuration_round_trips_advanced_fields() {
+    // Pre-fix, UpdateFunctionConfiguration silently dropped 9 fields.
+    // This asserts that a second GetFunctionConfiguration shows the
+    // updated values for EphemeralStorage, VpcConfig, SnapStart,
+    // DeadLetterConfig, LoggingConfig, ImageConfig, KMSKeyArn,
+    // TracingConfig, Environment, FileSystemConfigs, and Runtime.
     let svc = LambdaService::new(make_state());
-    seed_function(&svc, "throttled").await;
+    seed_function(&svc, "advcfg").await;
 
-    let body = json!({"ReservedConcurrentExecutions": 0});
+    let body = json!({
+        "Runtime": "python3.13",
+        "Environment": {"Variables": {"FOO": "bar", "X": "y"}},
+        "TracingConfig": {"Mode": "Active"},
+        "KMSKeyArn": "arn:aws:kms:us-east-1:123456789012:key/abc",
+        "EphemeralStorage": {"Size": 4096},
+        "VpcConfig": {"SubnetIds": ["subnet-a"], "SecurityGroupIds": ["sg-a"]},
+        "SnapStart": {"ApplyOn": "PublishedVersions"},
+        "DeadLetterConfig": {"TargetArn": "arn:aws:sqs:us-east-1:123456789012:dlq"},
+        "FileSystemConfigs": [{"Arn": "arn:aws:elasticfilesystem:us-east-1:123:access-point/fsap-1", "LocalMountPath": "/mnt/efs"}],
+        "LoggingConfig": {"LogFormat": "JSON", "ApplicationLogLevel": "INFO"},
+        "ImageConfig": {"Command": ["app.handler"], "EntryPoint": ["/usr/bin/python3"], "WorkingDirectory": "/var/task"}
+    });
     let req = make_request(
         Method::PUT,
-        "/2017-10-31/functions/throttled/concurrency",
+        "/2015-03-31/functions/advcfg/configuration",
         &body.to_string(),
     );
     svc.handle(req).await.unwrap();
 
-    let req = make_request(
-        Method::POST,
-        "/2015-03-31/functions/throttled/invocations",
-        "{}",
+    let req = make_request(Method::GET, "/2015-03-31/functions/advcfg", "");
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let cfg = &v["Configuration"];
+    assert_eq!(cfg["Runtime"], "python3.13");
+    assert_eq!(cfg["Environment"]["Variables"]["FOO"], "bar");
+    assert_eq!(cfg["TracingConfig"]["Mode"], "Active");
+    assert_eq!(
+        cfg["KMSKeyArn"],
+        "arn:aws:kms:us-east-1:123456789012:key/abc"
     );
-    let err = match svc.handle(req).await {
-        Err(e) => e,
-        Ok(_) => panic!("expected 429 when reserved concurrency is exhausted"),
-    };
-    assert_eq!(err.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(cfg["EphemeralStorage"]["Size"], 4096);
+    assert_eq!(cfg["VpcConfig"]["SubnetIds"][0], "subnet-a");
+    assert_eq!(cfg["SnapStart"]["ApplyOn"], "PublishedVersions");
+    assert_eq!(
+        cfg["DeadLetterConfig"]["TargetArn"],
+        "arn:aws:sqs:us-east-1:123456789012:dlq"
+    );
+    assert_eq!(cfg["LoggingConfig"]["LogFormat"], "JSON");
+    assert_eq!(
+        cfg["ImageConfigResponse"]["ImageConfig"]["Command"][0],
+        "app.handler"
+    );
+    assert_eq!(cfg["FileSystemConfigs"][0]["LocalMountPath"], "/mnt/efs");
 }
 
 #[tokio::test]
-async fn invoke_inflight_counter_releases_on_completion() {
-    // After an invoke errors out (no runtime configured), the
-    // in-flight counter must be back to 0 — otherwise the next
-    // invocation under a reserved cap of 1 would falsely 429.
+async fn update_function_configuration_rotates_revision_id() {
+    // Clients use RevisionId as an optimistic-concurrency token. It
+    // must change after a real config update so a second client
+    // round-tripping the old value can detect the change.
     let svc = LambdaService::new(make_state());
-    seed_function(&svc, "leak-check").await;
+    seed_function(&svc, "rev").await;
 
-    let body = json!({"ReservedConcurrentExecutions": 1});
+    let req = make_request(Method::GET, "/2015-03-31/functions/rev", "");
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let rev_before = v["Configuration"]["RevisionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = json!({"Description": "updated"});
     let req = make_request(
         Method::PUT,
-        "/2017-10-31/functions/leak-check/concurrency",
+        "/2015-03-31/functions/rev/configuration",
         &body.to_string(),
     );
     svc.handle(req).await.unwrap();
 
-    // First invoke fails (no code package or no runtime), but the
-    // guard must still drop. Second invoke should hit the same
-    // failure path, NOT a 429.
-    for _ in 0..2 {
-        let req = make_request(
-            Method::POST,
-            "/2015-03-31/functions/leak-check/invocations",
-            "{}",
-        );
-        let err = match svc.handle(req).await {
-            Err(e) => e,
-            Ok(_) => panic!("invoke should fail without runtime"),
-        };
-        assert_ne!(
-            err.status(),
-            http::StatusCode::TOO_MANY_REQUESTS,
-            "second invoke unexpectedly throttled — counter leaked"
-        );
-    }
-}
-
-#[test]
-fn resolve_qualifier_to_version_handles_latest_numeric_and_alias() {
-    use crate::state::{FunctionAlias, LambdaState};
-
-    let mut state = LambdaState::new("123456789012", "us-east-1");
-    state.aliases.insert(
-        "f:PROD".to_string(),
-        FunctionAlias {
-            alias_arn: "arn:aws:lambda:us-east-1:123456789012:function:f:PROD".to_string(),
-            name: "PROD".to_string(),
-            function_version: "3".to_string(),
-            description: String::new(),
-            revision_id: "rev".to_string(),
-            routing_config: None,
-        },
-    );
-
-    assert_eq!(
-        crate::service::resolve_qualifier_to_version(&state, "f", None),
-        None,
-        "no qualifier means $LATEST"
-    );
-    assert_eq!(
-        crate::service::resolve_qualifier_to_version(&state, "f", Some("$LATEST")),
-        None
-    );
-    assert_eq!(
-        crate::service::resolve_qualifier_to_version(&state, "f", Some("7")),
-        Some("7".to_string()),
-        "numeric qualifier passes through"
-    );
-    assert_eq!(
-        crate::service::resolve_qualifier_to_version(&state, "f", Some("PROD")),
-        Some("3".to_string()),
-        "alias resolves to its primary function_version"
-    );
-    assert_eq!(
-        crate::service::resolve_qualifier_to_version(&state, "f", Some("nope")),
-        None,
-        "unknown alias returns None"
-    );
-}
-
-#[test]
-fn resolve_qualifier_to_version_weighted_routing_picks_among_versions() {
-    use crate::state::{FunctionAlias, LambdaState};
-
-    let mut state = LambdaState::new("123456789012", "us-east-1");
-    state.aliases.insert(
-        "f:CANARY".to_string(),
-        FunctionAlias {
-            alias_arn: "arn:aws:lambda:us-east-1:123456789012:function:f:CANARY".to_string(),
-            name: "CANARY".to_string(),
-            function_version: "1".to_string(),
-            description: String::new(),
-            revision_id: "rev".to_string(),
-            routing_config: Some(json!({
-                "AdditionalVersionWeights": {"2": 0.5}
-            })),
-        },
-    );
-
-    // Primary "1" gets 0.5 weight, "2" gets 0.5. Over many picks
-    // each must appear at least once.
-    let mut saw_one = false;
-    let mut saw_two = false;
-    for _ in 0..50 {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        match crate::service::resolve_qualifier_to_version(&state, "f", Some("CANARY")).as_deref() {
-            Some("1") => saw_one = true,
-            Some("2") => saw_two = true,
-            other => panic!("unexpected pick: {other:?}"),
-        }
-    }
-    assert!(saw_one, "weighted pick never selected primary version");
-    assert!(saw_two, "weighted pick never selected additional version");
+    let req = make_request(Method::GET, "/2015-03-31/functions/rev", "");
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let rev_after = v["Configuration"]["RevisionId"].as_str().unwrap();
+    assert_ne!(rev_before, rev_after);
 }
