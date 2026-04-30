@@ -248,6 +248,19 @@ pub struct ForceDlqResponse {
     pub moved_messages: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSsmCommandStatusRequest {
+    pub account_id: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSsmCommandStatusResponse {
+    pub updated: bool,
+}
+
 // ── EventBridge ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
