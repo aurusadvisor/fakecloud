@@ -770,6 +770,20 @@ pub(crate) fn validate_untag_keys(keys: &[String]) -> Result<(), AwsServiceError
     Ok(())
 }
 
+/// Resolve the `PolicyName` to render for an attached managed policy ARN.
+///
+/// Customer-managed policies live in `state.policies` with their stored name.
+/// AWS-managed policies (`arn:aws:iam::aws:policy/...`) are accepted by the
+/// `Attach*Policy` calls without being inserted into state, so we derive the
+/// name from the ARN's last path segment to match what AWS itself returns.
+pub(crate) fn attached_policy_name(state: &crate::state::IamState, arn: &str) -> String {
+    state
+        .policies
+        .get(arn)
+        .map(|p| p.policy_name.clone())
+        .unwrap_or_else(|| arn.rsplit('/').next().unwrap_or(arn).to_string())
+}
+
 pub(crate) fn empty_response(action: &str, request_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
