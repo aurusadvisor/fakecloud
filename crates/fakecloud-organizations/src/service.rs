@@ -36,6 +36,12 @@ pub static ORGANIZATIONS_ACTIONS: &[&str] = &[
     "DetachPolicy",
     "ListPoliciesForTarget",
     "ListTargetsForPolicy",
+    "CreateAccount",
+    "CreateGovCloudAccount",
+    "DescribeCreateAccountStatus",
+    "ListCreateAccountStatus",
+    "CloseAccount",
+    "RemoveAccountFromOrganization",
 ];
 
 pub struct OrganizationsService {
@@ -463,6 +469,118 @@ impl OrganizationsService {
         }
         Ok(())
     }
+
+    fn create_account(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let email = required_str(&body, "Email")?.to_string();
+        let name = required_str(&body, "AccountName")?.to_string();
+
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        let status = org.create_account(&email, &name, None);
+        Ok(AwsResponse::ok_json(json!({
+            "CreateAccountStatus": create_account_status_payload(&status),
+        })))
+    }
+
+    fn create_gov_cloud_account(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let email = required_str(&body, "Email")?.to_string();
+        let name = required_str(&body, "AccountName")?.to_string();
+
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        // The GovCloud "paired" id is a 12-digit account id in the
+        // GovCloud partition; we mint one alongside the commercial id
+        // so callers see both, matching the real AWS response.
+        let gov_id = org.next_account_id();
+        let status = org.create_account(&email, &name, Some(gov_id));
+        Ok(AwsResponse::ok_json(json!({
+            "CreateAccountStatus": create_account_status_payload(&status),
+        })))
+    }
+
+    fn describe_create_account_status(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let request_id = required_str(&body, "CreateAccountRequestId")?.to_string();
+
+        let mut guard = self.state.write();
+        let org = guard.as_mut().ok_or_else(organizations_not_in_use)?;
+        if !org.accounts.contains_key(&req.account_id) {
+            return Err(organizations_not_in_use());
+        }
+        let status = org
+            .complete_or_describe_create_account(&request_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "CreateAccountStatusNotFoundException",
+                    format!("Create account status with id {request_id} was not found."),
+                )
+            })?;
+        Ok(AwsResponse::ok_json(json!({
+            "CreateAccountStatus": create_account_status_payload(&status),
+        })))
+    }
+
+    fn list_create_account_status(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let states: Vec<String> = body
+            .get("States")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let guard = self.state.read();
+        let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
+        if !org.accounts.contains_key(&req.account_id) {
+            return Err(organizations_not_in_use());
+        }
+        let statuses: Vec<Value> = org
+            .create_account_requests
+            .values()
+            .filter(|s| states.is_empty() || states.iter().any(|st| st == &s.state))
+            .map(create_account_status_payload)
+            .collect();
+        Ok(AwsResponse::ok_json(
+            json!({ "CreateAccountStatuses": statuses }),
+        ))
+    }
+
+    fn close_account(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let target = required_str(&body, "AccountId")?.to_string();
+
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.close_account(&target).map_err(org_error_to_aws)?;
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn remove_account_from_organization(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let target = required_str(&body, "AccountId")?.to_string();
+
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.remove_account(&target).map_err(org_error_to_aws)?;
+        Ok(AwsResponse::ok_json(json!({})))
+    }
 }
 
 #[async_trait]
@@ -495,6 +613,12 @@ impl AwsService for OrganizationsService {
             "DetachPolicy" => self.detach_policy(&req),
             "ListPoliciesForTarget" => self.list_policies_for_target(&req),
             "ListTargetsForPolicy" => self.list_targets_for_policy(&req),
+            "CreateAccount" => self.create_account(&req),
+            "CreateGovCloudAccount" => self.create_gov_cloud_account(&req),
+            "DescribeCreateAccountStatus" => self.describe_create_account_status(&req),
+            "ListCreateAccountStatus" => self.list_create_account_status(&req),
+            "CloseAccount" => self.close_account(&req),
+            "RemoveAccountFromOrganization" => self.remove_account_from_organization(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "organizations",
                 &req.action,
@@ -657,7 +781,39 @@ fn org_error_to_aws(err: OrgError) -> AwsServiceError {
             "TargetNotFoundException",
             format!("The target with id {id} was not found."),
         ),
+        OrgError::AccountChangesNotAllowed(id) => AwsServiceError::aws_error(
+            StatusCode::FORBIDDEN,
+            "ConstraintViolationException",
+            format!("Account {id} cannot be removed or closed (management account)."),
+        ),
+        OrgError::CreateAccountStatusNotFound(id) => AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "CreateAccountStatusNotFoundException",
+            format!("Create account status with id {id} was not found."),
+        ),
     }
+}
+
+fn create_account_status_payload(status: &crate::state::CreateAccountStatus) -> Value {
+    let mut obj = json!({
+        "Id": status.id,
+        "AccountName": status.account_name,
+        "State": status.state,
+        "RequestedTimestamp": status.requested_timestamp.timestamp() as f64,
+    });
+    if let Some(account_id) = &status.account_id {
+        obj["AccountId"] = json!(account_id);
+    }
+    if let Some(ts) = status.completed_timestamp {
+        obj["CompletedTimestamp"] = json!(ts.timestamp() as f64);
+    }
+    if let Some(reason) = &status.failure_reason {
+        obj["FailureReason"] = json!(reason);
+    }
+    if let Some(gov_id) = &status.gov_cloud_account_id {
+        obj["GovCloudAccountId"] = json!(gov_id);
+    }
+    obj
 }
 
 fn organization_payload(org: &OrganizationState) -> Value {
@@ -1793,5 +1949,244 @@ mod tests {
             .await,
         );
         assert_eq!(err.code(), "PolicyNotFoundException");
+    }
+
+    // ── account lifecycle (CreateAccount, Describe/ListCreateAccountStatus,
+    //    CloseAccount, RemoveAccountFromOrganization) ─────────────────────
+
+    fn body_value(resp: AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_account_starts_in_progress_then_describes_succeeded() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        let resp = svc
+            .handle(req_with(
+                "111111111111",
+                "CreateAccount",
+                json!({"Email": "new@example.com", "AccountName": "New"}),
+            ))
+            .await
+            .unwrap();
+        let body = body_value(resp);
+        let status = &body["CreateAccountStatus"];
+        let request_id = status["Id"].as_str().unwrap().to_string();
+        assert_eq!(status["State"].as_str().unwrap(), "IN_PROGRESS");
+        assert_eq!(status["AccountName"].as_str().unwrap(), "New");
+        let new_account_id = status["AccountId"].as_str().unwrap().to_string();
+        assert_eq!(new_account_id.len(), 12);
+
+        // First Describe should flip the status to SUCCEEDED.
+        let resp = svc
+            .handle(req_with(
+                "111111111111",
+                "DescribeCreateAccountStatus",
+                json!({"CreateAccountRequestId": request_id}),
+            ))
+            .await
+            .unwrap();
+        let body = body_value(resp);
+        assert_eq!(
+            body["CreateAccountStatus"]["State"].as_str().unwrap(),
+            "SUCCEEDED"
+        );
+        assert!(body["CreateAccountStatus"]["CompletedTimestamp"].is_number());
+    }
+
+    #[tokio::test]
+    async fn create_account_only_management_account_can_call() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        // Enroll a non-management account first.
+        svc.handle(req_with(
+            "111111111111",
+            "CreateAccount",
+            json!({"Email": "non-mgmt@example.com", "AccountName": "NonMgmt"}),
+        ))
+        .await
+        .unwrap();
+        // Find the new id via list.
+        let resp = svc
+            .handle(req_with("111111111111", "ListAccounts", json!({})))
+            .await
+            .unwrap();
+        let listed = body_value(resp);
+        let new_id = listed["Accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["Name"].as_str() == Some("NonMgmt"))
+            .unwrap()["Id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let err = expect_err(
+            svc.handle(req_with(
+                &new_id,
+                "CreateAccount",
+                json!({"Email": "x@example.com", "AccountName": "X"}),
+            ))
+            .await,
+        );
+        assert_eq!(err.code(), "AccessDeniedException");
+    }
+
+    #[tokio::test]
+    async fn list_create_account_status_filters_by_state() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        let resp = svc
+            .handle(req_with(
+                "111111111111",
+                "CreateAccount",
+                json!({"Email": "a@example.com", "AccountName": "A"}),
+            ))
+            .await
+            .unwrap();
+        let request_id = body_value(resp)["CreateAccountStatus"]["Id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Filter for IN_PROGRESS first — should include the new request.
+        let resp = svc
+            .handle(req_with(
+                "111111111111",
+                "ListCreateAccountStatus",
+                json!({"States": ["IN_PROGRESS"]}),
+            ))
+            .await
+            .unwrap();
+        let listed = body_value(resp);
+        let arr = listed["CreateAccountStatuses"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["Id"].as_str().unwrap(), request_id);
+
+        // Flip to SUCCEEDED via Describe, then refilter.
+        svc.handle(req_with(
+            "111111111111",
+            "DescribeCreateAccountStatus",
+            json!({"CreateAccountRequestId": request_id}),
+        ))
+        .await
+        .unwrap();
+        let resp = svc
+            .handle(req_with(
+                "111111111111",
+                "ListCreateAccountStatus",
+                json!({"States": ["IN_PROGRESS"]}),
+            ))
+            .await
+            .unwrap();
+        assert!(body_value(resp)["CreateAccountStatuses"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_account_marks_suspended_and_management_is_protected() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        let new_resp = svc
+            .handle(req_with(
+                "111111111111",
+                "CreateAccount",
+                json!({"Email": "a@example.com", "AccountName": "A"}),
+            ))
+            .await
+            .unwrap();
+        let new_id = body_value(new_resp)["CreateAccountStatus"]["AccountId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        svc.handle(req_with(
+            "111111111111",
+            "CloseAccount",
+            json!({"AccountId": new_id}),
+        ))
+        .await
+        .unwrap();
+        // Status should be SUSPENDED via DescribeAccount.
+        let resp = svc
+            .handle(req_with(
+                "111111111111",
+                "DescribeAccount",
+                json!({"AccountId": new_id}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            body_value(resp)["Account"]["Status"].as_str().unwrap(),
+            "SUSPENDED"
+        );
+
+        // Management account cannot be closed.
+        let err = expect_err(
+            svc.handle(req_with(
+                "111111111111",
+                "CloseAccount",
+                json!({"AccountId": "111111111111"}),
+            ))
+            .await,
+        );
+        assert_eq!(err.code(), "ConstraintViolationException");
+    }
+
+    #[tokio::test]
+    async fn remove_account_from_organization_drops_member() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        let new_resp = svc
+            .handle(req_with(
+                "111111111111",
+                "CreateAccount",
+                json!({"Email": "a@example.com", "AccountName": "A"}),
+            ))
+            .await
+            .unwrap();
+        let new_id = body_value(new_resp)["CreateAccountStatus"]["AccountId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        svc.handle(req_with(
+            "111111111111",
+            "RemoveAccountFromOrganization",
+            json!({"AccountId": new_id}),
+        ))
+        .await
+        .unwrap();
+        let err = expect_err(
+            svc.handle(req_with(
+                "111111111111",
+                "DescribeAccount",
+                json!({"AccountId": new_id}),
+            ))
+            .await,
+        );
+        assert_eq!(err.code(), "AccountNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn create_gov_cloud_account_returns_paired_id() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        let resp = svc
+            .handle(req_with(
+                "111111111111",
+                "CreateGovCloudAccount",
+                json!({"Email": "gov@example.com", "AccountName": "Gov"}),
+            ))
+            .await
+            .unwrap();
+        let body = body_value(resp);
+        let status = &body["CreateAccountStatus"];
+        assert!(status["AccountId"].is_string());
+        assert!(status["GovCloudAccountId"].is_string());
+        assert_ne!(
+            status["AccountId"].as_str().unwrap(),
+            status["GovCloudAccountId"].as_str().unwrap()
+        );
     }
 }

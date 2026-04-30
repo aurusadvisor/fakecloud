@@ -42,6 +42,12 @@ pub struct OrganizationState {
     pub policies: BTreeMap<String, Policy>,
     /// target_id -> attached policy ids. Targets are root id, OU id, or account id.
     pub attachments: BTreeMap<String, HashSet<String>>,
+    /// `CreateAccount` / `CreateGovCloudAccount` request statuses keyed
+    /// by request id (`car-...`). Lifecycles transition through
+    /// `IN_PROGRESS` -> `SUCCEEDED` (or `FAILED`) and remain queryable
+    /// via `DescribeCreateAccountStatus` and `ListCreateAccountStatus`.
+    #[serde(default)]
+    pub create_account_requests: BTreeMap<String, CreateAccountStatus>,
 }
 
 impl OrganizationState {
@@ -119,7 +125,114 @@ impl OrganizationState {
             accounts,
             policies,
             attachments,
+            create_account_requests: BTreeMap::new(),
         }
+    }
+
+    /// Allocate the next pseudo-random 12-digit account id that's not
+    /// already a member. Mirrors AWS's account-id format (numeric,
+    /// 12 digits, no leading zero stripping).
+    pub fn next_account_id(&self) -> String {
+        loop {
+            let mut id = String::with_capacity(12);
+            for _ in 0..12 {
+                let u = Uuid::new_v4();
+                let byte = u.as_bytes()[0];
+                id.push(((byte % 10) + b'0') as char);
+            }
+            if !id.starts_with('0') && !self.accounts.contains_key(&id) {
+                return id;
+            }
+        }
+    }
+
+    /// Synchronously create a new member account under the root and
+    /// record an `IN_PROGRESS` `CreateAccountStatus`. The status is
+    /// flipped to `SUCCEEDED` on the next `DescribeCreateAccountStatus`
+    /// (matching the typical poll-then-observe AWS shape) so callers
+    /// see both phases.
+    pub fn create_account(
+        &mut self,
+        email: &str,
+        name: &str,
+        gov_cloud_paired_id: Option<String>,
+    ) -> CreateAccountStatus {
+        let now = Utc::now();
+        let request_id = format!("car-{}", random_id(20));
+        let new_account_id = self.next_account_id();
+        let arn = format!(
+            "arn:aws:organizations::{}:account/{}/{}",
+            self.management_account_id, self.org_id, new_account_id
+        );
+        let account = MemberAccount {
+            id: new_account_id.clone(),
+            arn,
+            email: email.to_string(),
+            name: name.to_string(),
+            status: "ACTIVE".to_string(),
+            joined_method: "CREATED".to_string(),
+            joined_timestamp: now,
+            parent_id: self.root_id.clone(),
+        };
+        self.accounts.insert(new_account_id.clone(), account);
+
+        let status = CreateAccountStatus {
+            id: request_id.clone(),
+            account_id: Some(new_account_id),
+            account_name: name.to_string(),
+            state: "IN_PROGRESS".to_string(),
+            requested_timestamp: now,
+            completed_timestamp: None,
+            failure_reason: None,
+            gov_cloud_account_id: gov_cloud_paired_id,
+        };
+        self.create_account_requests
+            .insert(request_id, status.clone());
+        status
+    }
+
+    /// Look up a `CreateAccountStatus` by its `car-...` id. If still
+    /// `IN_PROGRESS`, flip it to `SUCCEEDED` and stamp the completion
+    /// timestamp before returning. Returns `None` if no such request.
+    pub fn complete_or_describe_create_account(
+        &mut self,
+        request_id: &str,
+    ) -> Option<CreateAccountStatus> {
+        let status = self.create_account_requests.get_mut(request_id)?;
+        if status.state == "IN_PROGRESS" {
+            status.state = "SUCCEEDED".to_string();
+            status.completed_timestamp = Some(Utc::now());
+        }
+        Some(status.clone())
+    }
+
+    /// Mark `account_id` as `SUSPENDED` (mirrors `CloseAccount`). The
+    /// account stays enrolled in the org so `ListAccounts` still shows
+    /// it, matching real AWS retention semantics.
+    pub fn close_account(&mut self, account_id: &str) -> Result<(), OrgError> {
+        if account_id == self.management_account_id {
+            return Err(OrgError::AccountChangesNotAllowed(account_id.to_string()));
+        }
+        let account = self
+            .accounts
+            .get_mut(account_id)
+            .ok_or_else(|| OrgError::AccountNotFound(account_id.to_string()))?;
+        account.status = "SUSPENDED".to_string();
+        Ok(())
+    }
+
+    /// Remove a member account from the organization. The management
+    /// account cannot be removed.
+    pub fn remove_account(&mut self, account_id: &str) -> Result<(), OrgError> {
+        if account_id == self.management_account_id {
+            return Err(OrgError::AccountChangesNotAllowed(account_id.to_string()));
+        }
+        if self.accounts.remove(account_id).is_none() {
+            return Err(OrgError::AccountNotFound(account_id.to_string()));
+        }
+        // Detach any direct policy attachments for the now-orphan id.
+        self.attachments.remove(account_id);
+        Ok(())
     }
 
     /// Returns `true` iff `account_id` is the management account.
@@ -506,6 +619,23 @@ pub enum OrgError {
     PolicyInUse(String),
     PolicyNotAttached(String),
     TargetNotFound(String),
+    AccountChangesNotAllowed(String),
+    CreateAccountStatusNotFound(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateAccountStatus {
+    pub id: String,
+    pub account_id: Option<String>,
+    pub account_name: String,
+    pub state: String,
+    pub requested_timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub completed_timestamp: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub failure_reason: Option<String>,
+    #[serde(default)]
+    pub gov_cloud_account_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
