@@ -307,6 +307,34 @@ fn send_message_returns_md5() {
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert!(body["MD5OfMessageBody"].as_str().is_some());
     assert!(body["MessageId"].as_str().is_some());
+    // No system attributes set => no MD5OfMessageSystemAttributes field
+    assert!(body.get("MD5OfMessageSystemAttributes").is_none());
+}
+
+#[test]
+fn send_message_returns_md5_of_system_attributes() {
+    let svc = make_service();
+    let url = create_queue(&svc, "sysattr-queue");
+    let req = make_request(
+        "SendMessage",
+        json!({
+            "QueueUrl": url,
+            "MessageBody": "test",
+            "MessageSystemAttributes": {
+                "AWSTraceHeader": {
+                    "DataType": "String",
+                    "StringValue": "Root=1-abc-def"
+                }
+            }
+        }),
+    );
+    let resp = svc.send_message(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let md5 = body["MD5OfMessageSystemAttributes"]
+        .as_str()
+        .expect("MD5OfMessageSystemAttributes missing");
+    assert_eq!(md5.len(), 32);
+    assert!(md5.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
 #[test]
