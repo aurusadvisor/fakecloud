@@ -580,6 +580,7 @@ async fn main() {
     let cognito_events_state = cognito_state.clone();
     let cognito_jwks_state = cognito_state.clone();
     let cognito_oidc_state = cognito_state.clone();
+    let cognito_token_state = cognito_state.clone();
 
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
@@ -3529,6 +3530,44 @@ async fn main() {
                                 &pool_id, &region, &base_url,
                             )),
                         )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/oauth2/token",
+            axum::routing::post({
+                let cs = cognito_token_state;
+                move |body: String| {
+                    let cs = cs.clone();
+                    async move {
+                        let params: std::collections::BTreeMap<String, String> =
+                            match serde_urlencoded::from_str::<Vec<(String, String)>>(&body) {
+                                Ok(pairs) => pairs.into_iter().collect(),
+                                Err(_) => std::collections::BTreeMap::new(),
+                            };
+                        let region = std::env::var("AWS_DEFAULT_REGION")
+                            .or_else(|_| std::env::var("AWS_REGION"))
+                            .unwrap_or_else(|_| "us-east-1".to_string());
+                        match fakecloud_cognito::handle_oauth2_token(&cs, &params, &region).await {
+                            Ok(resp) => (axum::http::StatusCode::OK, axum::Json(resp.to_json())),
+                            Err(err) => {
+                                let status = axum::http::StatusCode::from_u16(err.status_code())
+                                    .unwrap_or(axum::http::StatusCode::BAD_REQUEST);
+                                let mut body = serde_json::Map::new();
+                                body.insert(
+                                    "error".into(),
+                                    serde_json::Value::String(err.as_oauth_code().to_string()),
+                                );
+                                if let Some(desc) = err.description() {
+                                    body.insert(
+                                        "error_description".into(),
+                                        serde_json::Value::String(desc.to_string()),
+                                    );
+                                }
+                                (status, axum::Json(serde_json::Value::Object(body)))
+                            }
+                        }
                     }
                 }
             }),
