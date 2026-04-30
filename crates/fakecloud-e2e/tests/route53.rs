@@ -118,16 +118,23 @@ async fn change_and_list_resource_record_sets() {
         .collect();
     assert!(names.contains(&"api.rrset.example.com."));
 
-    let got_change = r53
-        .get_change()
-        .id(&change_id)
-        .send()
-        .await
-        .expect("get change");
-    assert_eq!(
-        got_change.change_info().unwrap().status().as_str(),
-        "INSYNC"
-    );
+    // Real Route53 returns PENDING during the propagation window then
+    // INSYNC. Poll up to 10 reads — fakecloud flips after a small
+    // fixed read-count threshold.
+    let mut status = String::new();
+    for _ in 0..10 {
+        let got = r53
+            .get_change()
+            .id(&change_id)
+            .send()
+            .await
+            .expect("get change");
+        status = got.change_info().unwrap().status().as_str().to_string();
+        if status == "INSYNC" {
+            break;
+        }
+    }
+    assert_eq!(status, "INSYNC");
 }
 
 #[tokio::test]
