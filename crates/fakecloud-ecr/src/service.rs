@@ -723,8 +723,9 @@ impl EcrService {
         }
 
         let snapshot = repo.images.get(&digest).cloned().unwrap();
+        let scan_on_push = repo.image_scanning_configuration.scan_on_push;
         let tag_ref = supplied_tag.as_deref();
-        Ok(AwsResponse::ok_json(json!({
+        let response = AwsResponse::ok_json(json!({
             "image": {
                 "registryId": repo.registry_id,
                 "repositoryName": name,
@@ -732,7 +733,71 @@ impl EcrService {
                 "imageManifest": snapshot.image_manifest,
                 "imageManifestMediaType": snapshot.image_manifest_media_type,
             }
-        })))
+        }));
+        // Drop the lock before kicking the async scan; trigger_scan
+        // re-acquires it to mark IN_PROGRESS and spawn the scanner.
+        drop(accounts);
+        if scan_on_push {
+            self.trigger_scan(&account, &name, &digest);
+        }
+        Ok(response)
+    }
+
+    /// Mark `digest` as `IN_PROGRESS` and spawn the scanner task.
+    /// Identical wiring to `start_image_scan` minus the request-shaped
+    /// response — used both by the user-facing `StartImageScan` and the
+    /// `scan_on_push=true` PutImage hook.
+    fn trigger_scan(&self, account: &str, name: &str, digest: &str) {
+        use crate::state::ImageScanFindings;
+        let layers = {
+            let mut accounts = self.state.write();
+            let Some(state) = accounts.get_mut(account) else {
+                return;
+            };
+            let Some(repo) = state.repositories.get_mut(name) else {
+                return;
+            };
+            repo.scan_findings.insert(
+                digest.to_string(),
+                ImageScanFindings {
+                    image_digest: digest.to_string(),
+                    scan_status: "IN_PROGRESS".to_string(),
+                    scan_completed_at: None,
+                    vulnerability_source_updated_at: None,
+                    finding_severity_counts: BTreeMap::new(),
+                    findings: Vec::new(),
+                },
+            );
+            layers_for_image(repo, digest)
+        };
+        let shared = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let snap_lock = self.snapshot_lock.clone();
+        let account = account.to_string();
+        let name = name.to_string();
+        let digest = digest.to_string();
+        tokio::spawn(async move {
+            let result = crate::scanner::scan_layers(&digest, &layers).await;
+            {
+                let mut accounts = shared.write();
+                let Some(state) = accounts.get_mut(&account) else {
+                    return;
+                };
+                let Some(repo) = state.repositories.get_mut(&name) else {
+                    return;
+                };
+                let findings = result.unwrap_or_else(|| ImageScanFindings {
+                    image_digest: digest.clone(),
+                    scan_status: "COMPLETE".to_string(),
+                    scan_completed_at: Some(Utc::now()),
+                    vulnerability_source_updated_at: Some(Utc::now()),
+                    finding_severity_counts: BTreeMap::new(),
+                    findings: Vec::new(),
+                });
+                repo.scan_findings.insert(digest.clone(), findings);
+            }
+            EcrService::save_snapshot_with(shared, store, snap_lock).await;
+        });
     }
 
     fn batch_get_image(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
