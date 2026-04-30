@@ -60,6 +60,15 @@ pub static ORGANIZATIONS_ACTIONS: &[&str] = &[
     "EnableAllFeatures",
     "EnablePolicyType",
     "DisablePolicyType",
+    "TagResource",
+    "UntagResource",
+    "ListTagsForResource",
+    "ListParents",
+    "ListChildren",
+    "DescribeEffectivePolicy",
+    "PutResourcePolicy",
+    "DeleteResourcePolicy",
+    "DescribeResourcePolicy",
 ];
 
 pub struct OrganizationsService {
@@ -939,6 +948,213 @@ impl OrganizationsService {
             }
         })))
     }
+    fn tag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let resource_id = required_str(&body, "ResourceId")?.to_string();
+        let tags = parse_tags(body.get("Tags"));
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.set_resource_tags(&resource_id, &tags);
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn untag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let resource_id = required_str(&body, "ResourceId")?.to_string();
+        let tag_keys: Vec<String> = body
+            .get("TagKeys")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.untag_resource(&resource_id, &tag_keys);
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_tags_for_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let resource_id = required_str(&body, "ResourceId")?.to_string();
+        let guard = self.state.read();
+        let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
+        let tags: Vec<Value> = org
+            .list_resource_tags(&resource_id)
+            .into_iter()
+            .map(|(k, v)| json!({"Key": k, "Value": v}))
+            .collect();
+        Ok(AwsResponse::ok_json(json!({ "Tags": tags })))
+    }
+
+    fn list_parents(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let child_id = required_str(&body, "ChildId")?.to_string();
+        let guard = self.state.read();
+        let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
+        let parents = match org.parent_of(&child_id) {
+            Some((id, kind)) => vec![json!({"Id": id, "Type": kind})],
+            None => Vec::new(),
+        };
+        Ok(AwsResponse::ok_json(json!({ "Parents": parents })))
+    }
+
+    fn list_children(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let parent_id = required_str(&body, "ParentId")?.to_string();
+        let child_type = required_str(&body, "ChildType")?.to_string();
+        let guard = self.state.read();
+        let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
+        let children: Vec<Value> = org
+            .list_children(&parent_id, &child_type)
+            .into_iter()
+            .map(|id| json!({"Id": id, "Type": child_type}))
+            .collect();
+        Ok(AwsResponse::ok_json(json!({ "Children": children })))
+    }
+
+    fn describe_effective_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let policy_type = required_str(&body, "PolicyType")?.to_string();
+        let target_id = body
+            .get("TargetId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| req.account_id.clone());
+        let guard = self.state.read();
+        let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
+        // The effective policy is the union of every policy of `policy_type`
+        // attached up the org hierarchy from `target_id` to root. We
+        // present it as a single Statement[] union so callers can audit.
+        let mut statements: Vec<Value> = Vec::new();
+        for ancestor in ancestors_for(org, &target_id) {
+            if let Some(policy_ids) = org.attachments.get(&ancestor) {
+                for pid in policy_ids {
+                    if let Some(policy) = org.policies.get(pid) {
+                        if policy.policy_type == policy_type {
+                            if let Ok(content) = serde_json::from_str::<Value>(&policy.content) {
+                                if let Some(arr) =
+                                    content.get("Statement").and_then(|v| v.as_array())
+                                {
+                                    statements.extend(arr.iter().cloned());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let merged = json!({"Version": "2012-10-17", "Statement": statements});
+        let payload = json!({
+            "EffectivePolicy": {
+                "PolicyType": policy_type,
+                "TargetId": target_id,
+                "PolicyContent": merged.to_string(),
+                "LastUpdatedTimestamp": Utc::now().timestamp() as f64,
+            }
+        });
+        Ok(AwsResponse::ok_json(payload))
+    }
+
+    fn put_resource_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let content = required_str(&body, "Content")?.to_string();
+        // Reject malformed JSON up front.
+        serde_json::from_str::<Value>(&content).map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInputException",
+                "Content must be valid JSON",
+            )
+        })?;
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.resource_policy = Some(content);
+        let payload = json!({
+            "ResourcePolicy": {
+                "ResourcePolicySummary": {
+                    "Id": "rp-fakecloud",
+                    "Arn": format!(
+                        "arn:aws:organizations::{}:resourcepolicy/{}/rp-fakecloud",
+                        org.management_account_id, org.org_id
+                    ),
+                },
+                "Content": org.resource_policy.clone(),
+            }
+        });
+        Ok(AwsResponse::ok_json(payload))
+    }
+
+    fn delete_resource_policy(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let mut guard = self.state.write();
+        self.require_member_management(&guard, &req.account_id)?;
+        let org = guard.as_mut().expect("management gate proved Some");
+        org.resource_policy = None;
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn describe_resource_policy(&self, _req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let guard = self.state.read();
+        let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
+        let content = org.resource_policy.clone().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourcePolicyNotFoundException",
+                "No resource policy is attached to this organization.",
+            )
+        })?;
+        Ok(AwsResponse::ok_json(json!({
+            "ResourcePolicy": {
+                "ResourcePolicySummary": {
+                    "Id": "rp-fakecloud",
+                    "Arn": format!(
+                        "arn:aws:organizations::{}:resourcepolicy/{}/rp-fakecloud",
+                        org.management_account_id, org.org_id
+                    ),
+                },
+                "Content": content,
+            }
+        })))
+    }
+}
+
+fn parse_tags(value: Option<&Value>) -> Vec<(String, String)> {
+    let arr = match value.and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter()
+        .filter_map(|v| {
+            let k = v.get("Key")?.as_str()?.to_string();
+            let value = v.get("Value")?.as_str()?.to_string();
+            Some((k, value))
+        })
+        .collect()
+}
+
+/// Walk from `target_id` up to root (inclusive) via OU/account parents.
+/// Used by `DescribeEffectivePolicy` to union policy statements across
+/// every level. Keeps the input id at the front so direct attachments
+/// take precedence in iteration order.
+fn ancestors_for(org: &OrganizationState, target_id: &str) -> Vec<String> {
+    let mut chain = vec![target_id.to_string()];
+    let mut cursor = target_id.to_string();
+    while let Some((parent, _)) = org.parent_of(&cursor) {
+        if parent.is_empty() {
+            break;
+        }
+        chain.push(parent.clone());
+        if parent.starts_with("r-") {
+            break;
+        }
+        cursor = parent;
+    }
+    chain
 }
 
 #[async_trait]
@@ -996,6 +1212,15 @@ impl AwsService for OrganizationsService {
             "EnableAllFeatures" => self.enable_all_features(&req),
             "EnablePolicyType" => self.enable_policy_type(&req),
             "DisablePolicyType" => self.disable_policy_type(&req),
+            "TagResource" => self.tag_resource(&req),
+            "UntagResource" => self.untag_resource(&req),
+            "ListTagsForResource" => self.list_tags_for_resource(&req),
+            "ListParents" => self.list_parents(&req),
+            "ListChildren" => self.list_children(&req),
+            "DescribeEffectivePolicy" => self.describe_effective_policy(&req),
+            "PutResourcePolicy" => self.put_resource_policy(&req),
+            "DeleteResourcePolicy" => self.delete_resource_policy(&req),
+            "DescribeResourcePolicy" => self.describe_resource_policy(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "organizations",
                 &req.action,
