@@ -907,7 +907,7 @@ async fn main() {
     let eb_state_for_scheduler = eb_state.clone();
     let eb_state_for_rds = eb_state.clone();
     let eb_state_for_lambda = eb_state.clone();
-    let mut scheduler = fakecloud_eventbridge::scheduler::Scheduler::new(eb_state, delivery_for_eb)
+    let mut scheduler = fakecloud_eventbridge::scheduler::Scheduler::new(eb_state.clone(), delivery_for_eb)
         .with_lambda(lambda_state.clone())
         .with_logs(logs_state.clone());
     if let Some(ref rt) = container_runtime {
@@ -2497,6 +2497,9 @@ async fn main() {
                 ),
                 fakecloud_iam::resource_policy::StsResourcePolicyProvider::shared(
                     iam_state.clone(),
+                ),
+                fakecloud_eventbridge::resource_policy::EventBridgeResourcePolicyProvider::shared(
+                    eb_state.clone(),
                 ),
             ],
         )),
