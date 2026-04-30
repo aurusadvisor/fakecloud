@@ -315,10 +315,9 @@ pub(crate) fn matches_pattern(
         Err(_) => return false,
     };
 
-    let pattern_obj = match pattern.as_object() {
-        Some(o) => o,
-        None => return false,
-    };
+    if !pattern.is_object() {
+        return false;
+    }
 
     let detail_value: Value = serde_json::from_str(detail).unwrap_or(json!({}));
     let event = json!({
@@ -330,20 +329,23 @@ pub(crate) fn matches_pattern(
         "resources": resources,
     });
 
-    for (key, pattern_value) in pattern_obj {
-        let event_value = &event[key];
-        if !matches_value(pattern_value, event_value) {
-            return false;
-        }
-    }
-
-    true
+    matches_value(&pattern, &event)
 }
 
 pub(crate) fn matches_value(pattern: &Value, event_value: &Value) -> bool {
     match pattern {
         Value::Object(obj) => {
+            // `$or` is a sibling-level alternation: any alternative pattern
+            // matched against this same event level passes the whole object.
+            if let Some(Value::Array(alternatives)) = obj.get("$or") {
+                return alternatives
+                    .iter()
+                    .any(|alt| matches_value(alt, event_value));
+            }
             for (key, sub_pattern) in obj {
+                if key == "$or" {
+                    continue;
+                }
                 let sub_value = &event_value[key];
                 if !matches_value(sub_pattern, sub_value) {
                     return false;
@@ -362,6 +364,30 @@ pub(crate) fn matches_single(pattern_elem: &Value, event_value: &Value) -> bool 
             if let Some(prefix_val) = obj.get("prefix") {
                 if let (Some(prefix), Some(actual)) = (prefix_val.as_str(), event_value.as_str()) {
                     return actual.starts_with(prefix);
+                }
+                return false;
+            }
+            if let Some(suffix_val) = obj.get("suffix") {
+                if let (Some(suffix), Some(actual)) = (suffix_val.as_str(), event_value.as_str()) {
+                    return actual.ends_with(suffix);
+                }
+                return false;
+            }
+            if let Some(eqic_val) = obj.get("equals-ignore-case") {
+                if let (Some(expected), Some(actual)) = (eqic_val.as_str(), event_value.as_str()) {
+                    return expected.eq_ignore_ascii_case(actual);
+                }
+                return false;
+            }
+            if let Some(cidr_val) = obj.get("cidr") {
+                if let (Some(cidr), Some(actual)) = (cidr_val.as_str(), event_value.as_str()) {
+                    return cidr_matches(cidr, actual);
+                }
+                return false;
+            }
+            if let Some(wild_val) = obj.get("wildcard") {
+                if let (Some(pattern), Some(actual)) = (wild_val.as_str(), event_value.as_str()) {
+                    return wildcard_matches(pattern, actual);
                 }
                 return false;
             }
@@ -385,6 +411,94 @@ pub(crate) fn matches_single(pattern_elem: &Value, event_value: &Value) -> bool 
         }
         _ => values_equal(pattern_elem, event_value),
     }
+}
+
+/// `wildcard` matcher: `*` matches any run of characters (including empty);
+/// `\*` is a literal asterisk.
+pub(crate) fn wildcard_matches(pattern: &str, actual: &str) -> bool {
+    let mut segments: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                current.push(next);
+            }
+        } else if c == '*' {
+            segments.push(std::mem::take(&mut current));
+        } else {
+            current.push(c);
+        }
+    }
+    segments.push(current);
+
+    if segments.len() == 1 {
+        return segments[0] == actual;
+    }
+
+    let mut pos = 0;
+    let first = &segments[0];
+    if !actual[pos..].starts_with(first.as_str()) {
+        return false;
+    }
+    pos += first.len();
+
+    let last_idx = segments.len() - 1;
+    for (i, seg) in segments.iter().enumerate().skip(1) {
+        if i == last_idx {
+            // The trailing segment must match the tail.
+            if !actual[pos..].ends_with(seg.as_str()) {
+                return false;
+            }
+            return actual.len().saturating_sub(pos) >= seg.len();
+        }
+        match actual[pos..].find(seg.as_str()) {
+            Some(idx) => pos += idx + seg.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
+/// IPv4 CIDR membership test for the `cidr` filter.
+pub(crate) fn cidr_matches(cidr: &str, actual: &str) -> bool {
+    let (net_str, prefix_str) = match cidr.split_once('/') {
+        Some(parts) => parts,
+        None => return false,
+    };
+    let prefix: u32 = match prefix_str.parse() {
+        Ok(p) if p <= 32 => p,
+        _ => return false,
+    };
+    let net = match parse_ipv4(net_str) {
+        Some(n) => n,
+        None => return false,
+    };
+    let value = match parse_ipv4(actual) {
+        Some(v) => v,
+        None => return false,
+    };
+    if prefix == 0 {
+        return true;
+    }
+    let mask = u32::MAX << (32 - prefix);
+    (net & mask) == (value & mask)
+}
+
+fn parse_ipv4(s: &str) -> Option<u32> {
+    let mut parts = s.split('.');
+    let mut result: u32 = 0;
+    for _ in 0..4 {
+        let octet: u32 = parts.next()?.parse().ok()?;
+        if octet > 255 {
+            return None;
+        }
+        result = (result << 8) | octet;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(result)
 }
 
 /// For each archive on `event_bus_name` whose event pattern matches the
