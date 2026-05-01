@@ -289,28 +289,47 @@ impl RdsService {
     }
 
     async fn save_snapshot(&self) {
-        let Some(store) = self.snapshot_store.clone() else {
-            return;
-        };
-        let _guard = self.snapshot_lock.lock().await;
-        let snapshot = RdsSnapshot {
-            schema_version: RDS_SNAPSHOT_SCHEMA_VERSION,
-            state: None,
-            accounts: Some(self.state.read().clone()),
-        };
-        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let bytes = serde_json::to_vec(&snapshot)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            store.save(&bytes)
-        })
+        save_snapshot_static(
+            self.state.clone(),
+            self.snapshot_store.clone(),
+            self.snapshot_lock.clone(),
+        )
         .await;
-        match join {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::error!(%err, "failed to write rds snapshot"),
-            Err(err) => tracing::error!(%err, "rds snapshot task panicked"),
-        }
     }
+}
 
+/// Persist the current `RdsState` to the configured snapshot store. Free
+/// function so background tasks (e.g. the create-DB-instance container-start
+/// task) can save without holding a `&RdsService`. Returns immediately when
+/// no store is configured (memory-mode runs).
+async fn save_snapshot_static(
+    state: SharedRdsState,
+    store: Option<Arc<dyn SnapshotStore>>,
+    lock: Arc<AsyncMutex<()>>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let _guard = lock.lock().await;
+    let snapshot = RdsSnapshot {
+        schema_version: RDS_SNAPSHOT_SCHEMA_VERSION,
+        state: None,
+        accounts: Some(state.read().clone()),
+    };
+    let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        store.save(&bytes)
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => tracing::error!(%err, "failed to write rds snapshot"),
+        Err(err) => tracing::error!(%err, "rds snapshot task panicked"),
+    }
+}
+
+impl RdsService {
     /// Return the runtime or a ``ServiceUnavailable`` error if it was not configured.
     ///
     /// RDS operations that start, stop, or reach into a database container fail
@@ -569,6 +588,8 @@ impl RdsService {
             let account_id = request.account_id.clone();
             let region = request.region.clone();
             let arn = instance_arn.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
             tokio::spawn(async move {
                 match runtime
                     .ensure_postgres(
@@ -584,15 +605,27 @@ impl RdsService {
                     .await
                 {
                     Ok(running) => {
-                        let mut accounts = state_handle.write();
-                        let state = accounts.get_or_create(&account_id);
-                        if let Some(inst) = state.instances.get_mut(&id) {
-                            inst.db_instance_status = "available".to_string();
-                            inst.endpoint_address = "127.0.0.1".to_string();
-                            inst.port = i32::from(running.host_port);
-                            inst.host_port = running.host_port;
-                            inst.container_id = running.container_id;
+                        {
+                            let mut accounts = state_handle.write();
+                            let state = accounts.get_or_create(&account_id);
+                            if let Some(inst) = state.instances.get_mut(&id) {
+                                inst.db_instance_status = "available".to_string();
+                                inst.endpoint_address = "127.0.0.1".to_string();
+                                inst.port = i32::from(running.host_port);
+                                inst.host_port = running.host_port;
+                                inst.container_id = running.container_id;
+                            }
                         }
+                        // Persist the flipped status. Without this the
+                        // synchronous CreateDBInstance save captures the
+                        // `creating` placeholder, which the load path
+                        // discards on restart, dropping the instance.
+                        save_snapshot_static(
+                            state_handle.clone(),
+                            snapshot_store.clone(),
+                            snapshot_lock.clone(),
+                        )
+                        .await;
                     }
                     Err(error) => {
                         tracing::error!(%error, db_instance_identifier=%id, "create_db_instance background task failed");
@@ -601,6 +634,12 @@ impl RdsService {
                             let state = accounts.get_or_create(&account_id);
                             state.instances.remove(&id);
                         }
+                        save_snapshot_static(
+                            state_handle.clone(),
+                            snapshot_store.clone(),
+                            snapshot_lock.clone(),
+                        )
+                        .await;
                         emit_event_static(
                             delivery_bus.as_ref(),
                             RdsSourceType::DbInstance,

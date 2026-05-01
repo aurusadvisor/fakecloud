@@ -10,12 +10,17 @@ use uuid::Uuid;
 use super::{
     db_instance_xml, default_db_name, default_parameter_group, default_port_for_engine,
     filter_engine_versions, filter_orderable_options, license_model_for_engine, merge_tags,
-    optional_i32_param, parse_tag_keys, parse_tags, validate_create_request, RdsService,
-    RdsSourceType,
+    optional_i32_param, parse_tag_keys, parse_tags, save_snapshot_static, validate_create_request,
+    RdsService, RdsSourceType,
 };
-use crate::state::{default_engine_versions, default_orderable_options, DbInstance, RdsTag};
+use crate::state::{
+    default_engine_versions, default_orderable_options, DbInstance, RdsSnapshot, RdsTag,
+    SharedRdsState, RDS_SNAPSHOT_SCHEMA_VERSION,
+};
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsService, AwsServiceError};
+use fakecloud_persistence::{DiskSnapshotStore, SnapshotStore};
+use tokio::sync::Mutex as AsyncMutex;
 
 #[test]
 fn default_port_matches_aws_for_each_engine() {
@@ -1652,4 +1657,125 @@ fn describe_db_subnet_groups_unknown_errors() {
     let svc = make_service();
     let req = request("DescribeDBSubnetGroups", &[("DBSubnetGroupName", "ghost")]);
     assert!(svc.describe_db_subnet_groups(&req).is_err());
+}
+
+/// Issue #914: the bg container-start task flips status from `creating`
+/// to `available`. Without persisting after the flip, a restart loaded a
+/// `creating` placeholder which the load path then dropped, making the
+/// DB instance disappear. `save_snapshot_static` is the free fn the bg
+/// task calls — exercise it directly to lock the contract: the latest
+/// state lands on disk for every caller, not just service handlers.
+#[tokio::test]
+async fn save_snapshot_static_persists_status_flip_from_bg_task() {
+    fn make_instance(id: &str, status: &str) -> DbInstance {
+        let now = Utc::now();
+        DbInstance {
+            db_instance_identifier: id.to_string(),
+            db_instance_arn: format!("arn:aws:rds:us-east-1:123456789012:db:{id}"),
+            db_instance_class: "db.t3.micro".to_string(),
+            engine: "postgres".to_string(),
+            engine_version: "16.3".to_string(),
+            db_instance_status: status.to_string(),
+            master_username: "admin".to_string(),
+            db_name: Some("appdb".to_string()),
+            endpoint_address: String::new(),
+            port: 0,
+            allocated_storage: 20,
+            publicly_accessible: true,
+            deletion_protection: false,
+            created_at: now,
+            dbi_resource_id: format!("db-{id}"),
+            master_user_password: "secret123".to_string(),
+            container_id: String::new(),
+            host_port: 0,
+            tags: Vec::new(),
+            read_replica_source_db_instance_identifier: None,
+            read_replica_db_instance_identifiers: Vec::new(),
+            vpc_security_group_ids: Vec::new(),
+            db_parameter_group_name: None,
+            backup_retention_period: 1,
+            preferred_backup_window: "03:00-04:00".to_string(),
+            latest_restorable_time: Some(now),
+            option_group_name: None,
+            multi_az: false,
+            pending_modified_values: None,
+            availability_zone: None,
+            storage_type: None,
+            storage_encrypted: false,
+            kms_key_id: None,
+            iam_database_authentication_enabled: false,
+            iops: None,
+            monitoring_interval: None,
+            monitoring_role_arn: None,
+            performance_insights_enabled: false,
+            performance_insights_kms_key_id: None,
+            performance_insights_retention_period: None,
+            enabled_cloudwatch_logs_exports: Vec::new(),
+            ca_certificate_identifier: None,
+            network_type: None,
+            character_set_name: None,
+            auto_minor_version_upgrade: None,
+            copy_tags_to_snapshot: None,
+            master_user_secret_arn: None,
+            master_user_secret_kms_key_id: None,
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rds.snapshot.json");
+    let store: Arc<dyn SnapshotStore> = Arc::new(DiskSnapshotStore::new(path.clone()));
+    let lock = Arc::new(AsyncMutex::new(()));
+
+    let state: SharedRdsState = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    {
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("123456789012");
+        s.instances
+            .insert("db-1".to_string(), make_instance("db-1", "creating"));
+    }
+
+    // First save: simulates the synchronous CreateDBInstance handler save.
+    save_snapshot_static(state.clone(), Some(store.clone()), lock.clone()).await;
+    let bytes = std::fs::read(&path).expect("snapshot file should exist");
+    let snap: RdsSnapshot = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snap.schema_version, RDS_SNAPSHOT_SCHEMA_VERSION);
+    let acc = snap.accounts.expect("multi-account");
+    let s = acc.get("123456789012").expect("account state");
+    assert_eq!(s.instances["db-1"].db_instance_status, "creating");
+
+    // Bg task flips the status and saves again — the regression path.
+    {
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("123456789012");
+        let inst = s.instances.get_mut("db-1").expect("placeholder still here");
+        inst.db_instance_status = "available".to_string();
+        inst.host_port = 15432;
+        inst.port = 15432;
+        inst.endpoint_address = "127.0.0.1".to_string();
+        inst.container_id = "container-id".to_string();
+    }
+    save_snapshot_static(state.clone(), Some(store.clone()), lock.clone()).await;
+
+    let bytes = std::fs::read(&path).unwrap();
+    let snap: RdsSnapshot = serde_json::from_slice(&bytes).unwrap();
+    let acc = snap.accounts.expect("multi-account");
+    let s = acc.get("123456789012").expect("account state");
+    assert_eq!(
+        s.instances["db-1"].db_instance_status, "available",
+        "post-bg-task save must overwrite the `creating` placeholder",
+    );
+    assert_eq!(s.instances["db-1"].host_port, 15432);
+}
+
+/// Memory mode: no store wired, save is a no-op. Guards against
+/// accidentally requiring a store for the bg-task path.
+#[tokio::test]
+async fn save_snapshot_static_is_noop_without_store() {
+    let lock = Arc::new(AsyncMutex::new(()));
+    let state: SharedRdsState = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    save_snapshot_static(state, None, lock).await;
 }
