@@ -453,6 +453,7 @@ impl ResetState {
         *self.cloudfront.write() = fakecloud_cloudfront::CloudFrontAccounts::new();
         *self.route53.write() = fakecloud_route53::Route53Accounts::new();
         *self.acm.write() = fakecloud_acm::AcmAccounts::new();
+        *self.firehose.write() = fakecloud_firehose::FirehoseAccounts::new();
         *self.application_autoscaling.write() =
             fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new();
         *self.wafv2.write() = fakecloud_wafv2::Wafv2Accounts::new();
@@ -787,6 +788,9 @@ mod tests {
                 fakecloud_route53::Route53Accounts::new(),
             )),
             acm: Arc::new(parking_lot::RwLock::new(fakecloud_acm::AcmAccounts::new())),
+            firehose: Arc::new(parking_lot::RwLock::new(
+                fakecloud_firehose::FirehoseAccounts::new(),
+            )),
             application_autoscaling: Arc::new(parking_lot::RwLock::new(
                 fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
             )),
