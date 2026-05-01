@@ -14,7 +14,10 @@ use fakecloud_ecr::{Repository, SharedEcrState};
 use fakecloud_eventbridge::{
     ApiDestination, Archive, Connection, EventRule, SharedEventBridgeState,
 };
-use fakecloud_iam::{IamPolicy, IamRole, PolicyVersion, SharedIamState};
+use fakecloud_iam::{
+    IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy, IamRole, IamUser, PolicyVersion,
+    SharedIamState, Tag,
+};
 use fakecloud_kinesis::{build_stream_shards, KinesisConsumer, KinesisStream, SharedKinesisState};
 use fakecloud_kms::{KmsAlias, KmsKey, SharedKmsState};
 use fakecloud_lambda::SharedLambdaState;
@@ -29,6 +32,22 @@ use fakecloud_ssm::{SharedSsmState, SsmParameter};
 
 use crate::state::StackResource;
 use crate::template::ResourceDefinition;
+
+/// Convert a CFN `Tags` property (`[{Key, Value}, ...]`) into the IAM
+/// crate's `Tag` Vec form. Silently skips malformed entries — the same
+/// tolerant behaviour the existing IAM service uses for runtime input.
+fn parse_iam_tags(value: Option<&serde_json::Value>) -> Vec<Tag> {
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|t| {
+            let key = t.get("Key").and_then(|v| v.as_str())?.to_string();
+            let value = t.get("Value").and_then(|v| v.as_str())?.to_string();
+            Some(Tag { key, value })
+        })
+        .collect()
+}
 
 /// `LogGroupName` properties on Logs CFN resources may carry either a
 /// log-group ARN (when they come from `{Ref: SomeLogGroup}` in the same
@@ -96,6 +115,12 @@ impl ResourceProvisioner {
             "AWS::SSM::Parameter" => self.create_ssm_parameter(resource),
             "AWS::IAM::Role" => self.create_iam_role(resource),
             "AWS::IAM::Policy" => self.create_iam_policy(resource),
+            "AWS::IAM::User" => self.create_iam_user(resource),
+            "AWS::IAM::Group" => self.create_iam_group(resource),
+            "AWS::IAM::ManagedPolicy" => self.create_iam_managed_policy(resource),
+            "AWS::IAM::UserToGroupAddition" => self.create_iam_user_to_group_addition(resource),
+            "AWS::IAM::AccessKey" => self.create_iam_access_key(resource),
+            "AWS::IAM::InstanceProfile" => self.create_iam_instance_profile(resource),
             "AWS::S3::Bucket" => self.create_s3_bucket(resource),
             "AWS::Events::Rule" => self.create_eventbridge_rule(resource),
             "AWS::Events::Connection" => self.create_eventbridge_connection(resource),
@@ -151,6 +176,14 @@ impl ResourceProvisioner {
             "AWS::SSM::Parameter" => self.delete_ssm_parameter(&resource.physical_id),
             "AWS::IAM::Role" => self.delete_iam_role(&resource.physical_id),
             "AWS::IAM::Policy" => self.delete_iam_policy(&resource.physical_id),
+            "AWS::IAM::User" => self.delete_iam_user(&resource.physical_id),
+            "AWS::IAM::Group" => self.delete_iam_group(&resource.physical_id),
+            "AWS::IAM::ManagedPolicy" => self.delete_iam_managed_policy(&resource.physical_id),
+            "AWS::IAM::UserToGroupAddition" => {
+                self.delete_iam_user_to_group_addition(&resource.physical_id)
+            }
+            "AWS::IAM::AccessKey" => self.delete_iam_access_key(&resource.physical_id),
+            "AWS::IAM::InstanceProfile" => self.delete_iam_instance_profile(&resource.physical_id),
             "AWS::S3::Bucket" => self.delete_s3_bucket(&resource.physical_id),
             "AWS::Events::Rule" => self.delete_eventbridge_rule(&resource.physical_id),
             "AWS::Events::Connection" => self.delete_eventbridge_connection(&resource.physical_id),
@@ -555,6 +588,493 @@ impl ResourceProvisioner {
         let mut accounts = self.iam_state.write();
         let state = accounts.get_or_create(&self.account_id);
         state.policies.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_iam_user(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let user_name = props
+            .get("UserName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let path = props
+            .get("Path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/")
+            .to_string();
+        let permissions_boundary = props
+            .get("PermissionsBoundary")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let tags = parse_iam_tags(props.get("Tags"));
+
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if state.users.contains_key(&user_name) {
+            return Err(format!("User {user_name} already exists"));
+        }
+        let arn = format!(
+            "arn:aws:iam::{}:user{}{}",
+            state.account_id, path, user_name
+        );
+        let user_id = format!(
+            "AIDA{}",
+            &Uuid::new_v4().to_string().replace('-', "").to_uppercase()[..16]
+        );
+        let user = IamUser {
+            user_name: user_name.clone(),
+            user_id: user_id.clone(),
+            arn: arn.clone(),
+            path,
+            created_at: Utc::now(),
+            tags,
+            permissions_boundary,
+        };
+        state.users.insert(user_name.clone(), user);
+
+        // Inline + managed policies declared inline on the user.
+        if let Some(policies) = props.get("Policies").and_then(|v| v.as_array()) {
+            let inline = state
+                .user_inline_policies
+                .entry(user_name.clone())
+                .or_default();
+            for p in policies {
+                if let (Some(n), Some(doc)) = (
+                    p.get("PolicyName").and_then(|v| v.as_str()),
+                    p.get("PolicyDocument"),
+                ) {
+                    let document = if doc.is_string() {
+                        doc.as_str().unwrap_or("").to_string()
+                    } else {
+                        serde_json::to_string(doc).unwrap_or_default()
+                    };
+                    inline.insert(n.to_string(), document);
+                }
+            }
+        }
+        if let Some(arns) = props.get("ManagedPolicyArns").and_then(|v| v.as_array()) {
+            let attached = state.user_policies.entry(user_name.clone()).or_default();
+            for a in arns {
+                if let Some(s) = a.as_str() {
+                    if !attached.contains(&s.to_string()) {
+                        attached.push(s.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(groups) = props.get("Groups").and_then(|v| v.as_array()) {
+            for g in groups {
+                if let Some(g_name) = g.as_str() {
+                    if let Some(group) = state.groups.get_mut(g_name) {
+                        if !group.members.iter().any(|m| m == &user_name) {
+                            group.members.push(user_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ProvisionResult::new(user_name).with("Arn", arn))
+    }
+
+    fn delete_iam_user(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.users.remove(physical_id);
+        state.user_inline_policies.remove(physical_id);
+        state.user_policies.remove(physical_id);
+        state.access_keys.remove(physical_id);
+        for group in state.groups.values_mut() {
+            group.members.retain(|m| m != physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_iam_group(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let group_name = props
+            .get("GroupName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let path = props
+            .get("Path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/")
+            .to_string();
+
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if state.groups.contains_key(&group_name) {
+            return Err(format!("Group {group_name} already exists"));
+        }
+        let arn = format!(
+            "arn:aws:iam::{}:group{}{}",
+            state.account_id, path, group_name
+        );
+        let group_id = format!(
+            "AGPA{}",
+            &Uuid::new_v4().to_string().replace('-', "").to_uppercase()[..16]
+        );
+        let mut inline_policies: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(policies) = props.get("Policies").and_then(|v| v.as_array()) {
+            for p in policies {
+                if let (Some(n), Some(doc)) = (
+                    p.get("PolicyName").and_then(|v| v.as_str()),
+                    p.get("PolicyDocument"),
+                ) {
+                    let document = if doc.is_string() {
+                        doc.as_str().unwrap_or("").to_string()
+                    } else {
+                        serde_json::to_string(doc).unwrap_or_default()
+                    };
+                    inline_policies.insert(n.to_string(), document);
+                }
+            }
+        }
+        let mut attached_policies: Vec<String> = Vec::new();
+        if let Some(arns) = props.get("ManagedPolicyArns").and_then(|v| v.as_array()) {
+            for a in arns {
+                if let Some(s) = a.as_str() {
+                    attached_policies.push(s.to_string());
+                }
+            }
+        }
+        state.groups.insert(
+            group_name.clone(),
+            IamGroup {
+                group_name: group_name.clone(),
+                group_id,
+                arn: arn.clone(),
+                path,
+                created_at: Utc::now(),
+                members: Vec::new(),
+                inline_policies,
+                attached_policies,
+            },
+        );
+
+        Ok(ProvisionResult::new(group_name).with("Arn", arn))
+    }
+
+    fn delete_iam_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.groups.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_iam_managed_policy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        // Same shape as AWS::IAM::Policy minus the inline-attach knobs;
+        // ManagedPolicy is a standalone policy, attached separately.
+        let props = &resource.properties;
+        let policy_name = props
+            .get("ManagedPolicyName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let policy_document = props
+            .get("PolicyDocument")
+            .map(|v| {
+                if v.is_string() {
+                    v.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            })
+            .unwrap_or_default();
+        let path = props
+            .get("Path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/")
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let arn = format!(
+            "arn:aws:iam::{}:policy{}{}",
+            state.account_id,
+            if path == "/" { "/" } else { path.as_str() },
+            policy_name
+        );
+        if state.policies.contains_key(&arn) {
+            return Err(format!("Managed policy {policy_name} already exists"));
+        }
+        let policy_id = format!(
+            "ANPA{}",
+            &Uuid::new_v4().to_string().replace('-', "").to_uppercase()[..16]
+        );
+        let now = Utc::now();
+        state.policies.insert(
+            arn.clone(),
+            IamPolicy {
+                policy_name,
+                policy_id,
+                arn: arn.clone(),
+                path,
+                description,
+                created_at: now,
+                tags: Vec::new(),
+                default_version_id: "v1".to_string(),
+                versions: vec![PolicyVersion {
+                    version_id: "v1".to_string(),
+                    document: policy_document,
+                    is_default: true,
+                    created_at: now,
+                }],
+                next_version_num: 2,
+                attachment_count: 0,
+            },
+        );
+
+        // Attach to declared users/groups/roles.
+        if let Some(users) = props.get("Users").and_then(|v| v.as_array()) {
+            for u in users {
+                if let Some(name) = u.as_str() {
+                    let attached = state.user_policies.entry(name.to_string()).or_default();
+                    if !attached.contains(&arn) {
+                        attached.push(arn.clone());
+                    }
+                }
+            }
+        }
+        if let Some(groups) = props.get("Groups").and_then(|v| v.as_array()) {
+            for g in groups {
+                if let Some(name) = g.as_str() {
+                    if let Some(group) = state.groups.get_mut(name) {
+                        if !group.attached_policies.contains(&arn) {
+                            group.attached_policies.push(arn.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(roles) = props.get("Roles").and_then(|v| v.as_array()) {
+            for r in roles {
+                if let Some(name) = r.as_str() {
+                    let attached = state.role_policies.entry(name.to_string()).or_default();
+                    if !attached.contains(&arn) {
+                        attached.push(arn.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
+    }
+
+    fn delete_iam_managed_policy(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.policies.remove(physical_id);
+        for arns in state.user_policies.values_mut() {
+            arns.retain(|a| a != physical_id);
+        }
+        for arns in state.role_policies.values_mut() {
+            arns.retain(|a| a != physical_id);
+        }
+        for group in state.groups.values_mut() {
+            group.attached_policies.retain(|a| a != physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_iam_user_to_group_addition(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let group_name = props
+            .get("GroupName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "GroupName is required".to_string())?
+            .to_string();
+        let users: Vec<String> = props
+            .get("Users")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|u| u.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let group = state
+            .groups
+            .get_mut(&group_name)
+            .ok_or_else(|| format!("Group {group_name} does not exist"))?;
+        for u in &users {
+            if !group.members.iter().any(|m| m == u) {
+                group.members.push(u.clone());
+            }
+        }
+
+        // Encode group + users so delete can revert exactly this addition.
+        let physical_id = format!("{group_name}|{}", users.join(","));
+        Ok(ProvisionResult::new(physical_id))
+    }
+
+    fn delete_iam_user_to_group_addition(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some((group_name, users)) = physical_id.split_once('|') {
+            if let Some(group) = state.groups.get_mut(group_name) {
+                let to_remove: Vec<&str> = users.split(',').filter(|s| !s.is_empty()).collect();
+                group.members.retain(|m| !to_remove.iter().any(|u| u == m));
+            }
+        }
+        Ok(())
+    }
+
+    fn create_iam_access_key(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let user_name = props
+            .get("UserName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "UserName is required".to_string())?
+            .to_string();
+        let status = props
+            .get("Status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Active")
+            .to_string();
+
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.users.contains_key(&user_name) {
+            return Err(format!("User {user_name} does not exist"));
+        }
+        let access_key_id = format!(
+            "AKIA{}",
+            &Uuid::new_v4().to_string().replace('-', "").to_uppercase()[..16]
+        );
+        let secret_access_key: String = Uuid::new_v4()
+            .to_string()
+            .replace('-', "")
+            .chars()
+            .take(40)
+            .collect();
+        state
+            .access_keys
+            .entry(user_name.clone())
+            .or_default()
+            .push(IamAccessKey {
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                user_name: user_name.clone(),
+                status,
+                created_at: Utc::now(),
+            });
+
+        Ok(ProvisionResult::new(access_key_id.clone()).with("SecretAccessKey", secret_access_key))
+    }
+
+    fn delete_iam_access_key(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        for keys in state.access_keys.values_mut() {
+            keys.retain(|k| k.access_key_id != physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_iam_instance_profile(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("InstanceProfileName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let path = props
+            .get("Path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/")
+            .to_string();
+        // Roles[] entries can be plain role names or `Ref`-resolved role
+        // ARNs (which the IAM Role provisioner emits as physical_id);
+        // extract the trailing name segment so DescribeInstanceProfile
+        // round-trips a name list.
+        let roles: Vec<String> = props
+            .get("Roles")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r.as_str())
+                    .map(|s| {
+                        if let Some(rest) = s.strip_prefix("arn:aws:iam::") {
+                            rest.split(":role/")
+                                .nth(1)
+                                .map(|name| name.to_string())
+                                .unwrap_or_else(|| s.to_string())
+                        } else {
+                            s.to_string()
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if state.instance_profiles.contains_key(&name) {
+            return Err(format!("InstanceProfile {name} already exists"));
+        }
+        // Force a retry pass when role refs haven't been resolved yet: a
+        // logical-id placeholder won't match any real role, and silently
+        // storing it would leave DescribeInstanceProfile returning an
+        // empty Roles array.
+        for role_name in &roles {
+            if !state.roles.contains_key(role_name) {
+                return Err(format!(
+                    "InstanceProfile {name}: referenced role {role_name} not yet provisioned"
+                ));
+            }
+        }
+        let arn = format!(
+            "arn:aws:iam::{}:instance-profile{}{}",
+            state.account_id, path, name
+        );
+        let id = format!(
+            "AIPA{}",
+            &Uuid::new_v4().to_string().replace('-', "").to_uppercase()[..16]
+        );
+        state.instance_profiles.insert(
+            name.clone(),
+            IamInstanceProfile {
+                instance_profile_name: name.clone(),
+                instance_profile_id: id,
+                arn: arn.clone(),
+                path,
+                created_at: Utc::now(),
+                roles,
+                tags: Vec::new(),
+            },
+        );
+
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_iam_instance_profile(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.instance_profiles.remove(physical_id);
         Ok(())
     }
 
