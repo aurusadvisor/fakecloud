@@ -584,6 +584,10 @@ async fn main() {
     let cognito_userinfo_state = cognito_state.clone();
     let cognito_revoke_state = cognito_state.clone();
 
+    let firehose_state: fakecloud_firehose::SharedFirehoseState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_firehose::FirehoseAccounts::new()),
+    );
+
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
         iam: iam_state.clone(),
@@ -608,6 +612,7 @@ async fn main() {
         cloudfront: cloudfront_state.clone(),
         route53: route53_state.clone(),
         acm: acm_state.clone(),
+        firehose: firehose_state.clone(),
         application_autoscaling: app_autoscaling_state.clone(),
         wafv2: wafv2_state.clone(),
         athena: athena_state.clone(),
@@ -2017,9 +2022,6 @@ async fn main() {
     let acm_service = fakecloud_acm::AcmService::new(acm_state.clone());
     registry.register(Arc::new(acm_service));
 
-    let firehose_state: fakecloud_firehose::SharedFirehoseState = Arc::new(
-        parking_lot::RwLock::new(fakecloud_firehose::FirehoseAccounts::new()),
-    );
     let firehose_service =
         fakecloud_firehose::FirehoseService::new(firehose_state.clone()).with_s3(s3_state.clone());
     registry.register(Arc::new(firehose_service));

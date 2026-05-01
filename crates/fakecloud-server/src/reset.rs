@@ -33,6 +33,7 @@ pub(crate) struct ResetState {
     pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
     pub route53: fakecloud_route53::SharedRoute53State,
     pub acm: fakecloud_acm::SharedAcmState,
+    pub firehose: fakecloud_firehose::SharedFirehoseState,
     pub application_autoscaling:
         fakecloud_application_autoscaling::SharedApplicationAutoScalingState,
     pub wafv2: fakecloud_wafv2::SharedWafv2State,
@@ -163,6 +164,9 @@ impl ResetState {
             }
             "acm" => {
                 *self.acm.write() = fakecloud_acm::AcmAccounts::new();
+            }
+            "firehose" => {
+                *self.firehose.write() = fakecloud_firehose::FirehoseAccounts::new();
             }
             "application-autoscaling" => {
                 *self.application_autoscaling.write() =
@@ -361,6 +365,10 @@ impl ResetState {
             }
             "acm" => {
                 let mut state = self.acm.write();
+                state.accounts.remove(account_id);
+            }
+            "firehose" => {
+                let mut state = self.firehose.write();
                 state.accounts.remove(account_id);
             }
             "application-autoscaling" => {

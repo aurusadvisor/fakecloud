@@ -314,13 +314,13 @@ impl FirehoseService {
         for r in records {
             let b64 = r["Data"].as_str();
             match b64.map(|s| base64::engine::general_purpose::STANDARD.decode(s)) {
-                Some(Ok(data)) => {
+                Some(Ok(data)) if !data.is_empty() => {
                     datas.push(data);
                     response_records.push(json!({
                         "RecordId": Uuid::new_v4().to_string(),
                     }));
                 }
-                Some(Err(_)) | None => {
+                _ => {
                     failed += 1;
                     response_records.push(json!({
                         "ErrorCode": "InvalidArgumentException",
