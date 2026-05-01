@@ -713,6 +713,7 @@ async fn main() {
             dynamodb: dynamodb_state.clone(),
             logs: logs_state.clone(),
             lambda: lambda_state.clone(),
+            secretsmanager: secretsmanager_state.clone(),
             delivery: delivery_for_cf,
         },
     );
