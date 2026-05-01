@@ -11,7 +11,9 @@ use fakecloud_dynamodb::{
     SharedDynamoDbState,
 };
 use fakecloud_ecr::{Repository, SharedEcrState};
-use fakecloud_eventbridge::{EventRule, SharedEventBridgeState};
+use fakecloud_eventbridge::{
+    ApiDestination, Archive, Connection, EventRule, SharedEventBridgeState,
+};
 use fakecloud_iam::{IamPolicy, IamRole, PolicyVersion, SharedIamState};
 use fakecloud_kinesis::{build_stream_shards, KinesisConsumer, KinesisStream, SharedKinesisState};
 use fakecloud_kms::{KmsAlias, KmsKey, SharedKmsState};
@@ -96,6 +98,9 @@ impl ResourceProvisioner {
             "AWS::IAM::Policy" => self.create_iam_policy(resource),
             "AWS::S3::Bucket" => self.create_s3_bucket(resource),
             "AWS::Events::Rule" => self.create_eventbridge_rule(resource),
+            "AWS::Events::Connection" => self.create_eventbridge_connection(resource),
+            "AWS::Events::ApiDestination" => self.create_eventbridge_api_destination(resource),
+            "AWS::Events::Archive" => self.create_eventbridge_archive(resource),
             "AWS::DynamoDB::Table" => self.create_dynamodb_table(resource),
             "AWS::Logs::LogGroup" => self.create_log_group(resource),
             "AWS::Logs::LogStream" => self.create_log_stream(resource),
@@ -148,6 +153,11 @@ impl ResourceProvisioner {
             "AWS::IAM::Policy" => self.delete_iam_policy(&resource.physical_id),
             "AWS::S3::Bucket" => self.delete_s3_bucket(&resource.physical_id),
             "AWS::Events::Rule" => self.delete_eventbridge_rule(&resource.physical_id),
+            "AWS::Events::Connection" => self.delete_eventbridge_connection(&resource.physical_id),
+            "AWS::Events::ApiDestination" => {
+                self.delete_eventbridge_api_destination(&resource.physical_id)
+            }
+            "AWS::Events::Archive" => self.delete_eventbridge_archive(&resource.physical_id),
             "AWS::DynamoDB::Table" => self.delete_dynamodb_table(&resource.physical_id),
             "AWS::Logs::LogGroup" => self.delete_log_group(&resource.physical_id),
             "AWS::Logs::LogStream" => self.delete_log_stream(&resource.physical_id),
@@ -672,6 +682,215 @@ impl ResourceProvisioner {
         if let Some(k) = key {
             state.rules.remove(&k);
         }
+        Ok(())
+    }
+
+    fn create_eventbridge_connection(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let authorization_type = props
+            .get("AuthorizationType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("API_KEY")
+            .to_string();
+        let auth_parameters = props
+            .get("AuthParameters")
+            .cloned()
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        if state.connections.contains_key(&name) {
+            return Err(format!("Connection {name} already exists"));
+        }
+        let now = Utc::now();
+        let arn = format!(
+            "arn:aws:events:{}:{}:connection/{}/{}",
+            state.region,
+            state.account_id,
+            name,
+            Uuid::new_v4().as_simple()
+        );
+        let secret_arn = format!(
+            "arn:aws:secretsmanager:{}:{}:secret:events!connection/{}-{}",
+            state.region,
+            state.account_id,
+            name,
+            Uuid::new_v4().as_simple()
+        );
+        let connection = Connection {
+            name: name.clone(),
+            arn: arn.clone(),
+            description,
+            authorization_type,
+            auth_parameters,
+            connection_state: "AUTHORIZED".to_string(),
+            secret_arn: secret_arn.clone(),
+            creation_time: now,
+            last_modified_time: now,
+            last_authorized_time: now,
+        };
+        state.connections.insert(name.clone(), connection);
+
+        Ok(ProvisionResult::new(name)
+            .with("Arn", arn)
+            .with("SecretArn", secret_arn))
+    }
+
+    fn delete_eventbridge_connection(&self, physical_id: &str) -> Result<(), String> {
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        state.connections.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_eventbridge_api_destination(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let connection_arn = props
+            .get("ConnectionArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "ConnectionArn is required".to_string())?
+            .to_string();
+        let invocation_endpoint = props
+            .get("InvocationEndpoint")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "InvocationEndpoint is required".to_string())?
+            .to_string();
+        let http_method = props
+            .get("HttpMethod")
+            .and_then(|v| v.as_str())
+            .unwrap_or("POST")
+            .to_string();
+        let invocation_rate_limit_per_second = props
+            .get("InvocationRateLimitPerSecond")
+            .and_then(|v| v.as_i64());
+
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        if state.api_destinations.contains_key(&name) {
+            return Err(format!("ApiDestination {name} already exists"));
+        }
+        let now = Utc::now();
+        let arn = format!(
+            "arn:aws:events:{}:{}:api-destination/{}/{}",
+            state.region,
+            state.account_id,
+            name,
+            Uuid::new_v4().as_simple()
+        );
+        state.api_destinations.insert(
+            name.clone(),
+            ApiDestination {
+                name: name.clone(),
+                arn: arn.clone(),
+                description,
+                connection_arn,
+                invocation_endpoint,
+                http_method,
+                invocation_rate_limit_per_second,
+                state: "ACTIVE".to_string(),
+                creation_time: now,
+                last_modified_time: now,
+            },
+        );
+
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_eventbridge_api_destination(&self, physical_id: &str) -> Result<(), String> {
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        state.api_destinations.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_eventbridge_archive(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("ArchiveName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let event_source_arn = props
+            .get("SourceArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "SourceArn is required".to_string())?
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let event_pattern = props.get("EventPattern").map(|v| {
+            if v.is_string() {
+                v.as_str().unwrap_or("").to_string()
+            } else {
+                serde_json::to_string(v).unwrap_or_default()
+            }
+        });
+        let retention_days = props
+            .get("RetentionDays")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        if state.archives.contains_key(&name) {
+            return Err(format!("Archive {name} already exists"));
+        }
+        let arn = format!(
+            "arn:aws:events:{}:{}:archive/{}",
+            state.region, state.account_id, name
+        );
+        state.archives.insert(
+            name.clone(),
+            Archive {
+                name: name.clone(),
+                arn: arn.clone(),
+                event_source_arn,
+                description,
+                event_pattern,
+                retention_days,
+                state: "ENABLED".to_string(),
+                creation_time: Utc::now(),
+                event_count: 0,
+                size_bytes: 0,
+                events: Vec::new(),
+            },
+        );
+
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_eventbridge_archive(&self, physical_id: &str) -> Result<(), String> {
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        state.archives.remove(physical_id);
         Ok(())
     }
 
