@@ -28,6 +28,10 @@ use fakecloud_lambda::SharedLambdaState;
 use fakecloud_logs::{
     LogStream, MetricFilter, MetricTransformation, SharedLogsState, SubscriptionFilter,
 };
+use fakecloud_organizations::{
+    OrganizationState, OrganizationalUnit, Policy as OrgPolicy, SharedOrganizationsState,
+    POLICY_TYPE_SCP,
+};
 use fakecloud_s3::{S3Bucket, SharedS3State};
 use fakecloud_secretsmanager::{Secret, SecretVersion, SharedSecretsManagerState};
 use fakecloud_sns::{SharedSnsState, SnsSubscription, SnsTopic};
@@ -269,6 +273,7 @@ pub struct ResourceProvisioner {
     pub ecr_state: SharedEcrState,
     pub cloudwatch_state: SharedCloudWatchState,
     pub elbv2_state: SharedElbv2State,
+    pub organizations_state: SharedOrganizationsState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -316,6 +321,12 @@ impl ResourceProvisioner {
             "AWS::ElasticLoadBalancingV2::Listener" => self.create_elbv2_listener(resource),
             "AWS::ElasticLoadBalancingV2::ListenerRule" => {
                 self.create_elbv2_listener_rule(resource)
+            }
+            "AWS::Organizations::Organization" => self.create_organization(resource),
+            "AWS::Organizations::OrganizationalUnit" => self.create_organization_unit(resource),
+            "AWS::Organizations::Policy" => self.create_organization_policy(resource),
+            "AWS::Organizations::ResourcePolicy" => {
+                self.create_organization_resource_policy(resource)
             }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
@@ -399,6 +410,14 @@ impl ResourceProvisioner {
             }
             "AWS::ElasticLoadBalancingV2::ListenerRule" => {
                 self.delete_elbv2_listener_rule(&resource.physical_id)
+            }
+            "AWS::Organizations::Organization" => self.delete_organization(&resource.physical_id),
+            "AWS::Organizations::OrganizationalUnit" => {
+                self.delete_organization_unit(&resource.physical_id)
+            }
+            "AWS::Organizations::Policy" => self.delete_organization_policy(&resource.physical_id),
+            "AWS::Organizations::ResourcePolicy" => {
+                self.delete_organization_resource_policy(&resource.physical_id)
             }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
@@ -3052,6 +3071,234 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    // --- Organizations ---
+
+    fn create_organization(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let feature_set = props
+            .get("FeatureSet")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ALL")
+            .to_string();
+
+        let mut org = self.organizations_state.write();
+        if org.is_some() {
+            return Err("Organization already exists; only one per fakecloud process".to_string());
+        }
+        let mut state = OrganizationState::bootstrap(&self.account_id);
+        state.feature_set = feature_set;
+        let org_id = state.org_id.clone();
+        let org_arn = state.org_arn.clone();
+        let mgmt_arn = state.management_account_arn.clone();
+        let root_id = state.root_id.clone();
+        *org = Some(state);
+
+        Ok(ProvisionResult::new(org_id.clone())
+            .with("Id", org_id)
+            .with("Arn", org_arn)
+            .with("ManagementAccountArn", mgmt_arn)
+            .with("RootId", root_id))
+    }
+
+    fn delete_organization(&self, _physical_id: &str) -> Result<(), String> {
+        let mut org = self.organizations_state.write();
+        *org = None;
+        Ok(())
+    }
+
+    fn create_organization_unit(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let parent_id = props
+            .get("ParentId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "ParentId is required".to_string())?
+            .to_string();
+
+        let mut org_lock = self.organizations_state.write();
+        let org = org_lock
+            .as_mut()
+            .ok_or_else(|| "Organization not yet created".to_string())?;
+        // Accept root id, OU id, or `Ref`-resolved logical id (we map to root).
+        let resolved_parent_id = if parent_id == org.root_id || org.ous.contains_key(&parent_id) {
+            parent_id
+        } else {
+            return Err(format!("Parent {parent_id} does not exist"));
+        };
+        let id_suffix: String = Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect();
+        let id = format!("ou-{}-{}", &org.root_id[2..], id_suffix);
+        let arn = format!(
+            "arn:aws:organizations::{}:ou/{}/{}",
+            org.management_account_id, org.org_id, id
+        );
+        org.ous.insert(
+            id.clone(),
+            OrganizationalUnit {
+                id: id.clone(),
+                arn: arn.clone(),
+                name: name.clone(),
+                parent_id: resolved_parent_id,
+            },
+        );
+        Ok(ProvisionResult::new(id.clone())
+            .with("Id", id)
+            .with("Arn", arn)
+            .with("Name", name))
+    }
+
+    fn delete_organization_unit(&self, physical_id: &str) -> Result<(), String> {
+        let mut org_lock = self.organizations_state.write();
+        if let Some(org) = org_lock.as_mut() {
+            org.ous.remove(physical_id);
+            org.attachments.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_organization_policy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let policy_type = props
+            .get("Type")
+            .and_then(|v| v.as_str())
+            .unwrap_or(POLICY_TYPE_SCP)
+            .to_string();
+        let content = props
+            .get("Content")
+            .map(|v| {
+                if v.is_string() {
+                    v.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            })
+            .unwrap_or_default();
+        let target_ids: Vec<String> = props
+            .get("TargetIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut org_lock = self.organizations_state.write();
+        let org = org_lock
+            .as_mut()
+            .ok_or_else(|| "Organization not yet created".to_string())?;
+        let id_suffix: String = Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect();
+        let id = format!("p-{}", id_suffix);
+        let arn = format!(
+            "arn:aws:organizations::{}:policy/{}/{}/{}",
+            org.management_account_id,
+            org.org_id,
+            policy_type.to_lowercase(),
+            id
+        );
+        org.policies.insert(
+            id.clone(),
+            OrgPolicy {
+                id: id.clone(),
+                arn: arn.clone(),
+                name: name.clone(),
+                description,
+                policy_type,
+                aws_managed: false,
+                content,
+            },
+        );
+        for target in target_ids {
+            org.attachments
+                .entry(target)
+                .or_default()
+                .insert(id.clone());
+        }
+        Ok(ProvisionResult::new(id.clone())
+            .with("Id", id)
+            .with("Arn", arn)
+            .with("Name", name))
+    }
+
+    fn delete_organization_policy(&self, physical_id: &str) -> Result<(), String> {
+        let mut org_lock = self.organizations_state.write();
+        if let Some(org) = org_lock.as_mut() {
+            org.policies.remove(physical_id);
+            for attachments in org.attachments.values_mut() {
+                attachments.remove(physical_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn create_organization_resource_policy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let content = props
+            .get("Content")
+            .map(|v| {
+                if v.is_string() {
+                    v.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            })
+            .ok_or_else(|| "Content is required".to_string())?;
+
+        let mut org_lock = self.organizations_state.write();
+        let org = org_lock
+            .as_mut()
+            .ok_or_else(|| "Organization not yet created".to_string())?;
+        org.resource_policy = Some(content);
+        let arn = format!(
+            "arn:aws:organizations::{}:resourcepolicy/{}/rp",
+            org.management_account_id, org.org_id
+        );
+        Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
+    }
+
+    fn delete_organization_resource_policy(&self, _physical_id: &str) -> Result<(), String> {
+        let mut org_lock = self.organizations_state.write();
+        if let Some(org) = org_lock.as_mut() {
+            org.resource_policy = None;
+        }
+        Ok(())
+    }
+
     fn delete_log_group(&self, physical_id: &str) -> Result<(), String> {
         let mut logs_accounts = self.logs_state.write();
         let state = logs_accounts.default_mut();
@@ -3450,6 +3697,7 @@ mod tests {
             )),
             cloudwatch_state: Arc::new(RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new())),
             elbv2_state: Arc::new(RwLock::new(fakecloud_elbv2::Elbv2Accounts::new())),
+            organizations_state: Arc::new(RwLock::new(None)),
             delivery: Arc::new(DeliveryBus::new()),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),
