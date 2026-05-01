@@ -31,6 +31,7 @@ fakecloud-cognito = { workspace = true }
 fakecloud-rds = { workspace = true }
 fakecloud-ecs = { workspace = true }
 fakecloud-acm = { workspace = true }
+fakecloud-elasticache = { workspace = true }
 rcgen = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

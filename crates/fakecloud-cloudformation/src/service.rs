@@ -135,6 +135,7 @@ pub struct CloudFormationDeps {
     pub rds: fakecloud_rds::SharedRdsState,
     pub ecs: fakecloud_ecs::SharedEcsState,
     pub acm: fakecloud_acm::SharedAcmState,
+    pub elasticache: fakecloud_elasticache::SharedElastiCacheState,
     pub delivery: Arc<DeliveryBus>,
 }
 
@@ -205,6 +206,7 @@ impl CloudFormationService {
             rds_state: self.deps.rds.clone(),
             ecs_state: self.deps.ecs.clone(),
             acm_state: self.deps.acm.clone(),
+            elasticache_state: self.deps.elasticache.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1312,6 +1314,13 @@ mod tests {
                 ),
             )),
             acm: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
+            elasticache: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
         };
         CloudFormationService::new(cf_state, deps)
