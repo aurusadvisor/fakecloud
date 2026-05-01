@@ -5,6 +5,11 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use fakecloud_cloudwatch::{AlarmState, MetricAlarm, SharedCloudWatchState};
+use fakecloud_cognito::{
+    default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig, CustomDomainConfig,
+    EmailConfiguration, PasswordPolicy, PoolPolicies, RecoveryOption, SchemaAttribute,
+    SharedCognitoState, SignInPolicy, SmsConfiguration, UserPool, UserPoolClient, UserPoolDomain,
+};
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_dynamodb::{
     AttributeDefinition, DynamoTable, KeySchemaElement, OnDemandThroughput, ProvisionedThroughput,
@@ -274,6 +279,7 @@ pub struct ResourceProvisioner {
     pub cloudwatch_state: SharedCloudWatchState,
     pub elbv2_state: SharedElbv2State,
     pub organizations_state: SharedOrganizationsState,
+    pub cognito_state: SharedCognitoState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -328,6 +334,9 @@ impl ResourceProvisioner {
             "AWS::Organizations::ResourcePolicy" => {
                 self.create_organization_resource_policy(resource)
             }
+            "AWS::Cognito::UserPool" => self.create_cognito_user_pool(resource),
+            "AWS::Cognito::UserPoolClient" => self.create_cognito_user_pool_client(resource),
+            "AWS::Cognito::UserPoolDomain" => self.create_cognito_user_pool_domain(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -418,6 +427,13 @@ impl ResourceProvisioner {
             "AWS::Organizations::Policy" => self.delete_organization_policy(&resource.physical_id),
             "AWS::Organizations::ResourcePolicy" => {
                 self.delete_organization_resource_policy(&resource.physical_id)
+            }
+            "AWS::Cognito::UserPool" => self.delete_cognito_user_pool(&resource.physical_id),
+            "AWS::Cognito::UserPoolClient" => {
+                self.delete_cognito_user_pool_client(&resource.physical_id)
+            }
+            "AWS::Cognito::UserPoolDomain" => {
+                self.delete_cognito_user_pool_domain(&resource.physical_id)
             }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
@@ -3633,6 +3649,483 @@ impl ResourceProvisioner {
         }
         Ok(())
     }
+
+    // --- Cognito ---
+
+    fn create_cognito_user_pool(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let pool_name = props
+            .get("PoolName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+
+        let pool_id = format!(
+            "{}_{}",
+            self.region,
+            Uuid::new_v4()
+                .simple()
+                .to_string()
+                .chars()
+                .take(9)
+                .collect::<String>()
+        );
+        let arn = format!(
+            "arn:aws:cognito-idp:{}:{}:userpool/{}",
+            self.region, self.account_id, pool_id
+        );
+        let now = Utc::now();
+
+        let password_policy = parse_cognito_password_policy(props.get("Policies"));
+        let auto_verified = parse_cognito_string_array(props.get("AutoVerifiedAttributes"));
+        let username_attributes = props
+            .get("UsernameAttributes")
+            .and_then(|v| v.as_array())
+            .map(|_| parse_cognito_string_array(props.get("UsernameAttributes")));
+        let alias_attributes = props
+            .get("AliasAttributes")
+            .and_then(|v| v.as_array())
+            .map(|_| parse_cognito_string_array(props.get("AliasAttributes")));
+        let mut schema_attributes = default_schema_attributes();
+        if let Some(arr) = props.get("Schema").and_then(|v| v.as_array()) {
+            for attr in arr {
+                if let Some(parsed) = parse_cognito_schema_attribute(attr) {
+                    if !schema_attributes.iter().any(|a| a.name == parsed.name) {
+                        schema_attributes.push(parsed);
+                    }
+                }
+            }
+        }
+        let mfa_configuration = props
+            .get("MfaConfiguration")
+            .and_then(|v| v.as_str())
+            .unwrap_or("OFF")
+            .to_string();
+        let user_pool_tier = props
+            .get("UserPoolTier")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ESSENTIALS")
+            .to_string();
+        let deletion_protection = props
+            .get("DeletionProtection")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let user_pool_tags = parse_cognito_tags(props.get("UserPoolTags"));
+        let email_configuration =
+            parse_cognito_email_configuration(props.get("EmailConfiguration"));
+        let sms_configuration = parse_cognito_sms_configuration(props.get("SmsConfiguration"));
+        let admin_create_user_config =
+            parse_cognito_admin_create_user_config(props.get("AdminCreateUserConfig"));
+        let account_recovery_setting =
+            parse_cognito_account_recovery(props.get("AccountRecoverySetting"));
+
+        let signing_kid = format!("{pool_id}-key-1");
+        let pool = UserPool {
+            id: pool_id.clone(),
+            name: pool_name,
+            arn: arn.clone(),
+            status: "ACTIVE".to_string(),
+            creation_date: now,
+            last_modified_date: now,
+            policies: PoolPolicies {
+                password_policy,
+                sign_in_policy: SignInPolicy {
+                    allowed_first_auth_factors: vec!["PASSWORD".to_string()],
+                },
+            },
+            auto_verified_attributes: auto_verified,
+            username_attributes,
+            alias_attributes,
+            schema_attributes,
+            lambda_config: None,
+            mfa_configuration,
+            email_configuration,
+            sms_configuration,
+            admin_create_user_config,
+            user_pool_tags,
+            account_recovery_setting,
+            deletion_protection,
+            estimated_number_of_users: 0,
+            software_token_mfa_configuration: None,
+            sms_mfa_configuration: None,
+            user_pool_tier,
+            verification_message_template: None,
+            // Lazy-generate the RSA-2048 keypair on the first JWKS / sign
+            // request — same path the runtime CreateUserPool handler uses
+            // (avoids ~100ms keygen during stack creation).
+            signing_key_pem: None,
+            signing_kid: Some(signing_kid),
+        };
+
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.user_pools.insert(pool_id.clone(), pool);
+
+        let provider_name = format!("cognito-idp.{}.amazonaws.com/{}", self.region, pool_id);
+        let provider_url = format!("https://{provider_name}");
+
+        Ok(ProvisionResult::new(pool_id.clone())
+            .with("Arn", arn)
+            .with("ProviderName", provider_name)
+            .with("ProviderURL", provider_url)
+            .with("UserPoolId", pool_id))
+    }
+
+    fn delete_cognito_user_pool(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.user_pools.remove(physical_id);
+        // Cascade: drop clients tied to this pool, plus per-pool side maps.
+        state
+            .user_pool_clients
+            .retain(|_, c| c.user_pool_id != physical_id);
+        state.users.remove(physical_id);
+        state.groups.remove(physical_id);
+        state.user_groups.remove(physical_id);
+        state.identity_providers.remove(physical_id);
+        state.resource_servers.remove(physical_id);
+        state.import_jobs.remove(physical_id);
+        state.domains.retain(|_, d| d.user_pool_id != physical_id);
+        Ok(())
+    }
+
+    fn create_cognito_user_pool_client(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let pool_id = props
+            .get("UserPoolId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "UserPoolId is required".to_string())?
+            .to_string();
+        let client_name = props
+            .get("ClientName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.user_pools.contains_key(&pool_id) {
+            // Force CFN to retry once UserPool resource provisions.
+            return Err(format!(
+                "User pool {pool_id} does not exist yet — retry once it has been provisioned"
+            ));
+        }
+
+        let client_id: String = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(26)
+            .collect::<String>()
+            .to_lowercase();
+        let generate_secret = props
+            .get("GenerateSecret")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let client_secret = if generate_secret {
+            use base64::Engine;
+            let mut bytes = Vec::with_capacity(48);
+            for _ in 0..3 {
+                bytes.extend_from_slice(Uuid::new_v4().as_bytes());
+            }
+            Some(
+                base64::engine::general_purpose::STANDARD
+                    .encode(&bytes)
+                    .chars()
+                    .take(51)
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        let now = Utc::now();
+        let client = UserPoolClient {
+            client_id: client_id.clone(),
+            client_name,
+            user_pool_id: pool_id.clone(),
+            client_secret: client_secret.clone(),
+            explicit_auth_flows: parse_cognito_string_array(props.get("ExplicitAuthFlows")),
+            token_validity_units: None,
+            access_token_validity: props.get("AccessTokenValidity").and_then(|v| v.as_i64()),
+            id_token_validity: props.get("IdTokenValidity").and_then(|v| v.as_i64()),
+            refresh_token_validity: props.get("RefreshTokenValidity").and_then(|v| v.as_i64()),
+            callback_urls: parse_cognito_string_array(props.get("CallbackURLs")),
+            logout_urls: parse_cognito_string_array(props.get("LogoutURLs")),
+            supported_identity_providers: parse_cognito_string_array(
+                props.get("SupportedIdentityProviders"),
+            ),
+            allowed_o_auth_flows: parse_cognito_string_array(props.get("AllowedOAuthFlows")),
+            allowed_o_auth_scopes: parse_cognito_string_array(props.get("AllowedOAuthScopes")),
+            allowed_o_auth_flows_user_pool_client: props
+                .get("AllowedOAuthFlowsUserPoolClient")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            prevent_user_existence_errors: props
+                .get("PreventUserExistenceErrors")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            read_attributes: parse_cognito_string_array(props.get("ReadAttributes")),
+            write_attributes: parse_cognito_string_array(props.get("WriteAttributes")),
+            creation_date: now,
+            last_modified_date: now,
+            enable_token_revocation: props
+                .get("EnableTokenRevocation")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            auth_session_validity: props.get("AuthSessionValidity").and_then(|v| v.as_i64()),
+            client_secrets: Vec::new(),
+            refresh_token_rotation: None,
+        };
+
+        state.user_pool_clients.insert(client_id.clone(), client);
+
+        let mut result = ProvisionResult::new(client_id.clone())
+            .with("ClientId", client_id.clone())
+            .with("Name", client_id);
+        if let Some(secret) = client_secret {
+            result = result.with("ClientSecret", secret);
+        }
+        Ok(result)
+    }
+
+    fn delete_cognito_user_pool_client(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.user_pool_clients.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_cognito_user_pool_domain(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let domain = props
+            .get("Domain")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Domain is required".to_string())?
+            .to_string();
+        let pool_id = props
+            .get("UserPoolId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "UserPoolId is required".to_string())?
+            .to_string();
+        let custom_domain_config = props
+            .get("CustomDomainConfig")
+            .and_then(|v| v.as_object())
+            .and_then(|m| {
+                m.get("CertificateArn")
+                    .and_then(|v| v.as_str())
+                    .map(|s| CustomDomainConfig {
+                        certificate_arn: s.to_string(),
+                    })
+            });
+
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.user_pools.contains_key(&pool_id) {
+            return Err(format!(
+                "User pool {pool_id} does not exist yet — retry once it has been provisioned"
+            ));
+        }
+        if state.domains.contains_key(&domain) {
+            return Err(format!("Domain {domain} already exists"));
+        }
+        state.domains.insert(
+            domain.clone(),
+            UserPoolDomain {
+                user_pool_id: pool_id,
+                domain: domain.clone(),
+                status: "ACTIVE".to_string(),
+                custom_domain_config: custom_domain_config.clone(),
+                creation_date: Utc::now(),
+            },
+        );
+
+        let cloudfront_distribution = if custom_domain_config.is_some() {
+            format!("{domain}.cloudfront.net")
+        } else {
+            format!("{domain}.auth.{}.amazoncognito.com", self.region)
+        };
+
+        Ok(ProvisionResult::new(domain.clone())
+            .with("Domain", domain)
+            .with("CloudFrontDistribution", cloudfront_distribution))
+    }
+
+    fn delete_cognito_user_pool_domain(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.domains.remove(physical_id);
+        Ok(())
+    }
+}
+
+/// Parse a JSON array-of-strings property. Returns empty Vec when the
+/// value is missing or shaped wrong; matches the tolerant input handling
+/// used by the runtime Cognito service.
+fn parse_cognito_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_cognito_password_policy(value: Option<&serde_json::Value>) -> PasswordPolicy {
+    let Some(inner) = value
+        .and_then(|v| v.get("PasswordPolicy"))
+        .and_then(|v| v.as_object())
+    else {
+        return PasswordPolicy::default();
+    };
+    let mut p = PasswordPolicy::default();
+    if let Some(n) = inner.get("MinimumLength").and_then(|v| v.as_i64()) {
+        p.minimum_length = n;
+    }
+    if let Some(b) = inner.get("RequireUppercase").and_then(|v| v.as_bool()) {
+        p.require_uppercase = b;
+    }
+    if let Some(b) = inner.get("RequireLowercase").and_then(|v| v.as_bool()) {
+        p.require_lowercase = b;
+    }
+    if let Some(b) = inner.get("RequireNumbers").and_then(|v| v.as_bool()) {
+        p.require_numbers = b;
+    }
+    if let Some(b) = inner.get("RequireSymbols").and_then(|v| v.as_bool()) {
+        p.require_symbols = b;
+    }
+    if let Some(n) = inner
+        .get("TemporaryPasswordValidityDays")
+        .and_then(|v| v.as_i64())
+    {
+        p.temporary_password_validity_days = n;
+    }
+    p
+}
+
+fn parse_cognito_schema_attribute(value: &serde_json::Value) -> Option<SchemaAttribute> {
+    let name = value.get("Name").and_then(|v| v.as_str())?.to_string();
+    Some(SchemaAttribute {
+        name,
+        attribute_data_type: value
+            .get("AttributeDataType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("String")
+            .to_string(),
+        developer_only_attribute: value
+            .get("DeveloperOnlyAttribute")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        mutable: value
+            .get("Mutable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        required: value
+            .get("Required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        string_attribute_constraints: None,
+        number_attribute_constraints: None,
+    })
+}
+
+fn parse_cognito_tags(value: Option<&serde_json::Value>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if let Some(obj) = value.and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(s) = v.as_str() {
+                out.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn parse_cognito_email_configuration(
+    value: Option<&serde_json::Value>,
+) -> Option<EmailConfiguration> {
+    let inner = value?.as_object()?;
+    Some(EmailConfiguration {
+        source_arn: inner
+            .get("SourceArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        reply_to_email_address: inner
+            .get("ReplyToEmailAddress")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        email_sending_account: inner
+            .get("EmailSendingAccount")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        from_email_address: inner
+            .get("From")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        configuration_set: inner
+            .get("ConfigurationSet")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
+fn parse_cognito_sms_configuration(value: Option<&serde_json::Value>) -> Option<SmsConfiguration> {
+    let inner = value?.as_object()?;
+    Some(SmsConfiguration {
+        sns_caller_arn: inner
+            .get("SnsCallerArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        external_id: inner
+            .get("ExternalId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        sns_region: inner
+            .get("SnsRegion")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
+fn parse_cognito_admin_create_user_config(
+    value: Option<&serde_json::Value>,
+) -> Option<AdminCreateUserConfig> {
+    let inner = value?.as_object()?;
+    Some(AdminCreateUserConfig {
+        allow_admin_create_user_only: inner
+            .get("AllowAdminCreateUserOnly")
+            .and_then(|v| v.as_bool()),
+        invite_message_template: None,
+        unused_account_validity_days: inner
+            .get("UnusedAccountValidityDays")
+            .and_then(|v| v.as_i64()),
+    })
+}
+
+fn parse_cognito_account_recovery(
+    value: Option<&serde_json::Value>,
+) -> Option<AccountRecoverySetting> {
+    let arr = value?.get("RecoveryMechanisms")?.as_array()?;
+    Some(AccountRecoverySetting {
+        recovery_mechanisms: arr
+            .iter()
+            .filter_map(|m| {
+                let name = m.get("Name").and_then(|v| v.as_str())?.to_string();
+                let priority = m.get("Priority").and_then(|v| v.as_i64()).unwrap_or(1);
+                Some(RecoveryOption { name, priority })
+            })
+            .collect(),
+    })
 }
 
 #[cfg(test)]
@@ -3698,6 +4191,9 @@ mod tests {
             cloudwatch_state: Arc::new(RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new())),
             elbv2_state: Arc::new(RwLock::new(fakecloud_elbv2::Elbv2Accounts::new())),
             organizations_state: Arc::new(RwLock::new(None)),
+            cognito_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),

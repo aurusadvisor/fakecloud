@@ -743,6 +743,7 @@ mod tests {
             cloudwatch: Arc::new(RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new())),
             elbv2: Arc::new(RwLock::new(fakecloud_elbv2::Elbv2Accounts::new())),
             organizations: Arc::new(RwLock::new(None)),
+            cognito: shared::<fakecloud_cognito::CognitoState>(),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }

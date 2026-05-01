@@ -2692,6 +2692,7 @@ dependencies = [
  "chrono",
  "fakecloud-aws",
  "fakecloud-cloudwatch",
+ "fakecloud-cognito",
  "fakecloud-core",
  "fakecloud-dynamodb",
  "fakecloud-ecr",
