@@ -733,6 +733,7 @@ async fn main() {
             rds: rds_state.clone(),
             ecs: ecs_state.clone(),
             acm: acm_state.clone(),
+            elasticache: elasticache_state.clone(),
             delivery: delivery_for_cf,
         },
     );

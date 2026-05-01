@@ -24,6 +24,10 @@ use fakecloud_ecs::{
     CapacityProvider as EcsCapacityProvider, Cluster as EcsCluster, Service as EcsService,
     SharedEcsState, TagEntry as EcsTagEntry, TaskDefinition as EcsTaskDefinition,
 };
+use fakecloud_elasticache::{
+    CacheParameterGroup, CacheSecurityGroup, CacheSubnetGroup, ElastiCacheUser as EcUser,
+    ElastiCacheUserGroup as EcUserGroup, SharedElastiCacheState,
+};
 use fakecloud_elbv2::{
     Action as ElbAction, Listener, LoadBalancer, Rule as ElbRule, RuleCondition, SharedElbv2State,
     Tag as ElbTag, TargetGroup, TargetGroupTuple,
@@ -308,6 +312,7 @@ pub struct ResourceProvisioner {
     pub rds_state: SharedRdsState,
     pub ecs_state: SharedEcsState,
     pub acm_state: SharedAcmState,
+    pub elasticache_state: SharedElastiCacheState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -385,6 +390,11 @@ impl ResourceProvisioner {
             "AWS::ECS::Service" => self.create_ecs_service(resource),
             "AWS::ECS::CapacityProvider" => self.create_ecs_capacity_provider(resource),
             "AWS::CertificateManager::Certificate" => self.create_acm_certificate(resource),
+            "AWS::ElastiCache::ParameterGroup" => self.create_ec_parameter_group(resource),
+            "AWS::ElastiCache::SubnetGroup" => self.create_ec_subnet_group(resource),
+            "AWS::ElastiCache::SecurityGroup" => self.create_ec_security_group(resource),
+            "AWS::ElastiCache::User" => self.create_ec_user(resource),
+            "AWS::ElastiCache::UserGroup" => self.create_ec_user_group(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -511,6 +521,15 @@ impl ResourceProvisioner {
             "AWS::CertificateManager::Certificate" => {
                 self.delete_acm_certificate(&resource.physical_id)
             }
+            "AWS::ElastiCache::ParameterGroup" => {
+                self.delete_ec_parameter_group(&resource.physical_id)
+            }
+            "AWS::ElastiCache::SubnetGroup" => self.delete_ec_subnet_group(&resource.physical_id),
+            "AWS::ElastiCache::SecurityGroup" => {
+                self.delete_ec_security_group(&resource.physical_id)
+            }
+            "AWS::ElastiCache::User" => self.delete_ec_user(&resource.physical_id),
+            "AWS::ElastiCache::UserGroup" => self.delete_ec_user_group(&resource.physical_id),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -5349,6 +5368,253 @@ impl ResourceProvisioner {
         }
         Ok(())
     }
+
+    // --- ElastiCache ---
+
+    fn create_ec_parameter_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("CacheParameterGroupName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let family = props
+            .get("CacheParameterGroupFamily")
+            .and_then(|v| v.as_str())
+            .unwrap_or("redis7")
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let arn = format!(
+            "arn:aws:elasticache:{}:{}:parametergroup:{}",
+            self.region, self.account_id, name
+        );
+        let group = CacheParameterGroup {
+            cache_parameter_group_name: name.clone(),
+            cache_parameter_group_family: family,
+            description,
+            is_global: false,
+            arn: arn.clone(),
+        };
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        // ParameterGroups stored as Vec — replace any existing entry.
+        state
+            .parameter_groups
+            .retain(|p| p.cache_parameter_group_name != name);
+        state.parameter_groups.push(group);
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_ec_parameter_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state
+            .parameter_groups
+            .retain(|p| p.cache_parameter_group_name != physical_id);
+        Ok(())
+    }
+
+    fn create_ec_subnet_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("CacheSubnetGroupName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let subnet_ids: Vec<String> = props
+            .get("SubnetIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let arn = format!(
+            "arn:aws:elasticache:{}:{}:subnetgroup:{}",
+            self.region, self.account_id, name
+        );
+        let group = CacheSubnetGroup {
+            cache_subnet_group_name: name.clone(),
+            cache_subnet_group_description: description,
+            vpc_id: String::new(),
+            subnet_ids,
+            arn: arn.clone(),
+        };
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.subnet_groups.insert(name.clone(), group);
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_ec_subnet_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.subnet_groups.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_ec_security_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("CacheSecurityGroupName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let arn = format!(
+            "arn:aws:elasticache:{}:{}:securitygroup:{}",
+            self.region, self.account_id, name
+        );
+        let group = CacheSecurityGroup {
+            cache_security_group_name: name.clone(),
+            description,
+            owner_id: self.account_id.clone(),
+            arn: arn.clone(),
+            ec2_security_groups: Vec::new(),
+        };
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.security_groups.insert(name.clone(), group);
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_ec_security_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.security_groups.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_ec_user(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let user_id = props
+            .get("UserId")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let user_name = props
+            .get("UserName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&user_id)
+            .to_string();
+        let engine = props
+            .get("Engine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("redis")
+            .to_string();
+        let access_string = props
+            .get("AccessString")
+            .and_then(|v| v.as_str())
+            .unwrap_or("on ~* +@all")
+            .to_string();
+        let authentication_type = props
+            .get("AuthenticationMode")
+            .and_then(|v| v.get("Type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("no-password-required")
+            .to_string();
+        let arn = format!(
+            "arn:aws:elasticache:{}:{}:user:{}",
+            self.region, self.account_id, user_id
+        );
+        let user = EcUser {
+            user_id: user_id.clone(),
+            user_name,
+            engine,
+            access_string,
+            status: "active".to_string(),
+            authentication_type,
+            password_count: 0,
+            arn: arn.clone(),
+            minimum_engine_version: "6.0".to_string(),
+            user_group_ids: Vec::new(),
+        };
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.users.insert(user_id.clone(), user);
+        Ok(ProvisionResult::new(user_id).with("Arn", arn))
+    }
+
+    fn delete_ec_user(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.users.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_ec_user_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let user_group_id = props
+            .get("UserGroupId")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let engine = props
+            .get("Engine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("redis")
+            .to_string();
+        let user_ids: Vec<String> = props
+            .get("UserIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let arn = format!(
+            "arn:aws:elasticache:{}:{}:usergroup:{}",
+            self.region, self.account_id, user_group_id
+        );
+        let group = EcUserGroup {
+            user_group_id: user_group_id.clone(),
+            engine,
+            status: "active".to_string(),
+            user_ids,
+            arn: arn.clone(),
+            minimum_engine_version: "6.0".to_string(),
+            pending_changes: None,
+            replication_groups: Vec::new(),
+        };
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.user_groups.insert(user_group_id.clone(), group);
+        Ok(ProvisionResult::new(user_group_id).with("Arn", arn))
+    }
+
+    fn delete_ec_user_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.user_groups.remove(physical_id);
+        Ok(())
+    }
 }
 
 /// Synthesize the per-domain DNS validation record list for a
@@ -5700,6 +5966,9 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             acm_state: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
+            elasticache_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),

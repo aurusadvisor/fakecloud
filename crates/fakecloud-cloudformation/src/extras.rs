@@ -747,6 +747,7 @@ mod tests {
             rds: shared::<fakecloud_rds::RdsState>(),
             ecs: shared::<fakecloud_ecs::EcsState>(),
             acm: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
+            elasticache: shared::<fakecloud_elasticache::ElastiCacheState>(),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }

@@ -2698,6 +2698,7 @@ dependencies = [
  "fakecloud-dynamodb",
  "fakecloud-ecr",
  "fakecloud-ecs",
+ "fakecloud-elasticache",
  "fakecloud-elbv2",
  "fakecloud-eventbridge",
  "fakecloud-iam",
