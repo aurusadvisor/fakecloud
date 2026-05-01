@@ -133,6 +133,7 @@ pub struct CloudFormationDeps {
     pub organizations: fakecloud_organizations::SharedOrganizationsState,
     pub cognito: fakecloud_cognito::SharedCognitoState,
     pub rds: fakecloud_rds::SharedRdsState,
+    pub ecs: fakecloud_ecs::SharedEcsState,
     pub delivery: Arc<DeliveryBus>,
 }
 
@@ -201,6 +202,7 @@ impl CloudFormationService {
             organizations_state: self.deps.organizations.clone(),
             cognito_state: self.deps.cognito.clone(),
             rds_state: self.deps.rds.clone(),
+            ecs_state: self.deps.ecs.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1294,6 +1296,13 @@ mod tests {
                 ),
             )),
             rds: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            ecs: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",
                     "us-east-1",

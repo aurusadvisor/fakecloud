@@ -16,6 +16,10 @@ use fakecloud_dynamodb::{
     SharedDynamoDbState,
 };
 use fakecloud_ecr::{Repository, SharedEcrState};
+use fakecloud_ecs::{
+    CapacityProvider as EcsCapacityProvider, Cluster as EcsCluster, Service as EcsService,
+    SharedEcsState, TagEntry as EcsTagEntry, TaskDefinition as EcsTaskDefinition,
+};
 use fakecloud_elbv2::{
     Action as ElbAction, Listener, LoadBalancer, Rule as ElbRule, RuleCondition, SharedElbv2State,
     Tag as ElbTag, TargetGroup, TargetGroupTuple,
@@ -298,6 +302,7 @@ pub struct ResourceProvisioner {
     pub organizations_state: SharedOrganizationsState,
     pub cognito_state: SharedCognitoState,
     pub rds_state: SharedRdsState,
+    pub ecs_state: SharedEcsState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -370,6 +375,10 @@ impl ResourceProvisioner {
             "AWS::RDS::EventSubscription" => self.create_rds_event_subscription(resource),
             "AWS::RDS::DBSecurityGroup" => self.create_rds_security_group(resource),
             "AWS::RDS::DBProxy" => self.create_rds_db_proxy(resource),
+            "AWS::ECS::Cluster" => self.create_ecs_cluster(resource),
+            "AWS::ECS::TaskDefinition" => self.create_ecs_task_definition(resource),
+            "AWS::ECS::Service" => self.create_ecs_service(resource),
+            "AWS::ECS::CapacityProvider" => self.create_ecs_capacity_provider(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -487,6 +496,12 @@ impl ResourceProvisioner {
             }
             "AWS::RDS::DBSecurityGroup" => self.delete_rds_security_group(&resource.physical_id),
             "AWS::RDS::DBProxy" => self.delete_rds_db_proxy(&resource.physical_id),
+            "AWS::ECS::Cluster" => self.delete_ecs_cluster(&resource.physical_id),
+            "AWS::ECS::TaskDefinition" => self.delete_ecs_task_definition(&resource.physical_id),
+            "AWS::ECS::Service" => self.delete_ecs_service(&resource.physical_id),
+            "AWS::ECS::CapacityProvider" => {
+                self.delete_ecs_capacity_provider(&resource.physical_id)
+            }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -4835,6 +4850,416 @@ impl ResourceProvisioner {
         }
         Ok(())
     }
+
+    // --- ECS ---
+
+    fn create_ecs_cluster(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let cluster_name = props
+            .get("ClusterName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let cluster_arn = format!(
+            "arn:aws:ecs:{}:{}:cluster/{}",
+            self.region, self.account_id, cluster_name
+        );
+        let mut cluster = EcsCluster::new(&cluster_name, cluster_arn.clone());
+        cluster.tags = parse_ecs_tags(props.get("Tags"));
+        cluster.capacity_providers = props
+            .get("CapacityProviders")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(strategy) = props
+            .get("DefaultCapacityProviderStrategy")
+            .and_then(|v| v.as_array())
+        {
+            cluster.default_capacity_provider_strategy = strategy.clone();
+        }
+        if let Some(cfg) = props.get("Configuration") {
+            cluster.configuration = Some(cfg.clone());
+        }
+        if let Some(settings) = props.get("ClusterSettings").and_then(|v| v.as_array()) {
+            cluster.settings = settings.clone();
+        }
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.clusters.insert(cluster_name.clone(), cluster);
+        Ok(ProvisionResult::new(cluster_name).with("Arn", cluster_arn))
+    }
+
+    fn delete_ecs_cluster(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.clusters.remove(physical_id);
+        // Cascade: drop services + tasks tied to this cluster.
+        state.services.retain(|_, s| s.cluster_name != physical_id);
+        state
+            .tasks
+            .retain(|_, t| t.cluster_arn.split('/').next_back() != Some(physical_id));
+        Ok(())
+    }
+
+    fn create_ecs_task_definition(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let family = props
+            .get("Family")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let container_definitions = props
+            .get("ContainerDefinitions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let task_role_arn = props
+            .get("TaskRoleArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let execution_role_arn = props
+            .get("ExecutionRoleArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let network_mode = props
+            .get("NetworkMode")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let requires_compatibilities: Vec<String> = props
+            .get("RequiresCompatibilities")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cpu = props
+            .get("Cpu")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let memory = props
+            .get("Memory")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let volumes = props
+            .get("Volumes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let placement_constraints = props
+            .get("PlacementConstraints")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let tags = parse_ecs_tags(props.get("Tags"));
+
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let revision = state
+            .next_revision
+            .entry(family.clone())
+            .and_modify(|n| *n += 1)
+            .or_insert(1);
+        let revision = *revision;
+        let arn = format!(
+            "arn:aws:ecs:{}:{}:task-definition/{}:{}",
+            self.region, self.account_id, family, revision
+        );
+        let td = EcsTaskDefinition {
+            family: family.clone(),
+            revision,
+            task_definition_arn: arn.clone(),
+            container_definitions,
+            status: "ACTIVE".to_string(),
+            task_role_arn,
+            execution_role_arn,
+            network_mode,
+            requires_compatibilities: requires_compatibilities.clone(),
+            compatibilities: requires_compatibilities,
+            cpu,
+            memory,
+            pid_mode: None,
+            ipc_mode: None,
+            volumes,
+            placement_constraints,
+            proxy_configuration: None,
+            inference_accelerators: Vec::new(),
+            ephemeral_storage: props.get("EphemeralStorage").cloned(),
+            runtime_platform: props.get("RuntimePlatform").cloned(),
+            requires_attributes: Vec::new(),
+            registered_at: Utc::now(),
+            registered_by: None,
+            deregistered_at: None,
+            tags,
+            enable_fault_injection: props.get("EnableFaultInjection").and_then(|v| v.as_bool()),
+        };
+        state
+            .task_definitions
+            .entry(family.clone())
+            .or_default()
+            .insert(revision, td);
+        Ok(ProvisionResult::new(arn.clone()).with("TaskDefinitionArn", arn))
+    }
+
+    fn delete_ecs_task_definition(&self, physical_id: &str) -> Result<(), String> {
+        // physical_id is the full task-definition ARN; family + revision
+        // sit at the trailing segment after `/`.
+        let Some(suffix) = physical_id.rsplit('/').next() else {
+            return Ok(());
+        };
+        let Some((family, rev)) = suffix.split_once(':') else {
+            return Ok(());
+        };
+        let Ok(revision) = rev.parse::<i32>() else {
+            return Ok(());
+        };
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(revs) = state.task_definitions.get_mut(family) {
+            if let Some(td) = revs.get_mut(&revision) {
+                td.status = "INACTIVE".to_string();
+                td.deregistered_at = Some(Utc::now());
+            }
+        }
+        Ok(())
+    }
+
+    fn create_ecs_service(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let service_name = props
+            .get("ServiceName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        // Cluster: default to "default" if missing; accept name or ARN.
+        let cluster_name = props
+            .get("Cluster")
+            .and_then(|v| v.as_str())
+            .map(parse_ecs_cluster_name)
+            .unwrap_or_else(|| "default".to_string());
+        let task_definition_arn = props
+            .get("TaskDefinition")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "TaskDefinition is required".to_string())?
+            .to_string();
+        let desired_count = props
+            .get("DesiredCount")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32)
+            .unwrap_or(1);
+        let launch_type = props
+            .get("LaunchType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("FARGATE")
+            .to_string();
+        let scheduling_strategy = props
+            .get("SchedulingStrategy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("REPLICA")
+            .to_string();
+        let deployment_controller = props
+            .get("DeploymentController")
+            .and_then(|v| v.get("Type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("ECS")
+            .to_string();
+        let load_balancers = props
+            .get("LoadBalancers")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let service_registries = props
+            .get("ServiceRegistries")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let placement_constraints = props
+            .get("PlacementConstraints")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let placement_strategy = props
+            .get("PlacementStrategies")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let network_configuration = props.get("NetworkConfiguration").cloned();
+        let role_arn = props
+            .get("Role")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let tags = parse_ecs_tags(props.get("Tags"));
+
+        // Family + revision parsed from the task definition ARN tail.
+        let (family, revision) = parse_td_arn(&task_definition_arn);
+
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.clusters.contains_key(&cluster_name) {
+            return Err(format!(
+                "Cluster {cluster_name} does not exist yet — retry once it has been provisioned"
+            ));
+        }
+        let cluster_arn = state.clusters[&cluster_name].cluster_arn.clone();
+        let service_arn = format!(
+            "arn:aws:ecs:{}:{}:service/{}/{}",
+            self.region, self.account_id, cluster_name, service_name
+        );
+        let key = format!("{cluster_name}/{service_name}");
+        let service = EcsService {
+            service_name: service_name.clone(),
+            service_arn: service_arn.clone(),
+            cluster_name: cluster_name.clone(),
+            cluster_arn,
+            task_definition_arn,
+            family,
+            revision,
+            desired_count,
+            running_count: 0,
+            pending_count: 0,
+            launch_type,
+            status: "ACTIVE".to_string(),
+            scheduling_strategy,
+            deployment_controller,
+            minimum_healthy_percent: props
+                .get("DeploymentConfiguration")
+                .and_then(|v| v.get("MinimumHealthyPercent"))
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
+            maximum_percent: props
+                .get("DeploymentConfiguration")
+                .and_then(|v| v.get("MaximumPercent"))
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
+            circuit_breaker: None,
+            deployments: Vec::new(),
+            load_balancers,
+            service_registries,
+            placement_constraints,
+            placement_strategy,
+            network_configuration,
+            tags,
+            created_at: Utc::now(),
+            created_by: None,
+            role_arn,
+        };
+        state.services.insert(key.clone(), service);
+        if let Some(c) = state.clusters.get_mut(&cluster_name) {
+            c.active_services_count += 1;
+        }
+        Ok(ProvisionResult::new(service_arn.clone())
+            .with("Name", service_name)
+            .with("ServiceArn", service_arn))
+    }
+
+    fn delete_ecs_service(&self, physical_id: &str) -> Result<(), String> {
+        // physical_id is full Service ARN: .../service/<cluster>/<service>
+        let Some((cluster, service)) = parse_service_arn(physical_id) else {
+            return Ok(());
+        };
+        let key = format!("{cluster}/{service}");
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if state.services.remove(&key).is_some() {
+            if let Some(c) = state.clusters.get_mut(&cluster) {
+                if c.active_services_count > 0 {
+                    c.active_services_count -= 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn create_ecs_capacity_provider(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let arn = format!(
+            "arn:aws:ecs:{}:{}:capacity-provider/{}",
+            self.region, self.account_id, name
+        );
+        let cp = EcsCapacityProvider {
+            name: name.clone(),
+            arn: arn.clone(),
+            status: "ACTIVE".to_string(),
+            auto_scaling_group_provider: props.get("AutoScalingGroupProvider").cloned(),
+            update_status: None,
+            update_status_reason: None,
+            created_at: Utc::now(),
+            tags: parse_ecs_tags(props.get("Tags")),
+        };
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.capacity_providers.insert(name.clone(), cp);
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_ecs_capacity_provider(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.capacity_providers.remove(physical_id);
+        Ok(())
+    }
+}
+
+/// Convert CFN `Tags` array into the ECS `TagEntry` form.
+fn parse_ecs_tags(value: Option<&serde_json::Value>) -> Vec<EcsTagEntry> {
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|t| {
+            let key = t.get("Key").and_then(|v| v.as_str())?.to_string();
+            let value = t.get("Value").and_then(|v| v.as_str())?.to_string();
+            Some(EcsTagEntry { key, value })
+        })
+        .collect()
+}
+
+/// Strip the cluster ARN prefix when CFN passes a Ref-resolved name or
+/// a GetAtt-resolved ARN; ECS internal state keys clusters by name.
+fn parse_ecs_cluster_name(input: &str) -> String {
+    if let Some(after) = input.split(":cluster/").nth(1) {
+        return after.to_string();
+    }
+    input.to_string()
+}
+
+/// Pull `(family, revision)` out of a task definition ARN tail like
+/// `task-definition/web:3`. Returns `(family, revision)` or
+/// `(input, 1)` for unrecognised shapes.
+fn parse_td_arn(input: &str) -> (String, i32) {
+    let suffix = input.rsplit('/').next().unwrap_or(input);
+    if let Some((family, rev)) = suffix.split_once(':') {
+        if let Ok(revision) = rev.parse::<i32>() {
+            return (family.to_string(), revision);
+        }
+    }
+    (input.to_string(), 1)
+}
+
+/// Pull `(cluster, service)` out of a service ARN like
+/// `arn:aws:ecs:us-east-1:000000000000:service/<cluster>/<service>`.
+fn parse_service_arn(input: &str) -> Option<(String, String)> {
+    let after = input.split(":service/").nth(1)?;
+    let mut parts = after.splitn(2, '/');
+    let cluster = parts.next()?.to_string();
+    let service = parts.next()?.to_string();
+    Some((cluster, service))
 }
 
 /// Parse CFN-shape Tags array into the RDS crate's tag form.
@@ -5089,6 +5514,9 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             rds_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            ecs_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),

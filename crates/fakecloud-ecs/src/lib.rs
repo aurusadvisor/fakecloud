@@ -4,5 +4,6 @@ pub(crate) mod state;
 
 pub use service::EcsService;
 pub use state::{
-    Cluster, EcsSnapshot, LifecycleEvent, SharedEcsState, Task, ECS_SNAPSHOT_SCHEMA_VERSION,
+    CapacityProvider, Cluster, EcsSnapshot, EcsState, LifecycleEvent, Service, SharedEcsState,
+    TagEntry, Task, TaskDefinition, ECS_SNAPSHOT_SCHEMA_VERSION,
 };
