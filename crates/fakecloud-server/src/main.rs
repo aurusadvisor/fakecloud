@@ -728,6 +728,7 @@ async fn main() {
             ecr: ecr_state.clone(),
             cloudwatch: cloudwatch_state.clone(),
             elbv2: elbv2_state.clone(),
+            organizations: organizations_state.clone(),
             delivery: delivery_for_cf,
         },
     );

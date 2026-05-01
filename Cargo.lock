@@ -2702,6 +2702,7 @@ dependencies = [
  "fakecloud-kms",
  "fakecloud-lambda",
  "fakecloud-logs",
+ "fakecloud-organizations",
  "fakecloud-persistence",
  "fakecloud-s3",
  "fakecloud-secretsmanager",

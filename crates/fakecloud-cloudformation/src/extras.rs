@@ -742,6 +742,7 @@ mod tests {
             ecr: shared::<EcrState>(),
             cloudwatch: Arc::new(RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new())),
             elbv2: Arc::new(RwLock::new(fakecloud_elbv2::Elbv2Accounts::new())),
+            organizations: Arc::new(RwLock::new(None)),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }
