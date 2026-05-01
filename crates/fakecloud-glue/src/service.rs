@@ -274,7 +274,30 @@ fn partition_json(p: &Partition) -> Value {
 }
 
 fn partition_key(values: &[String]) -> String {
-    values.join("/")
+    // Length-prefix each value so partitions whose values contain `/` (or any
+    // separator) cannot collide with neighbouring partitions.
+    let mut s = String::new();
+    for v in values {
+        s.push_str(&v.len().to_string());
+        s.push(':');
+        s.push_str(v);
+        s.push('\u{1f}');
+    }
+    s
+}
+
+fn parse_partition_values(json: &Value, field: &str) -> Result<Vec<String>, AwsServiceError> {
+    let arr = json.as_array().ok_or_else(|| missing(field))?;
+    if arr.is_empty() {
+        return Err(missing(field));
+    }
+    arr.iter()
+        .map(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| missing(field))
+        })
+        .collect()
 }
 
 impl GlueService {
@@ -520,17 +543,7 @@ impl GlueService {
             .ok_or_else(|| missing("TableName"))?
             .to_string();
         let input = &body["PartitionInput"];
-        let values: Vec<String> = input["Values"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .ok_or_else(|| missing("PartitionInput.Values"))?;
-        if values.is_empty() {
-            return Err(missing("PartitionInput.Values"));
-        }
+        let values = parse_partition_values(&input["Values"], "PartitionInput.Values")?;
         let key = partition_key(&values);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
@@ -568,14 +581,7 @@ impl GlueService {
         let table_name = body["TableName"]
             .as_str()
             .ok_or_else(|| missing("TableName"))?;
-        let values: Vec<String> = body["PartitionValues"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let values = parse_partition_values(&body["PartitionValues"], "PartitionValues")?;
         let key = partition_key(&values);
         let accounts = self.state.read();
         let state = accounts
@@ -627,14 +633,7 @@ impl GlueService {
         let table_name = body["TableName"]
             .as_str()
             .ok_or_else(|| missing("TableName"))?;
-        let value_list: Vec<String> = body["PartitionValueList"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let value_list = parse_partition_values(&body["PartitionValueList"], "PartitionValueList")?;
         let key = partition_key(&value_list);
         let input = &body["PartitionInput"];
         let mut accounts = self.state.write();
@@ -668,14 +667,7 @@ impl GlueService {
         let table_name = body["TableName"]
             .as_str()
             .ok_or_else(|| missing("TableName"))?;
-        let values: Vec<String> = body["PartitionValues"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let values = parse_partition_values(&body["PartitionValues"], "PartitionValues")?;
         let key = partition_key(&values);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
@@ -714,14 +706,7 @@ impl GlueService {
             .and_then(|dbs| dbs.get(db_name))
             .and_then(|db| db.tables.get(table_name));
         for pv in &to_get {
-            let values: Vec<String> = pv["Values"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let values = parse_partition_values(&pv["Values"], "PartitionsToGet.Values")?;
             let key = partition_key(&values);
             match table.and_then(|t| t.partitions.get(&key)) {
                 Some(p) => found.push(partition_json(p)),
@@ -761,24 +746,19 @@ impl GlueService {
             .get_mut(&table_name)
             .ok_or_else(|| entity_not_found(format!("Table {table_name} not found")))?;
         for input in inputs {
-            let values: Vec<String> = input["Values"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if values.is_empty() {
-                errors.push(json!({
-                    "PartitionValues": values,
-                    "ErrorDetail": {
-                        "ErrorCode": "InvalidInputException",
-                        "ErrorMessage": "Values must be a non-empty list",
-                    },
-                }));
-                continue;
-            }
+            let values = match parse_partition_values(&input["Values"], "PartitionInput.Values") {
+                Ok(v) => v,
+                Err(_) => {
+                    errors.push(json!({
+                        "PartitionValues": Vec::<String>::new(),
+                        "ErrorDetail": {
+                            "ErrorCode": "InvalidInputException",
+                            "ErrorMessage": "Values must be a non-empty list of strings",
+                        },
+                    }));
+                    continue;
+                }
+            };
             let key = partition_key(&values);
             if table.partitions.contains_key(&key) {
                 errors.push(json!({
