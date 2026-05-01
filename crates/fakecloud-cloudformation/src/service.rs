@@ -131,6 +131,7 @@ pub struct CloudFormationDeps {
     pub cloudwatch: fakecloud_cloudwatch::SharedCloudWatchState,
     pub elbv2: fakecloud_elbv2::SharedElbv2State,
     pub organizations: fakecloud_organizations::SharedOrganizationsState,
+    pub cognito: fakecloud_cognito::SharedCognitoState,
     pub delivery: Arc<DeliveryBus>,
 }
 
@@ -197,6 +198,7 @@ impl CloudFormationService {
             cloudwatch_state: self.deps.cloudwatch.clone(),
             elbv2_state: self.deps.elbv2.clone(),
             organizations_state: self.deps.organizations.clone(),
+            cognito_state: self.deps.cognito.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1282,6 +1284,13 @@ mod tests {
             cloudwatch: Arc::new(RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new())),
             elbv2: Arc::new(RwLock::new(fakecloud_elbv2::Elbv2Accounts::new())),
             organizations: Arc::new(RwLock::new(None)),
+            cognito: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
         };
         CloudFormationService::new(cf_state, deps)

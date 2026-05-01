@@ -9,4 +9,9 @@ pub use service::{
     oidc_discovery_document, pool_jwks_document, CognitoService, OAuthRevokeError, OAuthTokenError,
     OAuthTokenResponse, OAuthUserInfoError,
 };
-pub use state::{CognitoSnapshot, SharedCognitoState, COGNITO_SNAPSHOT_SCHEMA_VERSION};
+pub use state::{
+    default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig, CognitoSnapshot,
+    CognitoState, CustomDomainConfig, EmailConfiguration, PasswordPolicy, PoolPolicies,
+    RecoveryOption, SchemaAttribute, SharedCognitoState, SignInPolicy, SmsConfiguration, UserPool,
+    UserPoolClient, UserPoolDomain, COGNITO_SNAPSHOT_SCHEMA_VERSION,
+};

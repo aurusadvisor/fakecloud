@@ -729,6 +729,7 @@ async fn main() {
             cloudwatch: cloudwatch_state.clone(),
             elbv2: elbv2_state.clone(),
             organizations: organizations_state.clone(),
+            cognito: cognito_state.clone(),
             delivery: delivery_for_cf,
         },
     );
