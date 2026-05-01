@@ -11,6 +11,10 @@ use fakecloud_dynamodb::{
     SharedDynamoDbState,
 };
 use fakecloud_ecr::{Repository, SharedEcrState};
+use fakecloud_elbv2::{
+    Action as ElbAction, Listener, LoadBalancer, Rule as ElbRule, RuleCondition, SharedElbv2State,
+    Tag as ElbTag, TargetGroup, TargetGroupTuple,
+};
 use fakecloud_eventbridge::{
     ApiDestination, Archive, Connection, EventRule, SharedEventBridgeState,
 };
@@ -45,6 +49,171 @@ fn parse_iam_tags(value: Option<&serde_json::Value>) -> Vec<Tag> {
             let key = t.get("Key").and_then(|v| v.as_str())?.to_string();
             let value = t.get("Value").and_then(|v| v.as_str())?.to_string();
             Some(Tag { key, value })
+        })
+        .collect()
+}
+
+/// Mirror of `parse_iam_tags` but for the ELBv2 crate's separate `Tag`
+/// type. Same `[{Key, Value}, ...]` JSON shape, ignored on malformed entries.
+fn parse_elb_tags(value: Option<&serde_json::Value>) -> Vec<ElbTag> {
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|t| {
+            let key = t.get("Key").and_then(|v| v.as_str())?.to_string();
+            let value = t.get("Value").and_then(|v| v.as_str())?.to_string();
+            Some(ElbTag { key, value })
+        })
+        .collect()
+}
+
+/// Translate CFN-shape Listener/ListenerRule actions into ELBv2 internal
+/// `Action`s. Only the action-type knobs CFN exposes are wired; anything
+/// not recognised becomes a bare action with no target.
+fn parse_elb_actions(value: Option<&serde_json::Value>) -> Vec<ElbAction> {
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .map(|a| {
+            let action_type = a
+                .get("Type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("forward")
+                .to_string();
+            let target_group_arn = a
+                .get("TargetGroupArn")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let order = a.get("Order").and_then(|v| v.as_i64()).map(|n| n as i32);
+            let redirect = a
+                .get("RedirectConfig")
+                .map(|r| fakecloud_elbv2::RedirectConfig {
+                    protocol: r
+                        .get("Protocol")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    port: r
+                        .get("Port")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    host: r
+                        .get("Host")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    path: r
+                        .get("Path")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    query: r
+                        .get("Query")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    status_code: r
+                        .get("StatusCode")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("HTTP_302")
+                        .to_string(),
+                });
+            let fixed_response =
+                a.get("FixedResponseConfig")
+                    .map(|f| fakecloud_elbv2::FixedResponseConfig {
+                        message_body: f
+                            .get("MessageBody")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        status_code: f
+                            .get("StatusCode")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("200")
+                            .to_string(),
+                        content_type: f
+                            .get("ContentType")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    });
+            let forward = a.get("ForwardConfig").map(|f| {
+                let target_groups: Vec<TargetGroupTuple> = f
+                    .get("TargetGroups")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|t| {
+                                let target_group_arn = t
+                                    .get("TargetGroupArn")
+                                    .and_then(|v| v.as_str())?
+                                    .to_string();
+                                let weight =
+                                    t.get("Weight").and_then(|v| v.as_i64()).map(|n| n as i32);
+                                Some(TargetGroupTuple {
+                                    target_group_arn,
+                                    weight,
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                fakecloud_elbv2::ForwardConfig {
+                    target_groups,
+                    stickiness: None,
+                }
+            });
+            ElbAction {
+                action_type,
+                target_group_arn,
+                order,
+                redirect,
+                fixed_response,
+                forward,
+                authenticate_cognito: None,
+                authenticate_oidc: None,
+            }
+        })
+        .collect()
+}
+
+fn parse_elb_rule_conditions(value: Option<&serde_json::Value>) -> Vec<RuleCondition> {
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .map(|c| {
+            let field = c
+                .get("Field")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let values: Vec<String> = c
+                .get("Values")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let host_header_values: Vec<String> = c
+                .get("HostHeaderConfig")
+                .and_then(|v| v.get("Values"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            RuleCondition {
+                field,
+                values,
+                host_header_values,
+                path_pattern_values: Vec::new(),
+                http_header_name: None,
+                http_header_values: Vec::new(),
+                query_string_values: Vec::new(),
+                http_request_method_values: Vec::new(),
+                source_ip_values: Vec::new(),
+            }
         })
         .collect()
 }
@@ -99,6 +268,7 @@ pub struct ResourceProvisioner {
     pub kms_state: SharedKmsState,
     pub ecr_state: SharedEcrState,
     pub cloudwatch_state: SharedCloudWatchState,
+    pub elbv2_state: SharedElbv2State,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -139,6 +309,14 @@ impl ResourceProvisioner {
             "AWS::KMS::Alias" => self.create_kms_alias(resource),
             "AWS::ECR::Repository" => self.create_ecr_repository(resource),
             "AWS::CloudWatch::Alarm" => self.create_cloudwatch_alarm(resource),
+            "AWS::ElasticLoadBalancingV2::LoadBalancer" => {
+                self.create_elbv2_load_balancer(resource)
+            }
+            "AWS::ElasticLoadBalancingV2::TargetGroup" => self.create_elbv2_target_group(resource),
+            "AWS::ElasticLoadBalancingV2::Listener" => self.create_elbv2_listener(resource),
+            "AWS::ElasticLoadBalancingV2::ListenerRule" => {
+                self.create_elbv2_listener_rule(resource)
+            }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -210,6 +388,18 @@ impl ResourceProvisioner {
             "AWS::KMS::Alias" => self.delete_kms_alias(&resource.physical_id),
             "AWS::ECR::Repository" => self.delete_ecr_repository(&resource.physical_id),
             "AWS::CloudWatch::Alarm" => self.delete_cloudwatch_alarm(&resource.physical_id),
+            "AWS::ElasticLoadBalancingV2::LoadBalancer" => {
+                self.delete_elbv2_load_balancer(&resource.physical_id)
+            }
+            "AWS::ElasticLoadBalancingV2::TargetGroup" => {
+                self.delete_elbv2_target_group(&resource.physical_id)
+            }
+            "AWS::ElasticLoadBalancingV2::Listener" => {
+                self.delete_elbv2_listener(&resource.physical_id)
+            }
+            "AWS::ElasticLoadBalancingV2::ListenerRule" => {
+                self.delete_elbv2_listener_rule(&resource.physical_id)
+            }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -2437,6 +2627,431 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    // --- ELBv2 ---
+
+    fn create_elbv2_load_balancer(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let scheme = props
+            .get("Scheme")
+            .and_then(|v| v.as_str())
+            .unwrap_or("internet-facing")
+            .to_string();
+        let lb_type = props
+            .get("Type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("application")
+            .to_string();
+        let ip_address_type = props
+            .get("IpAddressType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ipv4")
+            .to_string();
+        let security_groups: Vec<String> = props
+            .get("SecurityGroups")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tags = parse_elb_tags(props.get("Tags"));
+
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let lb_id = Uuid::new_v4().simple().to_string();
+        let arn = format!(
+            "arn:aws:elasticloadbalancing:{}:{}:loadbalancer/{}/{}/{}",
+            self.region,
+            self.account_id,
+            if lb_type == "network" { "net" } else { "app" },
+            name,
+            &lb_id[..16]
+        );
+        let dns_name = format!(
+            "{}-{}.{}.elb.{}.amazonaws.com",
+            name,
+            &lb_id[..16],
+            self.region,
+            self.region
+        );
+
+        let mut availability_zones: Vec<fakecloud_elbv2::AvailabilityZone> = Vec::new();
+        if let Some(arr) = props.get("Subnets").and_then(|v| v.as_array()) {
+            for s in arr {
+                if let Some(subnet_id) = s.as_str() {
+                    availability_zones.push(fakecloud_elbv2::AvailabilityZone {
+                        zone_name: format!("{}a", self.region),
+                        subnet_id: subnet_id.to_string(),
+                        outpost_id: None,
+                        load_balancer_addresses: Vec::new(),
+                        source_nat_ipv6_prefixes: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        state.load_balancers.insert(
+            arn.clone(),
+            LoadBalancer {
+                arn: arn.clone(),
+                name: name.clone(),
+                dns_name: dns_name.clone(),
+                canonical_hosted_zone_id: "Z2P70J7EXAMPLE".to_string(),
+                created_time: Utc::now(),
+                scheme,
+                vpc_id: String::new(),
+                state_code: "active".to_string(),
+                state_reason: None,
+                lb_type,
+                availability_zones,
+                security_groups,
+                ip_address_type,
+                customer_owned_ipv4_pool: None,
+                enforce_security_group_inbound_rules_on_private_link_traffic: None,
+                enable_prefix_for_ipv6_source_nat: None,
+                ipv4_ipam_pool_id: None,
+                tags,
+                attributes: BTreeMap::new(),
+                minimum_capacity_units: None,
+                bound_port: None,
+            },
+        );
+
+        Ok(ProvisionResult::new(arn.clone())
+            .with("LoadBalancerArn", arn)
+            .with(
+                "LoadBalancerFullName",
+                format!("app/{name}/{}", &lb_id[..16]),
+            )
+            .with("LoadBalancerName", name)
+            .with("DNSName", dns_name)
+            .with("CanonicalHostedZoneID", "Z2P70J7EXAMPLE"))
+    }
+
+    fn delete_elbv2_load_balancer(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.load_balancers.remove(physical_id);
+        // Cascade-delete listeners and rules attached to this LB.
+        let listeners: Vec<String> = state
+            .listeners
+            .iter()
+            .filter(|(_, l)| l.load_balancer_arn == physical_id)
+            .map(|(arn, _)| arn.clone())
+            .collect();
+        for arn in &listeners {
+            state.listeners.remove(arn);
+            let rules: Vec<String> = state
+                .rules
+                .iter()
+                .filter(|(_, r)| r.listener_arn == *arn)
+                .map(|(a, _)| a.clone())
+                .collect();
+            for r in rules {
+                state.rules.remove(&r);
+            }
+        }
+        for tg in state.target_groups.values_mut() {
+            tg.load_balancer_arns.retain(|a| a != physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_elbv2_target_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let protocol = props
+            .get("Protocol")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let port = props.get("Port").and_then(|v| v.as_i64()).map(|n| n as i32);
+        let vpc_id = props
+            .get("VpcId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let target_type = props
+            .get("TargetType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("instance")
+            .to_string();
+        let ip_address_type = props
+            .get("IpAddressType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ipv4")
+            .to_string();
+        let protocol_version = props
+            .get("ProtocolVersion")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let tags = parse_elb_tags(props.get("Tags"));
+
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let id = Uuid::new_v4().simple().to_string();
+        let arn = format!(
+            "arn:aws:elasticloadbalancing:{}:{}:targetgroup/{}/{}",
+            self.region,
+            self.account_id,
+            name,
+            &id[..16]
+        );
+
+        state.target_groups.insert(
+            arn.clone(),
+            TargetGroup {
+                arn: arn.clone(),
+                name: name.clone(),
+                protocol,
+                port,
+                vpc_id,
+                target_type,
+                ip_address_type,
+                protocol_version,
+                health_check_protocol: props
+                    .get("HealthCheckProtocol")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                health_check_port: props
+                    .get("HealthCheckPort")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                health_check_enabled: props
+                    .get("HealthCheckEnabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+                health_check_path: props
+                    .get("HealthCheckPath")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                health_check_interval_seconds: props
+                    .get("HealthCheckIntervalSeconds")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(30) as i32,
+                health_check_timeout_seconds: props
+                    .get("HealthCheckTimeoutSeconds")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(5) as i32,
+                healthy_threshold_count: props
+                    .get("HealthyThresholdCount")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(5) as i32,
+                unhealthy_threshold_count: props
+                    .get("UnhealthyThresholdCount")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(2) as i32,
+                matcher_http_code: props
+                    .get("Matcher")
+                    .and_then(|v| v.get("HttpCode"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                matcher_grpc_code: props
+                    .get("Matcher")
+                    .and_then(|v| v.get("GrpcCode"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                load_balancer_arns: Vec::new(),
+                targets: Vec::new(),
+                tags,
+                attributes: BTreeMap::new(),
+                created_time: Utc::now(),
+            },
+        );
+
+        Ok(ProvisionResult::new(arn.clone())
+            .with("TargetGroupArn", arn)
+            .with("TargetGroupName", name)
+            .with("TargetGroupFullName", format!("targetgroup/{}", &id[..16])))
+    }
+
+    fn delete_elbv2_target_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.target_groups.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_elbv2_listener(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let load_balancer_arn = props
+            .get("LoadBalancerArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "LoadBalancerArn is required".to_string())?
+            .to_string();
+        let port = props.get("Port").and_then(|v| v.as_i64()).map(|n| n as i32);
+        let protocol = props
+            .get("Protocol")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let default_actions = parse_elb_actions(props.get("DefaultActions"));
+
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.load_balancers.contains_key(&load_balancer_arn) {
+            return Err(format!(
+                "LoadBalancer {load_balancer_arn} not yet provisioned"
+            ));
+        }
+
+        let lb_full = load_balancer_arn
+            .rsplit("loadbalancer/")
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let listener_id = Uuid::new_v4().simple().to_string();
+        let arn = format!(
+            "arn:aws:elasticloadbalancing:{}:{}:listener/{}/{}",
+            self.region,
+            self.account_id,
+            lb_full,
+            &listener_id[..16]
+        );
+
+        // Wire forward target groups -> LB association so dataplane probing
+        // and DescribeTargetGroups round-trip the relationship.
+        for action in &default_actions {
+            if let Some(tg_arn) = &action.target_group_arn {
+                if let Some(tg) = state.target_groups.get_mut(tg_arn) {
+                    if !tg.load_balancer_arns.contains(&load_balancer_arn) {
+                        tg.load_balancer_arns.push(load_balancer_arn.clone());
+                    }
+                }
+            }
+            if let Some(forward) = &action.forward {
+                for tgt in &forward.target_groups {
+                    if let Some(tg) = state.target_groups.get_mut(&tgt.target_group_arn) {
+                        if !tg.load_balancer_arns.contains(&load_balancer_arn) {
+                            tg.load_balancer_arns.push(load_balancer_arn.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        state.listeners.insert(
+            arn.clone(),
+            Listener {
+                arn: arn.clone(),
+                load_balancer_arn,
+                port,
+                protocol,
+                certificates: Vec::new(),
+                ssl_policy: props
+                    .get("SslPolicy")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                default_actions,
+                alpn_policy: Vec::new(),
+                mutual_authentication: None,
+                tags: parse_elb_tags(props.get("Tags")),
+                attributes: BTreeMap::new(),
+            },
+        );
+
+        Ok(ProvisionResult::new(arn.clone()).with("ListenerArn", arn))
+    }
+
+    fn delete_elbv2_listener(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.listeners.remove(physical_id);
+        let rules: Vec<String> = state
+            .rules
+            .iter()
+            .filter(|(_, r)| r.listener_arn == physical_id)
+            .map(|(arn, _)| arn.clone())
+            .collect();
+        for r in rules {
+            state.rules.remove(&r);
+        }
+        Ok(())
+    }
+
+    fn create_elbv2_listener_rule(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let listener_arn = props
+            .get("ListenerArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "ListenerArn is required".to_string())?
+            .to_string();
+        let priority = props
+            .get("Priority")
+            .map(|v| {
+                if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else if let Some(n) = v.as_i64() {
+                    n.to_string()
+                } else {
+                    "1".to_string()
+                }
+            })
+            .unwrap_or_else(|| "1".to_string());
+        let actions = parse_elb_actions(props.get("Actions"));
+        let conditions = parse_elb_rule_conditions(props.get("Conditions"));
+
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.listeners.contains_key(&listener_arn) {
+            return Err(format!("Listener {listener_arn} not yet provisioned"));
+        }
+        let listener_full = listener_arn
+            .rsplit("listener/")
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let rule_id = Uuid::new_v4().simple().to_string();
+        let arn = format!(
+            "arn:aws:elasticloadbalancing:{}:{}:listener-rule/{}/{}",
+            self.region,
+            self.account_id,
+            listener_full,
+            &rule_id[..16]
+        );
+
+        state.rules.insert(
+            arn.clone(),
+            ElbRule {
+                arn: arn.clone(),
+                listener_arn,
+                priority,
+                conditions,
+                actions,
+                is_default: false,
+                tags: parse_elb_tags(props.get("Tags")),
+            },
+        );
+
+        Ok(ProvisionResult::new(arn.clone()).with("RuleArn", arn))
+    }
+
+    fn delete_elbv2_listener_rule(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.rules.remove(physical_id);
+        Ok(())
+    }
+
     fn delete_log_group(&self, physical_id: &str) -> Result<(), String> {
         let mut logs_accounts = self.logs_state.write();
         let state = logs_accounts.default_mut();
@@ -2834,6 +3449,7 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             cloudwatch_state: Arc::new(RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new())),
+            elbv2_state: Arc::new(RwLock::new(fakecloud_elbv2::Elbv2Accounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),

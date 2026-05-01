@@ -129,6 +129,7 @@ pub struct CloudFormationDeps {
     pub kms: fakecloud_kms::SharedKmsState,
     pub ecr: fakecloud_ecr::SharedEcrState,
     pub cloudwatch: fakecloud_cloudwatch::SharedCloudWatchState,
+    pub elbv2: fakecloud_elbv2::SharedElbv2State,
     pub delivery: Arc<DeliveryBus>,
 }
 
@@ -193,6 +194,7 @@ impl CloudFormationService {
             kms_state: self.deps.kms.clone(),
             ecr_state: self.deps.ecr.clone(),
             cloudwatch_state: self.deps.cloudwatch.clone(),
+            elbv2_state: self.deps.elbv2.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1276,6 +1278,7 @@ mod tests {
                 ),
             )),
             cloudwatch: Arc::new(RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new())),
+            elbv2: Arc::new(RwLock::new(fakecloud_elbv2::Elbv2Accounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
         };
         CloudFormationService::new(cf_state, deps)
