@@ -2693,6 +2693,7 @@ dependencies = [
  "fakecloud-aws",
  "fakecloud-core",
  "fakecloud-dynamodb",
+ "fakecloud-ecr",
  "fakecloud-eventbridge",
  "fakecloud-iam",
  "fakecloud-kinesis",

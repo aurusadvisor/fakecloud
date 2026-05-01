@@ -9,6 +9,7 @@ use fakecloud_dynamodb::{
     AttributeDefinition, DynamoTable, KeySchemaElement, OnDemandThroughput, ProvisionedThroughput,
     SharedDynamoDbState,
 };
+use fakecloud_ecr::{Repository, SharedEcrState};
 use fakecloud_eventbridge::{EventRule, SharedEventBridgeState};
 use fakecloud_iam::{IamPolicy, IamRole, PolicyVersion, SharedIamState};
 use fakecloud_kinesis::{build_stream_shards, KinesisStream, SharedKinesisState};
@@ -59,6 +60,7 @@ pub struct ResourceProvisioner {
     pub secretsmanager_state: SharedSecretsManagerState,
     pub kinesis_state: SharedKinesisState,
     pub kms_state: SharedKmsState,
+    pub ecr_state: SharedEcrState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -84,6 +86,7 @@ impl ResourceProvisioner {
             "AWS::Kinesis::Stream" => self.create_kinesis_stream(resource),
             "AWS::KMS::Key" => self.create_kms_key(resource),
             "AWS::KMS::Alias" => self.create_kms_alias(resource),
+            "AWS::ECR::Repository" => self.create_ecr_repository(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -132,6 +135,7 @@ impl ResourceProvisioner {
             "AWS::Kinesis::Stream" => self.delete_kinesis_stream(&resource.physical_id),
             "AWS::KMS::Key" => self.delete_kms_key(&resource.physical_id),
             "AWS::KMS::Alias" => self.delete_kms_alias(&resource.physical_id),
+            "AWS::ECR::Repository" => self.delete_ecr_repository(&resource.physical_id),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -1373,6 +1377,100 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    // --- ECR ---
+
+    fn create_ecr_repository(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let repository_name = props
+            .get("RepositoryName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let image_tag_mutability = props
+            .get("ImageTagMutability")
+            .and_then(|v| v.as_str())
+            .unwrap_or("MUTABLE")
+            .to_string();
+        let scan_on_push = props
+            .get("ImageScanningConfiguration")
+            .and_then(|v| v.get("ScanOnPush"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let encryption_type = props
+            .get("EncryptionConfiguration")
+            .and_then(|v| v.get("EncryptionType"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("AES256")
+            .to_string();
+        let kms_key = props
+            .get("EncryptionConfiguration")
+            .and_then(|v| v.get("KmsKey"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let policy_text = props
+            .get("RepositoryPolicyText")
+            .map(|v| {
+                if v.is_string() {
+                    v.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            })
+            .filter(|s| !s.is_empty());
+        let lifecycle_policy = props
+            .get("LifecyclePolicy")
+            .and_then(|v| v.get("LifecyclePolicyText"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let mut tags: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
+            for t in arr {
+                if let (Some(k), Some(v)) = (
+                    t.get("Key").and_then(|x| x.as_str()),
+                    t.get("Value").and_then(|x| x.as_str()),
+                ) {
+                    tags.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if state.repositories.contains_key(&repository_name) {
+            return Err(format!("Repository {repository_name} already exists"));
+        }
+        let arn = state.repository_arn(&repository_name);
+        let registry_id = state.account_id.clone();
+        let endpoint = format!(
+            "{}.dkr.ecr.{}.amazonaws.com",
+            state.account_id, state.region
+        );
+        let mut repo = Repository::new(&repository_name, arn.clone(), &registry_id, &endpoint);
+        repo.image_tag_mutability = image_tag_mutability;
+        repo.image_scanning_configuration.scan_on_push = scan_on_push;
+        repo.encryption_configuration.encryption_type = encryption_type;
+        repo.encryption_configuration.kms_key = kms_key;
+        repo.policy = policy_text;
+        repo.lifecycle_policy = lifecycle_policy;
+        repo.tags = tags;
+        let uri = repo.repository_uri.clone();
+        state.repositories.insert(repository_name.clone(), repo);
+
+        Ok(ProvisionResult::new(repository_name)
+            .with("Arn", arn)
+            .with("RepositoryUri", uri))
+    }
+
+    fn delete_ecr_repository(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.repositories.remove(physical_id);
+        Ok(())
+    }
+
     fn delete_log_group(&self, physical_id: &str) -> Result<(), String> {
         let mut logs_accounts = self.logs_state.write();
         let state = logs_accounts.default_mut();
@@ -1550,6 +1648,9 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             kms_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            ecr_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),

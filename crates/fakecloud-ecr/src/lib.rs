@@ -7,6 +7,6 @@ pub(crate) mod state;
 
 pub use service::EcrService;
 pub use state::{
-    EcrSnapshot, Image, PullThroughCacheRule, Repository, SharedEcrState,
+    EcrSnapshot, EcrState, Image, PullThroughCacheRule, Repository, SharedEcrState,
     ECR_SNAPSHOT_SCHEMA_VERSION,
 };

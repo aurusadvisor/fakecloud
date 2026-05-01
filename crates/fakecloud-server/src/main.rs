@@ -721,6 +721,7 @@ async fn main() {
             secretsmanager: secretsmanager_state.clone(),
             kinesis: kinesis_state.clone(),
             kms: kms_state.clone(),
+            ecr: ecr_state.clone(),
             delivery: delivery_for_cf,
         },
     );
