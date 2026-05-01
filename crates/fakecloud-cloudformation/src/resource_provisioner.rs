@@ -13,7 +13,7 @@ use fakecloud_dynamodb::{
 use fakecloud_ecr::{Repository, SharedEcrState};
 use fakecloud_eventbridge::{EventRule, SharedEventBridgeState};
 use fakecloud_iam::{IamPolicy, IamRole, PolicyVersion, SharedIamState};
-use fakecloud_kinesis::{build_stream_shards, KinesisStream, SharedKinesisState};
+use fakecloud_kinesis::{build_stream_shards, KinesisConsumer, KinesisStream, SharedKinesisState};
 use fakecloud_kms::{KmsAlias, KmsKey, SharedKmsState};
 use fakecloud_lambda::SharedLambdaState;
 use fakecloud_logs::SharedLogsState;
@@ -86,6 +86,7 @@ impl ResourceProvisioner {
             "AWS::Lambda::Function" => self.create_lambda_function(resource),
             "AWS::SecretsManager::Secret" => self.create_secrets_manager_secret(resource),
             "AWS::Kinesis::Stream" => self.create_kinesis_stream(resource),
+            "AWS::Kinesis::StreamConsumer" => self.create_kinesis_stream_consumer(resource),
             "AWS::KMS::Key" => self.create_kms_key(resource),
             "AWS::KMS::Alias" => self.create_kms_alias(resource),
             "AWS::ECR::Repository" => self.create_ecr_repository(resource),
@@ -136,6 +137,9 @@ impl ResourceProvisioner {
                 self.delete_secrets_manager_secret(&resource.physical_id)
             }
             "AWS::Kinesis::Stream" => self.delete_kinesis_stream(&resource.physical_id),
+            "AWS::Kinesis::StreamConsumer" => {
+                self.delete_kinesis_stream_consumer(&resource.physical_id)
+            }
             "AWS::KMS::Key" => self.delete_kms_key(&resource.physical_id),
             "AWS::KMS::Alias" => self.delete_kms_alias(&resource.physical_id),
             "AWS::ECR::Repository" => self.delete_ecr_repository(&resource.physical_id),
@@ -1180,6 +1184,64 @@ impl ResourceProvisioner {
         let mut accounts = self.kinesis_state.write();
         let state = accounts.get_or_create(&self.account_id);
         state.streams.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_kinesis_stream_consumer(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let stream_arn = props
+            .get("StreamARN")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "StreamARN is required".to_string())?
+            .to_string();
+        let consumer_name = props
+            .get("ConsumerName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "ConsumerName is required".to_string())?
+            .to_string();
+
+        let mut accounts = self.kinesis_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if state
+            .consumers
+            .values()
+            .any(|c| c.stream_arn == stream_arn && c.consumer_name == consumer_name)
+        {
+            return Err(format!(
+                "Consumer {consumer_name} already exists on stream {stream_arn}"
+            ));
+        }
+        let now = Utc::now();
+        let consumer_arn = format!(
+            "{}/consumer/{}:{}",
+            stream_arn,
+            consumer_name,
+            now.timestamp()
+        );
+        let consumer = KinesisConsumer {
+            consumer_name: consumer_name.clone(),
+            consumer_arn: consumer_arn.clone(),
+            consumer_status: "ACTIVE".to_string(),
+            consumer_creation_timestamp: now,
+            stream_arn: stream_arn.clone(),
+        };
+        state.consumers.insert(consumer_arn.clone(), consumer);
+
+        Ok(ProvisionResult::new(consumer_arn.clone())
+            .with("ConsumerARN", consumer_arn)
+            .with("ConsumerName", consumer_name)
+            .with("ConsumerStatus", "ACTIVE")
+            .with("ConsumerCreationTimestamp", now.timestamp().to_string())
+            .with("StreamARN", stream_arn))
+    }
+
+    fn delete_kinesis_stream_consumer(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.kinesis_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.consumers.remove(physical_id);
         Ok(())
     }
 
