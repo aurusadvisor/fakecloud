@@ -378,6 +378,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         // (`AWSWAF_*` without the `_20190729` suffix) doesn't get routed here.
         "AWSWAF_20190729" => "wafv2",
         "AmazonAthena" => "athena",
+        s if s.starts_with("Firehose_") => "firehose",
         _ => return None,
     };
 

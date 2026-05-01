@@ -680,6 +680,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-firehose"
+version = "1.105.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfd2a1b7ee0df7b94d42367c64a2188ebaf4c2f41f62d56e10ac7ce6dc50ce67"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-iam"
 version = "1.107.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2390,6 +2414,7 @@ dependencies = [
  "fakecloud-elasticache",
  "fakecloud-elbv2",
  "fakecloud-eventbridge",
+ "fakecloud-firehose",
  "fakecloud-iam",
  "fakecloud-kinesis",
  "fakecloud-kms",
@@ -2776,6 +2801,7 @@ dependencies = [
  "aws-sdk-elasticache",
  "aws-sdk-elasticloadbalancingv2",
  "aws-sdk-eventbridge",
+ "aws-sdk-firehose",
  "aws-sdk-iam",
  "aws-sdk-kinesis",
  "aws-sdk-kms",
@@ -2923,6 +2949,27 @@ dependencies = [
  "http 1.4.0",
  "parking_lot",
  "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fakecloud-firehose"
+version = "0.13.3"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "fakecloud-aws",
+ "fakecloud-core",
+ "fakecloud-s3",
+ "http 1.4.0",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3374,6 +3421,7 @@ dependencies = [
  "aws-sdk-elasticache",
  "aws-sdk-elasticloadbalancingv2",
  "aws-sdk-eventbridge",
+ "aws-sdk-firehose",
  "aws-sdk-iam",
  "aws-sdk-kinesis",
  "aws-sdk-kms",

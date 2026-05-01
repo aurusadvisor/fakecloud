@@ -2017,6 +2017,13 @@ async fn main() {
     let acm_service = fakecloud_acm::AcmService::new(acm_state.clone());
     registry.register(Arc::new(acm_service));
 
+    let firehose_state: fakecloud_firehose::SharedFirehoseState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_firehose::FirehoseAccounts::new()),
+    );
+    let firehose_service =
+        fakecloud_firehose::FirehoseService::new(firehose_state.clone()).with_s3(s3_state.clone());
+    registry.register(Arc::new(firehose_service));
+
     let app_autoscaling_service =
         fakecloud_application_autoscaling::ApplicationAutoScalingService::new(
             app_autoscaling_state.clone(),
