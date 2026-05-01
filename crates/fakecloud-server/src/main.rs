@@ -720,6 +720,7 @@ async fn main() {
             lambda: lambda_state.clone(),
             secretsmanager: secretsmanager_state.clone(),
             kinesis: kinesis_state.clone(),
+            kms: kms_state.clone(),
             delivery: delivery_for_cf,
         },
     );

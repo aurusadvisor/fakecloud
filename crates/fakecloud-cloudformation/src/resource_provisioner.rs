@@ -12,6 +12,7 @@ use fakecloud_dynamodb::{
 use fakecloud_eventbridge::{EventRule, SharedEventBridgeState};
 use fakecloud_iam::{IamPolicy, IamRole, PolicyVersion, SharedIamState};
 use fakecloud_kinesis::{build_stream_shards, KinesisStream, SharedKinesisState};
+use fakecloud_kms::{KmsAlias, KmsKey, SharedKmsState};
 use fakecloud_lambda::SharedLambdaState;
 use fakecloud_logs::SharedLogsState;
 use fakecloud_s3::{S3Bucket, SharedS3State};
@@ -57,6 +58,7 @@ pub struct ResourceProvisioner {
     pub lambda_state: SharedLambdaState,
     pub secretsmanager_state: SharedSecretsManagerState,
     pub kinesis_state: SharedKinesisState,
+    pub kms_state: SharedKmsState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -80,6 +82,8 @@ impl ResourceProvisioner {
             "AWS::Lambda::Function" => self.create_lambda_function(resource),
             "AWS::SecretsManager::Secret" => self.create_secrets_manager_secret(resource),
             "AWS::Kinesis::Stream" => self.create_kinesis_stream(resource),
+            "AWS::KMS::Key" => self.create_kms_key(resource),
+            "AWS::KMS::Alias" => self.create_kms_alias(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -126,6 +130,8 @@ impl ResourceProvisioner {
                 self.delete_secrets_manager_secret(&resource.physical_id)
             }
             "AWS::Kinesis::Stream" => self.delete_kinesis_stream(&resource.physical_id),
+            "AWS::KMS::Key" => self.delete_kms_key(&resource.physical_id),
+            "AWS::KMS::Alias" => self.delete_kms_alias(&resource.physical_id),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -1169,6 +1175,204 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    // --- KMS ---
+
+    fn create_kms_key(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let enabled = props
+            .get("Enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let key_rotation_enabled = props
+            .get("EnableKeyRotation")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let key_usage = props
+            .get("KeyUsage")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ENCRYPT_DECRYPT")
+            .to_string();
+        let key_spec = props
+            .get("KeySpec")
+            .and_then(|v| v.as_str())
+            .unwrap_or("SYMMETRIC_DEFAULT")
+            .to_string();
+        let multi_region = props
+            .get("MultiRegion")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let origin = props
+            .get("Origin")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AWS_KMS")
+            .to_string();
+        let policy = match props.get("KeyPolicy") {
+            Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+            Some(v) => serde_json::to_string(v).unwrap_or_default(),
+            None => String::new(),
+        };
+        if !key_spec.starts_with("SYMMETRIC") && !key_spec.starts_with("HMAC") {
+            return Err(format!(
+                "AWS::KMS::Key with KeySpec '{key_spec}' is not yet supported in CloudFormation; only symmetric and HMAC specs are provisioned"
+            ));
+        }
+
+        let mut tags: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
+            for t in arr {
+                if let (Some(k), Some(v)) = (
+                    t.get("Key").and_then(|x| x.as_str()),
+                    t.get("Value").and_then(|x| x.as_str()),
+                ) {
+                    tags.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+
+        let key_id = if multi_region {
+            format!("mrk-{}", Uuid::new_v4().as_simple())
+        } else {
+            Uuid::new_v4().to_string()
+        };
+
+        let mut accounts = self.kms_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let arn = format!(
+            "arn:aws:kms:{}:{}:key/{}",
+            state.region, state.account_id, key_id
+        );
+        let now = Utc::now().timestamp() as f64;
+
+        // private_key_seed is only consulted for asymmetric KEY_AGREEMENT
+        // specs (ECC DeriveSharedSecret); symmetric and HMAC keys never read
+        // it, so a zero seed is fine for the specs this provisioner accepts.
+        let seed = vec![0u8; 32];
+
+        let encryption_algorithms = if key_usage == "ENCRYPT_DECRYPT" {
+            Some(vec!["SYMMETRIC_DEFAULT".to_string()])
+        } else {
+            None
+        };
+        let mac_algorithms = if key_usage == "GENERATE_VERIFY_MAC" {
+            let alg = match key_spec.as_str() {
+                "HMAC_224" => "HMAC_SHA_224",
+                "HMAC_256" => "HMAC_SHA_256",
+                "HMAC_384" => "HMAC_SHA_384",
+                "HMAC_512" => "HMAC_SHA_512",
+                _ => "HMAC_SHA_256",
+            };
+            Some(vec![alg.to_string()])
+        } else {
+            None
+        };
+
+        let key = KmsKey {
+            key_id: key_id.clone(),
+            arn: arn.clone(),
+            creation_date: now,
+            description,
+            enabled,
+            key_usage,
+            key_spec,
+            key_manager: "CUSTOMER".to_string(),
+            key_state: if enabled { "Enabled" } else { "Disabled" }.to_string(),
+            deletion_date: None,
+            tags,
+            policy,
+            key_rotation_enabled,
+            origin,
+            multi_region,
+            rotations: Vec::new(),
+            signing_algorithms: None,
+            encryption_algorithms,
+            mac_algorithms,
+            custom_key_store_id: None,
+            imported_key_material: false,
+            imported_material_bytes: None,
+            private_key_seed: seed,
+            primary_region: None,
+            asymmetric_private_key_der: None,
+            asymmetric_public_key_der: None,
+        };
+
+        state.keys.insert(key_id.clone(), key);
+
+        Ok(ProvisionResult::new(key_id.clone())
+            .with("Arn", arn)
+            .with("KeyId", key_id))
+    }
+
+    fn delete_kms_key(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.kms_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.keys.remove(physical_id);
+        state.aliases.retain(|_, a| a.target_key_id != physical_id);
+        Ok(())
+    }
+
+    fn create_kms_alias(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let alias_name = props
+            .get("AliasName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "AliasName is required".to_string())?
+            .to_string();
+        if !alias_name.starts_with("alias/") {
+            return Err(format!(
+                "AliasName must start with 'alias/'; got '{alias_name}'"
+            ));
+        }
+        let target_input = props
+            .get("TargetKeyId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "TargetKeyId is required".to_string())?
+            .to_string();
+
+        let mut accounts = self.kms_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+
+        let target_key_id = if state.keys.contains_key(&target_input) {
+            target_input.clone()
+        } else if let Some(id) = target_input
+            .strip_prefix("arn:aws:kms:")
+            .and_then(|rest| rest.split(":key/").nth(1))
+        {
+            if state.keys.contains_key(id) {
+                id.to_string()
+            } else {
+                return Err(format!("KMS key '{target_input}' does not exist"));
+            }
+        } else {
+            return Err(format!("KMS key '{target_input}' does not exist"));
+        };
+
+        let alias_arn = format!(
+            "arn:aws:kms:{}:{}:{}",
+            state.region, state.account_id, alias_name
+        );
+        let alias = KmsAlias {
+            alias_name: alias_name.clone(),
+            alias_arn,
+            target_key_id,
+            creation_date: Utc::now().timestamp() as f64,
+        };
+        state.aliases.insert(alias_name.clone(), alias);
+
+        Ok(ProvisionResult::new(alias_name))
+    }
+
+    fn delete_kms_alias(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.kms_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.aliases.remove(physical_id);
+        Ok(())
+    }
+
     fn delete_log_group(&self, physical_id: &str) -> Result<(), String> {
         let mut logs_accounts = self.logs_state.write();
         let state = logs_accounts.default_mut();
@@ -1343,6 +1547,9 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             kinesis_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            kms_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),
