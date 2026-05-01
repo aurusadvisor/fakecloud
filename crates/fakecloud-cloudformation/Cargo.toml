@@ -28,6 +28,7 @@ fakecloud-cloudwatch = { workspace = true }
 fakecloud-elbv2 = { workspace = true }
 fakecloud-organizations = { workspace = true }
 fakecloud-cognito = { workspace = true }
+fakecloud-rds = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }
