@@ -744,6 +744,7 @@ mod tests {
             elbv2: Arc::new(RwLock::new(fakecloud_elbv2::Elbv2Accounts::new())),
             organizations: Arc::new(RwLock::new(None)),
             cognito: shared::<fakecloud_cognito::CognitoState>(),
+            rds: shared::<fakecloud_rds::RdsState>(),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }

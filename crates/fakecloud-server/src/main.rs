@@ -730,6 +730,7 @@ async fn main() {
             elbv2: elbv2_state.clone(),
             organizations: organizations_state.clone(),
             cognito: cognito_state.clone(),
+            rds: rds_state.clone(),
             delivery: delivery_for_cf,
         },
     );

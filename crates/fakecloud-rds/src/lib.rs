@@ -5,5 +5,6 @@ pub(crate) mod state;
 
 pub use service::RdsService;
 pub use state::{
-    DbInstance, RdsSnapshot, RdsState, RdsTag, SharedRdsState, RDS_SNAPSHOT_SCHEMA_VERSION,
+    DbInstance, DbParameterGroup, DbSubnetGroup, RdsSnapshot, RdsState, RdsTag, SharedRdsState,
+    RDS_SNAPSHOT_SCHEMA_VERSION,
 };

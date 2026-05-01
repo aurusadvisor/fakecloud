@@ -39,6 +39,7 @@ use fakecloud_organizations::{
     OrganizationState, OrganizationalUnit, Policy as OrgPolicy, SharedOrganizationsState,
     POLICY_TYPE_SCP,
 };
+use fakecloud_rds::{DbParameterGroup, DbSubnetGroup, RdsTag, SharedRdsState};
 use fakecloud_s3::{S3Bucket, SharedS3State};
 use fakecloud_secretsmanager::{Secret, SecretVersion, SharedSecretsManagerState};
 use fakecloud_sns::{SharedSnsState, SnsSubscription, SnsTopic};
@@ -296,6 +297,7 @@ pub struct ResourceProvisioner {
     pub elbv2_state: SharedElbv2State,
     pub organizations_state: SharedOrganizationsState,
     pub cognito_state: SharedCognitoState,
+    pub rds_state: SharedRdsState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -359,6 +361,15 @@ impl ResourceProvisioner {
             "AWS::Cognito::UserPool" => self.create_cognito_user_pool(resource),
             "AWS::Cognito::UserPoolClient" => self.create_cognito_user_pool_client(resource),
             "AWS::Cognito::UserPoolDomain" => self.create_cognito_user_pool_domain(resource),
+            "AWS::RDS::DBSubnetGroup" => self.create_rds_subnet_group(resource),
+            "AWS::RDS::DBParameterGroup" => self.create_rds_parameter_group(resource),
+            "AWS::RDS::DBClusterParameterGroup" => {
+                self.create_rds_cluster_parameter_group(resource)
+            }
+            "AWS::RDS::OptionGroup" => self.create_rds_option_group(resource),
+            "AWS::RDS::EventSubscription" => self.create_rds_event_subscription(resource),
+            "AWS::RDS::DBSecurityGroup" => self.create_rds_security_group(resource),
+            "AWS::RDS::DBProxy" => self.create_rds_db_proxy(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -465,6 +476,17 @@ impl ResourceProvisioner {
             "AWS::Cognito::UserPoolDomain" => {
                 self.delete_cognito_user_pool_domain(&resource.physical_id)
             }
+            "AWS::RDS::DBSubnetGroup" => self.delete_rds_subnet_group(&resource.physical_id),
+            "AWS::RDS::DBParameterGroup" => self.delete_rds_parameter_group(&resource.physical_id),
+            "AWS::RDS::DBClusterParameterGroup" => {
+                self.delete_rds_cluster_parameter_group(&resource.physical_id)
+            }
+            "AWS::RDS::OptionGroup" => self.delete_rds_option_group(&resource.physical_id),
+            "AWS::RDS::EventSubscription" => {
+                self.delete_rds_event_subscription(&resource.physical_id)
+            }
+            "AWS::RDS::DBSecurityGroup" => self.delete_rds_security_group(&resource.physical_id),
+            "AWS::RDS::DBProxy" => self.delete_rds_db_proxy(&resource.physical_id),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -4498,6 +4520,345 @@ impl ResourceProvisioner {
         state.domains.remove(physical_id);
         Ok(())
     }
+
+    // --- RDS ---
+
+    fn create_rds_subnet_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("DBSubnetGroupName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let description = props
+            .get("DBSubnetGroupDescription")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let subnet_ids: Vec<String> = props
+            .get("SubnetIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tags = parse_rds_tags(props.get("Tags"));
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let arn = state.db_subnet_group_arn(&name);
+        let group = DbSubnetGroup {
+            db_subnet_group_name: name.clone(),
+            db_subnet_group_arn: arn.clone(),
+            db_subnet_group_description: description,
+            vpc_id: String::new(),
+            subnet_ids,
+            subnet_availability_zones: Vec::new(),
+            tags,
+        };
+        state.subnet_groups.insert(name.clone(), group);
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_rds_subnet_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.subnet_groups.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_rds_parameter_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("DBParameterGroupName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let family = props
+            .get("Family")
+            .and_then(|v| v.as_str())
+            .unwrap_or("postgres16")
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let parameters: std::collections::BTreeMap<String, String> = props
+            .get("Parameters")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tags = parse_rds_tags(props.get("Tags"));
+
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let arn = state.db_parameter_group_arn(&name);
+        let group = DbParameterGroup {
+            db_parameter_group_name: name.clone(),
+            db_parameter_group_arn: arn.clone(),
+            db_parameter_group_family: family,
+            description,
+            parameters,
+            tags,
+        };
+        state.parameter_groups.insert(name.clone(), group);
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_rds_parameter_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.parameter_groups.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_rds_cluster_parameter_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("DBClusterParameterGroupName")
+            .or_else(|| props.get("Name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let family = props
+            .get("Family")
+            .and_then(|v| v.as_str())
+            .unwrap_or("aurora-postgresql15")
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let arn = format!(
+            "arn:aws:rds:{}:{}:cluster-pg:{}",
+            self.region, self.account_id, name
+        );
+        let entry = serde_json::json!({
+            "DBClusterParameterGroupName": name,
+            "DBClusterParameterGroupArn": arn,
+            "DBParameterGroupFamily": family,
+            "Description": description,
+        });
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        rds_extras_mut(state, "cluster_param_groups").insert(name.clone(), entry);
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_rds_cluster_parameter_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(m) = state.extras.get_mut("cluster_param_groups") {
+            m.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_rds_option_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("OptionGroupName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let engine_name = props
+            .get("EngineName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("mysql")
+            .to_string();
+        let major_engine_version = props
+            .get("MajorEngineVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("8.0")
+            .to_string();
+        let description = props
+            .get("OptionGroupDescription")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let arn = format!(
+            "arn:aws:rds:{}:{}:og:{}",
+            self.region, self.account_id, name
+        );
+        let entry = serde_json::json!({
+            "OptionGroupName": name,
+            "OptionGroupArn": arn,
+            "EngineName": engine_name,
+            "MajorEngineVersion": major_engine_version,
+            "OptionGroupDescription": description,
+        });
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        rds_extras_mut(state, "option_groups").insert(name.clone(), entry);
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_rds_option_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(m) = state.extras.get_mut("option_groups") {
+            m.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_rds_event_subscription(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("SubscriptionName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let sns_topic_arn = props
+            .get("SnsTopicArn")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let entry = serde_json::json!({
+            "CustSubscriptionId": name,
+            "SnsTopicArn": sns_topic_arn,
+            "Status": "active",
+            "Enabled": props.get("Enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        });
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        rds_extras_mut(state, "event_subscriptions").insert(name.clone(), entry);
+        Ok(ProvisionResult::new(name))
+    }
+
+    fn delete_rds_event_subscription(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(m) = state.extras.get_mut("event_subscriptions") {
+            m.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_rds_security_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("DBSecurityGroupName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let description = props
+            .get("GroupDescription")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let entry = serde_json::json!({
+            "DBSecurityGroupName": name,
+            "DBSecurityGroupDescription": description,
+            "OwnerId": self.account_id,
+        });
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        rds_extras_mut(state, "security_groups").insert(name.clone(), entry);
+        Ok(ProvisionResult::new(name))
+    }
+
+    fn delete_rds_security_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(m) = state.extras.get_mut("security_groups") {
+            m.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_rds_db_proxy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("DBProxyName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let engine_family = props
+            .get("EngineFamily")
+            .and_then(|v| v.as_str())
+            .unwrap_or("POSTGRESQL")
+            .to_string();
+        let arn = format!(
+            "arn:aws:rds:{}:{}:db-proxy:{}",
+            self.region, self.account_id, name
+        );
+        let endpoint = format!("{name}.proxy-default.{}.rds.amazonaws.com", self.region);
+        let entry = serde_json::json!({
+            "DBProxyName": name,
+            "DBProxyArn": arn,
+            "Status": "available",
+            "EngineFamily": engine_family,
+            "Endpoint": endpoint,
+        });
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        rds_extras_mut(state, "proxies").insert(name.clone(), entry);
+        Ok(ProvisionResult::new(name)
+            .with("DBProxyArn", arn)
+            .with("Endpoint", endpoint))
+    }
+
+    fn delete_rds_db_proxy(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(m) = state.extras.get_mut("proxies") {
+            m.remove(physical_id);
+        }
+        Ok(())
+    }
+}
+
+/// Parse CFN-shape Tags array into the RDS crate's tag form.
+fn parse_rds_tags(value: Option<&serde_json::Value>) -> Vec<RdsTag> {
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|t| {
+            let key = t.get("Key").and_then(|v| v.as_str())?.to_string();
+            let value = t.get("Value").and_then(|v| v.as_str())?.to_string();
+            Some(RdsTag { key, value })
+        })
+        .collect()
+}
+
+/// Lazy-create an entry in the RDS `extras` bucket so the provisioner
+/// doesn't have to re-implement the `BTreeMap::entry` boilerplate per
+/// resource type.
+fn rds_extras_mut<'a>(
+    state: &'a mut fakecloud_rds::RdsState,
+    category: &str,
+) -> &'a mut BTreeMap<String, serde_json::Value> {
+    state.extras.entry(category.to_string()).or_default()
 }
 
 /// Parse a JSON array-of-strings property. Returns empty Vec when the
@@ -4725,6 +5086,9 @@ mod tests {
             elbv2_state: Arc::new(RwLock::new(fakecloud_elbv2::Elbv2Accounts::new())),
             organizations_state: Arc::new(RwLock::new(None)),
             cognito_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            rds_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),
