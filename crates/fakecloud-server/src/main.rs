@@ -591,6 +591,10 @@ async fn main() {
     let glue_state: fakecloud_glue::SharedGlueState =
         Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new()));
 
+    let cloudwatch_state: fakecloud_cloudwatch::SharedCloudWatchState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new()),
+    );
+
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
         iam: iam_state.clone(),
@@ -617,6 +621,7 @@ async fn main() {
         acm: acm_state.clone(),
         firehose: firehose_state.clone(),
         glue: glue_state.clone(),
+        cloudwatch: cloudwatch_state.clone(),
         application_autoscaling: app_autoscaling_state.clone(),
         wafv2: wafv2_state.clone(),
         athena: athena_state.clone(),
@@ -2033,6 +2038,9 @@ async fn main() {
 
     let glue_service = fakecloud_glue::GlueService::new(glue_state.clone());
     registry.register(Arc::new(glue_service));
+
+    let cloudwatch_service = fakecloud_cloudwatch::CloudWatchService::new(cloudwatch_state.clone());
+    registry.register(Arc::new(cloudwatch_service));
 
     let app_autoscaling_service =
         fakecloud_application_autoscaling::ApplicationAutoScalingService::new(
