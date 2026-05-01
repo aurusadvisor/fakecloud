@@ -7,4 +7,8 @@ pub(crate) mod state;
 pub const ELBV2_NAMESPACE: &str = "http://elasticloadbalancing.amazonaws.com/doc/2015-12-01/";
 
 pub use service::Elbv2Service;
-pub use state::{Elbv2Accounts, Listener, LoadBalancer, Rule, SharedElbv2State, TargetGroup};
+pub use state::{
+    Action, AvailabilityZone, Certificate, Elbv2Accounts, FixedResponseConfig, ForwardConfig,
+    Listener, LoadBalancer, LoadBalancerAddress, RedirectConfig, Rule, RuleCondition,
+    SharedElbv2State, Tag, TargetGroup, TargetGroupTuple,
+};

@@ -25,6 +25,7 @@ fakecloud-kinesis = { workspace = true }
 fakecloud-kms = { workspace = true }
 fakecloud-ecr = { workspace = true }
 fakecloud-cloudwatch = { workspace = true }
+fakecloud-elbv2 = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }

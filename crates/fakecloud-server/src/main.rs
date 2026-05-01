@@ -595,6 +595,10 @@ async fn main() {
         parking_lot::RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new()),
     );
 
+    let elbv2_state: fakecloud_elbv2::SharedElbv2State = Arc::new(parking_lot::RwLock::new(
+        fakecloud_elbv2::Elbv2Accounts::new(),
+    ));
+
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
         iam: iam_state.clone(),
@@ -723,6 +727,7 @@ async fn main() {
             kms: kms_state.clone(),
             ecr: ecr_state.clone(),
             cloudwatch: cloudwatch_state.clone(),
+            elbv2: elbv2_state.clone(),
             delivery: delivery_for_cf,
         },
     );
@@ -2018,11 +2023,8 @@ async fn main() {
     }
     registry.register(Arc::new(ecs_service));
 
-    let elbv2_state: fakecloud_elbv2::SharedElbv2State = Arc::new(parking_lot::RwLock::new(
-        fakecloud_elbv2::Elbv2Accounts::new(),
-    ));
     let elbv2_introspection_state = elbv2_state.clone();
-    let elbv2_service = Elbv2Service::new(elbv2_state);
+    let elbv2_service = Elbv2Service::new(elbv2_state.clone());
     registry.register(Arc::new(elbv2_service));
 
     let cloudfront_service = CloudFrontService::new(cloudfront_state.clone());

@@ -741,6 +741,7 @@ mod tests {
             kms: shared::<KmsState>(),
             ecr: shared::<EcrState>(),
             cloudwatch: Arc::new(RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new())),
+            elbv2: Arc::new(RwLock::new(fakecloud_elbv2::Elbv2Accounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }
