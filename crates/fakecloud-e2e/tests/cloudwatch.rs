@@ -1,0 +1,247 @@
+//! CloudWatch metrics + alarms E2E.
+
+mod helpers;
+
+use aws_sdk_cloudwatch::primitives::DateTime as AwsDateTime;
+use aws_sdk_cloudwatch::types::Metric as CwMetric;
+use aws_sdk_cloudwatch::types::{
+    ComparisonOperator, Dimension, MetricDataQuery, MetricDatum, MetricStat, StandardUnit,
+    StateValue, Statistic,
+};
+use helpers::TestServer;
+
+#[tokio::test]
+async fn put_and_list_metrics() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+
+    cw.put_metric_data()
+        .namespace("MyApp")
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("Latency")
+                .value(123.4)
+                .unit(StandardUnit::Milliseconds)
+                .dimensions(Dimension::builder().name("Service").value("api").build())
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put");
+
+    let listed = cw
+        .list_metrics()
+        .namespace("MyApp")
+        .send()
+        .await
+        .expect("list");
+    let metrics = listed.metrics();
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics[0].metric_name(), Some("Latency"));
+    assert_eq!(metrics[0].namespace(), Some("MyApp"));
+}
+
+#[tokio::test]
+async fn get_metric_statistics_aggregates_by_period() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let now = chrono::Utc::now();
+
+    for v in [10.0, 20.0, 30.0] {
+        cw.put_metric_data()
+            .namespace("Bench")
+            .metric_data(
+                MetricDatum::builder()
+                    .metric_name("Throughput")
+                    .value(v)
+                    .timestamp(AwsDateTime::from_secs(now.timestamp()))
+                    .build(),
+            )
+            .send()
+            .await
+            .expect("put");
+    }
+
+    let start = AwsDateTime::from_secs(now.timestamp() - 600);
+    let end = AwsDateTime::from_secs(now.timestamp() + 600);
+    let stats = cw
+        .get_metric_statistics()
+        .namespace("Bench")
+        .metric_name("Throughput")
+        .start_time(start)
+        .end_time(end)
+        .period(60)
+        .statistics(Statistic::Sum)
+        .statistics(Statistic::Average)
+        .statistics(Statistic::SampleCount)
+        .send()
+        .await
+        .expect("stats");
+
+    let datapoints = stats.datapoints();
+    assert_eq!(datapoints.len(), 1);
+    let dp = &datapoints[0];
+    assert!((dp.sum().unwrap() - 60.0).abs() < 1e-6);
+    assert!((dp.average().unwrap() - 20.0).abs() < 1e-6);
+    assert_eq!(dp.sample_count().unwrap(), 3.0);
+}
+
+#[tokio::test]
+async fn get_metric_data_returns_per_query_results() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let now = chrono::Utc::now();
+
+    for v in [1.0, 2.0, 3.0, 4.0] {
+        cw.put_metric_data()
+            .namespace("App")
+            .metric_data(
+                MetricDatum::builder()
+                    .metric_name("Errors")
+                    .value(v)
+                    .timestamp(AwsDateTime::from_secs(now.timestamp()))
+                    .build(),
+            )
+            .send()
+            .await
+            .expect("put");
+    }
+
+    let start = AwsDateTime::from_secs(now.timestamp() - 600);
+    let end = AwsDateTime::from_secs(now.timestamp() + 600);
+    let resp = cw
+        .get_metric_data()
+        .start_time(start)
+        .end_time(end)
+        .metric_data_queries(
+            MetricDataQuery::builder()
+                .id("q1")
+                .label("error-sum")
+                .metric_stat(
+                    MetricStat::builder()
+                        .metric(
+                            CwMetric::builder()
+                                .namespace("App")
+                                .metric_name("Errors")
+                                .build(),
+                        )
+                        .period(60)
+                        .stat("Sum")
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("metric data");
+
+    let results = resp.metric_data_results();
+    assert_eq!(results.len(), 1);
+    let r = &results[0];
+    assert_eq!(r.id(), Some("q1"));
+    let values = r.values();
+    assert_eq!(values.len(), 1);
+    assert!((values[0] - 10.0).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn alarm_lifecycle_and_set_state() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+
+    cw.put_metric_alarm()
+        .alarm_name("HighErrors")
+        .alarm_description("alert when errors spike")
+        .namespace("App")
+        .metric_name("Errors")
+        .statistic(Statistic::Sum)
+        .period(60)
+        .evaluation_periods(2)
+        .threshold(10.0)
+        .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+        .alarm_actions("arn:aws:sns:us-east-1:123456789012:ops")
+        .send()
+        .await
+        .expect("put alarm");
+
+    let listed = cw.describe_alarms().send().await.expect("describe");
+    assert_eq!(listed.metric_alarms().len(), 1);
+    let alarm = &listed.metric_alarms()[0];
+    assert_eq!(alarm.alarm_name(), Some("HighErrors"));
+    assert_eq!(alarm.state_value(), Some(&StateValue::InsufficientData));
+    assert_eq!(alarm.threshold(), Some(10.0));
+    assert_eq!(alarm.alarm_actions().len(), 1);
+
+    cw.set_alarm_state()
+        .alarm_name("HighErrors")
+        .state_value(StateValue::Alarm)
+        .state_reason("threshold breached")
+        .send()
+        .await
+        .expect("set state");
+
+    let after = cw.describe_alarms().send().await.expect("describe again");
+    assert_eq!(
+        after.metric_alarms()[0].state_value(),
+        Some(&StateValue::Alarm)
+    );
+
+    cw.disable_alarm_actions()
+        .alarm_names("HighErrors")
+        .send()
+        .await
+        .expect("disable");
+    let after_disable = cw.describe_alarms().send().await.expect("describe");
+    assert_eq!(
+        after_disable.metric_alarms()[0].actions_enabled(),
+        Some(false)
+    );
+
+    cw.delete_alarms()
+        .alarm_names("HighErrors")
+        .send()
+        .await
+        .expect("delete");
+    let final_list = cw.describe_alarms().send().await.expect("describe");
+    assert!(final_list.metric_alarms().is_empty());
+}
+
+#[tokio::test]
+async fn list_metrics_filters_by_dimension() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+
+    cw.put_metric_data()
+        .namespace("MultiDim")
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("Hits")
+                .value(1.0)
+                .dimensions(Dimension::builder().name("Service").value("api").build())
+                .build(),
+        )
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("Hits")
+                .value(2.0)
+                .dimensions(Dimension::builder().name("Service").value("worker").build())
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put");
+
+    let listed = cw
+        .list_metrics()
+        .namespace("MultiDim")
+        .dimensions(
+            aws_sdk_cloudwatch::types::DimensionFilter::builder()
+                .name("Service")
+                .value("api")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("list filtered");
+    assert_eq!(listed.metrics().len(), 1);
+}

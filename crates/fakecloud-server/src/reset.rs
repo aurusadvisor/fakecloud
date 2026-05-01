@@ -35,6 +35,7 @@ pub(crate) struct ResetState {
     pub acm: fakecloud_acm::SharedAcmState,
     pub firehose: fakecloud_firehose::SharedFirehoseState,
     pub glue: fakecloud_glue::SharedGlueState,
+    pub cloudwatch: fakecloud_cloudwatch::SharedCloudWatchState,
     pub application_autoscaling:
         fakecloud_application_autoscaling::SharedApplicationAutoScalingState,
     pub wafv2: fakecloud_wafv2::SharedWafv2State,
@@ -171,6 +172,9 @@ impl ResetState {
             }
             "glue" => {
                 *self.glue.write() = fakecloud_glue::GlueAccounts::new();
+            }
+            "monitoring" | "cloudwatch" => {
+                *self.cloudwatch.write() = fakecloud_cloudwatch::CloudWatchAccounts::new();
             }
             "application-autoscaling" => {
                 *self.application_autoscaling.write() =
@@ -379,6 +383,10 @@ impl ResetState {
                 let mut state = self.glue.write();
                 state.accounts.remove(account_id);
             }
+            "monitoring" | "cloudwatch" => {
+                let mut state = self.cloudwatch.write();
+                state.accounts.remove(account_id);
+            }
             "application-autoscaling" => {
                 let mut state = self.application_autoscaling.write();
                 state.accounts.remove(account_id);
@@ -463,6 +471,7 @@ impl ResetState {
         *self.acm.write() = fakecloud_acm::AcmAccounts::new();
         *self.firehose.write() = fakecloud_firehose::FirehoseAccounts::new();
         *self.glue.write() = fakecloud_glue::GlueAccounts::new();
+        *self.cloudwatch.write() = fakecloud_cloudwatch::CloudWatchAccounts::new();
         *self.application_autoscaling.write() =
             fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new();
         *self.wafv2.write() = fakecloud_wafv2::Wafv2Accounts::new();
@@ -801,6 +810,9 @@ mod tests {
                 fakecloud_firehose::FirehoseAccounts::new(),
             )),
             glue: Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new())),
+            cloudwatch: Arc::new(parking_lot::RwLock::new(
+                fakecloud_cloudwatch::CloudWatchAccounts::new(),
+            )),
             application_autoscaling: Arc::new(parking_lot::RwLock::new(
                 fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
             )),
