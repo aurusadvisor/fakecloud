@@ -2691,6 +2691,7 @@ dependencies = [
  "bytes",
  "chrono",
  "fakecloud-aws",
+ "fakecloud-cloudwatch",
  "fakecloud-core",
  "fakecloud-dynamodb",
  "fakecloud-ecr",
