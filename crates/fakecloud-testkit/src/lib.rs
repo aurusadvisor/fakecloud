@@ -652,6 +652,10 @@ impl TestServer {
         aws_sdk_acm::Client::new(&self.aws_config().await)
     }
 
+    pub async fn firehose_client(&self) -> aws_sdk_firehose::Client {
+        aws_sdk_firehose::Client::new(&self.aws_config().await)
+    }
+
     pub async fn application_autoscaling_client(&self) -> aws_sdk_applicationautoscaling::Client {
         aws_sdk_applicationautoscaling::Client::new(&self.aws_config().await)
     }
