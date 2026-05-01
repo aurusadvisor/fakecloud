@@ -161,7 +161,8 @@ impl FirehoseService {
         let now = Utc::now();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
-        if state.streams.contains_key(&name) {
+        let streams = state.streams_mut(&req.region);
+        if streams.contains_key(&name) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ResourceInUseException",
@@ -180,7 +181,7 @@ impl FirehoseService {
             destination: s3_dest,
             tags: BTreeMap::new(),
         };
-        state.streams.insert(name, stream);
+        streams.insert(name, stream);
         Ok(AwsResponse::ok_json(json!({
             "DeliveryStreamARN": arn,
         })))
@@ -195,7 +196,10 @@ impl FirehoseService {
         let state = accounts
             .get(&req.account_id)
             .ok_or_else(|| not_found(name))?;
-        let stream = state.streams.get(name).ok_or_else(|| not_found(name))?;
+        let stream = state
+            .streams(&req.region)
+            .and_then(|s| s.get(name))
+            .ok_or_else(|| not_found(name))?;
 
         let destinations: Vec<Value> = stream
             .destination
@@ -229,8 +233,9 @@ impl FirehoseService {
         let accounts = self.state.read();
         let names: Vec<String> = accounts
             .get(&req.account_id)
-            .map(|s| {
-                s.streams
+            .and_then(|s| s.streams(&req.region))
+            .map(|streams| {
+                streams
                     .iter()
                     .filter(|(n, stream)| {
                         if let Some(ref start) = exclusive_start {
@@ -262,7 +267,7 @@ impl FirehoseService {
             .ok_or_else(|| missing("DeliveryStreamName"))?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
-        if state.streams.remove(name).is_none() {
+        if state.streams_mut(&req.region).remove(name).is_none() {
             return Err(not_found(name));
         }
         Ok(AwsResponse::ok_json(json!({})))
@@ -330,7 +335,10 @@ impl FirehoseService {
             .ok_or_else(|| missing("DeliveryStreamName"))?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
-        let stream = state.streams.get_mut(name).ok_or_else(|| not_found(name))?;
+        let stream = state
+            .streams_mut(&req.region)
+            .get_mut(name)
+            .ok_or_else(|| not_found(name))?;
         if let Some(arr) = body["Tags"].as_array() {
             for t in arr {
                 if let (Some(k), Some(v)) = (t["Key"].as_str(), t["Value"].as_str()) {
@@ -348,7 +356,10 @@ impl FirehoseService {
             .ok_or_else(|| missing("DeliveryStreamName"))?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
-        let stream = state.streams.get_mut(name).ok_or_else(|| not_found(name))?;
+        let stream = state
+            .streams_mut(&req.region)
+            .get_mut(name)
+            .ok_or_else(|| not_found(name))?;
         if let Some(arr) = body["TagKeys"].as_array() {
             for k in arr {
                 if let Some(s) = k.as_str() {
@@ -371,7 +382,10 @@ impl FirehoseService {
         let state = accounts
             .get(&req.account_id)
             .ok_or_else(|| not_found(name))?;
-        let stream = state.streams.get(name).ok_or_else(|| not_found(name))?;
+        let stream = state
+            .streams(&req.region)
+            .and_then(|s| s.get(name))
+            .ok_or_else(|| not_found(name))?;
         let tags: Vec<Value> = stream
             .tags
             .iter()
@@ -390,7 +404,10 @@ impl FirehoseService {
             .ok_or_else(|| missing("DeliveryStreamName"))?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
-        let stream = state.streams.get_mut(name).ok_or_else(|| not_found(name))?;
+        let stream = state
+            .streams_mut(&req.region)
+            .get_mut(name)
+            .ok_or_else(|| not_found(name))?;
         if let Some(d) = parse_s3_destination(&body["S3DestinationUpdate"])
             .or_else(|| parse_s3_destination(&body["ExtendedS3DestinationUpdate"]))
         {
@@ -413,8 +430,8 @@ impl FirehoseService {
                 .get(account_id)
                 .ok_or_else(|| not_found(stream_name))?;
             let stream = state
-                .streams
-                .get(stream_name)
+                .streams(region)
+                .and_then(|s| s.get(stream_name))
                 .ok_or_else(|| not_found(stream_name))?;
             stream.destination.clone()
         };

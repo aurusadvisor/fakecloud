@@ -203,6 +203,74 @@ async fn firehose_put_record_batch_aggregates_payloads() {
 }
 
 #[tokio::test]
+async fn firehose_streams_region_isolated() {
+    use aws_config::BehaviorVersion;
+    use aws_credential_types::Credentials;
+    use aws_sdk_firehose::config::Region;
+
+    let server = TestServer::start().await;
+    let _ = setup(&server, "fh-bucket-region").await;
+
+    fn config_for(server: &TestServer, region: &str) -> aws_sdk_firehose::Config {
+        let creds = Credentials::new(
+            "AKIAIOSFODNN7EXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            None,
+            None,
+            "test",
+        );
+        aws_sdk_firehose::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .endpoint_url(server.endpoint())
+            .region(Region::new(region.to_string()))
+            .credentials_provider(creds)
+            .build()
+    }
+
+    let east = aws_sdk_firehose::Client::from_conf(config_for(&server, "us-east-1"));
+    let west = aws_sdk_firehose::Client::from_conf(config_for(&server, "us-west-2"));
+
+    let bucket_arn = "arn:aws:s3:::fh-bucket-region";
+    east.create_delivery_stream()
+        .delivery_stream_name("regional-stream")
+        .extended_s3_destination_configuration(ext_s3(bucket_arn))
+        .send()
+        .await
+        .expect("create east");
+
+    let east_desc = east
+        .describe_delivery_stream()
+        .delivery_stream_name("regional-stream")
+        .send()
+        .await
+        .expect("describe east");
+    assert_eq!(
+        east_desc
+            .delivery_stream_description()
+            .unwrap()
+            .delivery_stream_name(),
+        "regional-stream"
+    );
+
+    let west_err = west
+        .describe_delivery_stream()
+        .delivery_stream_name("regional-stream")
+        .send()
+        .await;
+    assert!(
+        west_err.is_err(),
+        "stream from us-east-1 must not be visible in us-west-2"
+    );
+
+    let west_listed = west
+        .list_delivery_streams()
+        .send()
+        .await
+        .expect("list west");
+    assert!(west_listed.delivery_stream_names().is_empty());
+}
+
+#[tokio::test]
 async fn firehose_tags_roundtrip() {
     let server = TestServer::start().await;
     let firehose = setup(&server, "fh-bucket-tags").await;

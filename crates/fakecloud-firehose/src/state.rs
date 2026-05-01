@@ -32,7 +32,8 @@ impl FirehoseAccounts {
 pub struct FirehoseState {
     pub account_id: String,
     pub region: String,
-    pub streams: BTreeMap<String, DeliveryStream>,
+    /// Streams isolated per region: region -> name -> stream.
+    pub streams_by_region: BTreeMap<String, BTreeMap<String, DeliveryStream>>,
 }
 
 impl FirehoseState {
@@ -40,8 +41,18 @@ impl FirehoseState {
         Self {
             account_id: account_id.to_string(),
             region: region.to_string(),
-            streams: BTreeMap::new(),
+            streams_by_region: BTreeMap::new(),
         }
+    }
+
+    pub fn streams(&self, region: &str) -> Option<&BTreeMap<String, DeliveryStream>> {
+        self.streams_by_region.get(region)
+    }
+
+    pub fn streams_mut(&mut self, region: &str) -> &mut BTreeMap<String, DeliveryStream> {
+        self.streams_by_region
+            .entry(region.to_string())
+            .or_default()
     }
 }
 
