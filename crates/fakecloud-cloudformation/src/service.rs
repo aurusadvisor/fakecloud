@@ -125,6 +125,7 @@ pub struct CloudFormationDeps {
     pub logs: SharedLogsState,
     pub lambda: fakecloud_lambda::SharedLambdaState,
     pub secretsmanager: fakecloud_secretsmanager::SharedSecretsManagerState,
+    pub kinesis: fakecloud_kinesis::SharedKinesisState,
     pub delivery: Arc<DeliveryBus>,
 }
 
@@ -185,6 +186,7 @@ impl CloudFormationService {
             logs_state: self.deps.logs.clone(),
             lambda_state: self.deps.lambda.clone(),
             secretsmanager_state: self.deps.secretsmanager.clone(),
+            kinesis_state: self.deps.kinesis.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1240,6 +1242,13 @@ mod tests {
                 ),
             )),
             secretsmanager: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            kinesis: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",
                     "us-east-1",

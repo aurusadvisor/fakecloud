@@ -125,7 +125,7 @@ pub(crate) fn shard_to_json(shard: &KinesisShard) -> Value {
     obj
 }
 
-pub(crate) fn build_stream_shards(shard_count: i32) -> Vec<KinesisShard> {
+pub fn build_stream_shards(shard_count: i32) -> Vec<KinesisShard> {
     let count = shard_count as u128;
     (0..shard_count)
         .map(|index| {
