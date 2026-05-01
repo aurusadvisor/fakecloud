@@ -11,6 +11,7 @@ use fakecloud_dynamodb::{
 };
 use fakecloud_eventbridge::{EventRule, SharedEventBridgeState};
 use fakecloud_iam::{IamPolicy, IamRole, PolicyVersion, SharedIamState};
+use fakecloud_kinesis::{build_stream_shards, KinesisStream, SharedKinesisState};
 use fakecloud_lambda::SharedLambdaState;
 use fakecloud_logs::SharedLogsState;
 use fakecloud_s3::{S3Bucket, SharedS3State};
@@ -55,6 +56,7 @@ pub struct ResourceProvisioner {
     pub logs_state: SharedLogsState,
     pub lambda_state: SharedLambdaState,
     pub secretsmanager_state: SharedSecretsManagerState,
+    pub kinesis_state: SharedKinesisState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -77,6 +79,7 @@ impl ResourceProvisioner {
             "AWS::Logs::LogGroup" => self.create_log_group(resource),
             "AWS::Lambda::Function" => self.create_lambda_function(resource),
             "AWS::SecretsManager::Secret" => self.create_secrets_manager_secret(resource),
+            "AWS::Kinesis::Stream" => self.create_kinesis_stream(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -122,6 +125,7 @@ impl ResourceProvisioner {
             "AWS::SecretsManager::Secret" => {
                 self.delete_secrets_manager_secret(&resource.physical_id)
             }
+            "AWS::Kinesis::Stream" => self.delete_kinesis_stream(&resource.physical_id),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -1096,6 +1100,75 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    // --- Kinesis ---
+
+    fn create_kinesis_stream(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let stream_name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let shard_count = props
+            .get("ShardCount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1) as i32;
+        if shard_count <= 0 {
+            return Err("ShardCount must be greater than zero".to_string());
+        }
+        let stream_mode = props
+            .get("StreamModeDetails")
+            .and_then(|v| v.get("StreamMode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("PROVISIONED")
+            .to_string();
+        let retention_period_hours = props
+            .get("RetentionPeriodHours")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(24) as i32;
+
+        let mut accounts = self.kinesis_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if state.streams.contains_key(&stream_name) {
+            return Err(format!("Stream {stream_name} already exists"));
+        }
+        let stream_arn = format!(
+            "arn:aws:kinesis:{}:{}:stream/{}",
+            state.region, state.account_id, stream_name
+        );
+        let stream = KinesisStream {
+            stream_name: stream_name.clone(),
+            stream_arn: stream_arn.clone(),
+            stream_status: "ACTIVE".to_string(),
+            stream_creation_timestamp: Utc::now(),
+            retention_period_hours,
+            stream_mode,
+            encryption_type: "NONE".to_string(),
+            key_id: None,
+            shard_count,
+            open_shard_count: shard_count,
+            tags: BTreeMap::new(),
+            shards: build_stream_shards(shard_count),
+            next_shard_index: shard_count,
+            enhanced_metrics: Vec::new(),
+            warm_throughput_mibps: None,
+            max_record_size_kib: None,
+        };
+        state.streams.insert(stream_name.clone(), stream);
+
+        Ok(ProvisionResult::new(stream_name).with("Arn", stream_arn))
+    }
+
+    fn delete_kinesis_stream(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.kinesis_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.streams.remove(physical_id);
+        Ok(())
+    }
+
     fn delete_log_group(&self, physical_id: &str) -> Result<(), String> {
         let mut logs_accounts = self.logs_state.write();
         let state = logs_accounts.default_mut();
@@ -1267,6 +1340,9 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             secretsmanager_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            kinesis_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),

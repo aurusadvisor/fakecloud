@@ -707,6 +707,7 @@ mod tests {
         use fakecloud_dynamodb::DynamoDbState;
         use fakecloud_eventbridge::EventBridgeState;
         use fakecloud_iam::IamState;
+        use fakecloud_kinesis::KinesisState;
         use fakecloud_lambda::LambdaState;
         use fakecloud_logs::LogsState;
         use fakecloud_s3::S3State;
@@ -734,6 +735,7 @@ mod tests {
             logs: shared::<LogsState>(),
             lambda: shared::<LambdaState>(),
             secretsmanager: shared::<SecretsManagerState>(),
+            kinesis: shared::<KinesisState>(),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }

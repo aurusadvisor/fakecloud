@@ -1608,6 +1608,7 @@ const SHARD_LEVEL_METRICS: &[&str] = &[
 
 #[path = "service_helpers.rs"]
 mod service_helpers;
+pub use service_helpers::build_stream_shards;
 pub(crate) use service_helpers::*;
 
 #[cfg(test)]
