@@ -30,6 +30,8 @@ fakecloud-organizations = { workspace = true }
 fakecloud-cognito = { workspace = true }
 fakecloud-rds = { workspace = true }
 fakecloud-ecs = { workspace = true }
+fakecloud-acm = { workspace = true }
+rcgen = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }

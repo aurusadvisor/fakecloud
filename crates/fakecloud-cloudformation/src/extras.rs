@@ -746,6 +746,7 @@ mod tests {
             cognito: shared::<fakecloud_cognito::CognitoState>(),
             rds: shared::<fakecloud_rds::RdsState>(),
             ecs: shared::<fakecloud_ecs::EcsState>(),
+            acm: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }
