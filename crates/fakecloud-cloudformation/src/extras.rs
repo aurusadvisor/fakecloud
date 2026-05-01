@@ -745,6 +745,7 @@ mod tests {
             organizations: Arc::new(RwLock::new(None)),
             cognito: shared::<fakecloud_cognito::CognitoState>(),
             rds: shared::<fakecloud_rds::RdsState>(),
+            ecs: shared::<fakecloud_ecs::EcsState>(),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }
