@@ -1,0 +1,143 @@
+//! CloudFormation provisioner for AWS::ECR::Repository.
+
+mod helpers;
+
+use aws_sdk_cloudformation::types::{Capability, OnFailure};
+use helpers::TestServer;
+
+const TEMPLATE: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "AppRepo": {
+      "Type": "AWS::ECR::Repository",
+      "Properties": {
+        "RepositoryName": "cfn-app",
+        "ImageTagMutability": "IMMUTABLE",
+        "ImageScanningConfiguration": {"ScanOnPush": true},
+        "EncryptionConfiguration": {"EncryptionType": "AES256"},
+        "RepositoryPolicyText": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Sid": "Pull",
+            "Effect": "Allow",
+            "Principal": {"AWS": "*"},
+            "Action": ["ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"]
+          }]
+        },
+        "LifecyclePolicy": {
+          "LifecyclePolicyText": "{\"rules\":[{\"rulePriority\":1,\"description\":\"keep latest 10\",\"selection\":{\"tagStatus\":\"any\",\"countType\":\"imageCountMoreThan\",\"countNumber\":10},\"action\":{\"type\":\"expire\"}}]}"
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "RepoName": {"Value": {"Ref": "AppRepo"}},
+    "RepoArn": {"Value": {"Fn::GetAtt": ["AppRepo", "Arn"]}},
+    "RepoUri": {"Value": {"Fn::GetAtt": ["AppRepo", "RepositoryUri"]}}
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_provisions_and_deletes_ecr_repository() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let ecr = server.ecr_client().await;
+
+    cfn.create_stack()
+        .stack_name("ecr-stack")
+        .template_body(TEMPLATE)
+        .capabilities(Capability::CapabilityIam)
+        .on_failure(OnFailure::Rollback)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("ecr-stack")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let stack = described.stacks().first().expect("stack present");
+    assert_eq!(stack.stack_status().unwrap().as_str(), "CREATE_COMPLETE");
+
+    let mut name = None;
+    let mut arn = None;
+    let mut uri = None;
+    for o in stack.outputs() {
+        match o.output_key() {
+            Some("RepoName") => name = o.output_value().map(|s| s.to_string()),
+            Some("RepoArn") => arn = o.output_value().map(|s| s.to_string()),
+            Some("RepoUri") => uri = o.output_value().map(|s| s.to_string()),
+            _ => {}
+        }
+    }
+    let name = name.expect("RepoName output");
+    let arn = arn.expect("RepoArn output");
+    let uri = uri.expect("RepoUri output");
+    assert_eq!(name, "cfn-app");
+    assert!(arn.starts_with("arn:aws:ecr:") && arn.ends_with(":repository/cfn-app"));
+    assert!(uri.ends_with("/cfn-app"));
+
+    let described_repo = ecr
+        .describe_repositories()
+        .repository_names(&name)
+        .send()
+        .await
+        .expect("describe_repositories");
+    let repo = described_repo.repositories().first().expect("repo present");
+    assert_eq!(repo.repository_name(), Some(name.as_str()));
+    assert_eq!(
+        repo.image_tag_mutability().map(|m| m.as_str()),
+        Some("IMMUTABLE")
+    );
+    assert_eq!(
+        repo.image_scanning_configuration()
+            .map(|c| c.scan_on_push()),
+        Some(true)
+    );
+
+    let policy = ecr
+        .get_repository_policy()
+        .repository_name(&name)
+        .send()
+        .await
+        .expect("get_repository_policy");
+    assert!(
+        policy
+            .policy_text()
+            .map(|s| s.contains("ecr:GetDownloadUrlForLayer"))
+            .unwrap_or(false),
+        "policy text should round-trip the inline policy"
+    );
+
+    let lifecycle = ecr
+        .get_lifecycle_policy()
+        .repository_name(&name)
+        .send()
+        .await
+        .expect("get_lifecycle_policy");
+    assert!(
+        lifecycle
+            .lifecycle_policy_text()
+            .map(|s| s.contains("imageCountMoreThan"))
+            .unwrap_or(false),
+        "lifecycle policy text should round-trip"
+    );
+
+    cfn.delete_stack()
+        .stack_name("ecr-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+
+    let after = ecr
+        .describe_repositories()
+        .repository_names(&name)
+        .send()
+        .await;
+    assert!(
+        after.is_err(),
+        "repository should be gone after stack deletion"
+    );
+}
