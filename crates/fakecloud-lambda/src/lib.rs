@@ -7,6 +7,7 @@ pub(crate) mod state;
 
 pub use service::LambdaService;
 pub use state::{
-    LambdaFunction, LambdaInvocation, LambdaSnapshot, LambdaState, SharedLambdaState,
+    AttachedLayer, EventSourceMapping, FunctionAlias, FunctionUrlConfig, LambdaFunction,
+    LambdaInvocation, LambdaSnapshot, LambdaState, Layer, LayerVersion, SharedLambdaState,
     LAMBDA_SNAPSHOT_SCHEMA_VERSION,
 };

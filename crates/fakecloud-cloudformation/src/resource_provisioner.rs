@@ -29,7 +29,9 @@ use fakecloud_iam::{
 };
 use fakecloud_kinesis::{build_stream_shards, KinesisConsumer, KinesisStream, SharedKinesisState};
 use fakecloud_kms::{KmsAlias, KmsKey, SharedKmsState};
-use fakecloud_lambda::SharedLambdaState;
+use fakecloud_lambda::{
+    EventSourceMapping, FunctionAlias, FunctionUrlConfig, Layer, LayerVersion, SharedLambdaState,
+};
 use fakecloud_logs::{
     LogStream, MetricFilter, MetricTransformation, SharedLogsState, SubscriptionFilter,
 };
@@ -240,6 +242,20 @@ fn parse_log_group_name(input: &str) -> String {
     input.to_string()
 }
 
+/// Pull the function name out of either a bare name or a Lambda
+/// function ARN. CFN passes `{Ref: SomeFunction}` which resolves to the
+/// function name today, but `{Fn::GetAtt: [F, Arn]}` resolves to the
+/// full ARN; both shapes need to land at the same map key.
+fn parse_lambda_function_name(input: &str) -> String {
+    if let Some(rest) = input.strip_prefix("arn:aws:lambda:") {
+        if let Some(after) = rest.split(":function:").nth(1) {
+            // Trim trailing `:qualifier` (alias / version).
+            return after.split(':').next().unwrap_or(after).to_string();
+        }
+    }
+    input.to_string()
+}
+
 /// What a resource provisioner returns. The physical id is what `Ref` resolves
 /// to; `attributes` is what `Fn::GetAtt` resolves to (per-resource-type).
 pub struct ProvisionResult {
@@ -313,6 +329,12 @@ impl ResourceProvisioner {
             "AWS::Logs::MetricFilter" => self.create_metric_filter(resource),
             "AWS::Logs::SubscriptionFilter" => self.create_subscription_filter(resource),
             "AWS::Lambda::Function" => self.create_lambda_function(resource),
+            "AWS::Lambda::Permission" => self.create_lambda_permission(resource),
+            "AWS::Lambda::EventSourceMapping" => self.create_lambda_event_source_mapping(resource),
+            "AWS::Lambda::LayerVersion" => self.create_lambda_layer_version(resource),
+            "AWS::Lambda::Url" => self.create_lambda_url(resource),
+            "AWS::Lambda::Alias" => self.create_lambda_alias(resource),
+            "AWS::Lambda::Version" => self.create_lambda_version(resource),
             "AWS::SecretsManager::Secret" => self.create_secrets_manager_secret(resource),
             "AWS::Kinesis::Stream" => self.create_kinesis_stream(resource),
             "AWS::Kinesis::StreamConsumer" => self.create_kinesis_stream_consumer(resource),
@@ -397,6 +419,14 @@ impl ResourceProvisioner {
                 self.delete_subscription_filter(&resource.physical_id)
             }
             "AWS::Lambda::Function" => self.delete_lambda_function(&resource.physical_id),
+            "AWS::Lambda::Permission" => self.delete_lambda_permission(&resource.physical_id),
+            "AWS::Lambda::EventSourceMapping" => {
+                self.delete_lambda_event_source_mapping(&resource.physical_id)
+            }
+            "AWS::Lambda::LayerVersion" => self.delete_lambda_layer_version(&resource.physical_id),
+            "AWS::Lambda::Url" => self.delete_lambda_url(&resource.physical_id),
+            "AWS::Lambda::Alias" => self.delete_lambda_alias(&resource.physical_id),
+            "AWS::Lambda::Version" => self.delete_lambda_version(&resource.physical_id),
             "AWS::SecretsManager::Secret" => {
                 self.delete_secrets_manager_secret(&resource.physical_id)
             }
@@ -2005,6 +2035,509 @@ impl ResourceProvisioner {
         let mut accounts = self.lambda_state.write();
         let state = accounts.default_mut();
         state.functions.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_lambda_permission(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let function_name = parse_lambda_function_name(
+            props
+                .get("FunctionName")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "FunctionName is required".to_string())?,
+        );
+        let action = props
+            .get("Action")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Action is required".to_string())?
+            .to_string();
+        let principal = props
+            .get("Principal")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Principal is required".to_string())?
+            .to_string();
+        let source_arn = props
+            .get("SourceArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let source_account = props
+            .get("SourceAccount")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // CFN does not surface a StatementId knob; synthesize one from
+        // the logical id so subsequent updates / deletes can find the
+        // statement again.
+        let statement_id = format!(
+            "cfn-{}-{}",
+            resource.logical_id,
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
+
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let func = state.functions.get_mut(&function_name).ok_or_else(|| {
+            format!(
+                "Function {function_name} does not exist yet — retry once it has been provisioned"
+            )
+        })?;
+
+        let mut doc: serde_json::Value = func
+            .policy
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .filter(|v| v.is_object())
+            .unwrap_or_else(|| serde_json::json!({"Version": "2012-10-17", "Statement": []}));
+        if !doc.get("Statement").map(|s| s.is_array()).unwrap_or(false) {
+            doc["Statement"] = serde_json::json!([]);
+        }
+        let principal_value =
+            if principal.ends_with(".amazonaws.com") || principal.contains(".amazon") {
+                serde_json::json!({ "Service": principal })
+            } else {
+                serde_json::json!({ "AWS": principal })
+            };
+        let mut conditions = serde_json::Map::new();
+        if let Some(src) = source_arn {
+            conditions.insert(
+                "ArnLike".to_string(),
+                serde_json::json!({ "AWS:SourceArn": src }),
+            );
+        }
+        if let Some(acct) = source_account {
+            conditions.insert(
+                "StringEquals".to_string(),
+                serde_json::json!({ "AWS:SourceAccount": acct }),
+            );
+        }
+        let mut statement = serde_json::Map::new();
+        statement.insert(
+            "Sid".to_string(),
+            serde_json::Value::String(statement_id.clone()),
+        );
+        statement.insert(
+            "Effect".to_string(),
+            serde_json::Value::String("Allow".to_string()),
+        );
+        statement.insert("Principal".to_string(), principal_value);
+        statement.insert("Action".to_string(), serde_json::Value::String(action));
+        statement.insert(
+            "Resource".to_string(),
+            serde_json::Value::String(func.function_arn.clone()),
+        );
+        if !conditions.is_empty() {
+            statement.insert(
+                "Condition".to_string(),
+                serde_json::Value::Object(conditions),
+            );
+        }
+        doc["Statement"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::Value::Object(statement));
+        func.policy = Some(doc.to_string());
+
+        // Encode `{function}|{sid}` so delete can target a single statement.
+        let physical_id = format!("{function_name}|{statement_id}");
+        Ok(ProvisionResult::new(physical_id).with("Id", statement_id))
+    }
+
+    fn delete_lambda_permission(&self, physical_id: &str) -> Result<(), String> {
+        let Some((function_name, sid)) = physical_id.split_once('|') else {
+            return Ok(());
+        };
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(func) = state.functions.get_mut(function_name) {
+            if let Some(policy_str) = func.policy.as_deref() {
+                if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(policy_str) {
+                    if let Some(arr) = doc.get_mut("Statement").and_then(|v| v.as_array_mut()) {
+                        arr.retain(|s| s.get("Sid").and_then(|v| v.as_str()) != Some(sid));
+                        func.policy = Some(doc.to_string());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn create_lambda_event_source_mapping(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let function_name = parse_lambda_function_name(
+            props
+                .get("FunctionName")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "FunctionName is required".to_string())?,
+        );
+        let event_source_arn = props
+            .get("EventSourceArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "EventSourceArn is required".to_string())?
+            .to_string();
+        let batch_size = props
+            .get("BatchSize")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(10);
+        let enabled = props
+            .get("Enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let starting_position = props
+            .get("StartingPosition")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let starting_position_timestamp = props
+            .get("StartingPositionTimestamp")
+            .and_then(|v| v.as_f64());
+        let parallelization_factor = props.get("ParallelizationFactor").and_then(|v| v.as_i64());
+        let maximum_batching_window_in_seconds = props
+            .get("MaximumBatchingWindowInSeconds")
+            .and_then(|v| v.as_i64());
+        let function_response_types: Vec<String> = props
+            .get("FunctionResponseTypes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let filter_patterns: Vec<String> = props
+            .get("FilterCriteria")
+            .and_then(|v| v.get("Filters"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|f| {
+                        f.get("Pattern")
+                            .and_then(|p| p.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.functions.contains_key(&function_name) {
+            return Err(format!(
+                "Function {function_name} does not exist yet — retry once it has been provisioned"
+            ));
+        }
+        let function_arn = format!(
+            "arn:aws:lambda:{}:{}:function:{}",
+            self.region, self.account_id, function_name
+        );
+        let uuid = Uuid::new_v4().to_string();
+        let esm = EventSourceMapping {
+            uuid: uuid.clone(),
+            function_arn,
+            event_source_arn,
+            batch_size,
+            enabled,
+            state: if enabled {
+                "Enabled".to_string()
+            } else {
+                "Disabled".to_string()
+            },
+            last_modified: Utc::now(),
+            filter_patterns,
+            maximum_batching_window_in_seconds,
+            starting_position,
+            starting_position_timestamp,
+            parallelization_factor,
+            function_response_types,
+        };
+        state.event_source_mappings.insert(uuid.clone(), esm);
+        Ok(ProvisionResult::new(uuid.clone()).with("Id", uuid))
+    }
+
+    fn delete_lambda_event_source_mapping(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.event_source_mappings.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_lambda_layer_version(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let layer_name = props
+            .get("LayerName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let license_info = props
+            .get("LicenseInfo")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let compatible_runtimes: Vec<String> = props
+            .get("CompatibleRuntimes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Content (S3Bucket / S3Key / S3ObjectVersion) is not unzipped
+        // here — the provisioner stores zero-length placeholder bytes
+        // so callers that just want the ARN see a published version.
+        let zip_bytes = if let Some(b64) = props
+            .get("Content")
+            .and_then(|v| v.get("ZipFile"))
+            .and_then(|v| v.as_str())
+        {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.decode(b64).ok()
+        } else {
+            None
+        };
+
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let layer_arn = format!(
+            "arn:aws:lambda:{}:{}:layer:{}",
+            self.region, self.account_id, layer_name
+        );
+        let layer = state
+            .layers
+            .entry(layer_name.clone())
+            .or_insert_with(|| Layer {
+                layer_name: layer_name.clone(),
+                layer_arn: layer_arn.clone(),
+                versions: Vec::new(),
+            });
+        let next_version = (layer.versions.len() as i64) + 1;
+        let version_arn = format!("{}:{}", layer.layer_arn, next_version);
+        let code_size = zip_bytes.as_deref().map(|b| b.len() as i64).unwrap_or(0);
+        layer.versions.push(LayerVersion {
+            version: next_version,
+            layer_version_arn: version_arn.clone(),
+            description: description.clone(),
+            created_date: Utc::now(),
+            compatible_runtimes,
+            license_info,
+            policy: None,
+            code_zip: zip_bytes,
+            code_sha256: String::new(),
+            code_size,
+        });
+        Ok(ProvisionResult::new(version_arn.clone())
+            .with("LayerVersionArn", version_arn)
+            .with("LayerArn", layer_arn))
+    }
+
+    fn delete_lambda_layer_version(&self, physical_id: &str) -> Result<(), String> {
+        // physical_id = `{layer_arn}:{version}` — strip trailing version.
+        let Some(idx) = physical_id.rfind(':') else {
+            return Ok(());
+        };
+        let (layer_arn, version_part) = physical_id.split_at(idx);
+        let version_part = &version_part[1..];
+        let Ok(version) = version_part.parse::<i64>() else {
+            return Ok(());
+        };
+        // ARN form: arn:aws:lambda:<region>:<account>:layer:<name>
+        let layer_name = layer_arn.rsplit(':').next().unwrap_or("").to_string();
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(layer) = state.layers.get_mut(&layer_name) {
+            layer.versions.retain(|v| v.version != version);
+            if layer.versions.is_empty() {
+                state.layers.remove(&layer_name);
+            }
+        }
+        Ok(())
+    }
+
+    fn create_lambda_url(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let function_name = parse_lambda_function_name(
+            props
+                .get("TargetFunctionArn")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "TargetFunctionArn is required".to_string())?,
+        );
+        let auth_type = props
+            .get("AuthType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("NONE")
+            .to_string();
+        let invoke_mode = props
+            .get("InvokeMode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("BUFFERED")
+            .to_string();
+        let cors = props.get("Cors").cloned();
+
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.functions.contains_key(&function_name) {
+            return Err(format!(
+                "Function {function_name} does not exist yet — retry once it has been provisioned"
+            ));
+        }
+        let function_arn = format!(
+            "arn:aws:lambda:{}:{}:function:{}",
+            self.region, self.account_id, function_name
+        );
+        let function_url = format!("https://{function_name}.lambda-url.{}.on.aws/", self.region);
+        let now = Utc::now();
+        let cfg = FunctionUrlConfig {
+            function_arn: function_arn.clone(),
+            function_url: function_url.clone(),
+            auth_type,
+            cors,
+            creation_time: now,
+            last_modified_time: now,
+            invoke_mode,
+        };
+        state
+            .function_url_configs
+            .insert(function_name.clone(), cfg);
+
+        Ok(ProvisionResult::new(function_name.clone())
+            .with("FunctionArn", function_arn)
+            .with("FunctionUrl", function_url))
+    }
+
+    fn delete_lambda_url(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.function_url_configs.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_lambda_alias(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let function_name = parse_lambda_function_name(
+            props
+                .get("FunctionName")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "FunctionName is required".to_string())?,
+        );
+        let alias_name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Name is required".to_string())?
+            .to_string();
+        let function_version = props
+            .get("FunctionVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("$LATEST")
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let routing_config = props.get("RoutingConfig").cloned();
+
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.functions.contains_key(&function_name) {
+            return Err(format!(
+                "Function {function_name} does not exist yet — retry once it has been provisioned"
+            ));
+        }
+        let alias_arn = format!(
+            "arn:aws:lambda:{}:{}:function:{}:{}",
+            self.region, self.account_id, function_name, alias_name
+        );
+        let key = format!("{function_name}:{alias_name}");
+        state.aliases.insert(
+            key.clone(),
+            FunctionAlias {
+                alias_arn: alias_arn.clone(),
+                name: alias_name,
+                function_version,
+                description,
+                revision_id: Uuid::new_v4().to_string(),
+                routing_config,
+            },
+        );
+        Ok(ProvisionResult::new(key).with("AliasArn", alias_arn))
+    }
+
+    fn delete_lambda_alias(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.aliases.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_lambda_version(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let function_name = parse_lambda_function_name(
+            props
+                .get("FunctionName")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "FunctionName is required".to_string())?,
+        );
+
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let func = state
+            .functions
+            .get(&function_name)
+            .ok_or_else(|| format!("Function {function_name} does not exist yet — retry once it has been provisioned"))?
+            .clone();
+        let versions = state
+            .function_versions
+            .entry(function_name.clone())
+            .or_default();
+        let next_version = (versions.len() as i64 + 1).to_string();
+        versions.push(next_version.clone());
+        // Snapshot current function config under this version.
+        let mut snapshot = func.clone();
+        snapshot.version = next_version.clone();
+        state
+            .function_version_snapshots
+            .entry(function_name.clone())
+            .or_default()
+            .insert(next_version.clone(), snapshot);
+        let version_arn = format!(
+            "arn:aws:lambda:{}:{}:function:{}:{}",
+            self.region, self.account_id, function_name, next_version
+        );
+        let physical_id = format!("{function_name}:{next_version}");
+        Ok(ProvisionResult::new(physical_id)
+            .with("Version", next_version)
+            .with("FunctionArn", version_arn))
+    }
+
+    fn delete_lambda_version(&self, physical_id: &str) -> Result<(), String> {
+        let Some((function_name, version)) = physical_id.split_once(':') else {
+            return Ok(());
+        };
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(versions) = state.function_versions.get_mut(function_name) {
+            versions.retain(|v| v != version);
+        }
+        if let Some(snapshots) = state.function_version_snapshots.get_mut(function_name) {
+            snapshots.remove(version);
+        }
         Ok(())
     }
 
