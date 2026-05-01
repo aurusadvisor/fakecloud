@@ -12,6 +12,6 @@ pub mod sts_service;
 pub mod xml_responses;
 
 pub use state::{
-    IamAccessKey, IamPolicy, IamRole, IamSnapshot, IamState, IamUser, PolicyVersion,
-    SharedIamState, IAM_SNAPSHOT_SCHEMA_VERSION,
+    IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy, IamRole, IamSnapshot, IamState, IamUser,
+    PolicyVersion, SharedIamState, Tag, IAM_SNAPSHOT_SCHEMA_VERSION,
 };
