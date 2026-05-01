@@ -722,6 +722,7 @@ async fn main() {
             kinesis: kinesis_state.clone(),
             kms: kms_state.clone(),
             ecr: ecr_state.clone(),
+            cloudwatch: cloudwatch_state.clone(),
             delivery: delivery_for_cf,
         },
     );

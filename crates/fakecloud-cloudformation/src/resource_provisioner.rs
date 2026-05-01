@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use fakecloud_cloudwatch::{AlarmState, MetricAlarm, SharedCloudWatchState};
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_dynamodb::{
     AttributeDefinition, DynamoTable, KeySchemaElement, OnDemandThroughput, ProvisionedThroughput,
@@ -61,6 +62,7 @@ pub struct ResourceProvisioner {
     pub kinesis_state: SharedKinesisState,
     pub kms_state: SharedKmsState,
     pub ecr_state: SharedEcrState,
+    pub cloudwatch_state: SharedCloudWatchState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -87,6 +89,7 @@ impl ResourceProvisioner {
             "AWS::KMS::Key" => self.create_kms_key(resource),
             "AWS::KMS::Alias" => self.create_kms_alias(resource),
             "AWS::ECR::Repository" => self.create_ecr_repository(resource),
+            "AWS::CloudWatch::Alarm" => self.create_cloudwatch_alarm(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -136,6 +139,7 @@ impl ResourceProvisioner {
             "AWS::KMS::Key" => self.delete_kms_key(&resource.physical_id),
             "AWS::KMS::Alias" => self.delete_kms_alias(&resource.physical_id),
             "AWS::ECR::Repository" => self.delete_ecr_repository(&resource.physical_id),
+            "AWS::CloudWatch::Alarm" => self.delete_cloudwatch_alarm(&resource.physical_id),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -1471,6 +1475,144 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    // --- CloudWatch ---
+
+    fn create_cloudwatch_alarm(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let alarm_name = props
+            .get("AlarmName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let alarm_description = props
+            .get("AlarmDescription")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let actions_enabled = props
+            .get("ActionsEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let str_array = |key: &str| -> Vec<String> {
+            props
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let alarm_actions = str_array("AlarmActions");
+        let ok_actions = str_array("OKActions");
+        let insufficient_data_actions = str_array("InsufficientDataActions");
+
+        let metric_name = props
+            .get("MetricName")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let namespace = props
+            .get("Namespace")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let statistic = props
+            .get("Statistic")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let extended_statistic = props
+            .get("ExtendedStatistic")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let unit = props
+            .get("Unit")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let period = props.get("Period").and_then(|v| v.as_i64());
+        let evaluation_periods = props
+            .get("EvaluationPeriods")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+        let datapoints_to_alarm = props.get("DatapointsToAlarm").and_then(|v| v.as_i64());
+        let threshold = props.get("Threshold").and_then(|v| v.as_f64());
+        let comparison_operator = props
+            .get("ComparisonOperator")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GreaterThanThreshold")
+            .to_string();
+        let treat_missing_data = props
+            .get("TreatMissingData")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let evaluate_low_sample_count_percentile = props
+            .get("EvaluateLowSampleCountPercentile")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let mut dimensions: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(arr) = props.get("Dimensions").and_then(|v| v.as_array()) {
+            for d in arr {
+                if let (Some(k), Some(v)) = (
+                    d.get("Name").and_then(|x| x.as_str()),
+                    d.get("Value").and_then(|x| x.as_str()),
+                ) {
+                    dimensions.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+
+        let mut accounts = self.cloudwatch_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let alarm_arn = format!(
+            "arn:aws:cloudwatch:{}:{}:alarm:{}",
+            self.region, self.account_id, alarm_name
+        );
+        let now = Utc::now();
+        let alarm = MetricAlarm {
+            alarm_name: alarm_name.clone(),
+            alarm_arn: alarm_arn.clone(),
+            alarm_description,
+            actions_enabled,
+            ok_actions,
+            alarm_actions,
+            insufficient_data_actions,
+            state_value: AlarmState::InsufficientData,
+            state_reason: "Unchecked: Initial alarm creation".to_string(),
+            state_updated_timestamp: now,
+            metric_name,
+            namespace,
+            statistic,
+            extended_statistic,
+            dimensions,
+            period,
+            unit,
+            evaluation_periods,
+            datapoints_to_alarm,
+            threshold,
+            comparison_operator,
+            treat_missing_data,
+            evaluate_low_sample_count_percentile,
+            configuration_updated_timestamp: now,
+            alarm_configuration_updated_timestamp: now,
+        };
+        let region_alarms = state.alarms_in_mut(&self.region);
+        if region_alarms.contains_key(&alarm_name) {
+            return Err(format!("Alarm {alarm_name} already exists"));
+        }
+        region_alarms.insert(alarm_name.clone(), alarm);
+
+        Ok(ProvisionResult::new(alarm_name).with("Arn", alarm_arn))
+    }
+
+    fn delete_cloudwatch_alarm(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.cloudwatch_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.alarms_in_mut(&self.region).remove(physical_id);
+        Ok(())
+    }
+
     fn delete_log_group(&self, physical_id: &str) -> Result<(), String> {
         let mut logs_accounts = self.logs_state.write();
         let state = logs_accounts.default_mut();
@@ -1653,6 +1795,7 @@ mod tests {
             ecr_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
+            cloudwatch_state: Arc::new(RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),

@@ -740,6 +740,7 @@ mod tests {
             kinesis: shared::<KinesisState>(),
             kms: shared::<KmsState>(),
             ecr: shared::<EcrState>(),
+            cloudwatch: Arc::new(RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }

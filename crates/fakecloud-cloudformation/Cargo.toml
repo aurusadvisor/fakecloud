@@ -24,6 +24,7 @@ fakecloud-secretsmanager = { workspace = true }
 fakecloud-kinesis = { workspace = true }
 fakecloud-kms = { workspace = true }
 fakecloud-ecr = { workspace = true }
+fakecloud-cloudwatch = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }
