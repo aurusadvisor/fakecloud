@@ -379,6 +379,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "AWSWAF_20190729" => "wafv2",
         "AmazonAthena" => "athena",
         s if s.starts_with("Firehose_") => "firehose",
+        "AWSGlue" => "glue",
         _ => return None,
     };
 

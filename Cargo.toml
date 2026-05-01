@@ -28,6 +28,7 @@ members = [
     "crates/fakecloud-route53",
     "crates/fakecloud-acm",
     "crates/fakecloud-firehose",
+    "crates/fakecloud-glue",
     "crates/fakecloud-application-autoscaling",
     "crates/fakecloud-wafv2",
     "crates/fakecloud-athena",
@@ -124,6 +125,7 @@ fakecloud-cloudfront = { path = "crates/fakecloud-cloudfront", version = "0.13.3
 fakecloud-route53 = { path = "crates/fakecloud-route53", version = "0.13.3" }
 fakecloud-acm = { path = "crates/fakecloud-acm", version = "0.13.3" }
 fakecloud-firehose = { path = "crates/fakecloud-firehose", version = "0.13.3" }
+fakecloud-glue = { path = "crates/fakecloud-glue", version = "0.13.3" }
 fakecloud-application-autoscaling = { path = "crates/fakecloud-application-autoscaling", version = "0.13.3" }
 fakecloud-wafv2 = { path = "crates/fakecloud-wafv2", version = "0.13.3" }
 fakecloud-athena = { path = "crates/fakecloud-athena", version = "0.13.3" }

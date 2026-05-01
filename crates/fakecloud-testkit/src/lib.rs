@@ -668,6 +668,10 @@ impl TestServer {
         aws_sdk_athena::Client::new(&self.aws_config().await)
     }
 
+    pub async fn glue_client(&self) -> aws_sdk_glue::Client {
+        aws_sdk_glue::Client::new(&self.aws_config().await)
+    }
+
     /// S3 always uses path-style addressing against fakecloud so bucket
     /// names don't have to be DNS-legal subdomains of `localhost`.
     pub async fn s3_client(&self) -> aws_sdk_s3::Client {
