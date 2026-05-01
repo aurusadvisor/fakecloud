@@ -310,19 +310,41 @@ impl FirehoseService {
             .ok_or_else(|| missing("Records"))?;
         let mut datas = Vec::with_capacity(records.len());
         let mut response_records = Vec::with_capacity(records.len());
+        let mut failed = 0;
         for r in records {
-            let b64 = r["Data"].as_str().unwrap_or_default();
-            let data = base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .unwrap_or_default();
-            datas.push(data);
-            response_records.push(json!({
-                "RecordId": Uuid::new_v4().to_string(),
-            }));
+            let b64 = r["Data"].as_str();
+            match b64.map(|s| base64::engine::general_purpose::STANDARD.decode(s)) {
+                Some(Ok(data)) => {
+                    datas.push(data);
+                    response_records.push(json!({
+                        "RecordId": Uuid::new_v4().to_string(),
+                    }));
+                }
+                Some(Err(_)) | None => {
+                    failed += 1;
+                    response_records.push(json!({
+                        "ErrorCode": "InvalidArgumentException",
+                        "ErrorMessage": "Record.Data must be a non-empty base64-encoded string",
+                    }));
+                }
+            }
         }
-        self.deliver_records(&req.account_id, &req.region, &name, datas)?;
+        if !datas.is_empty() {
+            self.deliver_records(&req.account_id, &req.region, &name, datas)?;
+        } else if failed == records.len() && !records.is_empty() {
+            // Validate stream exists even when nothing delivers, so callers
+            // get a clear ResourceNotFoundException for typos.
+            let accounts = self.state.read();
+            let state = accounts
+                .get(&req.account_id)
+                .ok_or_else(|| not_found(&name))?;
+            state
+                .streams(&req.region)
+                .and_then(|s| s.get(&name))
+                .ok_or_else(|| not_found(&name))?;
+        }
         Ok(AwsResponse::ok_json(json!({
-            "FailedPutCount": 0,
+            "FailedPutCount": failed,
             "Encrypted": false,
             "RequestResponses": response_records,
         })))

@@ -203,6 +203,68 @@ async fn firehose_put_record_batch_aggregates_payloads() {
 }
 
 #[tokio::test]
+async fn firehose_put_record_batch_reports_invalid_records() {
+    let server = TestServer::start().await;
+    let firehose = setup(&server, "fh-bucket-invalid").await;
+    let bucket_arn = "arn:aws:s3:::fh-bucket-invalid";
+
+    firehose
+        .create_delivery_stream()
+        .delivery_stream_name("fh-invalid-stream")
+        .extended_s3_destination_configuration(ext_s3(bucket_arn))
+        .send()
+        .await
+        .expect("create");
+
+    // Mix valid + valid + valid records (SDK base64-encodes Blob for us, so
+    // we can't construct invalid base64 via the SDK). Validate happy-path
+    // counts here; invalid-record handling is exercised at the wire level
+    // below by talking directly to the JSON endpoint.
+    let resp = firehose
+        .put_record_batch()
+        .delivery_stream_name("fh-invalid-stream")
+        .records(Record::builder().data(Blob::new(b"ok-1")).build().unwrap())
+        .records(Record::builder().data(Blob::new(b"ok-2")).build().unwrap())
+        .send()
+        .await
+        .expect("put batch");
+    assert_eq!(resp.failed_put_count(), 0);
+
+    // Wire-level invalid-base64 records should bump FailedPutCount and
+    // surface an ErrorCode on the corresponding response entry.
+    let http = reqwest::Client::new();
+    let url = format!("{}/", server.endpoint());
+    let body = serde_json::json!({
+        "DeliveryStreamName": "fh-invalid-stream",
+        "Records": [
+            {"Data": "@@@not-base64@@@"},
+            {"Data": "Z29vZA=="}
+        ]
+    });
+    let r = http
+        .post(&url)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header("X-Amz-Target", "Firehose_20150804.PutRecordBatch")
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 \
+             Credential=AKIAIOSFODNN7EXAMPLE/20260501/us-east-1/firehose/aws4_request, \
+             SignedHeaders=host;x-amz-target, Signature=deadbeef",
+        )
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let json: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(json["FailedPutCount"], 1);
+    let resps = json["RequestResponses"].as_array().unwrap();
+    assert_eq!(resps.len(), 2);
+    assert_eq!(resps[0]["ErrorCode"], "InvalidArgumentException");
+    assert!(resps[1].get("RecordId").is_some());
+}
+
+#[tokio::test]
 async fn firehose_streams_region_isolated() {
     use aws_config::BehaviorVersion;
     use aws_credential_types::Credentials;
