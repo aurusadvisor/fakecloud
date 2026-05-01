@@ -732,6 +732,7 @@ async fn main() {
             cognito: cognito_state.clone(),
             rds: rds_state.clone(),
             ecs: ecs_state.clone(),
+            acm: acm_state.clone(),
             delivery: delivery_for_cf,
         },
     );

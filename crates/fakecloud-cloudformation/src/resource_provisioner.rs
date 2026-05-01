@@ -4,6 +4,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use fakecloud_acm::{
+    CertificateOptions as AcmCertificateOptions, DomainValidation as AcmDomainValidation,
+    SharedAcmState, StoredCertificate as AcmStoredCertificate,
+};
 use fakecloud_cloudwatch::{AlarmState, MetricAlarm, SharedCloudWatchState};
 use fakecloud_cognito::{
     default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig, CustomDomainConfig,
@@ -303,6 +307,7 @@ pub struct ResourceProvisioner {
     pub cognito_state: SharedCognitoState,
     pub rds_state: SharedRdsState,
     pub ecs_state: SharedEcsState,
+    pub acm_state: SharedAcmState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -379,6 +384,7 @@ impl ResourceProvisioner {
             "AWS::ECS::TaskDefinition" => self.create_ecs_task_definition(resource),
             "AWS::ECS::Service" => self.create_ecs_service(resource),
             "AWS::ECS::CapacityProvider" => self.create_ecs_capacity_provider(resource),
+            "AWS::CertificateManager::Certificate" => self.create_acm_certificate(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -501,6 +507,9 @@ impl ResourceProvisioner {
             "AWS::ECS::Service" => self.delete_ecs_service(&resource.physical_id),
             "AWS::ECS::CapacityProvider" => {
                 self.delete_ecs_capacity_provider(&resource.physical_id)
+            }
+            "AWS::CertificateManager::Certificate" => {
+                self.delete_acm_certificate(&resource.physical_id)
             }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
@@ -5214,6 +5223,177 @@ impl ResourceProvisioner {
         state.capacity_providers.remove(physical_id);
         Ok(())
     }
+
+    // --- ACM ---
+
+    fn create_acm_certificate(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let domain_name = props
+            .get("DomainName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "DomainName is required".to_string())?
+            .to_string();
+        let sans: Vec<String> = props
+            .get("SubjectAlternativeNames")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let key_algorithm = props
+            .get("KeyAlgorithm")
+            .and_then(|v| v.as_str())
+            .unwrap_or("RSA_2048")
+            .to_string();
+        let validation_method = props
+            .get("ValidationMethod")
+            .and_then(|v| v.as_str())
+            .unwrap_or("DNS")
+            .to_string();
+        let ca_arn = props
+            .get("CertificateAuthorityArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let tags = parse_acm_tags(props.get("Tags"));
+        let cert_transparency = props
+            .get("CertificateTransparencyLoggingPreference")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ENABLED")
+            .to_string();
+
+        // Mint a deterministic-ish ARN — ACM uses a UUID per certificate.
+        let arn = format!(
+            "arn:aws:acm:{}:{}:certificate/{}",
+            self.region,
+            self.account_id,
+            Uuid::new_v4()
+        );
+        let now = Utc::now();
+
+        // Build a real self-signed PEM via rcgen for the cert+SANs so
+        // GetCertificate / DescribeCertificate round-trip parseable
+        // X.509 (matches the runtime RequestCertificate path).
+        let mut all_names = vec![domain_name.clone()];
+        for s in &sans {
+            if !all_names.contains(s) {
+                all_names.push(s.clone());
+            }
+        }
+        let (cert_pem, key_pem) = rcgen::generate_simple_self_signed(all_names.clone())
+            .map(|c| (c.cert.pem(), c.key_pair.serialize_pem()))
+            .map(|(c, k)| (Some(c), Some(k)))
+            .unwrap_or((None, None));
+
+        // CFN-provisioned certs land as ISSUED right away — real CFN
+        // blocks until validation completes, but fakecloud doesn't run
+        // a DNS server, so leaving the cert PENDING_VALIDATION would
+        // wedge dependent resources (CloudFront/ELBv2) forever. The
+        // runtime RequestCertificate path stays on the read-count flip
+        // dance for parity with ACM's async behaviour.
+        let cert = AcmStoredCertificate {
+            arn: arn.clone(),
+            domain_name: domain_name.clone(),
+            subject_alternative_names: all_names,
+            status: "ISSUED".to_string(),
+            cert_type: "AMAZON_ISSUED".to_string(),
+            certificate_pem: cert_pem,
+            certificate_chain_pem: None,
+            private_key_pem: key_pem,
+            idempotency_token: None,
+            serial: format!("{:032x}", Uuid::new_v4().as_u128()),
+            subject: format!("CN={domain_name}"),
+            issuer: "Amazon".to_string(),
+            key_algorithm,
+            signature_algorithm: "SHA256WITHRSA".to_string(),
+            created_at: now,
+            issued_at: Some(now),
+            imported_at: None,
+            revoked_at: None,
+            revocation_reason: None,
+            not_before: now,
+            // 13 months (matches real ACM issued-cert lifetime).
+            not_after: now + chrono::Duration::days(395),
+            validation_method: Some(validation_method.clone()),
+            domain_validation: synth_acm_domain_validation(&domain_name, &sans, &validation_method),
+            options: AcmCertificateOptions {
+                certificate_transparency_logging_preference: cert_transparency,
+                export: "DISABLED".to_string(),
+            },
+            renewal_eligibility: "INELIGIBLE".to_string(),
+            managed_by: None,
+            certificate_authority_arn: ca_arn,
+            tags,
+            in_use_by: Vec::new(),
+            describe_read_count: 0,
+        };
+
+        let mut accounts = self.acm_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        account.certificates.insert(arn.clone(), cert);
+
+        Ok(ProvisionResult::new(arn))
+    }
+
+    fn delete_acm_certificate(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.acm_state.write();
+        if let Some(account) = accounts.accounts.get_mut(&self.account_id) {
+            account.certificates.remove(physical_id);
+        }
+        Ok(())
+    }
+}
+
+/// Synthesize the per-domain DNS validation record list for a
+/// CFN-provisioned cert. Mirrors the runtime ACM path: each name gets
+/// a SUCCESS record (since CFN-issued certs are auto-validated above)
+/// and an `_amzn-validations.<domain>.` resource record so callers
+/// that read DescribeCertificate see the same shape they'd expect
+/// from a real ACM-issued cert.
+fn synth_acm_domain_validation(
+    domain_name: &str,
+    sans: &[String],
+    validation_method: &str,
+) -> Vec<AcmDomainValidation> {
+    let mut all = vec![domain_name.to_string()];
+    for s in sans {
+        if !all.contains(s) {
+            all.push(s.clone());
+        }
+    }
+    all.into_iter()
+        .map(|name| AcmDomainValidation {
+            domain_name: name.clone(),
+            validation_status: "SUCCESS".to_string(),
+            validation_method: validation_method.to_string(),
+            resource_record_name: Some(format!("_amzn-validations.{name}.")),
+            resource_record_type: Some("CNAME".to_string()),
+            resource_record_value: Some(format!("{}.acm-validations.aws.", Uuid::new_v4())),
+        })
+        .collect()
+}
+
+/// Convert CFN `Tags` array into the ACM crate's tag map form.
+fn parse_acm_tags(value: Option<&serde_json::Value>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if let Some(arr) = value.and_then(|v| v.as_array()) {
+        for t in arr {
+            if let (Some(k), Some(v)) = (
+                t.get("Key").and_then(|v| v.as_str()),
+                t.get("Value").and_then(|v| v.as_str()),
+            ) {
+                out.insert(k.to_string(), v.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Convert CFN `Tags` array into the ECS `TagEntry` form.
@@ -5519,6 +5699,7 @@ mod tests {
             ecs_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
+            acm_state: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
             account_id: "123456789012".to_string(),
             region: "us-east-1".to_string(),
