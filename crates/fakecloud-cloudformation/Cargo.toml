@@ -22,6 +22,7 @@ fakecloud-logs = { workspace = true }
 fakecloud-lambda = { workspace = true }
 fakecloud-secretsmanager = { workspace = true }
 fakecloud-kinesis = { workspace = true }
+fakecloud-kms = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }

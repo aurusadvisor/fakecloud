@@ -2696,6 +2696,7 @@ dependencies = [
  "fakecloud-eventbridge",
  "fakecloud-iam",
  "fakecloud-kinesis",
+ "fakecloud-kms",
  "fakecloud-lambda",
  "fakecloud-logs",
  "fakecloud-persistence",

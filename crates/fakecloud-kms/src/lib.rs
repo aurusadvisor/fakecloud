@@ -6,4 +6,6 @@ pub(crate) mod service;
 pub(crate) mod state;
 
 pub use service::KmsService;
-pub use state::{KmsSnapshot, SharedKmsState, KMS_SNAPSHOT_SCHEMA_VERSION};
+pub use state::{
+    KmsAlias, KmsKey, KmsSnapshot, KmsState, SharedKmsState, KMS_SNAPSHOT_SCHEMA_VERSION,
+};

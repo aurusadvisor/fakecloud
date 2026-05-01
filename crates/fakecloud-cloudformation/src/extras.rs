@@ -708,6 +708,7 @@ mod tests {
         use fakecloud_eventbridge::EventBridgeState;
         use fakecloud_iam::IamState;
         use fakecloud_kinesis::KinesisState;
+        use fakecloud_kms::KmsState;
         use fakecloud_lambda::LambdaState;
         use fakecloud_logs::LogsState;
         use fakecloud_s3::S3State;
@@ -736,6 +737,7 @@ mod tests {
             lambda: shared::<LambdaState>(),
             secretsmanager: shared::<SecretsManagerState>(),
             kinesis: shared::<KinesisState>(),
+            kms: shared::<KmsState>(),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }
