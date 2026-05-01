@@ -178,6 +178,65 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// Per-datapoint aggregation summary covering both the simple `Value` form
+/// and the `StatisticValues` form so callers don't lose the count or
+/// min/max baked into a `StatisticSet`.
+#[derive(Clone, Copy)]
+struct DatumStats {
+    sum: f64,
+    min: f64,
+    max: f64,
+    count: f64,
+}
+
+fn datum_stats(d: &MetricDatum) -> Option<DatumStats> {
+    if let Some(v) = d.value {
+        return Some(DatumStats {
+            sum: v,
+            min: v,
+            max: v,
+            count: 1.0,
+        });
+    }
+    if let Some(s) = &d.statistic_values {
+        return Some(DatumStats {
+            sum: s.sum,
+            min: s.minimum,
+            max: s.maximum,
+            count: s.sample_count,
+        });
+    }
+    None
+}
+
+fn merge_stats(acc: &mut DatumStats, other: DatumStats) {
+    acc.sum += other.sum;
+    acc.count += other.count;
+    if other.min < acc.min {
+        acc.min = other.min;
+    }
+    if other.max > acc.max {
+        acc.max = other.max;
+    }
+}
+
+fn stat_value(stat: &str, agg: DatumStats) -> Option<f64> {
+    match stat {
+        "Sum" => Some(agg.sum),
+        "Average" => {
+            if agg.count > 0.0 {
+                Some(agg.sum / agg.count)
+            } else {
+                None
+            }
+        }
+        "Minimum" => Some(agg.min),
+        "Maximum" => Some(agg.max),
+        "SampleCount" => Some(agg.count),
+        _ => None,
+    }
+}
+
 fn render_dimensions(dims: &BTreeMap<String, String>) -> String {
     let mut s = String::from("<Dimensions>");
     for (name, value) in dims.iter() {
@@ -354,7 +413,7 @@ impl CloudWatchService {
         if let Some(acct) = state.get(&req.account_id) {
             if let Some(map) = acct.metrics_in(&req.region) {
                 if let Some(data) = map.get(&namespace) {
-                    let mut buckets: BTreeMap<DateTime<Utc>, Vec<f64>> = BTreeMap::new();
+                    let mut buckets: BTreeMap<DateTime<Utc>, DatumStats> = BTreeMap::new();
                     for d in data.iter() {
                         if d.metric_name != metric_name {
                             continue;
@@ -368,31 +427,24 @@ impl CloudWatchService {
                         if d.timestamp < start_ts || d.timestamp >= end_ts {
                             continue;
                         }
-                        let value = match (d.value, &d.statistic_values) {
-                            (Some(v), _) => v,
-                            (None, Some(s)) => s.sum / s.sample_count.max(1.0),
-                            _ => continue,
+                        let Some(stats) = datum_stats(d) else {
+                            continue;
                         };
                         let secs = d.timestamp.timestamp();
                         let bucket_secs = secs - secs.rem_euclid(period);
                         let bucket_ts =
                             DateTime::<Utc>::from_timestamp(bucket_secs, 0).unwrap_or(d.timestamp);
-                        buckets.entry(bucket_ts).or_default().push(value);
+                        buckets
+                            .entry(bucket_ts)
+                            .and_modify(|acc| merge_stats(acc, stats))
+                            .or_insert(stats);
                     }
-                    for (ts, values) in buckets {
+                    for (ts, agg) in buckets {
                         let mut stats = BTreeMap::new();
                         for stat in statistics.iter() {
-                            let v = match stat.as_str() {
-                                "Sum" => values.iter().sum::<f64>(),
-                                "Average" => values.iter().sum::<f64>() / values.len() as f64,
-                                "Minimum" => values.iter().copied().fold(f64::INFINITY, f64::min),
-                                "Maximum" => {
-                                    values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-                                }
-                                "SampleCount" => values.len() as f64,
-                                _ => continue,
-                            };
-                            stats.insert(stat.clone(), v);
+                            if let Some(v) = stat_value(stat, agg) {
+                                stats.insert(stat.clone(), v);
+                            }
                         }
                         datapoints.push((ts, stats));
                     }
@@ -450,6 +502,11 @@ impl CloudWatchService {
                 .get("MetricStat.Period")
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(60);
+            if period <= 0 {
+                return Err(invalid_param(
+                    "MetricStat.Period must be a positive integer",
+                ));
+            }
             let dim_filter = parse_dimensions(&q, "MetricStat.Metric.Dimensions");
 
             let (mut timestamps, mut values): (Vec<String>, Vec<f64>) = (Vec::new(), Vec::new());
@@ -457,7 +514,7 @@ impl CloudWatchService {
                 if let Some(acct) = state.get(&req.account_id) {
                     if let Some(map) = acct.metrics_in(&req.region) {
                         if let Some(data) = map.get(&namespace) {
-                            let mut buckets: BTreeMap<DateTime<Utc>, Vec<f64>> = BTreeMap::new();
+                            let mut buckets: BTreeMap<DateTime<Utc>, DatumStats> = BTreeMap::new();
                             for d in data.iter() {
                                 if d.metric_name != metric_name {
                                     continue;
@@ -471,27 +528,21 @@ impl CloudWatchService {
                                 if d.timestamp < start_ts || d.timestamp >= end_ts {
                                     continue;
                                 }
-                                let value = match (d.value, &d.statistic_values) {
-                                    (Some(v), _) => v,
-                                    (None, Some(s)) => s.sum / s.sample_count.max(1.0),
-                                    _ => continue,
+                                let Some(stats) = datum_stats(d) else {
+                                    continue;
                                 };
                                 let secs = d.timestamp.timestamp();
                                 let bucket_secs = secs - secs.rem_euclid(period);
                                 let bucket_ts = DateTime::<Utc>::from_timestamp(bucket_secs, 0)
                                     .unwrap_or(d.timestamp);
-                                buckets.entry(bucket_ts).or_default().push(value);
+                                buckets
+                                    .entry(bucket_ts)
+                                    .and_modify(|acc| merge_stats(acc, stats))
+                                    .or_insert(stats);
                             }
-                            for (ts, vals) in buckets {
-                                let v = match stat.as_str() {
-                                    "Sum" => vals.iter().sum::<f64>(),
-                                    "Average" => vals.iter().sum::<f64>() / vals.len() as f64,
-                                    "Minimum" => vals.iter().copied().fold(f64::INFINITY, f64::min),
-                                    "Maximum" => {
-                                        vals.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-                                    }
-                                    "SampleCount" => vals.len() as f64,
-                                    _ => continue,
+                            for (ts, agg) in buckets {
+                                let Some(v) = stat_value(&stat, agg) else {
+                                    continue;
                                 };
                                 timestamps
                                     .push(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
