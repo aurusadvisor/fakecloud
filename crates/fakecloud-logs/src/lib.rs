@@ -6,6 +6,6 @@ pub mod transformer;
 
 pub use service::LogsService;
 pub use state::{
-    LogEvent, LogGroup, LogStream, LogsSnapshot, LogsState, SharedLogsState,
-    LOGS_SNAPSHOT_SCHEMA_VERSION,
+    LogEvent, LogGroup, LogStream, LogsSnapshot, LogsState, MetricFilter, MetricTransformation,
+    SharedLogsState, SubscriptionFilter, LOGS_SNAPSHOT_SCHEMA_VERSION,
 };
