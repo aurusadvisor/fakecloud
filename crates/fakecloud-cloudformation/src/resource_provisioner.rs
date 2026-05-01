@@ -14,6 +14,7 @@ use fakecloud_iam::{IamPolicy, IamRole, PolicyVersion, SharedIamState};
 use fakecloud_lambda::SharedLambdaState;
 use fakecloud_logs::SharedLogsState;
 use fakecloud_s3::{S3Bucket, SharedS3State};
+use fakecloud_secretsmanager::{Secret, SecretVersion, SharedSecretsManagerState};
 use fakecloud_sns::{SharedSnsState, SnsSubscription, SnsTopic};
 use fakecloud_sqs::{SharedSqsState, SqsQueue};
 use fakecloud_ssm::{SharedSsmState, SsmParameter};
@@ -53,6 +54,7 @@ pub struct ResourceProvisioner {
     pub dynamodb_state: SharedDynamoDbState,
     pub logs_state: SharedLogsState,
     pub lambda_state: SharedLambdaState,
+    pub secretsmanager_state: SharedSecretsManagerState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -74,6 +76,7 @@ impl ResourceProvisioner {
             "AWS::DynamoDB::Table" => self.create_dynamodb_table(resource),
             "AWS::Logs::LogGroup" => self.create_log_group(resource),
             "AWS::Lambda::Function" => self.create_lambda_function(resource),
+            "AWS::SecretsManager::Secret" => self.create_secrets_manager_secret(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -116,6 +119,9 @@ impl ResourceProvisioner {
             "AWS::DynamoDB::Table" => self.delete_dynamodb_table(&resource.physical_id),
             "AWS::Logs::LogGroup" => self.delete_log_group(&resource.physical_id),
             "AWS::Lambda::Function" => self.delete_lambda_function(&resource.physical_id),
+            "AWS::SecretsManager::Secret" => {
+                self.delete_secrets_manager_secret(&resource.physical_id)
+            }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -993,6 +999,103 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    // --- SecretsManager ---
+
+    fn create_secrets_manager_secret(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let kms_key_id = props
+            .get("KmsKeyId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let mut accounts = self.secretsmanager_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let arn = format!(
+            "arn:aws:secretsmanager:{}:{}:secret:{}",
+            state.region, state.account_id, name
+        );
+
+        if state.secrets.contains_key(&arn) {
+            return Err(format!("Secret {name} already exists"));
+        }
+
+        let now = Utc::now();
+        let mut versions = BTreeMap::new();
+        let mut current_version_id: Option<String> = None;
+        if let Some(secret_string) = props.get("SecretString").and_then(|v| v.as_str()) {
+            let version_id = Uuid::new_v4().to_string();
+            versions.insert(
+                version_id.clone(),
+                SecretVersion {
+                    version_id: version_id.clone(),
+                    secret_string: Some(secret_string.to_string()),
+                    secret_binary: None,
+                    stages: vec!["AWSCURRENT".to_string()],
+                    created_at: now,
+                },
+            );
+            current_version_id = Some(version_id);
+        }
+
+        let mut tags: Vec<(String, String)> = Vec::new();
+        if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
+            for t in arr {
+                if let (Some(k), Some(v)) = (
+                    t.get("Key").and_then(|x| x.as_str()),
+                    t.get("Value").and_then(|x| x.as_str()),
+                ) {
+                    tags.push((k.to_string(), v.to_string()));
+                }
+            }
+        }
+        let tags_set = !tags.is_empty();
+
+        let secret = Secret {
+            name: name.clone(),
+            arn: arn.clone(),
+            description,
+            kms_key_id,
+            versions,
+            current_version_id,
+            tags,
+            tags_ever_set: tags_set,
+            deleted: false,
+            deletion_date: None,
+            created_at: now,
+            last_changed_at: now,
+            last_accessed_at: None,
+            rotation_enabled: None,
+            rotation_lambda_arn: None,
+            rotation_rules: None,
+            last_rotated_at: None,
+            resource_policy: None,
+        };
+        state.secrets.insert(arn.clone(), secret);
+
+        Ok(ProvisionResult::new(arn.clone())
+            .with("Id", arn.clone())
+            .with("Name", name))
+    }
+
+    fn delete_secrets_manager_secret(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.secretsmanager_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.secrets.remove(physical_id);
+        Ok(())
+    }
+
     fn delete_log_group(&self, physical_id: &str) -> Result<(), String> {
         let mut logs_accounts = self.logs_state.write();
         let state = logs_accounts.default_mut();
@@ -1161,6 +1264,9 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             lambda_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            secretsmanager_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),

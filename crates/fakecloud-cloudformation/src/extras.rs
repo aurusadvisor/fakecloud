@@ -710,6 +710,7 @@ mod tests {
         use fakecloud_lambda::LambdaState;
         use fakecloud_logs::LogsState;
         use fakecloud_s3::S3State;
+        use fakecloud_secretsmanager::SecretsManagerState;
         use fakecloud_sns::SnsState;
         use fakecloud_sqs::SqsState;
         use fakecloud_ssm::SsmState;
@@ -732,6 +733,7 @@ mod tests {
             dynamodb: shared::<DynamoDbState>(),
             logs: shared::<LogsState>(),
             lambda: shared::<LambdaState>(),
+            secretsmanager: shared::<SecretsManagerState>(),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }

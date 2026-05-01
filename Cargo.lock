@@ -2635,6 +2635,7 @@ dependencies = [
  "fakecloud-logs",
  "fakecloud-persistence",
  "fakecloud-s3",
+ "fakecloud-secretsmanager",
  "fakecloud-sns",
  "fakecloud-sqs",
  "fakecloud-ssm",
