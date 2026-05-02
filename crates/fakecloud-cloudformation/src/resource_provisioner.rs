@@ -26,12 +26,16 @@ use fakecloud_cloudfront::{
         PublicKeyConfig, StoredFunction, StoredKeyGroup, StoredOriginAccessIdentity,
         StoredPublicKey,
     },
+    model::{
+        DefaultCacheBehavior, DistributionConfig, Origin, OriginItems, Origins, ViewerCertificate,
+    },
     policies::{
         CachePolicyConfig, OriginAccessControlConfig, OriginRequestPolicyConfig,
         OriginRequestPolicyCookiesConfig, OriginRequestPolicyHeadersConfig,
         OriginRequestPolicyQueryStringsConfig, ResponseHeadersPolicyConfig, StoredCachePolicy,
         StoredOriginAccessControl, StoredOriginRequestPolicy, StoredResponseHeadersPolicy,
     },
+    state::StoredDistribution,
     SharedCloudFrontState,
 };
 use fakecloud_cloudwatch::{AlarmState, Dashboard, MetricAlarm, SharedCloudWatchState};
@@ -485,6 +489,7 @@ impl ResourceProvisioner {
             "AWS::CloudFront::CloudFrontOriginAccessIdentity" => {
                 self.create_cf_origin_access_identity(resource)
             }
+            "AWS::CloudFront::Distribution" => self.create_cf_distribution(resource),
             "AWS::CloudFront::OriginAccessControl" => {
                 self.create_cf_origin_access_control(resource)
             }
@@ -753,6 +758,7 @@ impl ResourceProvisioner {
             "AWS::CloudFront::CloudFrontOriginAccessIdentity" => {
                 self.delete_cf_origin_access_identity(&resource.physical_id)
             }
+            "AWS::CloudFront::Distribution" => self.delete_cf_distribution(&resource.physical_id),
             "AWS::CloudFront::OriginAccessControl" => {
                 self.delete_cf_origin_access_control(&resource.physical_id)
             }
@@ -8512,6 +8518,165 @@ impl ResourceProvisioner {
         let mut accounts = self.cloudfront_state.write();
         let state = accounts.entry("000000000000");
         state.origin_access_identities.remove(physical_id);
+        Ok(())
+    }
+
+    /// Provision an `AWS::CloudFront::Distribution`. Reads
+    /// DistributionConfig.Origins/DefaultCacheBehavior/etc. and persists
+    /// a StoredDistribution in CloudFront state. CFN's Origins property
+    /// is a flat array, so we wrap it back into the wire shape with a
+    /// quantity + Items.Origin nesting.
+    fn create_cf_distribution(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let cfg = resource
+            .properties
+            .get("DistributionConfig")
+            .ok_or_else(|| "DistributionConfig is required".to_string())?;
+
+        // CFN Origins is a flat JSON array; the wire shape is
+        // { Quantity, Items: { Origin: [...] } }. Translate. CFN's
+        // PascalCase doesn't always match the wire model — Origin's
+        // CustomOriginConfig uses HTTPPort/HTTPSPort while the model
+        // expects HttpPort/HttpsPort, so we patch a few well-known
+        // renames before letting serde finish the parse.
+        let origin_entries: Vec<Origin> = cfg
+            .get("Origins")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "DistributionConfig.Origins is required".to_string())?
+            .iter()
+            .map(|o| {
+                let mut patched = o.clone();
+                if let Some(custom) = patched
+                    .get_mut("CustomOriginConfig")
+                    .and_then(|v| v.as_object_mut())
+                {
+                    if let Some(v) = custom.remove("HTTPPort") {
+                        custom.insert("HttpPort".to_string(), v);
+                    }
+                    if let Some(v) = custom.remove("HTTPSPort") {
+                        custom.insert("HttpsPort".to_string(), v);
+                    }
+                }
+                serde_json::from_value::<Origin>(patched)
+                    .map_err(|e| format!("Invalid Origin entry: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if origin_entries.is_empty() {
+            return Err("DistributionConfig.Origins must contain at least one origin".to_string());
+        }
+        let origins = Origins {
+            quantity: origin_entries.len() as i32,
+            items: Some(OriginItems {
+                origin: origin_entries,
+            }),
+        };
+
+        let dcb_value = cfg
+            .get("DefaultCacheBehavior")
+            .ok_or_else(|| "DistributionConfig.DefaultCacheBehavior is required".to_string())?;
+        let default_cache_behavior: DefaultCacheBehavior =
+            serde_json::from_value(dcb_value.clone())
+                .map_err(|e| format!("Invalid DefaultCacheBehavior: {e}"))?;
+
+        let comment = cfg
+            .get("Comment")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let enabled = cfg.get("Enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let price_class = cfg
+            .get("PriceClass")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let http_version = cfg
+            .get("HttpVersion")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let is_ipv6_enabled = cfg.get("IPV6Enabled").and_then(|v| v.as_bool());
+        let default_root_object = cfg
+            .get("DefaultRootObject")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let web_acl_id = cfg
+            .get("WebACLId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let viewer_certificate: Option<ViewerCertificate> = cfg
+            .get("ViewerCertificate")
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()
+            .map_err(|e| format!("Invalid ViewerCertificate: {e}"))?;
+
+        let caller_reference = format!("cfn-{}-{}", resource.logical_id, Uuid::new_v4().simple());
+
+        let mut config = DistributionConfig {
+            caller_reference,
+            comment,
+            enabled,
+            origins,
+            default_cache_behavior,
+            ..Default::default()
+        };
+        config.price_class = price_class;
+        config.http_version = http_version;
+        config.is_ipv6_enabled = is_ipv6_enabled;
+        config.default_root_object = default_root_object;
+        config.web_acl_id = web_acl_id;
+        config.viewer_certificate = viewer_certificate;
+
+        // Mint distribution id + ARN + domain in the same shape the
+        // CloudFront service uses.
+        let id_suffix: String = Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(13)
+            .collect::<String>()
+            .to_uppercase();
+        let id = format!("E{id_suffix}");
+        let etag_suffix: String = Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(7)
+            .collect::<String>()
+            .to_uppercase();
+        let etag = format!("E{etag_suffix}");
+        let domain_name = format!("{}.cloudfront.net", id.to_lowercase());
+        let arn = format!(
+            "arn:aws:cloudfront::{}:distribution/{}",
+            self.account_id, id
+        );
+
+        let stored = StoredDistribution {
+            id: id.clone(),
+            arn: arn.clone(),
+            // CloudFront flips this to Deployed on the first GetDistribution
+            // poll, matching the rest of the service.
+            status: "InProgress".to_string(),
+            last_modified_time: Utc::now(),
+            domain_name: domain_name.clone(),
+            in_progress_invalidation_batches: 0,
+            etag,
+            config,
+        };
+
+        let mut accounts = self.cloudfront_state.write();
+        let state = accounts.entry("000000000000");
+        state.distributions.insert(id.clone(), stored);
+        Ok(ProvisionResult::new(id.clone())
+            .with("Id", id)
+            .with("DomainName", domain_name)
+            .with("Arn", arn))
+    }
+
+    fn delete_cf_distribution(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.cloudfront_state.write();
+        let state = accounts.entry("000000000000");
+        state.distributions.remove(physical_id);
         Ok(())
     }
 

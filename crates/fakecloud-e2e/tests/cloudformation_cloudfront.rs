@@ -168,3 +168,103 @@ async fn cfn_provisions_cloudfront_resources() {
         .await;
     assert!(oai_after.is_err(), "OAI should be gone");
 }
+
+const DIST_TEMPLATE: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Dist": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Properties": {
+        "DistributionConfig": {
+          "Comment": "cfn dist",
+          "Enabled": true,
+          "PriceClass": "PriceClass_100",
+          "Origins": [{
+            "Id": "origin-1",
+            "DomainName": "origin.example.com",
+            "CustomOriginConfig": {
+              "OriginProtocolPolicy": "https-only",
+              "HTTPPort": 80,
+              "HTTPSPort": 443
+            }
+          }],
+          "DefaultCacheBehavior": {
+            "TargetOriginId": "origin-1",
+            "ViewerProtocolPolicy": "redirect-to-https"
+          }
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "DistId": {"Value": {"Ref": "Dist"}},
+    "DistDomain": {"Value": {"Fn::GetAtt": ["Dist", "DomainName"]}}
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_provisions_cloudfront_distribution() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let cf = aws_sdk_cloudfront::Client::new(&server.aws_config().await);
+
+    cfn.create_stack()
+        .stack_name("cf-dist-stack")
+        .template_body(DIST_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("cf-dist-stack")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let stack = described.stacks().first().unwrap();
+    assert_eq!(stack.stack_status().unwrap().as_str(), "CREATE_COMPLETE");
+
+    let dist_id = stack
+        .outputs()
+        .iter()
+        .find(|o| o.output_key() == Some("DistId"))
+        .and_then(|o| o.output_value())
+        .map(|s| s.to_string())
+        .expect("DistId");
+    let dist_domain = stack
+        .outputs()
+        .iter()
+        .find(|o| o.output_key() == Some("DistDomain"))
+        .and_then(|o| o.output_value())
+        .map(|s| s.to_string())
+        .expect("DistDomain");
+    assert!(dist_id.starts_with('E'));
+    assert!(dist_domain.ends_with(".cloudfront.net"));
+
+    let described = cf
+        .get_distribution()
+        .id(&dist_id)
+        .send()
+        .await
+        .expect("get_distribution");
+    let dist = described.distribution().expect("distribution");
+    let dcfg = dist.distribution_config().expect("config");
+    assert_eq!(dcfg.comment(), "cfn dist");
+    assert!(dcfg.enabled());
+    let origins = dcfg.origins().expect("origins");
+    assert_eq!(origins.quantity(), 1);
+    let first_origin = origins.items().first().expect("at least one origin");
+    assert_eq!(first_origin.id(), "origin-1");
+    assert_eq!(first_origin.domain_name(), "origin.example.com");
+    let dcb = dcfg.default_cache_behavior().expect("dcb");
+    assert_eq!(dcb.target_origin_id(), "origin-1");
+
+    cfn.delete_stack()
+        .stack_name("cf-dist-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+
+    let after = cf.get_distribution().id(&dist_id).send().await;
+    assert!(after.is_err(), "distribution should be gone");
+}
