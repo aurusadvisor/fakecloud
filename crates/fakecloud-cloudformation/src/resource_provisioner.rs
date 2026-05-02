@@ -22,7 +22,7 @@ use fakecloud_cloudfront::{
     },
     SharedCloudFrontState,
 };
-use fakecloud_cloudwatch::{AlarmState, MetricAlarm, SharedCloudWatchState};
+use fakecloud_cloudwatch::{AlarmState, Dashboard, MetricAlarm, SharedCloudWatchState};
 use fakecloud_cognito::{
     default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig, CustomDomainConfig,
     EmailConfiguration, PasswordPolicy, PoolPolicies, RecoveryOption, SchemaAttribute,
@@ -400,6 +400,7 @@ impl ResourceProvisioner {
             "AWS::KMS::Alias" => self.create_kms_alias(resource),
             "AWS::ECR::Repository" => self.create_ecr_repository(resource),
             "AWS::CloudWatch::Alarm" => self.create_cloudwatch_alarm(resource),
+            "AWS::CloudWatch::Dashboard" => self.create_cloudwatch_dashboard(resource),
             "AWS::ElasticLoadBalancingV2::LoadBalancer" => {
                 self.create_elbv2_load_balancer(resource)
             }
@@ -567,6 +568,7 @@ impl ResourceProvisioner {
             "AWS::KMS::Alias" => self.delete_kms_alias(&resource.physical_id),
             "AWS::ECR::Repository" => self.delete_ecr_repository(&resource.physical_id),
             "AWS::CloudWatch::Alarm" => self.delete_cloudwatch_alarm(&resource.physical_id),
+            "AWS::CloudWatch::Dashboard" => self.delete_cloudwatch_dashboard(&resource.physical_id),
             "AWS::ElasticLoadBalancingV2::LoadBalancer" => {
                 self.delete_elbv2_load_balancer(&resource.physical_id)
             }
@@ -3822,6 +3824,58 @@ impl ResourceProvisioner {
         let mut accounts = self.cloudwatch_state.write();
         let state = accounts.get_or_create(&self.account_id);
         state.alarms_in_mut(&self.region).remove(physical_id);
+        Ok(())
+    }
+
+    fn create_cloudwatch_dashboard(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let dashboard_name = props
+            .get("DashboardName")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                let suffix = Uuid::new_v4().simple().to_string();
+                format!("{}-{}", resource.logical_id, &suffix[..8])
+            });
+        // CFN passes DashboardBody as a JSON string (Fn::Sub friendly).
+        let body = props
+            .get("DashboardBody")
+            .ok_or("DashboardBody is required")?;
+        let body_str = if let Some(s) = body.as_str() {
+            s.to_string()
+        } else {
+            serde_json::to_string(body).map_err(|e| format!("invalid DashboardBody: {e}"))?
+        };
+        // Validate JSON syntax to mirror real PutDashboard behavior.
+        serde_json::from_str::<serde_json::Value>(&body_str)
+            .map_err(|e| format!("DashboardBody must be valid JSON: {e}"))?;
+
+        let arn = format!(
+            "arn:aws:cloudwatch::{}:dashboard/{dashboard_name}",
+            self.account_id
+        );
+        let dashboard = Dashboard {
+            name: dashboard_name.clone(),
+            arn: arn.clone(),
+            size_bytes: body_str.len() as i64,
+            body: body_str,
+            last_modified: Utc::now(),
+        };
+
+        let mut accounts = self.cloudwatch_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.dashboards.insert(dashboard_name.clone(), dashboard);
+
+        Ok(ProvisionResult::new(dashboard_name).with("Arn", arn))
+    }
+
+    fn delete_cloudwatch_dashboard(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.cloudwatch_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.dashboards.remove(physical_id);
         Ok(())
     }
 

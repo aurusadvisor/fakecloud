@@ -9,7 +9,9 @@ use fakecloud_core::query::{
 };
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
-use crate::state::{AlarmState, MetricAlarm, MetricDatum, SharedCloudWatchState, StatisticSet};
+use crate::state::{
+    AlarmState, Dashboard, MetricAlarm, MetricDatum, SharedCloudWatchState, StatisticSet,
+};
 
 const NS: &str = "http://monitoring.amazonaws.com/doc/2010-08-01/";
 
@@ -62,6 +64,10 @@ impl AwsService for CloudWatchService {
             "DisableAlarmActions" => self.disable_alarm_actions(&req),
             "SetAlarmState" => self.set_alarm_state(&req),
             "DescribeAlarmHistory" => self.describe_alarm_history(&req),
+            "PutDashboard" => self.put_dashboard(&req),
+            "GetDashboard" => self.get_dashboard(&req),
+            "DeleteDashboards" => self.delete_dashboards(&req),
+            "ListDashboards" => self.list_dashboards(&req),
             _ => Err(AwsServiceError::action_not_implemented(
                 "monitoring",
                 &req.action,
@@ -836,6 +842,122 @@ impl CloudWatchService {
             &inner,
             &req.request_id,
         ))
+    }
+
+    fn put_dashboard(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let dashboard_name = req
+            .query_params
+            .get("DashboardName")
+            .ok_or_else(|| invalid_param("DashboardName is required"))?
+            .clone();
+        let body = req
+            .query_params
+            .get("DashboardBody")
+            .ok_or_else(|| invalid_param("DashboardBody is required"))?
+            .clone();
+        // AWS validates that DashboardBody parses as JSON; we do the same so
+        // bad bodies surface a useful error before persisting.
+        if serde_json::from_str::<serde_json::Value>(&body).is_err() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterInput",
+                "DashboardBody must be a valid JSON object",
+            ));
+        }
+        let arn = format!(
+            "arn:aws:cloudwatch::{}:dashboard/{dashboard_name}",
+            req.account_id
+        );
+        let dashboard = Dashboard {
+            name: dashboard_name.clone(),
+            arn,
+            size_bytes: body.len() as i64,
+            body,
+            last_modified: Utc::now(),
+        };
+        let mut state = self.state.write();
+        let acct = state.get_or_create(&req.account_id);
+        acct.dashboards.insert(dashboard_name, dashboard);
+        // PutDashboard returns DashboardValidationMessages — empty when the
+        // body parses cleanly.
+        let inner = String::from("<DashboardValidationMessages/>");
+        Ok(xml_response("PutDashboard", &inner, &req.request_id))
+    }
+
+    fn get_dashboard(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let name = req
+            .query_params
+            .get("DashboardName")
+            .ok_or_else(|| invalid_param("DashboardName is required"))?
+            .clone();
+        let state = self.state.read();
+        let dashboard = state
+            .get(&req.account_id)
+            .and_then(|a| a.dashboards.get(&name))
+            .cloned()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFound",
+                    format!("Dashboard {name} does not exist"),
+                )
+            })?;
+        let inner = format!(
+            "<DashboardArn>{}</DashboardArn><DashboardBody>{}</DashboardBody><DashboardName>{}</DashboardName>",
+            xml_escape(&dashboard.arn),
+            xml_escape(&dashboard.body),
+            xml_escape(&dashboard.name),
+        );
+        Ok(xml_response("GetDashboard", &inner, &req.request_id))
+    }
+
+    fn delete_dashboards(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let mut names: Vec<String> = Vec::new();
+        for (k, v) in req.query_params.iter() {
+            if k.starts_with("DashboardNames.member.") {
+                names.push(v.clone());
+            }
+        }
+        if names.is_empty() {
+            return Err(invalid_param(
+                "DashboardNames must contain at least one name",
+            ));
+        }
+        let mut state = self.state.write();
+        let acct = state.get_or_create(&req.account_id);
+        for n in names {
+            acct.dashboards.remove(&n);
+        }
+        Ok(empty_metadata_response("DeleteDashboards", &req.request_id))
+    }
+
+    fn list_dashboards(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let prefix = req.query_params.get("DashboardNamePrefix").cloned();
+        let state = self.state.read();
+        let dashboards: Vec<Dashboard> = state
+            .get(&req.account_id)
+            .map(|a| {
+                a.dashboards
+                    .values()
+                    .filter(|d| prefix.as_ref().is_none_or(|p| d.name.starts_with(p)))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut entries = String::new();
+        for d in &dashboards {
+            entries.push_str("<member>");
+            entries.push_str(&format!(
+                "<DashboardArn>{}</DashboardArn><DashboardName>{}</DashboardName><LastModified>{}</LastModified><Size>{}</Size>",
+                xml_escape(&d.arn),
+                xml_escape(&d.name),
+                d.last_modified.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                d.size_bytes,
+            ));
+            entries.push_str("</member>");
+        }
+        let inner = format!("<DashboardEntries>{entries}</DashboardEntries>");
+        Ok(xml_response("ListDashboards", &inner, &req.request_id))
     }
 }
 
