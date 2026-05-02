@@ -108,6 +108,20 @@ pub trait SqsDelivery: Send + Sync {
 /// Trait for publishing messages to SNS topics.
 pub trait SnsDelivery: Send + Sync {
     fn publish_to_topic(&self, topic_arn: &str, message: &str, subject: Option<&str>);
+
+    /// Publish to a FIFO SNS topic carrying the message group/dedup IDs
+    /// that downstream SQS subscribers need for ordering. Default impl
+    /// drops the IDs so non-FIFO callers don't have to override.
+    fn publish_to_topic_fifo(
+        &self,
+        topic_arn: &str,
+        message: &str,
+        subject: Option<&str>,
+        _message_group_id: Option<&str>,
+        _message_dedup_id: Option<&str>,
+    ) {
+        self.publish_to_topic(topic_arn, message, subject);
+    }
 }
 
 /// Trait for putting events onto an EventBridge bus from cross-service integrations.

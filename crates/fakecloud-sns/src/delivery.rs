@@ -19,8 +19,15 @@ impl SnsDeliveryImpl {
     }
 }
 
-impl SnsDelivery for SnsDeliveryImpl {
-    fn publish_to_topic(&self, topic_arn: &str, message: &str, subject: Option<&str>) {
+impl SnsDeliveryImpl {
+    fn fan_out(
+        &self,
+        topic_arn: &str,
+        message: &str,
+        subject: Option<&str>,
+        message_group_id: Option<&str>,
+        message_dedup_id: Option<&str>,
+    ) {
         let mut accounts = self.state.write();
 
         // Parse account from topic ARN (arn:aws:sns:region:ACCOUNT:name)
@@ -34,50 +41,29 @@ impl SnsDelivery for SnsDeliveryImpl {
         }
 
         let msg_id = uuid::Uuid::new_v4().to_string();
+        let attrs: BTreeMap<String, crate::state::MessageAttribute> = BTreeMap::new();
         state.published.push(PublishedMessage {
             message_id: msg_id.clone(),
             topic_arn: topic_arn.to_string(),
             message: message.to_string(),
             subject: subject.map(|s| s.to_string()),
-            message_attributes: BTreeMap::new(),
-            message_group_id: None,
-            message_dedup_id: None,
+            message_attributes: attrs.clone(),
+            message_group_id: message_group_id.map(|s| s.to_string()),
+            message_dedup_id: message_dedup_id.map(|s| s.to_string()),
             timestamp: Utc::now(),
         });
 
-        // Fan out to SQS subscribers
-        let sqs_subscribers: Vec<String> = state
-            .subscriptions
-            .values()
-            .filter(|s| s.topic_arn == topic_arn && s.protocol == "sqs" && s.confirmed)
-            .map(|s| s.endpoint.clone())
-            .collect();
+        // Reuse the same subscriber-collection helper the direct
+        // publish() path uses, so filter-policy + confirmation logic is
+        // shared instead of duplicated.
+        let subscribers =
+            crate::service::collect_topic_subscribers(state, topic_arn, &attrs, message);
 
-        // Collect Lambda, email, and SMS subscribers
-        let lambda_subscribers: Vec<(String, String)> = state
-            .subscriptions
-            .values()
-            .filter(|s| s.topic_arn == topic_arn && s.protocol == "lambda" && s.confirmed)
-            .map(|s| (s.endpoint.clone(), s.subscription_arn.clone()))
-            .collect();
-
-        let email_subscribers: Vec<String> = state
-            .subscriptions
-            .values()
-            .filter(|s| {
-                s.topic_arn == topic_arn
-                    && (s.protocol == "email" || s.protocol == "email-json")
-                    && s.confirmed
-            })
-            .map(|s| s.endpoint.clone())
-            .collect();
-
-        let sms_subscribers: Vec<String> = state
-            .subscriptions
-            .values()
-            .filter(|s| s.topic_arn == topic_arn && s.protocol == "sms" && s.confirmed)
-            .map(|s| s.endpoint.clone())
-            .collect();
+        let sqs_subscribers: Vec<(String, bool)> = subscribers.sqs.clone();
+        let lambda_subscribers: Vec<(String, String)> = subscribers.lambda.clone();
+        let email_subscribers: Vec<String> = subscribers.email.clone();
+        let sms_subscribers: Vec<String> = subscribers.sms.clone();
+        let http_subscribers: Vec<crate::service::HttpSubscriber> = subscribers.http.clone();
 
         let endpoint = state.endpoint.clone();
 
@@ -180,9 +166,62 @@ impl SnsDelivery for SnsDeliveryImpl {
         );
         let envelope_str = serde_json::Value::Object(envelope_map).to_string();
 
-        for queue_arn in sqs_subscribers {
-            self.delivery
-                .send_to_sqs(&queue_arn, &envelope_str, &HashMap::new());
+        for (queue_arn, _raw) in sqs_subscribers {
+            self.delivery.send_to_sqs_with_attrs(
+                &queue_arn,
+                &envelope_str,
+                &HashMap::new(),
+                message_group_id,
+                message_dedup_id,
+            );
+        }
+
+        // HTTP/HTTPS subscribers honour DeliveryPolicy + RedrivePolicy
+        // exactly like the direct publish() path.
+        for sub in http_subscribers {
+            let body = envelope_str.clone();
+            let topic = topic_arn.to_string();
+            let delivery = self.delivery.clone();
+            tokio::spawn(async move {
+                let policy =
+                    crate::service::parse_http_delivery_policy(sub.delivery_policy.as_deref());
+                let client = reqwest::Client::new();
+                let mut last_err: Option<String> = None;
+                let attempts = policy.num_retries.saturating_add(1);
+                for attempt in 0..attempts {
+                    if attempt > 0 {
+                        let delay_ms = crate::service::retry_delay_ms(&policy, attempt);
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    let resp = client
+                        .post(&sub.endpoint)
+                        .header("Content-Type", "application/json")
+                        .header("x-amz-sns-message-type", "Notification")
+                        .header("x-amz-sns-topic-arn", &topic)
+                        .header("x-amz-sns-subscription-arn", &sub.subscription_arn)
+                        .body(body.clone())
+                        .send()
+                        .await;
+                    match resp {
+                        Ok(r) if r.status().is_success() => return,
+                        Ok(r) => last_err = Some(format!("HTTP {}", r.status())),
+                        Err(e) => last_err = Some(e.to_string()),
+                    }
+                }
+                let err = last_err.unwrap_or_else(|| "unknown".to_string());
+                tracing::warn!(
+                    endpoint = %sub.endpoint,
+                    error = %err,
+                    "SNS cross-service HTTP delivery exhausted retries"
+                );
+                if let Some(dlq_arn) =
+                    crate::service::parse_redrive_dlq(sub.redrive_policy.as_deref())
+                {
+                    let dlq_body =
+                        crate::service::build_dlq_envelope(&body, &err, &sub.subscription_arn);
+                    delivery.send_to_sqs(&dlq_arn, &dlq_body, &HashMap::new());
+                }
+            });
         }
 
         // Invoke Lambda subscribers via container runtime
@@ -218,6 +257,29 @@ impl SnsDelivery for SnsDeliveryImpl {
                 }
             });
         }
+    }
+}
+
+impl SnsDelivery for SnsDeliveryImpl {
+    fn publish_to_topic(&self, topic_arn: &str, message: &str, subject: Option<&str>) {
+        self.fan_out(topic_arn, message, subject, None, None);
+    }
+
+    fn publish_to_topic_fifo(
+        &self,
+        topic_arn: &str,
+        message: &str,
+        subject: Option<&str>,
+        message_group_id: Option<&str>,
+        message_dedup_id: Option<&str>,
+    ) {
+        self.fan_out(
+            topic_arn,
+            message,
+            subject,
+            message_group_id,
+            message_dedup_id,
+        );
     }
 }
 
