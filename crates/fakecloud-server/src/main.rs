@@ -734,6 +734,7 @@ async fn main() {
             ecs: ecs_state.clone(),
             acm: acm_state.clone(),
             elasticache: elasticache_state.clone(),
+            route53: route53_state.clone(),
             delivery: delivery_for_cf,
         },
     );
