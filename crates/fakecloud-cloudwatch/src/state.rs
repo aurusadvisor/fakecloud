@@ -35,6 +35,19 @@ pub struct CloudWatchState {
     pub metrics: BTreeMap<String, BTreeMap<String, Vec<MetricDatum>>>,
     /// region -> alarm_name -> MetricAlarm
     pub alarms: BTreeMap<String, BTreeMap<String, MetricAlarm>>,
+    /// Dashboards keyed by name (CloudWatch dashboards are global per
+    /// account, not regional).
+    #[serde(default)]
+    pub dashboards: BTreeMap<String, Dashboard>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dashboard {
+    pub name: String,
+    pub arn: String,
+    pub body: String,
+    pub last_modified: DateTime<Utc>,
+    pub size_bytes: i64,
 }
 
 impl CloudWatchState {
@@ -43,6 +56,7 @@ impl CloudWatchState {
             account_id: account_id.to_string(),
             metrics: BTreeMap::new(),
             alarms: BTreeMap::new(),
+            dashboards: BTreeMap::new(),
         }
     }
 
