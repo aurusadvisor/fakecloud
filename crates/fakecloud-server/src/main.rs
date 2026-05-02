@@ -499,9 +499,13 @@ async fn main() {
         fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
     let kinesis_delivery_for_dynamodb =
         fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
+    let s3_delivery_for_logs = Arc::new(fakecloud_s3::delivery::S3DeliveryImpl::new(
+        s3_state.clone(),
+    ));
     let mut delivery_for_logs = DeliveryBus::new()
         .with_sqs(sqs_delivery.clone())
-        .with_kinesis(kinesis_delivery);
+        .with_kinesis(kinesis_delivery)
+        .with_s3(s3_delivery_for_logs);
     if let Some(ref ld) = lambda_delivery {
         delivery_for_logs = delivery_for_logs.with_lambda(ld.clone());
     }

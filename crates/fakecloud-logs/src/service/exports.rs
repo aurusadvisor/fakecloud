@@ -77,32 +77,54 @@ impl LogsService {
             ("RUNNING".to_string(), "Task is running".to_string())
         };
 
-        // Collect matching events and write to export storage
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        if from_time < to_time {
-            if let Some(group) = state.log_groups.get(&log_group_name) {
-                let mut exported_lines: Vec<String> = Vec::new();
-                for (stream_name, stream) in &group.log_streams {
-                    // Apply stream name prefix filter if provided
-                    if let Some(ref prefix) = log_stream_name_prefix {
-                        if !stream_name.starts_with(prefix.as_str()) {
-                            continue;
+        // Collect matching events. Render the export payload, then
+        // write it to the destination S3 bucket via the delivery bus
+        // so DescribeLogGroups callers can verify content via real
+        // S3 GetObject. Falls back to the internal export_storage map
+        // when no S3 writer is wired (in-process tests).
+        let mut exported_lines: Vec<String> = Vec::new();
+        {
+            let accounts = self.state.read();
+            let empty = crate::state::LogsState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            if from_time < to_time {
+                if let Some(group) = state.log_groups.get(&log_group_name) {
+                    for (stream_name, stream) in &group.log_streams {
+                        if let Some(ref prefix) = log_stream_name_prefix {
+                            if !stream_name.starts_with(prefix.as_str()) {
+                                continue;
+                            }
                         }
-                    }
-                    for event in &stream.events {
-                        if event.timestamp >= from_time && event.timestamp < to_time {
-                            exported_lines.push(event.message.clone());
+                        for event in &stream.events {
+                            if event.timestamp >= from_time && event.timestamp < to_time {
+                                exported_lines.push(event.message.clone());
+                            }
                         }
                     }
                 }
-                if !exported_lines.is_empty() {
-                    let export_key = format!(
+            }
+        }
+
+        let s3_key = format!("{destination_prefix}/{log_group_name}/{task_id}");
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if from_time < to_time && !exported_lines.is_empty() {
+            let data = exported_lines.join("\n");
+            let body = data.into_bytes();
+            match self.delivery_bus.put_object_to_s3(
+                &req.account_id,
+                &destination,
+                &s3_key,
+                body.clone(),
+                Some("text/plain"),
+            ) {
+                Ok(()) => {}
+                Err(_) => {
+                    let fallback_key = format!(
                         "{}/{}/{}/{}",
                         destination, destination_prefix, log_group_name, task_id
                     );
-                    let data = exported_lines.join("\n");
-                    state.export_storage.insert(export_key, data.into_bytes());
+                    state.export_storage.insert(fallback_key, body);
                 }
             }
         }
