@@ -47,7 +47,7 @@ use fakecloud_elbv2::{
     Tag as ElbTag, TargetGroup, TargetGroupTuple,
 };
 use fakecloud_eventbridge::{
-    ApiDestination, Archive, Connection, EventRule, SharedEventBridgeState,
+    ApiDestination, Archive, Connection, Endpoint, EventBus, EventRule, SharedEventBridgeState,
 };
 use fakecloud_iam::{
     IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy, IamRole, IamUser, PolicyVersion,
@@ -368,6 +368,9 @@ impl ResourceProvisioner {
             "AWS::Events::Connection" => self.create_eventbridge_connection(resource),
             "AWS::Events::ApiDestination" => self.create_eventbridge_api_destination(resource),
             "AWS::Events::Archive" => self.create_eventbridge_archive(resource),
+            "AWS::Events::EventBus" => self.create_eventbridge_event_bus(resource),
+            "AWS::Events::EventBusPolicy" => self.create_eventbridge_event_bus_policy(resource),
+            "AWS::Events::Endpoint" => self.create_eventbridge_endpoint(resource),
             "AWS::DynamoDB::Table" => self.create_dynamodb_table(resource),
             "AWS::Logs::LogGroup" => self.create_log_group(resource),
             "AWS::Logs::LogStream" => self.create_log_stream(resource),
@@ -506,6 +509,11 @@ impl ResourceProvisioner {
             "AWS::S3::Bucket" => self.delete_s3_bucket(&resource.physical_id),
             "AWS::Events::Rule" => self.delete_eventbridge_rule(&resource.physical_id),
             "AWS::Events::Connection" => self.delete_eventbridge_connection(&resource.physical_id),
+            "AWS::Events::EventBus" => self.delete_eventbridge_event_bus(&resource.physical_id),
+            "AWS::Events::EventBusPolicy" => {
+                self.delete_eventbridge_event_bus_policy(&resource.physical_id)
+            }
+            "AWS::Events::Endpoint" => self.delete_eventbridge_endpoint(&resource.physical_id),
             "AWS::Events::ApiDestination" => {
                 self.delete_eventbridge_api_destination(&resource.physical_id)
             }
@@ -1845,6 +1853,224 @@ impl ResourceProvisioner {
         let mut eb_accounts = self.eventbridge_state.write();
         let state = eb_accounts.get_or_create(&self.account_id);
         state.archives.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_eventbridge_event_bus(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let kms_key_identifier = props
+            .get("KmsKeyIdentifier")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let dead_letter_config = props.get("DeadLetterConfig").cloned();
+        let policy = props.get("Policy").cloned();
+        let arn = format!(
+            "arn:aws:events:{}:{}:event-bus/{name}",
+            self.region, self.account_id
+        );
+        let now = Utc::now();
+        let bus = EventBus {
+            name: name.clone(),
+            arn: arn.clone(),
+            tags: BTreeMap::new(),
+            policy,
+            description,
+            kms_key_identifier,
+            dead_letter_config,
+            creation_time: now,
+            last_modified_time: now,
+        };
+
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        state.buses.insert(name.clone(), bus);
+
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn delete_eventbridge_event_bus(&self, physical_id: &str) -> Result<(), String> {
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        // The default bus is reserved; refuse to delete it.
+        if physical_id == "default" {
+            return Ok(());
+        }
+        state.buses.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_eventbridge_event_bus_policy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let bus_name = props
+            .get("EventBusName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .to_string();
+        // Statement is the v2 shape; the older v1 shape has Action+Principal+
+        // StatementId; both ultimately end up as a single statement on the bus
+        // policy. We accept either form.
+        let statement = if let Some(s) = props.get("Statement") {
+            s.clone()
+        } else {
+            let sid = props
+                .get("Sid")
+                .or_else(|| props.get("StatementId"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let action = props
+                .get("Action")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let principal = props.get("Principal").cloned();
+            let condition = props.get("Condition").cloned();
+            let mut obj = serde_json::json!({
+                "Effect": "Allow",
+                "Resource": format!(
+                    "arn:aws:events:{}:{}:event-bus/{bus_name}",
+                    self.region, self.account_id
+                ),
+            });
+            if let (Some(sid), Some(obj)) = (sid, obj.as_object_mut()) {
+                obj.insert("Sid".to_string(), serde_json::Value::String(sid));
+            }
+            if let (Some(action), Some(obj)) = (action, obj.as_object_mut()) {
+                obj.insert("Action".to_string(), serde_json::Value::String(action));
+            }
+            if let (Some(principal), Some(obj)) = (principal, obj.as_object_mut()) {
+                obj.insert("Principal".to_string(), principal);
+            }
+            if let (Some(condition), Some(obj)) = (condition, obj.as_object_mut()) {
+                obj.insert("Condition".to_string(), condition);
+            }
+            obj
+        };
+
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        let bus = state
+            .buses
+            .get_mut(&bus_name)
+            .ok_or_else(|| format!("EventBus {bus_name} not yet provisioned"))?;
+        // Append to the existing policy's Statement array, or create one.
+        match bus.policy.as_mut() {
+            Some(serde_json::Value::Object(obj)) => {
+                if let Some(serde_json::Value::Array(arr)) = obj.get_mut("Statement") {
+                    arr.push(statement);
+                } else {
+                    obj.insert(
+                        "Statement".to_string(),
+                        serde_json::Value::Array(vec![statement]),
+                    );
+                }
+            }
+            _ => {
+                bus.policy = Some(serde_json::json!({
+                    "Version": "2012-10-17",
+                    "Statement": [statement],
+                }));
+            }
+        }
+
+        // Physical id encodes the bus name + a synthetic id so delete locates the
+        // entry even when the user never sets Sid/StatementId.
+        let pid = format!("{bus_name}|{}", Uuid::new_v4().simple());
+        Ok(ProvisionResult::new(pid))
+    }
+
+    fn delete_eventbridge_event_bus_policy(&self, physical_id: &str) -> Result<(), String> {
+        let bus_name = physical_id
+            .split_once('|')
+            .map(|(b, _)| b.to_string())
+            .unwrap_or_else(|| "default".to_string());
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        if let Some(bus) = state.buses.get_mut(&bus_name) {
+            bus.policy = None;
+        }
+        Ok(())
+    }
+
+    fn create_eventbridge_endpoint(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let routing_config = props
+            .get("RoutingConfig")
+            .cloned()
+            .ok_or("RoutingConfig is required")?;
+        let replication_config = props.get("ReplicationConfig").cloned();
+        let event_buses = props
+            .get("EventBuses")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let role_arn = props
+            .get("RoleArn")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let endpoint_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+        let arn = format!(
+            "arn:aws:events:{}:{}:endpoint/{name}",
+            self.region, self.account_id
+        );
+        let endpoint_url = format!("https://{endpoint_id}.endpoint.events.amazonaws.com");
+        let now = Utc::now();
+        let endpoint = Endpoint {
+            name: name.clone(),
+            arn: arn.clone(),
+            endpoint_id: endpoint_id.clone(),
+            endpoint_url: Some(endpoint_url.clone()),
+            description,
+            routing_config,
+            replication_config,
+            event_buses,
+            role_arn,
+            state: "ACTIVE".to_string(),
+            creation_time: now,
+            last_modified_time: now,
+        };
+
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        state.endpoints.insert(name.clone(), endpoint);
+
+        Ok(ProvisionResult::new(name)
+            .with("Arn", arn)
+            .with("EndpointId", endpoint_id)
+            .with("EndpointUrl", endpoint_url)
+            .with("State", "ACTIVE"))
+    }
+
+    fn delete_eventbridge_endpoint(&self, physical_id: &str) -> Result<(), String> {
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        state.endpoints.remove(physical_id);
         Ok(())
     }
 
