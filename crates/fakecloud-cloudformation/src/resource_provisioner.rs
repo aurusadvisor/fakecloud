@@ -51,8 +51,9 @@ use fakecloud_ecs::{
     SharedEcsState, TagEntry as EcsTagEntry, TaskDefinition as EcsTaskDefinition,
 };
 use fakecloud_elasticache::{
-    CacheParameterGroup, CacheSecurityGroup, CacheSubnetGroup, ElastiCacheUser as EcUser,
-    ElastiCacheUserGroup as EcUserGroup, SharedElastiCacheState,
+    CacheCluster as EcCacheCluster, CacheParameterGroup, CacheSecurityGroup, CacheSubnetGroup,
+    ElastiCacheUser as EcUser, ElastiCacheUserGroup as EcUserGroup,
+    ReplicationGroup as EcReplicationGroup, SharedElastiCacheState,
 };
 use fakecloud_elbv2::{
     Action as ElbAction, Listener, LoadBalancer, Rule as ElbRule, RuleCondition, SharedElbv2State,
@@ -461,6 +462,8 @@ impl ResourceProvisioner {
             "AWS::ElastiCache::SecurityGroup" => self.create_ec_security_group(resource),
             "AWS::ElastiCache::User" => self.create_ec_user(resource),
             "AWS::ElastiCache::UserGroup" => self.create_ec_user_group(resource),
+            "AWS::ElastiCache::CacheCluster" => self.create_ec_cache_cluster(resource),
+            "AWS::ElastiCache::ReplicationGroup" => self.create_ec_replication_group(resource),
             "AWS::Route53::HostedZone" => self.create_route53_hosted_zone(resource),
             "AWS::Route53::RecordSet" => self.create_route53_record_set(resource),
             "AWS::Route53::HealthCheck" => self.create_route53_health_check(resource),
@@ -700,6 +703,10 @@ impl ResourceProvisioner {
             }
             "AWS::ElastiCache::User" => self.delete_ec_user(&resource.physical_id),
             "AWS::ElastiCache::UserGroup" => self.delete_ec_user_group(&resource.physical_id),
+            "AWS::ElastiCache::CacheCluster" => self.delete_ec_cache_cluster(&resource.physical_id),
+            "AWS::ElastiCache::ReplicationGroup" => {
+                self.delete_ec_replication_group(&resource.physical_id)
+            }
             "AWS::Route53::HostedZone" => self.delete_route53_hosted_zone(&resource.physical_id),
             "AWS::Route53::RecordSet" => {
                 self.delete_route53_record_set(&resource.physical_id, &resource.attributes)
@@ -7037,6 +7044,286 @@ impl ResourceProvisioner {
         let mut accounts = self.elasticache_state.write();
         let state = accounts.get_or_create(&self.account_id);
         state.user_groups.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_ec_cache_cluster(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = props
+            .get("ClusterName")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| format!("cfn-cc-{}", resource.logical_id.to_lowercase()));
+        let cache_node_type = props
+            .get("CacheNodeType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("cache.t4g.micro")
+            .to_string();
+        let engine = props
+            .get("Engine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("redis")
+            .to_string();
+        let engine_version = props
+            .get("EngineVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("7.1")
+            .to_string();
+        let num_cache_nodes = props
+            .get("NumCacheNodes")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32)
+            .unwrap_or(1);
+        let preferred_az = props
+            .get("PreferredAvailabilityZone")
+            .and_then(|v| v.as_str())
+            .unwrap_or("us-east-1a")
+            .to_string();
+        let cache_subnet_group_name = props
+            .get("CacheSubnetGroupName")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let auto_minor_version_upgrade = props
+            .get("AutoMinorVersionUpgrade")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let port = props
+            .get("Port")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as u16)
+            .unwrap_or(6379);
+
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let arn = format!(
+            "arn:aws:elasticache:{}:{}:cluster:{}",
+            state.region, state.account_id, id
+        );
+        let endpoint_address = format!("{id}.fakecloud.{}.cache.amazonaws.com", state.region);
+        let cluster = EcCacheCluster {
+            cache_cluster_id: id.clone(),
+            cache_node_type,
+            engine,
+            engine_version,
+            cache_cluster_status: "available".to_string(),
+            num_cache_nodes,
+            preferred_availability_zone: preferred_az,
+            cache_subnet_group_name,
+            auto_minor_version_upgrade,
+            arn: arn.clone(),
+            created_at: Utc::now().to_rfc3339(),
+            endpoint_address: endpoint_address.clone(),
+            endpoint_port: port,
+            container_id: String::new(),
+            host_port: 0,
+            replication_group_id: None,
+        };
+        state.cache_clusters.insert(id.clone(), cluster);
+        Ok(ProvisionResult::new(id.clone())
+            .with("Arn", arn)
+            .with("RedisEndpoint.Address", endpoint_address.clone())
+            .with("RedisEndpoint.Port", port.to_string())
+            .with("ConfigurationEndpoint.Address", endpoint_address)
+            .with("ConfigurationEndpoint.Port", port.to_string()))
+    }
+
+    fn delete_ec_cache_cluster(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.cache_clusters.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_ec_replication_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = props
+            .get("ReplicationGroupId")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| format!("cfn-rg-{}", resource.logical_id.to_lowercase()));
+        let description = props
+            .get("ReplicationGroupDescription")
+            .and_then(|v| v.as_str())
+            .unwrap_or("CFN-provisioned replication group")
+            .to_string();
+        let cache_node_type = props
+            .get("CacheNodeType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("cache.t4g.micro")
+            .to_string();
+        let engine = props
+            .get("Engine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("redis")
+            .to_string();
+        let engine_version = props
+            .get("EngineVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("7.1")
+            .to_string();
+        let num_cache_clusters = props
+            .get("NumCacheClusters")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32)
+            .unwrap_or(1);
+        let num_node_groups = props
+            .get("NumNodeGroups")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32)
+            .unwrap_or(0);
+        let replicas_per_node_group = props
+            .get("ReplicasPerNodeGroup")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32);
+        let automatic_failover_enabled = props
+            .get("AutomaticFailoverEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let multi_az_enabled = props
+            .get("MultiAZEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let transit_encryption_enabled = props
+            .get("TransitEncryptionEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let at_rest_encryption_enabled = props
+            .get("AtRestEncryptionEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let kms_key_id = props
+            .get("KmsKeyId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let auth_token_enabled = props
+            .get("AuthToken")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some();
+        let user_group_ids: Vec<String> = props
+            .get("UserGroupIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let snapshot_retention_limit = props
+            .get("SnapshotRetentionLimit")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32)
+            .unwrap_or(0);
+        let snapshot_window = props
+            .get("SnapshotWindow")
+            .and_then(|v| v.as_str())
+            .unwrap_or("00:00-01:00")
+            .to_string();
+        let port = props
+            .get("Port")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as u16)
+            .unwrap_or(6379);
+        let cluster_enabled = num_node_groups > 1
+            || props
+                .get("ClusterEnabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let arn = format!(
+            "arn:aws:elasticache:{}:{}:replicationgroup:{}",
+            state.region, state.account_id, id
+        );
+        let endpoint_address = format!(
+            "{id}.fakecloud.ng.0001.{}.cache.amazonaws.com",
+            state.region
+        );
+        let configuration_endpoint = if cluster_enabled {
+            Some(format!(
+                "{id}.fakecloud.cfg.{}.cache.amazonaws.com",
+                state.region
+            ))
+        } else {
+            None
+        };
+
+        let group = EcReplicationGroup {
+            replication_group_id: id.clone(),
+            description,
+            global_replication_group_id: None,
+            global_replication_group_role: None,
+            status: "available".to_string(),
+            cache_node_type,
+            engine,
+            engine_version,
+            num_cache_clusters,
+            automatic_failover_enabled,
+            endpoint_address: endpoint_address.clone(),
+            endpoint_port: port,
+            arn: arn.clone(),
+            created_at: Utc::now().to_rfc3339(),
+            container_id: String::new(),
+            host_port: 0,
+            member_clusters: Vec::new(),
+            snapshot_retention_limit,
+            snapshot_window,
+            transit_encryption_enabled,
+            at_rest_encryption_enabled,
+            cluster_enabled,
+            kms_key_id,
+            auth_token_enabled,
+            user_group_ids,
+            multi_az_enabled,
+            log_delivery_configurations: Vec::new(),
+            data_tiering: props
+                .get("DataTieringEnabled")
+                .and_then(|v| v.as_bool())
+                .map(|b| if b { "enabled" } else { "disabled" }.to_string()),
+            ip_discovery: props
+                .get("IpDiscovery")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            network_type: props
+                .get("NetworkType")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            transit_encryption_mode: props
+                .get("TransitEncryptionMode")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            num_node_groups,
+            configuration_endpoint_address: configuration_endpoint.clone(),
+            configuration_endpoint_port: configuration_endpoint.as_ref().map(|_| port),
+            replicas_per_node_group,
+        };
+        state.replication_groups.insert(id.clone(), group);
+
+        let mut result = ProvisionResult::new(id.clone())
+            .with("Arn", arn)
+            .with("PrimaryEndPoint.Address", endpoint_address.clone())
+            .with("PrimaryEndPoint.Port", port.to_string())
+            .with("ReadEndPoint.Addresses", endpoint_address.clone())
+            .with("ReadEndPoint.Ports", port.to_string());
+        if let Some(cfg) = configuration_endpoint {
+            result = result
+                .with("ConfigurationEndPoint.Address", cfg)
+                .with("ConfigurationEndPoint.Port", port.to_string());
+        }
+        Ok(result)
+    }
+
+    fn delete_ec_replication_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.replication_groups.remove(physical_id);
         Ok(())
     }
 
