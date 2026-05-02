@@ -10,6 +10,7 @@
 //! IDs so SDK callers can chain operations (e.g., `CreateChangeSet`
 //! -> `DescribeChangeSet` -> `ExecuteChangeSet`).
 
+use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -19,6 +20,7 @@ use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::CloudFormationService;
+use crate::template;
 
 const NS: &str = "http://cloudformation.amazonaws.com/doc/2010-05-15/";
 
@@ -106,6 +108,119 @@ impl CloudFormationService {
             "CreateChangeSet" => {
                 let stack_name = params.get("StackName").ok_or_else(|| missing("StackName"))?.clone();
                 let cs_name = params.get("ChangeSetName").ok_or_else(|| missing("ChangeSetName"))?.clone();
+                let template_body = params.get("TemplateBody").cloned().unwrap_or_default();
+
+                let cs_params = CloudFormationService::extract_parameters(&params);
+                let cs_tags = CloudFormationService::extract_tags(&params);
+                let cs_notif = CloudFormationService::extract_notification_arns(&params);
+
+                // Locate target stack (if any) so existing resources can drive
+                // the diff. If absent the change set is treated as CREATE-type
+                // and every resource is reported as Add.
+                let stack_lookup: Option<(String, Vec<crate::state::StackResource>)> = {
+                    let accounts = self.state.read();
+                    accounts.get(&aid).and_then(|s| {
+                        s.stacks
+                            .values()
+                            .find(|st| {
+                                (st.name == stack_name || st.stack_id == stack_name)
+                                    && st.status != "DELETE_COMPLETE"
+                            })
+                            .map(|st| (st.stack_id.clone(), st.resources.clone()))
+                    })
+                };
+
+                // Seed pseudo-parameters before parsing so Refs to AWS::*
+                // resolve like they do during real CreateStack/UpdateStack.
+                let mut full_params: BTreeMap<String, String> = cs_params.clone();
+                full_params
+                    .entry("AWS::Region".to_string())
+                    .or_insert_with(|| req.region.clone());
+                full_params
+                    .entry("AWS::AccountId".to_string())
+                    .or_insert_with(|| aid.clone());
+                full_params
+                    .entry("AWS::StackName".to_string())
+                    .or_insert_with(|| stack_name.clone());
+                full_params
+                    .entry("AWS::Partition".to_string())
+                    .or_insert_with(|| "aws".to_string());
+                full_params
+                    .entry("AWS::URLSuffix".to_string())
+                    .or_insert_with(|| "amazonaws.com".to_string());
+                if let Some((sid, _)) = &stack_lookup {
+                    full_params
+                        .entry("AWS::StackId".to_string())
+                        .or_insert_with(|| sid.clone());
+                }
+
+                let parsed =
+                    template::parse_template(&template_body, &full_params).map_err(|e| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ValidationError",
+                            e,
+                        )
+                    })?;
+
+                let existing_resources = stack_lookup
+                    .as_ref()
+                    .map(|(_, r)| r.clone())
+                    .unwrap_or_default();
+                let existing_by_id: BTreeMap<&str, &crate::state::StackResource> =
+                    existing_resources
+                        .iter()
+                        .map(|r| (r.logical_id.as_str(), r))
+                        .collect();
+                let new_by_id: BTreeMap<&str, &template::ResourceDefinition> = parsed
+                    .resources
+                    .iter()
+                    .map(|r| (r.logical_id.as_str(), r))
+                    .collect();
+
+                let mut changes: Vec<Value> = Vec::new();
+                for r in &parsed.resources {
+                    if let Some(existing) = existing_by_id.get(r.logical_id.as_str()) {
+                        let replacement = if existing.resource_type != r.resource_type {
+                            "True"
+                        } else {
+                            "Conditional"
+                        };
+                        changes.push(json!({
+                            "Type": "Resource",
+                            "ResourceChange": {
+                                "Action": "Modify",
+                                "LogicalResourceId": r.logical_id,
+                                "PhysicalResourceId": existing.physical_id,
+                                "ResourceType": r.resource_type,
+                                "Replacement": replacement,
+                            }
+                        }));
+                    } else {
+                        changes.push(json!({
+                            "Type": "Resource",
+                            "ResourceChange": {
+                                "Action": "Add",
+                                "LogicalResourceId": r.logical_id,
+                                "ResourceType": r.resource_type,
+                            }
+                        }));
+                    }
+                }
+                for r in &existing_resources {
+                    if !new_by_id.contains_key(r.logical_id.as_str()) {
+                        changes.push(json!({
+                            "Type": "Resource",
+                            "ResourceChange": {
+                                "Action": "Remove",
+                                "LogicalResourceId": r.logical_id,
+                                "PhysicalResourceId": r.physical_id,
+                                "ResourceType": r.resource_type,
+                            }
+                        }));
+                    }
+                }
+
                 let id = Arn::new(
                     "cloudformation",
                     "us-east-1",
@@ -113,44 +228,114 @@ impl CloudFormationService {
                     &format!("changeSet/{cs_name}/{}", rand_id()),
                 )
                 .to_string();
-                let stack_id = Arn::new(
-                    "cloudformation",
-                    "us-east-1",
-                    &aid,
-                    &format!("stack/{stack_name}/{}", rand_id()),
-                )
-                .to_string();
+                let stack_id_str = stack_lookup
+                    .as_ref()
+                    .map(|(s, _)| s.clone())
+                    .unwrap_or_else(|| {
+                        Arn::new(
+                            "cloudformation",
+                            "us-east-1",
+                            &aid,
+                            &format!("stack/{stack_name}/{}", rand_id()),
+                        )
+                        .to_string()
+                    });
+
                 let entry = json!({
                     "Id": id,
                     "ChangeSetName": cs_name,
-                    "StackId": stack_id,
+                    "StackId": stack_id_str,
                     "StackName": stack_name,
                     "Status": "CREATE_COMPLETE",
                     "ExecutionStatus": "AVAILABLE",
-                    "Changes": [],
+                    "TemplateBody": template_body,
+                    "Parameters": cs_params,
+                    "Tags": cs_tags,
+                    "NotificationArns": cs_notif,
+                    "Changes": changes,
                 });
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "change_sets").insert(id.clone(), entry);
                 Ok(xml_response(
                     "CreateChangeSet",
-                    format!("    <Id>{}</Id>\n    <StackId>{}</StackId>", xml_escape(&id), xml_escape(&stack_id)),
+                    format!(
+                        "    <Id>{}</Id>\n    <StackId>{}</StackId>",
+                        xml_escape(&id),
+                        xml_escape(&stack_id_str)
+                    ),
                     &rid,
                 ))
             }
             "DescribeChangeSet" => {
                 let cs = params.get("ChangeSetName").ok_or_else(|| missing("ChangeSetName"))?.clone();
+                let stack_filter = params.get("StackName").cloned();
                 let accounts = self.state.read();
                 let entry = accounts.get(&aid)
                     .and_then(|s| s.extras.get("change_sets"))
-                    .and_then(|m| m.values().find(|v| v["Id"].as_str() == Some(&cs) || v["ChangeSetName"].as_str() == Some(&cs)))
+                    .and_then(|m| m.values().find(|v| {
+                        let id_match = v["Id"].as_str() == Some(&cs)
+                            || v["ChangeSetName"].as_str() == Some(&cs);
+                        let stack_match = stack_filter.as_deref().is_none_or(|sf| {
+                            v["StackName"].as_str() == Some(sf)
+                                || v["StackId"].as_str() == Some(sf)
+                        });
+                        id_match && stack_match
+                    }))
                     .cloned()
                     .unwrap_or_else(|| json!({"ChangeSetName": cs.clone(), "Status": "CREATE_COMPLETE", "ExecutionStatus": "AVAILABLE"}));
+                let changes_xml = entry["Changes"]
+                    .as_array()
+                    .map(|arr| {
+                        let mut out = String::new();
+                        for change in arr {
+                            let rc = &change["ResourceChange"];
+                            out.push_str("      <member>\n");
+                            out.push_str(&format!(
+                                "        <Type>{}</Type>\n",
+                                xml_escape(change["Type"].as_str().unwrap_or("Resource"))
+                            ));
+                            out.push_str("        <ResourceChange>\n");
+                            out.push_str(&format!(
+                                "          <Action>{}</Action>\n",
+                                xml_escape(rc["Action"].as_str().unwrap_or(""))
+                            ));
+                            out.push_str(&format!(
+                                "          <LogicalResourceId>{}</LogicalResourceId>\n",
+                                xml_escape(rc["LogicalResourceId"].as_str().unwrap_or(""))
+                            ));
+                            if let Some(pid) = rc["PhysicalResourceId"].as_str() {
+                                out.push_str(&format!(
+                                    "          <PhysicalResourceId>{}</PhysicalResourceId>\n",
+                                    xml_escape(pid)
+                                ));
+                            }
+                            out.push_str(&format!(
+                                "          <ResourceType>{}</ResourceType>\n",
+                                xml_escape(rc["ResourceType"].as_str().unwrap_or(""))
+                            ));
+                            if let Some(replacement) = rc["Replacement"].as_str() {
+                                out.push_str(&format!(
+                                    "          <Replacement>{}</Replacement>\n",
+                                    xml_escape(replacement)
+                                ));
+                            }
+                            out.push_str("        </ResourceChange>\n");
+                            out.push_str("      </member>");
+                            out.push('\n');
+                        }
+                        out
+                    })
+                    .unwrap_or_default();
                 let inner = format!(
-                    "    <ChangeSetName>{}</ChangeSetName>\n    <Status>{}</Status>\n    <ExecutionStatus>{}</ExecutionStatus>\n    <Changes/>",
+                    "    <ChangeSetName>{}</ChangeSetName>\n    <ChangeSetId>{}</ChangeSetId>\n    <StackId>{}</StackId>\n    <StackName>{}</StackName>\n    <Status>{}</Status>\n    <ExecutionStatus>{}</ExecutionStatus>\n    <Changes>\n{}    </Changes>",
                     xml_escape(entry["ChangeSetName"].as_str().unwrap_or("")),
+                    xml_escape(entry["Id"].as_str().unwrap_or("")),
+                    xml_escape(entry["StackId"].as_str().unwrap_or("")),
+                    xml_escape(entry["StackName"].as_str().unwrap_or("")),
                     xml_escape(entry["Status"].as_str().unwrap_or("CREATE_COMPLETE")),
                     xml_escape(entry["ExecutionStatus"].as_str().unwrap_or("AVAILABLE")),
+                    changes_xml,
                 );
                 Ok(xml_response("DescribeChangeSet", inner, &rid))
             }
@@ -168,7 +353,189 @@ impl CloudFormationService {
                 }
                 Ok(xml_response("DeleteChangeSet", String::new(), &rid))
             }
-            "ExecuteChangeSet" => Ok(xml_response("ExecuteChangeSet", String::new(), &rid)),
+            "ExecuteChangeSet" => {
+                let cs = params
+                    .get("ChangeSetName")
+                    .ok_or_else(|| missing("ChangeSetName"))?
+                    .clone();
+                let stack_filter = params.get("StackName").cloned();
+
+                let entry = {
+                    let accounts = self.state.read();
+                    accounts
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("change_sets"))
+                        .and_then(|m| {
+                            m.values()
+                                .find(|v| {
+                                    let id_match = v["Id"].as_str() == Some(&cs)
+                                        || v["ChangeSetName"].as_str() == Some(&cs);
+                                    let stack_match = stack_filter.as_deref().is_none_or(|sf| {
+                                        v["StackName"].as_str() == Some(sf)
+                                            || v["StackId"].as_str() == Some(sf)
+                                    });
+                                    id_match && stack_match
+                                })
+                                .cloned()
+                        })
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "ChangeSetNotFound",
+                                format!("ChangeSet [{cs}] does not exist"),
+                            )
+                        })?
+                };
+
+                let cs_id = entry["Id"].as_str().unwrap_or("").to_string();
+                let stack_name = entry["StackName"].as_str().unwrap_or("").to_string();
+                let template_body = entry["TemplateBody"].as_str().unwrap_or("").to_string();
+                let cs_tags: BTreeMap<String, String> = entry["Tags"]
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let cs_notif: Vec<String> = entry["NotificationArns"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut cs_params: BTreeMap<String, String> = entry["Parameters"]
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if entry["ExecutionStatus"].as_str() != Some("AVAILABLE") {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidChangeSetStatus",
+                        format!(
+                            "ChangeSet [{cs}] cannot be executed in its current status of [{}]",
+                            entry["ExecutionStatus"].as_str().unwrap_or("")
+                        ),
+                    ));
+                }
+
+                let found_stack_id = {
+                    let accounts = self.state.read();
+                    accounts.get(&aid).and_then(|s| {
+                        s.stacks
+                            .values()
+                            .find(|st| {
+                                (st.name == stack_name || st.stack_id == stack_name)
+                                    && st.status != "DELETE_COMPLETE"
+                            })
+                            .map(|st| st.stack_id.clone())
+                    })
+                }
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationError",
+                        format!("Stack [{stack_name}] does not exist"),
+                    )
+                })?;
+
+                cs_params
+                    .entry("AWS::Region".to_string())
+                    .or_insert_with(|| req.region.clone());
+                cs_params
+                    .entry("AWS::AccountId".to_string())
+                    .or_insert_with(|| aid.clone());
+                cs_params
+                    .entry("AWS::StackId".to_string())
+                    .or_insert_with(|| found_stack_id.clone());
+                cs_params
+                    .entry("AWS::StackName".to_string())
+                    .or_insert_with(|| stack_name.clone());
+                cs_params
+                    .entry("AWS::Partition".to_string())
+                    .or_insert_with(|| "aws".to_string());
+                cs_params
+                    .entry("AWS::URLSuffix".to_string())
+                    .or_insert_with(|| "amazonaws.com".to_string());
+
+                let parsed = template::parse_template(&template_body, &cs_params).map_err(|e| {
+                    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
+                })?;
+
+                let provisioner = self.provisioner(&found_stack_id, &aid, &req.region);
+
+                let (update_result, stack_id_clone) = {
+                    let mut accounts = self.state.write();
+                    let state = accounts.get_or_create(&aid);
+                    let stack = state
+                        .stacks
+                        .values_mut()
+                        .find(|st| {
+                            st.stack_id == found_stack_id && st.status != "DELETE_COMPLETE"
+                        })
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "ValidationError",
+                                format!("Stack [{stack_name}] does not exist"),
+                            )
+                        })?;
+                    let result = crate::service::apply_resource_updates(
+                        stack,
+                        &parsed.resources,
+                        &template_body,
+                        &cs_params,
+                        &provisioner,
+                    );
+                    let sid = stack.stack_id.clone();
+                    stack.template = template_body.clone();
+                    stack.status = if result.is_err() {
+                        "UPDATE_FAILED".to_string()
+                    } else {
+                        "UPDATE_COMPLETE".to_string()
+                    };
+                    stack.parameters = cs_params.clone();
+                    if !cs_tags.is_empty() {
+                        stack.tags = cs_tags;
+                    }
+                    if !cs_notif.is_empty() {
+                        stack.notification_arns = cs_notif;
+                    }
+                    stack.updated_at = Some(Utc::now());
+                    if result.is_ok() {
+                        stack.outputs.clear();
+                    }
+
+                    if let Some(m) = state.extras.get_mut("change_sets") {
+                        if let Some(e) = m.get_mut(&cs_id) {
+                            e["ExecutionStatus"] = json!(if result.is_err() {
+                                "EXECUTE_FAILED"
+                            } else {
+                                "EXECUTE_COMPLETE"
+                            });
+                        }
+                    }
+                    (result, sid)
+                };
+
+                if let Err(msg) = update_result {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationError",
+                        msg,
+                    ));
+                }
+
+                let _ = stack_id_clone;
+                Ok(xml_response("ExecuteChangeSet", String::new(), &rid))
+            }
             "ListChangeSets" => {
                 let accounts = self.state.read();
                 let items: Vec<Value> = accounts.get(&aid)
