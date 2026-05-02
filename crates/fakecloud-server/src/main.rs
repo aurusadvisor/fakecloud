@@ -735,6 +735,7 @@ async fn main() {
             acm: acm_state.clone(),
             elasticache: elasticache_state.clone(),
             route53: route53_state.clone(),
+            cloudfront: cloudfront_state.clone(),
             delivery: delivery_for_cf,
         },
     );
