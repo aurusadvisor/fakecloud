@@ -749,6 +749,7 @@ mod tests {
             acm: Arc::new(RwLock::new(fakecloud_acm::AcmAccounts::new())),
             elasticache: shared::<fakecloud_elasticache::ElastiCacheState>(),
             route53: Arc::new(RwLock::new(fakecloud_route53::Route53Accounts::new())),
+            cloudfront: Arc::new(RwLock::new(fakecloud_cloudfront::CloudFrontAccounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }

@@ -20,7 +20,7 @@ pub mod policies;
 pub mod policies_service;
 pub mod router;
 pub(crate) mod service;
-pub(crate) mod state;
+pub mod state;
 pub mod streaming;
 pub mod streaming_service;
 pub mod tenants;
