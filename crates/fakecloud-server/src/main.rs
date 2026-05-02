@@ -739,6 +739,7 @@ async fn main() {
             stepfunctions: stepfunctions_state.clone(),
             wafv2: wafv2_state.clone(),
             apigateway: apigatewayv1_state.clone(),
+            apigatewayv2: apigatewayv2_state.clone(),
             delivery: delivery_for_cf,
         },
     );

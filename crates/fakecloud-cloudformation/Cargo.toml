@@ -37,6 +37,7 @@ fakecloud-cloudfront = { workspace = true }
 fakecloud-stepfunctions = { workspace = true }
 fakecloud-wafv2 = { workspace = true }
 fakecloud-apigateway = { workspace = true }
+fakecloud-apigatewayv2 = { workspace = true }
 rcgen = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

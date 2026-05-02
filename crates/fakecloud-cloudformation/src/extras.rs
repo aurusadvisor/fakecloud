@@ -753,6 +753,7 @@ mod tests {
             stepfunctions: shared::<fakecloud_stepfunctions::StepFunctionsState>(),
             wafv2: Arc::new(RwLock::new(fakecloud_wafv2::Wafv2Accounts::default())),
             apigateway: shared::<fakecloud_apigateway::ApiGatewayState>(),
+            apigatewayv2: shared::<fakecloud_apigatewayv2::ApiGatewayV2State>(),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }
