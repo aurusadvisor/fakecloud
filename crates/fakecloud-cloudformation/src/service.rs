@@ -139,6 +139,7 @@ pub struct CloudFormationDeps {
     pub route53: fakecloud_route53::SharedRoute53State,
     pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
     pub stepfunctions: fakecloud_stepfunctions::SharedStepFunctionsState,
+    pub wafv2: fakecloud_wafv2::SharedWafv2State,
     pub delivery: Arc<DeliveryBus>,
 }
 
@@ -213,6 +214,7 @@ impl CloudFormationService {
             route53_state: self.deps.route53.clone(),
             cloudfront_state: self.deps.cloudfront.clone(),
             stepfunctions_state: self.deps.stepfunctions.clone(),
+            wafv2_state: self.deps.wafv2.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1336,6 +1338,7 @@ mod tests {
                     "",
                 ),
             )),
+            wafv2: Arc::new(RwLock::new(fakecloud_wafv2::Wafv2Accounts::default())),
             delivery: Arc::new(DeliveryBus::new()),
         };
         CloudFormationService::new(cf_state, deps)

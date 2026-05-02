@@ -737,6 +737,7 @@ async fn main() {
             route53: route53_state.clone(),
             cloudfront: cloudfront_state.clone(),
             stepfunctions: stepfunctions_state.clone(),
+            wafv2: wafv2_state.clone(),
             delivery: delivery_for_cf,
         },
     );
