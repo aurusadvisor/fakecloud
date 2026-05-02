@@ -137,11 +137,13 @@ impl DynamoDbService {
             })?;
 
             let mut write_count = 0u32;
+            let mut keys_for_icm: Vec<HashMap<String, AttributeValue>> = Vec::new();
             for request in reqs {
                 if let Some(put_req) = request.get("PutRequest") {
                     let item: HashMap<String, AttributeValue> =
                         serde_json::from_value(put_req["Item"].clone()).unwrap_or_default();
                     let key = extract_key(table, &item);
+                    keys_for_icm.push(key.clone());
                     if let Some(idx) = table.find_item_index(&key) {
                         table.items[idx] = item;
                     } else {
@@ -151,6 +153,7 @@ impl DynamoDbService {
                 } else if let Some(del_req) = request.get("DeleteRequest") {
                     let key: HashMap<String, AttributeValue> =
                         serde_json::from_value(del_req["Key"].clone()).unwrap_or_default();
+                    keys_for_icm.push(key.clone());
                     if let Some(idx) = table.find_item_index(&key) {
                         table.items.remove(idx);
                     }
@@ -170,8 +173,15 @@ impl DynamoDbService {
                 consumed_capacity.push(cc);
             }
 
-            if return_icm == "SIZE" {
-                item_collection_metrics.insert(table_name.clone(), vec![]);
+            if return_icm == "SIZE" && !table.lsi.is_empty() {
+                let entries: Vec<Value> = keys_for_icm
+                    .iter()
+                    .map(|k| super::helpers::build_item_collection_metrics(&return_icm, table, k))
+                    .filter(|v| !v.is_null())
+                    .collect();
+                if !entries.is_empty() {
+                    item_collection_metrics.insert(table_name.clone(), entries);
+                }
             }
         }
 
@@ -183,7 +193,7 @@ impl DynamoDbService {
             result["ConsumedCapacity"] = json!(consumed_capacity);
         }
 
-        if return_icm == "SIZE" {
+        if return_icm == "SIZE" && !item_collection_metrics.is_empty() {
             result["ItemCollectionMetrics"] = json!(item_collection_metrics);
         }
 

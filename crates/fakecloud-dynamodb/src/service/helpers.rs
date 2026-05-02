@@ -2614,3 +2614,40 @@ pub(crate) fn return_icm_mode(body: &Value) -> &str {
         .as_str()
         .unwrap_or("NONE")
 }
+
+/// Build the per-write `ItemCollectionMetrics` document AWS emits when the
+/// table has at least one local secondary index and the caller asked for
+/// `ReturnItemCollectionMetrics=SIZE`. Returns `Value::Null` whenever the
+/// document should be omitted.
+///
+/// `ItemCollectionKey` is the partition-key attribute of the affected item
+/// — we look up the key-schema's HASH element and copy that attribute from
+/// `key`. `SizeEstimateRangeGB` reports a coarse [lower, upper] estimate;
+/// real DynamoDB returns 0..1 GB for small collections, so we use the same
+/// range as a stand-in until item-collection sizing is tracked precisely.
+pub(crate) fn build_item_collection_metrics(
+    mode: &str,
+    table: &crate::state::DynamoTable,
+    key: &std::collections::HashMap<String, crate::state::AttributeValue>,
+) -> Value {
+    if mode != "SIZE" || table.lsi.is_empty() {
+        return Value::Null;
+    }
+    let partition_key = table
+        .key_schema
+        .iter()
+        .find(|k| k.key_type == "HASH")
+        .map(|k| k.attribute_name.as_str());
+    let mut item_collection_key = serde_json::Map::new();
+    if let Some(pk_name) = partition_key {
+        if let Some(pk_value) = key.get(pk_name) {
+            if let Ok(serialized) = serde_json::to_value(pk_value) {
+                item_collection_key.insert(pk_name.to_string(), serialized);
+            }
+        }
+    }
+    json!({
+        "ItemCollectionKey": Value::Object(item_collection_key),
+        "SizeEstimateRangeGB": [0.0, 1.0],
+    })
+}

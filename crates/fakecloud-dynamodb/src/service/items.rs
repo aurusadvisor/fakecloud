@@ -6,10 +6,11 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
 use super::{
-    apply_update_expression, build_consumed_capacity, evaluate_condition, extract_key, get_table,
-    get_table_mut, parse_expression_attribute_names, parse_expression_attribute_values,
-    project_item, require_object, require_str, return_consumed_mode, return_icm_mode,
-    validate_key_attributes_in_key, validate_key_in_item, DynamoDbService,
+    apply_update_expression, build_consumed_capacity, build_item_collection_metrics,
+    evaluate_condition, extract_key, get_table, get_table_mut, parse_expression_attribute_names,
+    parse_expression_attribute_values, project_item, require_object, require_str,
+    return_consumed_mode, return_icm_mode, validate_key_attributes_in_key, validate_key_in_item,
+    DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -27,7 +28,7 @@ impl DynamoDbService {
 
         // --- Acquire write lock ONLY for validation + mutation ---
         // Capture kinesis delivery info alongside the return value
-        let (old_item, kinesis_info, kms_audit) = {
+        let (old_item, kinesis_info, kms_audit, icm) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
             let region = state.region.clone();
@@ -94,7 +95,7 @@ impl DynamoDbService {
                 (
                     target,
                     event_name.to_string(),
-                    key,
+                    key.clone(),
                     old_item_for_stream,
                     Some(item.clone()),
                 )
@@ -108,7 +109,9 @@ impl DynamoDbService {
                 None
             };
 
-            (old_item_for_return, kinesis_info, kms_audit)
+            let icm = build_item_collection_metrics(&return_icm, table, &key);
+
+            (old_item_for_return, kinesis_info, kms_audit, icm)
         };
         // --- Write lock released, build response ---
 
@@ -140,8 +143,8 @@ impl DynamoDbService {
         if !cc.is_null() {
             result["ConsumedCapacity"] = cc;
         }
-        if return_icm == "SIZE" {
-            result["ItemCollectionMetrics"] = json!({});
+        if !icm.is_null() {
+            result["ItemCollectionMetrics"] = icm;
         }
 
         Self::ok_json(result)
@@ -297,8 +300,9 @@ impl DynamoDbService {
                 result["ConsumedCapacity"] = cc;
             }
 
-            if return_icm == "SIZE" {
-                result["ItemCollectionMetrics"] = json!({});
+            let icm = build_item_collection_metrics(return_icm, table, &key);
+            if !icm.is_null() {
+                result["ItemCollectionMetrics"] = icm;
             }
 
             (result, kinesis_info)
@@ -422,6 +426,8 @@ impl DynamoDbService {
 
         table.recalculate_stats();
 
+        let icm = build_item_collection_metrics(&return_icm, table, &key);
+
         // Release the write lock (drop `state`)
         drop(accounts);
 
@@ -446,8 +452,8 @@ impl DynamoDbService {
         if !cc.is_null() {
             result["ConsumedCapacity"] = cc;
         }
-        if return_icm == "SIZE" {
-            result["ItemCollectionMetrics"] = json!({});
+        if !icm.is_null() {
+            result["ItemCollectionMetrics"] = icm;
         }
 
         Self::ok_json(result)
