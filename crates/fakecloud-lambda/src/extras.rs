@@ -1,7 +1,6 @@
 //! Lambda handlers added to close the conformance gap. Aliases, layers,
 //! function URL configs, concurrency, code signing, event invoke, runtime
-//! management, scaling, recursion, capacity providers, durable executions,
-//! tagging, and account settings.
+//! management, scaling, recursion, tagging, and account settings.
 
 use chrono::Utc;
 use http::StatusCode;
@@ -13,9 +12,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::LambdaService;
 use crate::state::{
-    AccountSettings, AttachedLayer, CapacityProvider, CodeSigningConfig, DurableExecution,
-    EventInvokeConfig, FunctionAlias, FunctionScalingConfig, FunctionUrlConfig, LambdaState, Layer,
-    LayerVersion, ProvisionedConcurrencyConfig, RuntimeManagementConfig,
+    AccountSettings, AttachedLayer, CodeSigningConfig, EventInvokeConfig, FunctionAlias,
+    FunctionScalingConfig, FunctionUrlConfig, LambdaState, Layer, LayerVersion,
+    ProvisionedConcurrencyConfig, RuntimeManagementConfig,
 };
 
 /// Resolve a layer-version ARN to its current `CodeSize` from the
@@ -237,33 +236,6 @@ impl LambdaService {
             "TagResource" => self.tag_resource(res, req),
             "UntagResource" => self.untag_resource(res, req),
             "ListTags" => self.list_tags(res, aid),
-
-            // Capacity providers
-            "CreateCapacityProvider" => self.create_capacity_provider(req),
-            "GetCapacityProvider" => self.get_capacity_provider(res, aid),
-            "UpdateCapacityProvider" => self.update_capacity_provider(res, req),
-            "DeleteCapacityProvider" => self.delete_capacity_provider(res, aid),
-            "ListCapacityProviders" => self.list_capacity_providers(aid),
-            "ListFunctionVersionsByCapacityProvider" => {
-                self.list_versions_by_capacity_provider(res, aid)
-            }
-
-            // Durable executions
-            "CheckpointDurableExecution" => self.checkpoint_durable_execution(res, req),
-            "GetDurableExecution" => self.get_durable_execution(res, aid),
-            "GetDurableExecutionHistory" => self.get_durable_execution_history(res, aid),
-            "GetDurableExecutionState" => self.get_durable_execution_state(res, aid),
-            "ListDurableExecutionsByFunction" => self.list_durable_executions_by_function(res, aid),
-            "StopDurableExecution" => self.stop_durable_execution(res, aid),
-            "SendDurableExecutionCallbackSuccess" => {
-                self.send_durable_callback(res, req, "SUCCESS")
-            }
-            "SendDurableExecutionCallbackFailure" => {
-                self.send_durable_callback(res, req, "FAILURE")
-            }
-            "SendDurableExecutionCallbackHeartbeat" => {
-                self.send_durable_callback(res, req, "HEARTBEAT")
-            }
 
             _ => Err(AwsServiceError::action_not_implemented("lambda", action)),
         }
@@ -1714,272 +1686,6 @@ impl LambdaService {
 
     // ── Capacity providers ──
 
-    fn create_capacity_provider(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let body = body(req);
-        let name = body["CapacityProviderName"]
-            .as_str()
-            .or_else(|| body["Name"].as_str())
-            .ok_or_else(|| missing("CapacityProviderName"))?
-            .to_string();
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let arn = format!(
-            "arn:aws:lambda:{}:{}:capacity-provider:{}",
-            state.region, state.account_id, name
-        );
-        let cp = CapacityProvider {
-            name: name.clone(),
-            arn: arn.clone(),
-            status: "ACTIVE".to_string(),
-            created: Utc::now(),
-        };
-        state.capacity_providers.insert(name, cp.clone());
-        ok(json!({
-            "Name": cp.name,
-            "Arn": cp.arn,
-            "Status": cp.status,
-        }))
-    }
-
-    fn get_capacity_provider(
-        &self,
-        name: &str,
-        account_id: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let region = self.region_for(account_id);
-        self.with_state_read(account_id, &region, |state| {
-            state
-                .capacity_providers
-                .get(name)
-                .map(|cp| {
-                    ok(json!({
-                        "Name": cp.name,
-                        "Arn": cp.arn,
-                        "Status": cp.status,
-                    }))
-                })
-                .unwrap_or_else(|| Err(not_found("CapacityProvider", name)))
-        })
-    }
-
-    fn update_capacity_provider(
-        &self,
-        name: &str,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let cp = state
-            .capacity_providers
-            .get_mut(name)
-            .ok_or_else(|| not_found("CapacityProvider", name))?;
-        cp.status = "ACTIVE".to_string();
-        ok(json!({
-            "Name": cp.name,
-            "Arn": cp.arn,
-            "Status": cp.status,
-        }))
-    }
-
-    fn delete_capacity_provider(
-        &self,
-        name: &str,
-        account_id: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
-        state.capacity_providers.remove(name);
-        empty()
-    }
-
-    fn list_capacity_providers(&self, account_id: &str) -> Result<AwsResponse, AwsServiceError> {
-        let region = self.region_for(account_id);
-        self.with_state_read(account_id, &region, |state| {
-            let cps: Vec<Value> = state
-                .capacity_providers
-                .values()
-                .map(|cp| {
-                    json!({
-                        "Name": cp.name,
-                        "Arn": cp.arn,
-                        "Status": cp.status,
-                    })
-                })
-                .collect();
-            ok(json!({"CapacityProviders": cps}))
-        })
-    }
-
-    fn list_versions_by_capacity_provider(
-        &self,
-        _name: &str,
-        _account_id: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        ok(json!({"FunctionVersions": []}))
-    }
-
-    // ── Durable executions ──
-
-    fn checkpoint_durable_execution(
-        &self,
-        id: &str,
-        req: &AwsRequest,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let body = body(req);
-        let body_arn = body
-            .get("FunctionArn")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let body_function = body
-            .get("FunctionName")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let derived_arn = body_arn.unwrap_or_else(|| match body_function {
-            Some(name) if name.starts_with("arn:") => name,
-            Some(name) => format!(
-                "arn:aws:lambda:us-east-1:{}:function:{name}",
-                req.account_id
-            ),
-            None => String::new(),
-        });
-        let exec = state
-            .durable_executions
-            .entry(id.to_string())
-            .or_insert_with(|| DurableExecution {
-                id: id.to_string(),
-                function_arn: derived_arn.clone(),
-                status: "RUNNING".to_string(),
-                started: Utc::now(),
-                stopped: None,
-                history: Vec::new(),
-                state: json!({}),
-            });
-        if exec.function_arn.is_empty() && !derived_arn.is_empty() {
-            exec.function_arn = derived_arn;
-        }
-        if let Some(s) = body.get("State") {
-            exec.state = s.clone();
-        }
-        if let Some(h) = body.get("HistoryEvent") {
-            exec.history.push(h.clone());
-        }
-        empty()
-    }
-
-    fn get_durable_execution(
-        &self,
-        id: &str,
-        account_id: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let region = self.region_for(account_id);
-        self.with_state_read(account_id, &region, |state| {
-            state
-                .durable_executions
-                .get(id)
-                .map(|e| {
-                    ok(json!({
-                        "Id": e.id,
-                        "FunctionArn": e.function_arn,
-                        "Status": e.status,
-                        "Started": e.started.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-                        "Stopped": e.stopped.map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-                    }))
-                })
-                .unwrap_or_else(|| Err(not_found("DurableExecution", id)))
-        })
-    }
-
-    fn get_durable_execution_history(
-        &self,
-        id: &str,
-        account_id: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let region = self.region_for(account_id);
-        self.with_state_read(account_id, &region, |state| {
-            let history = state
-                .durable_executions
-                .get(id)
-                .map(|e| e.history.clone())
-                .unwrap_or_default();
-            ok(json!({"Events": history}))
-        })
-    }
-
-    fn get_durable_execution_state(
-        &self,
-        id: &str,
-        account_id: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let region = self.region_for(account_id);
-        self.with_state_read(account_id, &region, |state| {
-            let s = state
-                .durable_executions
-                .get(id)
-                .map(|e| e.state.clone())
-                .unwrap_or(json!({}));
-            ok(json!({"State": s}))
-        })
-    }
-
-    fn list_durable_executions_by_function(
-        &self,
-        function_name: &str,
-        account_id: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let region = self.region_for(account_id);
-        self.with_state_read(account_id, &region, |state| {
-            let executions: Vec<Value> = state
-                .durable_executions
-                .values()
-                .filter(|e| e.function_arn.contains(function_name))
-                .map(|e| {
-                    json!({
-                        "Id": e.id,
-                        "Status": e.status,
-                    })
-                })
-                .collect();
-            ok(json!({"DurableExecutions": executions}))
-        })
-    }
-
-    fn stop_durable_execution(
-        &self,
-        id: &str,
-        account_id: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
-        if let Some(e) = state.durable_executions.get_mut(id) {
-            e.status = "STOPPED".to_string();
-            e.stopped = Some(Utc::now());
-        }
-        empty()
-    }
-
-    fn send_durable_callback(
-        &self,
-        id: &str,
-        _req: &AwsRequest,
-        kind: &str,
-    ) -> Result<AwsResponse, AwsServiceError> {
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(_req.account_id.as_str());
-        if let Some(e) = state.durable_executions.get_mut(id) {
-            e.history.push(
-                json!({"type": format!("Callback{kind}"), "timestamp": Utc::now().to_rfc3339()}),
-            );
-            if kind == "SUCCESS" {
-                e.status = "SUCCEEDED".to_string();
-            } else if kind == "FAILURE" {
-                e.status = "FAILED".to_string();
-            }
-        }
-        empty()
-    }
-
     fn update_event_source_mapping_handler(
         &self,
         uuid: &str,
@@ -2179,7 +1885,6 @@ mod tests {
         run(&s, "InvokeWithResponseStream", r#"{}"#, Some("fn"), &[]).await;
         run(&s, "ListLayers", "", None, &[]).await;
         run(&s, "ListLayerVersions", "", Some("layer"), &[]).await;
-        run(&s, "ListCapacityProviders", "", None, &[]).await;
     }
 
     #[tokio::test]
@@ -2195,40 +1900,6 @@ mod tests {
         .await;
         run(&s, "ListLayers", "", None, &[]).await;
         run(&s, "ListLayerVersions", "", Some("layer1"), &[]).await;
-    }
-
-    #[tokio::test]
-    async fn capacity_providers_lifecycle() {
-        let s = svc();
-        run(
-            &s,
-            "CreateCapacityProvider",
-            r#"{"CapacityProviderName":"cp1"}"#,
-            None,
-            &[],
-        )
-        .await;
-        run(&s, "GetCapacityProvider", "", Some("cp1"), &[]).await;
-        run(&s, "ListCapacityProviders", "", None, &[]).await;
-        run(&s, "UpdateCapacityProvider", r#"{}"#, Some("cp1"), &[]).await;
-        run(&s, "DeleteCapacityProvider", "", Some("cp1"), &[]).await;
-    }
-
-    #[tokio::test]
-    async fn durable_executions() {
-        let s = svc();
-        run(
-            &s,
-            "CheckpointDurableExecution",
-            r#"{"FunctionName":"fn"}"#,
-            Some("d1"),
-            &[],
-        )
-        .await;
-        run(&s, "GetDurableExecution", "", Some("d1"), &[]).await;
-        run(&s, "GetDurableExecutionHistory", "", Some("d1"), &[]).await;
-        run(&s, "GetDurableExecutionState", "", Some("d1"), &[]).await;
-        run(&s, "StopDurableExecution", "", Some("d1"), &[]).await;
     }
 
     #[tokio::test]

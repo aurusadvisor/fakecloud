@@ -20,8 +20,8 @@ fn make_python_zip() -> Vec<u8> {
 // Function lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "CreateFunction", checksum = "46e2786b")]
-#[test_action("lambda", "GetFunction", checksum = "2d15e19e")]
+#[test_action("lambda", "CreateFunction", checksum = "fb1d897c")]
+#[test_action("lambda", "GetFunction", checksum = "def04e3e")]
 #[test_action("lambda", "DeleteFunction", checksum = "70eb2012")]
 #[tokio::test]
 async fn lambda_create_get_delete_function() {
@@ -72,7 +72,7 @@ async fn lambda_create_get_delete_function() {
     assert!(result.is_err());
 }
 
-#[test_action("lambda", "ListFunctions", checksum = "fa22d1bf")]
+#[test_action("lambda", "ListFunctions", checksum = "b5676906")]
 #[tokio::test]
 async fn lambda_list_functions() {
     let server = TestServer::start().await;
@@ -103,7 +103,7 @@ async fn lambda_list_functions() {
 // Invoke
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "Invoke", checksum = "73c32773")]
+#[test_action("lambda", "Invoke", checksum = "f0f875f9")]
 #[tokio::test]
 async fn lambda_invoke() {
     let server = TestServer::start().await;
@@ -148,7 +148,7 @@ async fn lambda_invoke() {
 // PublishVersion
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "PublishVersion", checksum = "209921df")]
+#[test_action("lambda", "PublishVersion", checksum = "431754d8")]
 #[tokio::test]
 async fn lambda_publish_version() {
     let server = TestServer::start().await;
@@ -406,7 +406,7 @@ async fn lambda_alias_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "ListVersionsByFunction", checksum = "0aa379e9")]
+#[test_action("lambda", "ListVersionsByFunction", checksum = "807494e2")]
 #[tokio::test]
 async fn lambda_list_versions_by_function() {
     let server = TestServer::start().await;
@@ -420,9 +420,9 @@ async fn lambda_list_versions_by_function() {
         .unwrap();
 }
 
-#[test_action("lambda", "GetFunctionConfiguration", checksum = "75f79ba8")]
-#[test_action("lambda", "UpdateFunctionConfiguration", checksum = "b0ba1c8a")]
-#[test_action("lambda", "UpdateFunctionCode", checksum = "7b2d0b8d")]
+#[test_action("lambda", "GetFunctionConfiguration", checksum = "96d15a61")]
+#[test_action("lambda", "UpdateFunctionConfiguration", checksum = "67f13e43")]
+#[test_action("lambda", "UpdateFunctionCode", checksum = "30e1094e")]
 #[tokio::test]
 async fn lambda_function_configuration_extras() {
     let server = TestServer::start().await;
@@ -891,129 +891,6 @@ async fn lambda_tag_resource_lifecycle() {
         .untag_resource()
         .resource(&arn)
         .tag_keys("env")
-        .send()
-        .await
-        .unwrap();
-}
-
-#[test_action("lambda", "CreateCapacityProvider", checksum = "cf3a7b6a")]
-#[test_action("lambda", "GetCapacityProvider", checksum = "ad947440")]
-#[test_action("lambda", "UpdateCapacityProvider", checksum = "5d2bbc06")]
-#[test_action("lambda", "DeleteCapacityProvider", checksum = "555e0456")]
-#[test_action("lambda", "ListCapacityProviders", checksum = "dae35ca3")]
-#[test_action(
-    "lambda",
-    "ListFunctionVersionsByCapacityProvider",
-    checksum = "d51f5143"
-)]
-#[tokio::test]
-async fn lambda_capacity_provider_lifecycle() {
-    let server = TestServer::start().await;
-    let client = server.lambda_client().await;
-    client
-        .create_capacity_provider()
-        .capacity_provider_name("cp1")
-        .send()
-        .await
-        .unwrap();
-    client
-        .get_capacity_provider()
-        .capacity_provider_name("cp1")
-        .send()
-        .await
-        .unwrap();
-    client
-        .update_capacity_provider()
-        .capacity_provider_name("cp1")
-        .send()
-        .await
-        .unwrap();
-    client.list_capacity_providers().send().await.unwrap();
-    client
-        .list_function_versions_by_capacity_provider()
-        .capacity_provider_name("cp1")
-        .send()
-        .await
-        .unwrap();
-    client
-        .delete_capacity_provider()
-        .capacity_provider_name("cp1")
-        .send()
-        .await
-        .unwrap();
-}
-
-#[test_action("lambda", "CheckpointDurableExecution", checksum = "9ea9391f")]
-#[test_action("lambda", "GetDurableExecution", checksum = "e76992ce")]
-#[test_action("lambda", "GetDurableExecutionHistory", checksum = "54910a95")]
-#[test_action("lambda", "GetDurableExecutionState", checksum = "467d4d29")]
-#[test_action("lambda", "ListDurableExecutionsByFunction", checksum = "7e7ba943")]
-#[test_action("lambda", "StopDurableExecution", checksum = "dc468fea")]
-#[test_action("lambda", "SendDurableExecutionCallbackSuccess", checksum = "2ff17f12")]
-#[test_action("lambda", "SendDurableExecutionCallbackFailure", checksum = "4f3d7101")]
-#[test_action(
-    "lambda",
-    "SendDurableExecutionCallbackHeartbeat",
-    checksum = "a797352f"
-)]
-#[tokio::test]
-async fn lambda_durable_execution_lifecycle() {
-    let server = TestServer::start().await;
-    let client = server.lambda_client().await;
-    make_basic_function(&client, "durable-fn").await;
-    client
-        .checkpoint_durable_execution()
-        .durable_execution_arn("durable-1")
-        .checkpoint_token("token-1")
-        .send()
-        .await
-        .unwrap();
-    client
-        .get_durable_execution()
-        .durable_execution_arn("durable-1")
-        .send()
-        .await
-        .unwrap();
-    client
-        .get_durable_execution_history()
-        .durable_execution_arn("durable-1")
-        .send()
-        .await
-        .unwrap();
-    client
-        .get_durable_execution_state()
-        .durable_execution_arn("durable-1")
-        .checkpoint_token("token-1")
-        .send()
-        .await
-        .unwrap();
-    client
-        .list_durable_executions_by_function()
-        .function_name("durable-fn")
-        .send()
-        .await
-        .unwrap();
-    client
-        .send_durable_execution_callback_heartbeat()
-        .callback_id("durable-1")
-        .send()
-        .await
-        .unwrap();
-    client
-        .send_durable_execution_callback_success()
-        .callback_id("durable-1")
-        .send()
-        .await
-        .unwrap();
-    client
-        .send_durable_execution_callback_failure()
-        .callback_id("durable-1")
-        .send()
-        .await
-        .unwrap();
-    client
-        .stop_durable_execution()
-        .durable_execution_arn("durable-1")
         .send()
         .await
         .unwrap();
