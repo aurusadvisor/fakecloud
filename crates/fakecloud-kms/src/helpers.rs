@@ -549,12 +549,30 @@ pub(crate) fn key_metadata_json(key: &KmsKey, account_id: &str) -> Value {
     }
 
     if key.multi_region {
-        // Add MultiRegionConfiguration for primary keys
+        // Distinguish primary vs replica via the stored `primary_region`
+        // pointer — when set, this key is a replica that points back at
+        // its primary's region and arn.
+        let (key_type, primary_arn, primary_region) = match &key.primary_region {
+            Some(region) => {
+                let primary_arn = key
+                    .arn
+                    .splitn(6, ':')
+                    .enumerate()
+                    .map(|(idx, part)| if idx == 3 { region.as_str() } else { part })
+                    .collect::<Vec<&str>>()
+                    .join(":");
+                ("REPLICA", primary_arn, region.clone())
+            }
+            None => {
+                let region = key.arn.split(':').nth(3).unwrap_or("us-east-1").to_string();
+                ("PRIMARY", key.arn.clone(), region)
+            }
+        };
         meta["MultiRegionConfiguration"] = json!({
-            "MultiRegionKeyType": "PRIMARY",
+            "MultiRegionKeyType": key_type,
             "PrimaryKey": {
-                "Arn": key.arn,
-                "Region": key.arn.split(':').nth(3).unwrap_or("us-east-1"),
+                "Arn": primary_arn,
+                "Region": primary_region,
             },
             "ReplicaKeys": [],
         });

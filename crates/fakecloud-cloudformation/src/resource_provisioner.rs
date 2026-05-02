@@ -421,6 +421,7 @@ impl ResourceProvisioner {
             "AWS::Kinesis::StreamConsumer" => self.create_kinesis_stream_consumer(resource),
             "AWS::KMS::Key" => self.create_kms_key(resource),
             "AWS::KMS::Alias" => self.create_kms_alias(resource),
+            "AWS::KMS::ReplicaKey" => self.create_kms_replica_key(resource),
             "AWS::ECR::Repository" => self.create_ecr_repository(resource),
             "AWS::ECR::RepositoryPolicy" => self.create_ecr_repository_policy(resource),
             "AWS::ECR::RegistryPolicy" => self.create_ecr_registry_policy(resource),
@@ -655,6 +656,7 @@ impl ResourceProvisioner {
                 self.delete_kinesis_stream_consumer(&resource.physical_id)
             }
             "AWS::KMS::Key" => self.delete_kms_key(&resource.physical_id),
+            "AWS::KMS::ReplicaKey" => self.delete_kms_replica_key(&resource.physical_id),
             "AWS::KMS::Alias" => self.delete_kms_alias(&resource.physical_id),
             "AWS::ECR::Repository" => self.delete_ecr_repository(&resource.physical_id),
             "AWS::ECR::RepositoryPolicy" => {
@@ -3738,6 +3740,121 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         state.keys.remove(physical_id);
         state.aliases.retain(|_, a| a.target_key_id != physical_id);
+        Ok(())
+    }
+
+    /// Provision an `AWS::KMS::ReplicaKey`. Looks up the primary key by
+    /// arn and inserts a region-keyed replica into the same account
+    /// state, mirroring the ReplicateKey API contract.
+    fn create_kms_replica_key(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let primary_arn = props
+            .get("PrimaryKeyArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "PrimaryKeyArn is required".to_string())?
+            .to_string();
+        // arn:aws:kms:<region>:<account>:key/<key_id>
+        let parts: Vec<&str> = primary_arn.split(':').collect();
+        if parts.len() < 6 {
+            return Err(format!("Invalid PrimaryKeyArn: {primary_arn}"));
+        }
+        let primary_region = parts[3].to_string();
+        let key_id = parts[5]
+            .strip_prefix("key/")
+            .ok_or_else(|| format!("PrimaryKeyArn missing key/ segment: {primary_arn}"))?
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let enabled = props
+            .get("Enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let policy = match props.get("KeyPolicy") {
+            Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+            Some(v) => serde_json::to_string(v).unwrap_or_default(),
+            None => String::new(),
+        };
+        let mut tags: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
+            for t in arr {
+                if let (Some(k), Some(v)) = (
+                    t.get("Key").and_then(|x| x.as_str()),
+                    t.get("Value").and_then(|x| x.as_str()),
+                ) {
+                    tags.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+
+        let mut accounts = self.kms_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        // Source must be a multi-region key in the primary account; look
+        // it up either by raw key_id (when the primary lives in this
+        // state's region) or via the region-keyed slot.
+        let source_storage_keys = [key_id.clone(), format!("{primary_region}:{key_id}")];
+        let source = source_storage_keys
+            .iter()
+            .find_map(|k| state.keys.get(k).cloned())
+            .ok_or_else(|| format!("Primary key {primary_arn} does not exist"))?;
+        if !source.multi_region {
+            return Err(format!(
+                "Primary key {primary_arn} is not a multi-region key"
+            ));
+        }
+
+        // Real AWS uses the same `mrk-...` id across regions; fakecloud
+        // is single-region, so colliding the id with the primary would
+        // overwrite the primary in `state.keys`. Mint a distinct
+        // `mrk-replica-` id whose `primary_region` points back at the
+        // source so DescribeKey reports `MultiRegionKeyType=REPLICA`.
+        let replica_key_id = format!("mrk-replica-{}", Uuid::new_v4().as_simple());
+        let replica_arn = format!(
+            "arn:aws:kms:{}:{}:key/{}",
+            self.region, self.account_id, replica_key_id
+        );
+        let mut replica = source;
+        replica.key_id = replica_key_id.clone();
+        replica.arn = replica_arn.clone();
+        if !description.is_empty() {
+            replica.description = description;
+        }
+        replica.enabled = enabled;
+        replica.key_state = if enabled {
+            "Enabled".to_string()
+        } else {
+            "Disabled".to_string()
+        };
+        if !policy.is_empty() {
+            replica.policy = policy;
+        }
+        if !tags.is_empty() {
+            replica.tags.extend(tags);
+        }
+        replica.deletion_date = None;
+        replica.key_rotation_enabled = false;
+        replica.multi_region = true;
+        replica.rotations = Vec::new();
+        replica.custom_key_store_id = None;
+        replica.imported_key_material = false;
+        replica.imported_material_bytes = None;
+        replica.primary_region = Some(primary_region);
+
+        state.keys.insert(replica_key_id.clone(), replica);
+        Ok(ProvisionResult::new(replica_key_id.clone())
+            .with("KeyId", replica_key_id)
+            .with("Arn", replica_arn))
+    }
+
+    fn delete_kms_replica_key(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.kms_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.keys.remove(physical_id);
         Ok(())
     }
 
