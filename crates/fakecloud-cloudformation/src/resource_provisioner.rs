@@ -457,6 +457,7 @@ impl ResourceProvisioner {
             "AWS::ECS::Service" => self.create_ecs_service(resource),
             "AWS::ECS::CapacityProvider" => self.create_ecs_capacity_provider(resource),
             "AWS::CertificateManager::Certificate" => self.create_acm_certificate(resource),
+            "AWS::CertificateManager::Account" => self.create_acm_account(resource),
             "AWS::ElastiCache::ParameterGroup" => self.create_ec_parameter_group(resource),
             "AWS::ElastiCache::SubnetGroup" => self.create_ec_subnet_group(resource),
             "AWS::ElastiCache::SecurityGroup" => self.create_ec_security_group(resource),
@@ -694,6 +695,7 @@ impl ResourceProvisioner {
             "AWS::CertificateManager::Certificate" => {
                 self.delete_acm_certificate(&resource.physical_id)
             }
+            "AWS::CertificateManager::Account" => self.delete_acm_account(),
             "AWS::ElastiCache::ParameterGroup" => {
                 self.delete_ec_parameter_group(&resource.physical_id)
             }
@@ -6796,6 +6798,39 @@ impl ResourceProvisioner {
         let mut accounts = self.acm_state.write();
         if let Some(account) = accounts.accounts.get_mut(&self.account_id) {
             account.certificates.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    /// Provision the singleton `AWS::CertificateManager::Account` resource —
+    /// stores `ExpiryEventsConfiguration.DaysBeforeExpiry` on the account
+    /// config so `GetAccountConfiguration` reflects it.
+    fn create_acm_account(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
+        let days = resource
+            .properties
+            .get("ExpiryEventsConfiguration")
+            .and_then(|v| v.get("DaysBeforeExpiry"))
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32);
+        let mut accounts = self.acm_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        account.account_config.expiry_events_days_before_expiry = days;
+        Ok(ProvisionResult::new(format!(
+            "acm-account-{}",
+            self.account_id
+        )))
+    }
+
+    /// Reset the account config back to the default (no expiry events).
+    /// AWS keeps the account around — the CFN deletion just clears the
+    /// per-account override.
+    fn delete_acm_account(&self) -> Result<(), String> {
+        let mut accounts = self.acm_state.write();
+        if let Some(account) = accounts.accounts.get_mut(&self.account_id) {
+            account.account_config.expiry_events_days_before_expiry = None;
         }
         Ok(())
     }

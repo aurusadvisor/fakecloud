@@ -86,3 +86,60 @@ async fn cfn_provisions_acm_certificate() {
         "certificate should be gone after stack deletion"
     );
 }
+
+const ACCOUNT_TEMPLATE: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "AcmAcct": {
+      "Type": "AWS::CertificateManager::Account",
+      "Properties": {
+        "ExpiryEventsConfiguration": {
+          "DaysBeforeExpiry": 17
+        }
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_provisions_acm_account_expiry_events() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let acm = aws_sdk_acm::Client::new(&server.aws_config().await);
+
+    cfn.create_stack()
+        .stack_name("acm-account-stack")
+        .template_body(ACCOUNT_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let cfg = acm
+        .get_account_configuration()
+        .send()
+        .await
+        .expect("get_account_configuration");
+    assert_eq!(
+        cfg.expiry_events().and_then(|e| e.days_before_expiry()),
+        Some(17),
+    );
+
+    cfn.delete_stack()
+        .stack_name("acm-account-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+
+    let cfg_after = acm
+        .get_account_configuration()
+        .send()
+        .await
+        .expect("get_account_configuration after delete");
+    assert!(
+        cfg_after
+            .expiry_events()
+            .and_then(|e| e.days_before_expiry())
+            .is_none(),
+        "expiry days should reset to default after stack delete",
+    );
+}
