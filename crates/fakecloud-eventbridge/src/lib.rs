@@ -7,6 +7,6 @@ pub(crate) mod state;
 
 pub use service::EventBridgeService;
 pub use state::{
-    ApiDestination, Archive, Connection, EventBridgeSnapshot, EventBridgeState, EventBus,
+    ApiDestination, Archive, Connection, Endpoint, EventBridgeSnapshot, EventBridgeState, EventBus,
     EventRule, SharedEventBridgeState, EVENTBRIDGE_SNAPSHOT_SCHEMA_VERSION,
 };
