@@ -1606,11 +1606,21 @@ pub(crate) struct SnsLambdaEventInput<'a> {
 pub(crate) struct TopicSubscribers {
     /// (queue_arn, raw_message_delivery)
     sqs: Vec<(String, bool)>,
-    http: Vec<String>,
+    http: Vec<HttpSubscriber>,
     /// (function_arn, subscription_arn)
     lambda: Vec<(String, String)>,
     email: Vec<String>,
     sms: Vec<String>,
+}
+
+/// HTTP/HTTPS subscriber with the per-subscription DeliveryPolicy +
+/// RedrivePolicy needed for retry/DLQ routing.
+#[derive(Debug, Clone)]
+pub(crate) struct HttpSubscriber {
+    pub(crate) endpoint: String,
+    pub(crate) subscription_arn: String,
+    pub(crate) delivery_policy: Option<String>,
+    pub(crate) redrive_policy: Option<String>,
 }
 
 /// Read-only state passed down the fan-out helpers so each helper has

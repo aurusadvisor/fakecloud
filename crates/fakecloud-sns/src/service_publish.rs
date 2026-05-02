@@ -272,10 +272,10 @@ impl SnsService {
 
     pub(super) fn deliver_to_http_subscribers(
         &self,
-        subs: &[String],
+        subs: &[crate::service::HttpSubscriber],
         ctx: &TopicFanoutContext<'_>,
     ) {
-        for endpoint_url in subs {
+        for sub in subs {
             let body = build_sns_envelope(
                 ctx.msg_id,
                 ctx.topic_arn,
@@ -284,20 +284,43 @@ impl SnsService {
                 ctx.envelope_attrs,
                 ctx.endpoint,
             );
-            let endpoint_url = endpoint_url.clone();
             let topic = ctx.topic_arn.to_string();
+            let sub = sub.clone();
+            let delivery = self.delivery.clone();
             tokio::spawn(async move {
+                let policy = parse_http_delivery_policy(sub.delivery_policy.as_deref());
                 let client = reqwest::Client::new();
-                let result = client
-                    .post(&endpoint_url)
-                    .header("Content-Type", "application/json")
-                    .header("x-amz-sns-message-type", "Notification")
-                    .header("x-amz-sns-topic-arn", &topic)
-                    .body(body)
-                    .send()
-                    .await;
-                if let Err(e) = result {
-                    tracing::warn!(endpoint = %endpoint_url, error = %e, "SNS HTTP delivery failed");
+                let mut last_err: Option<String> = None;
+                let attempts = policy.num_retries.saturating_add(1);
+                for attempt in 0..attempts {
+                    if attempt > 0 {
+                        let delay_ms = retry_delay_ms(&policy, attempt);
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    let resp = client
+                        .post(&sub.endpoint)
+                        .header("Content-Type", "application/json")
+                        .header("x-amz-sns-message-type", "Notification")
+                        .header("x-amz-sns-topic-arn", &topic)
+                        .header("x-amz-sns-subscription-arn", &sub.subscription_arn)
+                        .body(body.clone())
+                        .send()
+                        .await;
+                    match resp {
+                        Ok(r) if r.status().is_success() => return,
+                        Ok(r) => last_err = Some(format!("HTTP {}", r.status())),
+                        Err(e) => last_err = Some(e.to_string()),
+                    }
+                }
+                let err = last_err.unwrap_or_else(|| "unknown".to_string());
+                tracing::warn!(
+                    endpoint = %sub.endpoint,
+                    error = %err,
+                    "SNS HTTP delivery exhausted retries"
+                );
+                if let Some(dlq_arn) = parse_redrive_dlq(sub.redrive_policy.as_deref()) {
+                    let dlq_body = build_dlq_envelope(&body, &err, &sub.subscription_arn);
+                    delivery.send_to_sqs(&dlq_arn, &dlq_body, &std::collections::HashMap::new());
                 }
             });
         }
@@ -784,5 +807,160 @@ impl SnsService {
             ),
             request_id,
         ))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HttpDeliveryPolicy {
+    pub(crate) num_retries: u32,
+    pub(crate) min_delay_target: u32,
+    pub(crate) max_delay_target: u32,
+}
+
+impl Default for HttpDeliveryPolicy {
+    fn default() -> Self {
+        Self {
+            num_retries: 3,
+            min_delay_target: 20,
+            max_delay_target: 20,
+        }
+    }
+}
+
+/// Parse subscription DeliveryPolicy JSON into the retry knobs SNS
+/// honours: numRetries, minDelayTarget, maxDelayTarget. Falls back to
+/// SNS's documented defaults (3 retries, 20s) on missing/malformed.
+pub(crate) fn parse_http_delivery_policy(raw: Option<&str>) -> HttpDeliveryPolicy {
+    let mut out = HttpDeliveryPolicy::default();
+    let Some(s) = raw else { return out };
+    let Ok(v) = serde_json::from_str::<Value>(s) else {
+        return out;
+    };
+    let healthy = v.get("healthyRetryPolicy").or(Some(&v));
+    if let Some(p) = healthy {
+        if let Some(n) = p.get("numRetries").and_then(|x| x.as_u64()) {
+            out.num_retries = n.min(100) as u32;
+        }
+        if let Some(n) = p.get("minDelayTarget").and_then(|x| x.as_u64()) {
+            out.min_delay_target = n as u32;
+        }
+        if let Some(n) = p.get("maxDelayTarget").and_then(|x| x.as_u64()) {
+            out.max_delay_target = n as u32;
+        }
+    }
+    out
+}
+
+/// Linear backoff between min and max delay target across attempts. SNS
+/// uses an exponential or linear policy depending on `backoffFunction`;
+/// fakecloud picks linear (the default) since that's what most callers
+/// configure and the variance doesn't change retry semantics.
+pub(crate) fn retry_delay_ms(policy: &HttpDeliveryPolicy, attempt: u32) -> u64 {
+    let span = policy
+        .max_delay_target
+        .saturating_sub(policy.min_delay_target);
+    let extra = if policy.num_retries == 0 {
+        0
+    } else {
+        span as u64 * attempt as u64 / policy.num_retries as u64
+    };
+    // Multiply seconds by 50ms for fakecloud — real AWS sleeps full
+    // seconds, but tests need to finish quickly; logical retry shape
+    // (attempt count, DLQ routing) matters more than wall-clock delay.
+    (policy.min_delay_target as u64 + extra) * 50
+}
+
+/// Pull the SQS DLQ ARN out of a RedrivePolicy JSON like
+/// `{"deadLetterTargetArn": "arn:aws:sqs:..."}`. AWS only supports SQS
+/// queues here; anything else returns None.
+pub(crate) fn parse_redrive_dlq(raw: Option<&str>) -> Option<String> {
+    let s = raw?;
+    let v: Value = serde_json::from_str(s).ok()?;
+    v.get("deadLetterTargetArn")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Wrap the original SNS notification body in the metadata SNS attaches
+/// when forwarding to a redrive DLQ.
+pub(crate) fn build_dlq_envelope(
+    original_body: &str,
+    error: &str,
+    subscription_arn: &str,
+) -> String {
+    let original: Value = serde_json::from_str(original_body)
+        .unwrap_or_else(|_| Value::String(original_body.to_string()));
+    serde_json::to_string(&serde_json::json!({
+        "Message": original,
+        "DeliveryError": error,
+        "SubscriptionArn": subscription_arn,
+    }))
+    .unwrap_or_else(|_| original_body.to_string())
+}
+
+#[cfg(test)]
+mod retry_dlq_tests {
+    use super::*;
+
+    #[test]
+    fn parse_http_delivery_policy_falls_back_on_missing() {
+        let p = parse_http_delivery_policy(None);
+        assert_eq!(p.num_retries, 3);
+        assert_eq!(p.min_delay_target, 20);
+    }
+
+    #[test]
+    fn parse_http_delivery_policy_reads_healthy_retry_block() {
+        let p = parse_http_delivery_policy(Some(
+            r#"{"healthyRetryPolicy":{"numRetries":7,"minDelayTarget":1,"maxDelayTarget":5}}"#,
+        ));
+        assert_eq!(p.num_retries, 7);
+        assert_eq!(p.min_delay_target, 1);
+        assert_eq!(p.max_delay_target, 5);
+    }
+
+    #[test]
+    fn parse_http_delivery_policy_reads_top_level_block() {
+        let p = parse_http_delivery_policy(Some(
+            r#"{"numRetries":2,"minDelayTarget":1,"maxDelayTarget":4}"#,
+        ));
+        assert_eq!(p.num_retries, 2);
+        assert_eq!(p.min_delay_target, 1);
+    }
+
+    #[test]
+    fn retry_delay_ramps_between_min_and_max() {
+        let p = HttpDeliveryPolicy {
+            num_retries: 4,
+            min_delay_target: 1,
+            max_delay_target: 5,
+        };
+        assert!(retry_delay_ms(&p, 1) >= retry_delay_ms(&p, 0));
+        assert!(retry_delay_ms(&p, 4) >= retry_delay_ms(&p, 1));
+    }
+
+    #[test]
+    fn parse_redrive_dlq_extracts_arn() {
+        assert_eq!(
+            parse_redrive_dlq(Some(
+                r#"{"deadLetterTargetArn":"arn:aws:sqs:us-east-1:1:dlq"}"#
+            )),
+            Some("arn:aws:sqs:us-east-1:1:dlq".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_redrive_dlq_returns_none_for_garbage() {
+        assert!(parse_redrive_dlq(Some("not json")).is_none());
+        assert!(parse_redrive_dlq(None).is_none());
+    }
+
+    #[test]
+    fn build_dlq_envelope_wraps_original_with_metadata() {
+        let body = build_dlq_envelope(r#"{"Message":"hi"}"#, "HTTP 500", "arn:sub");
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["DeliveryError"], "HTTP 500");
+        assert_eq!(v["SubscriptionArn"], "arn:sub");
+        assert_eq!(v["Message"]["Message"], "hi");
     }
 }
