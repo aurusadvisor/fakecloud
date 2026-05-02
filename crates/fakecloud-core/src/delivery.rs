@@ -19,6 +19,8 @@ pub struct DeliveryBus {
     kinesis_sender: Option<Arc<dyn KinesisDelivery>>,
     /// Start Step Functions executions.
     stepfunctions_starter: Option<Arc<dyn StepFunctionsDelivery>>,
+    /// Write objects to S3 buckets.
+    s3_writer: Option<Arc<dyn S3Delivery>>,
 }
 
 /// Message attribute for SQS delivery from SNS.
@@ -173,6 +175,22 @@ pub trait StepFunctionsDelivery: Send + Sync {
     fn start_execution(&self, state_machine_arn: &str, input: &str);
 }
 
+/// Cross-service S3 writer used by services that need to deliver
+/// content to S3 buckets without taking a direct dep on the S3 crate
+/// (CloudWatch Logs export tasks, Kinesis Firehose, ELB access logs).
+pub trait S3Delivery: Send + Sync {
+    /// Put an object to a bucket. Returns the bucket name on success
+    /// or an error string the caller can surface in tests / logs.
+    fn put_object(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<(), String>;
+}
+
 /// Outbound email dispatch used by services that emulate AWS flows that
 /// route through SES (Cognito verification, etc.) without taking a direct
 /// dependency on the SES crate.
@@ -232,6 +250,28 @@ impl DeliveryBus {
             lambda_invoker: None,
             kinesis_sender: None,
             stepfunctions_starter: None,
+            s3_writer: None,
+        }
+    }
+
+    pub fn with_s3(mut self, sender: Arc<dyn S3Delivery>) -> Self {
+        self.s3_writer = Some(sender);
+        self
+    }
+
+    /// Write content to S3. Returns Err when no S3 writer is wired or
+    /// when the underlying impl rejects the bucket / payload.
+    pub fn put_object_to_s3(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<(), String> {
+        match self.s3_writer {
+            Some(ref sender) => sender.put_object(account_id, bucket, key, body, content_type),
+            None => Err("S3 writer not configured".to_string()),
         }
     }
 
