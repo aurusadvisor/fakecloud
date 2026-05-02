@@ -438,6 +438,10 @@ impl ResourceProvisioner {
             "AWS::ElasticLoadBalancingV2::ListenerRule" => {
                 self.create_elbv2_listener_rule(resource)
             }
+            "AWS::ElasticLoadBalancingV2::ListenerCertificate" => {
+                self.create_elbv2_listener_certificate(resource)
+            }
+            "AWS::ElasticLoadBalancingV2::TrustStore" => self.create_elbv2_trust_store(resource),
             "AWS::Organizations::Organization" => self.create_organization(resource),
             "AWS::Organizations::OrganizationalUnit" => self.create_organization_unit(resource),
             "AWS::Organizations::Account" => self.create_organization_account(resource),
@@ -672,6 +676,12 @@ impl ResourceProvisioner {
             }
             "AWS::ElasticLoadBalancingV2::ListenerRule" => {
                 self.delete_elbv2_listener_rule(&resource.physical_id)
+            }
+            "AWS::ElasticLoadBalancingV2::ListenerCertificate" => {
+                self.delete_elbv2_listener_certificate(&resource.physical_id)
+            }
+            "AWS::ElasticLoadBalancingV2::TrustStore" => {
+                self.delete_elbv2_trust_store(&resource.physical_id)
             }
             "AWS::Organizations::Organization" => self.delete_organization(&resource.physical_id),
             "AWS::Organizations::OrganizationalUnit" => {
@@ -4699,6 +4709,146 @@ impl ResourceProvisioner {
         let mut accounts = self.elbv2_state.write();
         let state = accounts.get_or_create(&self.account_id);
         state.rules.remove(physical_id);
+        Ok(())
+    }
+
+    /// Provision an `AWS::ElasticLoadBalancingV2::ListenerCertificate`.
+    /// Appends each non-default certificate from `Certificates` to the
+    /// target listener (the default listener cert is set on Listener
+    /// creation, so this resource only manages SNI extras).
+    fn create_elbv2_listener_certificate(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let listener_arn = props
+            .get("ListenerArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "ListenerArn is required".to_string())?
+            .to_string();
+        let certs: Vec<String> = props
+            .get("Certificates")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| c.get("CertificateArn").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if certs.is_empty() {
+            return Err("Certificates must contain at least one CertificateArn".to_string());
+        }
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let listener = state
+            .listeners
+            .get_mut(&listener_arn)
+            .ok_or_else(|| format!("Listener {listener_arn} does not exist"))?;
+        for arn in &certs {
+            listener.certificates.retain(|c| &c.certificate_arn != arn);
+            listener.certificates.push(fakecloud_elbv2::Certificate {
+                certificate_arn: arn.clone(),
+                is_default: false,
+            });
+        }
+        Ok(ProvisionResult::new(format!(
+            "{}#{}",
+            listener_arn,
+            certs.join(",")
+        )))
+    }
+
+    fn delete_elbv2_listener_certificate(&self, physical_id: &str) -> Result<(), String> {
+        let (listener_arn, cert_list) = match physical_id.split_once('#') {
+            Some(parts) => parts,
+            None => return Ok(()),
+        };
+        let cert_arns: Vec<&str> = cert_list.split(',').collect();
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(listener) = state.listeners.get_mut(listener_arn) {
+            listener
+                .certificates
+                .retain(|c| !cert_arns.iter().any(|a| *a == c.certificate_arn));
+        }
+        Ok(())
+    }
+
+    /// Provision an `AWS::ElasticLoadBalancingV2::TrustStore`.
+    fn create_elbv2_trust_store(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let bucket = props
+            .get("CaCertificatesBundleS3Bucket")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "CaCertificatesBundleS3Bucket is required".to_string())?;
+        let key = props
+            .get("CaCertificatesBundleS3Key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "CaCertificatesBundleS3Key is required".to_string())?;
+        let tags: Vec<fakecloud_elbv2::Tag> = props
+            .get("Tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        let k = t.get("Key").and_then(|v| v.as_str())?;
+                        let val = t.get("Value").and_then(|v| v.as_str()).unwrap_or("");
+                        Some(fakecloud_elbv2::Tag {
+                            key: k.to_string(),
+                            value: val.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if state.trust_stores.values().any(|t| t.name == name) {
+            return Err(format!("Trust store {name} already exists"));
+        }
+        let suffix: String = Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(16)
+            .collect();
+        let arn = format!(
+            "arn:aws:elasticloadbalancing:{}:{}:truststore/{}/{}",
+            self.region, self.account_id, name, suffix
+        );
+        let ts = fakecloud_elbv2::TrustStore {
+            arn: arn.clone(),
+            name: name.clone(),
+            status: "ACTIVE".to_string(),
+            number_of_ca_certificates: 1,
+            total_revoked_entries: 0,
+            created_time: Utc::now(),
+            ca_certificates_bundle: Some(format!("s3://{bucket}/{key}").into_bytes()),
+            revocations: BTreeMap::new(),
+            next_revocation_id: 1,
+            tags,
+        };
+        state.trust_stores.insert(arn.clone(), ts);
+        Ok(ProvisionResult::new(arn.clone())
+            .with("TrustStoreArn", arn)
+            .with("Name", name)
+            .with("Status", "ACTIVE".to_string()))
+    }
+
+    fn delete_elbv2_trust_store(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.trust_stores.remove(physical_id);
         Ok(())
     }
 
