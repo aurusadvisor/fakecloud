@@ -628,6 +628,12 @@ impl LogsService {
             let partition_key = format!("{}-{}", group_name, stream_name);
             self.delivery_bus
                 .send_to_kinesis(destination_arn, &encoded, &partition_key);
+        } else if destination_arn.contains(":firehose:") {
+            // Firehose subscriptions get the same gzip+base64 envelope
+            // Lambda/Kinesis subscribers see, so a downstream consumer
+            // can decode with the standard CloudWatch-Logs format.
+            self.delivery_bus
+                .put_record_to_firehose(destination_arn, encoded.as_bytes());
         }
     }
 

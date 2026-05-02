@@ -439,7 +439,7 @@ impl FirehoseService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    fn deliver_records(
+    pub fn deliver_records(
         &self,
         account_id: &str,
         region: &str,

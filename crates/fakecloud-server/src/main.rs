@@ -502,10 +502,23 @@ async fn main() {
     let s3_delivery_for_logs = Arc::new(fakecloud_s3::delivery::S3DeliveryImpl::new(
         s3_state.clone(),
     ));
+    // Firehose state is constructed once and shared between the public
+    // FirehoseService (registered later) and the cross-service delivery
+    // hook the Logs subscription dispatch uses for `arn:aws:firehose:`
+    // destinations. Building it here keeps the wiring in one place.
+    let firehose_state: fakecloud_firehose::SharedFirehoseState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_firehose::FirehoseAccounts::new()),
+    );
+    let firehose_delivery_for_logs =
+        Arc::new(fakecloud_firehose::delivery::FirehoseDeliveryImpl::new(
+            firehose_state.clone(),
+            s3_state.clone(),
+        ));
     let mut delivery_for_logs = DeliveryBus::new()
         .with_sqs(sqs_delivery.clone())
         .with_kinesis(kinesis_delivery)
-        .with_s3(s3_delivery_for_logs);
+        .with_s3(s3_delivery_for_logs)
+        .with_firehose(firehose_delivery_for_logs);
     if let Some(ref ld) = lambda_delivery {
         delivery_for_logs = delivery_for_logs.with_lambda(ld.clone());
     }
@@ -587,10 +600,6 @@ async fn main() {
     let cognito_token_state = cognito_state.clone();
     let cognito_userinfo_state = cognito_state.clone();
     let cognito_revoke_state = cognito_state.clone();
-
-    let firehose_state: fakecloud_firehose::SharedFirehoseState = Arc::new(
-        parking_lot::RwLock::new(fakecloud_firehose::FirehoseAccounts::new()),
-    );
 
     let glue_state: fakecloud_glue::SharedGlueState =
         Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new()));
