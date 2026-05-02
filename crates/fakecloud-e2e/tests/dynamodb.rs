@@ -3793,3 +3793,148 @@ async fn query_select_count_omits_items_array() {
         resp.items()
     );
 }
+
+#[tokio::test]
+async fn dynamodb_put_item_emits_item_collection_metrics_on_lsi_table() {
+    use aws_sdk_dynamodb::types::{LocalSecondaryIndex, ReturnItemCollectionMetrics};
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("LsiTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("sk")
+                .key_type(KeyType::Range)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("sk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("lsiSk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .local_secondary_indexes(
+            LocalSecondaryIndex::builder()
+                .index_name("byLsiSk")
+                .key_schema(
+                    KeySchemaElement::builder()
+                        .attribute_name("pk")
+                        .key_type(KeyType::Hash)
+                        .build()
+                        .unwrap(),
+                )
+                .key_schema(
+                    KeySchemaElement::builder()
+                        .attribute_name("lsiSk")
+                        .key_type(KeyType::Range)
+                        .build()
+                        .unwrap(),
+                )
+                .projection(
+                    Projection::builder()
+                        .projection_type(ProjectionType::All)
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .put_item()
+        .table_name("LsiTable")
+        .item("pk", AttributeValue::S("user1".into()))
+        .item("sk", AttributeValue::S("a".into()))
+        .item("lsiSk", AttributeValue::S("z".into()))
+        .return_item_collection_metrics(ReturnItemCollectionMetrics::Size)
+        .send()
+        .await
+        .unwrap();
+
+    let icm = resp
+        .item_collection_metrics()
+        .expect("LSI table should yield ItemCollectionMetrics");
+    let icm_key = icm
+        .item_collection_key()
+        .expect("LSI table response must carry ItemCollectionKey");
+    let pk = icm_key
+        .get("pk")
+        .expect("ItemCollectionKey must include partition key");
+    assert_eq!(pk.as_s().unwrap(), "user1");
+    let range = icm.size_estimate_range_gb();
+    assert!(
+        range.len() == 2 && range[0] >= 0.0 && range[1] >= range[0],
+        "SizeEstimateRangeGB malformed: {range:?}"
+    );
+}
+
+#[tokio::test]
+async fn dynamodb_put_item_omits_item_collection_metrics_without_lsi() {
+    use aws_sdk_dynamodb::types::ReturnItemCollectionMetrics;
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("PlainTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .put_item()
+        .table_name("PlainTable")
+        .item("pk", AttributeValue::S("user1".into()))
+        .return_item_collection_metrics(ReturnItemCollectionMetrics::Size)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        resp.item_collection_metrics().is_none(),
+        "Tables without LSI must omit ItemCollectionMetrics"
+    );
+}
