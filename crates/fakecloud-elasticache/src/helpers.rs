@@ -633,6 +633,55 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
         String::new()
     };
 
+    let cache_parameter_group_xml = match &cluster.cache_parameter_group_name {
+        Some(name) => format!(
+            "<CacheParameterGroup>\
+             <CacheParameterGroupName>{}</CacheParameterGroupName>\
+             <ParameterApplyStatus>in-sync</ParameterApplyStatus>\
+             </CacheParameterGroup>",
+            xml_escape(name)
+        ),
+        None => String::new(),
+    };
+    let security_groups_xml = if cluster.security_group_ids.is_empty() {
+        "<SecurityGroups/>".to_string()
+    } else {
+        format!(
+            "<SecurityGroups>{}</SecurityGroups>",
+            cluster
+                .security_group_ids
+                .iter()
+                .map(|sg| format!(
+                    "<SecurityGroupMembership>\
+                     <SecurityGroupId>{}</SecurityGroupId>\
+                     <Status>active</Status>\
+                     </SecurityGroupMembership>",
+                    xml_escape(sg)
+                ))
+                .collect::<String>()
+        )
+    };
+    let log_delivery_configurations_xml = if cluster.log_delivery_configurations.is_empty() {
+        "<LogDeliveryConfigurations/>".to_string()
+    } else {
+        let entries: String = cluster
+            .log_delivery_configurations
+            .iter()
+            .map(log_delivery_configuration_xml)
+            .collect();
+        format!("<LogDeliveryConfigurations>{entries}</LogDeliveryConfigurations>")
+    };
+    let configuration_endpoint_xml =
+        if cluster.replication_group_id.is_some() && !cluster.endpoint_address.is_empty() {
+            format!(
+            "<ConfigurationEndpoint><Address>{}</Address><Port>{}</Port></ConfigurationEndpoint>",
+            xml_escape(&cluster.endpoint_address),
+            cluster.endpoint_port
+        )
+        } else {
+            String::new()
+        };
+
     format!(
         "<CacheClusterId>{}</CacheClusterId>\
          <CacheNodeType>{}</CacheNodeType>\
@@ -644,6 +693,13 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
          <CacheClusterCreateTime>{}</CacheClusterCreateTime>\
          {cache_subnet_group_name_xml}\
          {cache_nodes_xml}\
+         {cache_parameter_group_xml}\
+         {security_groups_xml}\
+         {log_delivery_configurations_xml}\
+         {configuration_endpoint_xml}\
+         <TransitEncryptionEnabled>{}</TransitEncryptionEnabled>\
+         <AtRestEncryptionEnabled>{}</AtRestEncryptionEnabled>\
+         <AuthTokenEnabled>{}</AuthTokenEnabled>\
          <AutoMinorVersionUpgrade>{}</AutoMinorVersionUpgrade>\
          {replication_group_id_xml}\
          <ARN>{}</ARN>",
@@ -655,6 +711,9 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
         cluster.num_cache_nodes,
         xml_escape(&cluster.preferred_availability_zone),
         xml_escape(&cluster.created_at),
+        cluster.transit_encryption_enabled,
+        cluster.at_rest_encryption_enabled,
+        cluster.auth_token_enabled,
         cluster.auto_minor_version_upgrade,
         xml_escape(&cluster.arn),
     )
@@ -1314,4 +1373,79 @@ pub(crate) fn parameter_xml(p: &EngineDefaultParameter) -> String {
         p.is_modifiable,
         xml_escape(&p.minimum_engine_version),
     )
+}
+
+#[cfg(test)]
+mod cluster_xml_tests {
+    use super::*;
+    use crate::state::{CacheCluster, LogDeliveryConfiguration};
+
+    fn fixture() -> CacheCluster {
+        CacheCluster {
+            cache_cluster_id: "c1".into(),
+            cache_node_type: "cache.t3.micro".into(),
+            engine: "redis".into(),
+            engine_version: "7.1".into(),
+            cache_cluster_status: "available".into(),
+            num_cache_nodes: 1,
+            preferred_availability_zone: "us-east-1a".into(),
+            cache_subnet_group_name: None,
+            auto_minor_version_upgrade: true,
+            arn: "arn:aws:elasticache:us-east-1:000000000000:cluster:c1".into(),
+            created_at: "2026-05-02T00:00:00Z".into(),
+            endpoint_address: "127.0.0.1".into(),
+            endpoint_port: 6379,
+            container_id: String::new(),
+            host_port: 6379,
+            replication_group_id: None,
+            cache_parameter_group_name: None,
+            security_group_ids: Vec::new(),
+            log_delivery_configurations: Vec::new(),
+            transit_encryption_enabled: false,
+            at_rest_encryption_enabled: false,
+            auth_token_enabled: false,
+        }
+    }
+
+    #[test]
+    fn defaults_emit_canonical_flags() {
+        let c = fixture();
+        let xml = cache_cluster_xml(&c, false);
+        assert!(xml.contains("<TransitEncryptionEnabled>false</TransitEncryptionEnabled>"));
+        assert!(xml.contains("<AtRestEncryptionEnabled>false</AtRestEncryptionEnabled>"));
+        assert!(xml.contains("<AuthTokenEnabled>false</AuthTokenEnabled>"));
+        // No parameter group / security groups / log destinations set.
+        assert!(!xml.contains("<CacheParameterGroup>"));
+        assert!(xml.contains("<SecurityGroups/>"));
+        assert!(xml.contains("<LogDeliveryConfigurations/>"));
+        // No replication group => no ConfigurationEndpoint emitted.
+        assert!(!xml.contains("<ConfigurationEndpoint>"));
+    }
+
+    #[test]
+    fn populated_fields_round_trip() {
+        let mut c = fixture();
+        c.cache_parameter_group_name = Some("default.redis7".into());
+        c.security_group_ids = vec!["sg-abc".into(), "sg-def".into()];
+        c.transit_encryption_enabled = true;
+        c.at_rest_encryption_enabled = true;
+        c.auth_token_enabled = true;
+        c.log_delivery_configurations = vec![LogDeliveryConfiguration {
+            log_type: "slow-log".into(),
+            destination_type: "cloudwatch-logs".into(),
+            destination_details: Some("my-log-group".into()),
+            log_format: "json".into(),
+            status: "active".into(),
+        }];
+        c.replication_group_id = Some("rg1".into());
+        let xml = cache_cluster_xml(&c, false);
+        assert!(xml.contains("<CacheParameterGroupName>default.redis7</CacheParameterGroupName>"));
+        assert!(xml.contains("<SecurityGroupId>sg-abc</SecurityGroupId>"));
+        assert!(xml.contains("<SecurityGroupId>sg-def</SecurityGroupId>"));
+        assert!(xml.contains("<TransitEncryptionEnabled>true</TransitEncryptionEnabled>"));
+        assert!(xml.contains("<AtRestEncryptionEnabled>true</AtRestEncryptionEnabled>"));
+        assert!(xml.contains("<AuthTokenEnabled>true</AuthTokenEnabled>"));
+        assert!(xml.contains("<LogType>slow-log</LogType>"));
+        assert!(xml.contains("<ConfigurationEndpoint>"));
+    }
 }

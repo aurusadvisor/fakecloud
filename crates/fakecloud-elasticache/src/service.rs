@@ -837,6 +837,19 @@ impl ElastiCacheService {
             optional_query_param(request, "AutoMinorVersionUpgrade").as_deref(),
         )?
         .unwrap_or(true);
+        let cache_parameter_group_name = optional_query_param(request, "CacheParameterGroupName");
+        let security_group_ids =
+            parse_query_list_param(request, "SecurityGroupIds", "SecurityGroupId");
+        let log_delivery_configurations = parse_log_delivery_configs(request);
+        let transit_encryption_enabled = parse_optional_bool(
+            optional_query_param(request, "TransitEncryptionEnabled").as_deref(),
+        )?
+        .unwrap_or(false);
+        let at_rest_encryption_enabled = parse_optional_bool(
+            optional_query_param(request, "AtRestEncryptionEnabled").as_deref(),
+        )?
+        .unwrap_or(false);
+        let auth_token_enabled = optional_query_param(request, "AuthToken").is_some();
 
         let (preferred_availability_zone, arn) = {
             let mut accounts = self.state.write();
@@ -936,6 +949,12 @@ impl ElastiCacheService {
             container_id: running.container_id,
             host_port: running.host_port,
             replication_group_id,
+            cache_parameter_group_name,
+            security_group_ids,
+            log_delivery_configurations,
+            transit_encryption_enabled,
+            at_rest_encryption_enabled,
+            auth_token_enabled,
         };
 
         let xml = cache_cluster_xml(&cluster, true);

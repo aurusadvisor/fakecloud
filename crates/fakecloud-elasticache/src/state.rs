@@ -105,6 +105,29 @@ pub struct CacheCluster {
     pub container_id: String,
     pub host_port: u16,
     pub replication_group_id: Option<String>,
+    /// `CacheParameterGroup.CacheParameterGroupName` — group bound at
+    /// create / modify time. Real AWS always emits this membership;
+    /// fakecloud previously omitted the element entirely.
+    #[serde(default)]
+    pub cache_parameter_group_name: Option<String>,
+    /// VPC security group ids attached at create time. Echoed via
+    /// `<SecurityGroups>` for parity with AWS DescribeCacheClusters.
+    #[serde(default)]
+    pub security_group_ids: Vec<String>,
+    /// `LogDeliveryConfigurations` — destinations + log types attached
+    /// to the cluster. Round-tripped only.
+    #[serde(default)]
+    pub log_delivery_configurations: Vec<LogDeliveryConfiguration>,
+    /// In-transit encryption flag. Real AWS always emits this; defaults
+    /// to `false` for unencrypted clusters.
+    #[serde(default)]
+    pub transit_encryption_enabled: bool,
+    /// At-rest encryption flag.
+    #[serde(default)]
+    pub at_rest_encryption_enabled: bool,
+    /// `AuthTokenEnabled` — true when an AUTH token was supplied.
+    #[serde(default)]
+    pub auth_token_enabled: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1192,6 +1215,12 @@ mod tests {
                 container_id: "abc123".to_string(),
                 host_port: 12345,
                 replication_group_id: None,
+                cache_parameter_group_name: None,
+                security_group_ids: Vec::new(),
+                log_delivery_configurations: Vec::new(),
+                transit_encryption_enabled: false,
+                at_rest_encryption_enabled: false,
+                auth_token_enabled: false,
             },
         );
         assert_eq!(state.cache_clusters.len(), 1);

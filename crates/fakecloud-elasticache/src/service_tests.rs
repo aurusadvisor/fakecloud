@@ -147,8 +147,13 @@ fn cache_cluster_xml_contains_expected_fields() {
         container_id: "abc123".to_string(),
         host_port: 6379,
         replication_group_id: Some("rg-1".to_string()),
+        cache_parameter_group_name: None,
+        security_group_ids: Vec::new(),
+        log_delivery_configurations: Vec::new(),
+        transit_encryption_enabled: false,
+        at_rest_encryption_enabled: false,
+        auth_token_enabled: false,
     };
-
     let xml = cache_cluster_xml(&cluster, true);
     assert!(xml.contains("<CacheClusterId>classic-1</CacheClusterId>"));
     assert!(xml.contains("<CacheNodeType>cache.t3.micro</CacheNodeType>"));
@@ -682,6 +687,12 @@ fn service_with_cache_cluster(cluster_id: &str) -> ElastiCacheService {
                 container_id: "abc123".to_string(),
                 host_port: 6379,
                 replication_group_id: None,
+                cache_parameter_group_name: None,
+                security_group_ids: Vec::new(),
+                log_delivery_configurations: Vec::new(),
+                transit_encryption_enabled: false,
+                at_rest_encryption_enabled: false,
+                auth_token_enabled: false,
             },
         );
     }
@@ -715,6 +726,12 @@ fn describe_cache_clusters_returns_all() {
                 container_id: "def456".to_string(),
                 host_port: 6380,
                 replication_group_id: None,
+                cache_parameter_group_name: None,
+                security_group_ids: Vec::new(),
+                log_delivery_configurations: Vec::new(),
+                transit_encryption_enabled: false,
+                at_rest_encryption_enabled: false,
+                auth_token_enabled: false,
             },
         );
     }
@@ -2936,6 +2953,12 @@ async fn reboot_cache_cluster_marks_rebooting_when_no_runtime() {
                 container_id: "abc123".to_string(),
                 host_port: 6379,
                 replication_group_id: None,
+                cache_parameter_group_name: None,
+                security_group_ids: Vec::new(),
+                log_delivery_configurations: Vec::new(),
+                transit_encryption_enabled: false,
+                at_rest_encryption_enabled: false,
+                auth_token_enabled: false,
             },
         );
     }
