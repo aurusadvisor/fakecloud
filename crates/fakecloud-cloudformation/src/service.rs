@@ -191,7 +191,12 @@ impl CloudFormationService {
         }
     }
 
-    fn provisioner(&self, stack_id: &str, account_id: &str, region: &str) -> ResourceProvisioner {
+    pub(crate) fn provisioner(
+        &self,
+        stack_id: &str,
+        account_id: &str,
+        region: &str,
+    ) -> ResourceProvisioner {
         ResourceProvisioner {
             sqs_state: self.deps.sqs.clone(),
             sns_state: self.deps.sns.clone(),
@@ -247,7 +252,7 @@ impl CloudFormationService {
         params
     }
 
-    fn extract_tags(params: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    pub(crate) fn extract_tags(params: &BTreeMap<String, String>) -> BTreeMap<String, String> {
         let mut tags = BTreeMap::new();
         for i in 1.. {
             let key_param = format!("Tags.member.{i}.Key");
@@ -262,7 +267,9 @@ impl CloudFormationService {
         tags
     }
 
-    fn extract_parameters(params: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    pub(crate) fn extract_parameters(
+        params: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
         let mut result = BTreeMap::new();
         for i in 1.. {
             let key_param = format!("Parameters.member.{i}.ParameterKey");
@@ -277,7 +284,7 @@ impl CloudFormationService {
         result
     }
 
-    fn extract_notification_arns(params: &BTreeMap<String, String>) -> Vec<String> {
+    pub(crate) fn extract_notification_arns(params: &BTreeMap<String, String>) -> Vec<String> {
         let mut arns = Vec::new();
         for i in 1.. {
             let key = format!("NotificationARNs.member.{i}");
@@ -936,6 +943,7 @@ impl AwsService for CloudFormationService {
                 | "UpdateStack"
                 | "CreateChangeSet"
                 | "DeleteChangeSet"
+                | "ExecuteChangeSet"
                 | "CreateStackSet"
                 | "DeleteStackSet"
                 | "CreateStackRefactor"
@@ -1106,7 +1114,7 @@ impl UpdateStackInput {
 
 /// Apply resource updates: delete removed resources, create new ones.
 /// Returns Err(msg) if any resource operation fails.
-fn apply_resource_updates(
+pub(crate) fn apply_resource_updates(
     stack: &mut crate::state::Stack,
     new_resource_defs: &[template::ResourceDefinition],
     template_body: &str,
