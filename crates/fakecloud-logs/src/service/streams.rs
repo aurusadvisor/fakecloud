@@ -2284,4 +2284,34 @@ mod tests {
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert!(body["destinations"].is_array());
     }
+
+    #[test]
+    fn get_query_results_drops_events_older_than_retention() {
+        let svc = make_service();
+        create_group(&svc, "ret-q");
+        create_stream(&svc, "ret-q", "s");
+        let now = chrono::Utc::now().timestamp_millis();
+        put_events_at(&svc, "ret-q", "s", &["stale"], now - 12 * 86_400_000);
+        put_events(&svc, "ret-q", "s", &["recent"]);
+        put_retention(&svc, "ret-q", 1);
+
+        let req = make_request(
+            "StartQuery",
+            json!({
+                "logGroupName": "ret-q",
+                "queryString": "fields @message",
+                "startTime": (now / 1000) - 30 * 86_400,
+                "endTime": now / 1000,
+            }),
+        );
+        let resp = svc.start_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let qid = body["queryId"].as_str().unwrap().to_string();
+
+        let req = make_request("GetQueryResults", json!({"queryId": qid}));
+        let resp = svc.get_query_results(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let scanned = body["statistics"]["recordsScanned"].as_f64().unwrap();
+        assert_eq!(scanned, 1.0, "retention should hide the 12-day-old event");
+    }
 }
