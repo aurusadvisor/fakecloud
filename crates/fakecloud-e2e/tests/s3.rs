@@ -3506,12 +3506,17 @@ async fn s3_get_object_attributes() {
     );
     let json = output.stdout_json();
 
-    // ETag should match what PutObject returned (without quotes)
+    // ETag must round-trip with the surrounding quote chars AWS itself
+    // emits — SDK clients compare this against PutObject's ETag, which is
+    // also quoted, so unquoted values would fail integrity checks.
     let etag = json["ETag"].as_str().expect("Expected ETag in response");
-    let expected = put_etag.trim_matches('"');
     assert_eq!(
-        etag, expected,
-        "ETag mismatch: got {etag}, expected {expected}"
+        etag, put_etag,
+        "ETag mismatch: got {etag}, expected {put_etag}"
+    );
+    assert!(
+        etag.starts_with('"') && etag.ends_with('"'),
+        "ETag must be quoted: {etag}"
     );
 
     // ObjectSize should match data length
@@ -3523,6 +3528,60 @@ async fn s3_get_object_attributes() {
         .as_str()
         .expect("Expected StorageClass");
     assert_eq!(sc, "STANDARD");
+}
+
+#[tokio::test]
+async fn s3_get_object_attributes_checksum_full_object() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("checksum-attrs")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_object()
+        .bucket("checksum-attrs")
+        .key("file.bin")
+        .body(ByteStream::from_static(b"hello world"))
+        .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Crc32)
+        .send()
+        .await
+        .unwrap();
+
+    let output = server
+        .aws_cli(&[
+            "s3api",
+            "get-object-attributes",
+            "--bucket",
+            "checksum-attrs",
+            "--key",
+            "file.bin",
+            "--object-attributes",
+            "Checksum",
+        ])
+        .await;
+    assert!(
+        output.success(),
+        "get-object-attributes Checksum failed: {}",
+        output.stderr_text()
+    );
+    let json = output.stdout_json();
+
+    assert!(
+        json["Checksum"]["ChecksumCRC32"].is_string(),
+        "Expected ChecksumCRC32 in response: {json}"
+    );
+    let ct = json["Checksum"]["ChecksumType"]
+        .as_str()
+        .expect("Expected ChecksumType");
+    assert_eq!(
+        ct, "FULL_OBJECT",
+        "Single-part PUT should yield FULL_OBJECT ChecksumType"
+    );
 }
 
 #[tokio::test]
