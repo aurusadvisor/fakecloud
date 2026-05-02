@@ -863,10 +863,27 @@ impl RdsService {
             master_username: instance_for_snapshot.master_username.clone(),
             db_name: instance_for_snapshot.db_name.clone(),
             dbi_resource_id: instance_for_snapshot.dbi_resource_id.clone(),
-            snapshot_type: "manual".to_string(),
+            snapshot_type: "automated".to_string(),
             master_user_password: instance_for_snapshot.master_user_password.clone(),
             tags: Vec::new(),
             dump_data,
+            availability_zone: instance_for_snapshot.availability_zone.clone(),
+            vpc_id: None,
+            instance_create_time: Some(instance_for_snapshot.created_at),
+            license_model: Some(
+                service_helpers::license_model_for_engine(&instance_for_snapshot.engine)
+                    .to_string(),
+            ),
+            iops: instance_for_snapshot.iops,
+            option_group_name: instance_for_snapshot.option_group_name.clone(),
+            percent_progress: Some(100),
+            storage_type: instance_for_snapshot.storage_type.clone(),
+            encrypted: instance_for_snapshot.storage_encrypted,
+            kms_key_id: instance_for_snapshot.kms_key_id.clone(),
+            iam_database_authentication_enabled: instance_for_snapshot
+                .iam_database_authentication_enabled,
+            timezone: None,
+            storage_throughput: None,
         };
 
         state.snapshots.insert(snapshot_id.to_string(), snapshot);
@@ -1374,6 +1391,21 @@ impl RdsService {
             master_user_password: instance.master_user_password.clone(),
             tags: Vec::new(),
             dump_data,
+            availability_zone: instance.availability_zone.clone(),
+            vpc_id: None,
+            instance_create_time: Some(instance.created_at),
+            license_model: Some(
+                service_helpers::license_model_for_engine(&instance.engine).to_string(),
+            ),
+            iops: instance.iops,
+            option_group_name: instance.option_group_name.clone(),
+            percent_progress: Some(100),
+            storage_type: instance.storage_type.clone(),
+            encrypted: instance.storage_encrypted,
+            kms_key_id: instance.kms_key_id.clone(),
+            iam_database_authentication_enabled: instance.iam_database_authentication_enabled,
+            timezone: None,
+            storage_throughput: None,
         };
 
         state

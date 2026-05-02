@@ -255,6 +255,60 @@ fn db_instance_xml_renders_dynamic_storage_and_kms() {
     assert!(xml.contains("<SecretStatus>active</SecretStatus>"));
 }
 
+#[test]
+fn db_snapshot_xml_emits_extended_fields() {
+    use super::db_snapshot_xml;
+    let snapshot = crate::state::DbSnapshot {
+        db_snapshot_identifier: "snap-1".to_string(),
+        db_snapshot_arn: "arn:aws:rds:us-east-1:123:snapshot:snap-1".to_string(),
+        db_instance_identifier: "src-db".to_string(),
+        snapshot_create_time: Utc::now(),
+        engine: "postgres".to_string(),
+        engine_version: "16.3".to_string(),
+        allocated_storage: 20,
+        status: "available".to_string(),
+        port: 5432,
+        master_username: "admin".to_string(),
+        db_name: Some("appdb".to_string()),
+        dbi_resource_id: "db-rid".to_string(),
+        snapshot_type: "manual".to_string(),
+        master_user_password: "secret".to_string(),
+        tags: Vec::new(),
+        dump_data: Vec::new(),
+        availability_zone: Some("us-east-1a".to_string()),
+        vpc_id: Some("vpc-abc".to_string()),
+        instance_create_time: Some(Utc::now()),
+        license_model: Some("postgresql-license".to_string()),
+        iops: Some(3000),
+        option_group_name: Some("default:postgres-16".to_string()),
+        percent_progress: Some(100),
+        storage_type: Some("gp3".to_string()),
+        encrypted: true,
+        kms_key_id: Some("arn:aws:kms:us-east-1:123:key/abc".to_string()),
+        iam_database_authentication_enabled: true,
+        timezone: None,
+        storage_throughput: Some(125),
+    };
+
+    let xml = db_snapshot_xml(&snapshot);
+
+    assert!(xml.contains("<AvailabilityZone>us-east-1a</AvailabilityZone>"));
+    assert!(xml.contains("<VpcId>vpc-abc</VpcId>"));
+    assert!(xml.contains("<InstanceCreateTime>"));
+    assert!(xml.contains("<LicenseModel>postgresql-license</LicenseModel>"));
+    assert!(xml.contains("<Iops>3000</Iops>"));
+    assert!(xml.contains("<OptionGroupName>default:postgres-16</OptionGroupName>"));
+    assert!(xml.contains("<PercentProgress>100</PercentProgress>"));
+    assert!(xml.contains("<StorageType>gp3</StorageType>"));
+    assert!(xml.contains("<Encrypted>true</Encrypted>"));
+    assert!(xml.contains("<KmsKeyId>arn:aws:kms:us-east-1:123:key/abc</KmsKeyId>"));
+    assert!(
+        xml.contains("<IAMDatabaseAuthenticationEnabled>true</IAMDatabaseAuthenticationEnabled>")
+    );
+    assert!(xml.contains("<StorageThroughput>125</StorageThroughput>"));
+    assert!(xml.contains("<ProcessorFeatures/>"));
+}
+
 fn make_instance_with_defaults(id: &str) -> DbInstance {
     let created_at = Utc::now();
     DbInstance {
@@ -1096,6 +1150,19 @@ fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
             master_user_password: "secret".to_string(),
             tags: Vec::new(),
             dump_data: Vec::new(),
+            availability_zone: None,
+            vpc_id: None,
+            instance_create_time: None,
+            license_model: None,
+            iops: None,
+            option_group_name: None,
+            percent_progress: None,
+            storage_type: None,
+            encrypted: false,
+            kms_key_id: None,
+            iam_database_authentication_enabled: false,
+            timezone: None,
+            storage_throughput: None,
         },
     );
 }

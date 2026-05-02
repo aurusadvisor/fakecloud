@@ -191,6 +191,32 @@ pub struct DbSnapshot {
     pub master_user_password: String,
     pub tags: Vec<RdsTag>,
     pub dump_data: Vec<u8>,
+    #[serde(default)]
+    pub availability_zone: Option<String>,
+    #[serde(default)]
+    pub vpc_id: Option<String>,
+    #[serde(default)]
+    pub instance_create_time: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub license_model: Option<String>,
+    #[serde(default)]
+    pub iops: Option<i32>,
+    #[serde(default)]
+    pub option_group_name: Option<String>,
+    #[serde(default)]
+    pub percent_progress: Option<i32>,
+    #[serde(default)]
+    pub storage_type: Option<String>,
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub kms_key_id: Option<String>,
+    #[serde(default)]
+    pub iam_database_authentication_enabled: bool,
+    #[serde(default)]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub storage_throughput: Option<i32>,
 }
 
 impl fmt::Debug for DbSnapshot {
