@@ -422,6 +422,12 @@ impl ResourceProvisioner {
             "AWS::KMS::Key" => self.create_kms_key(resource),
             "AWS::KMS::Alias" => self.create_kms_alias(resource),
             "AWS::ECR::Repository" => self.create_ecr_repository(resource),
+            "AWS::ECR::RepositoryPolicy" => self.create_ecr_repository_policy(resource),
+            "AWS::ECR::RegistryPolicy" => self.create_ecr_registry_policy(resource),
+            "AWS::ECR::ReplicationConfiguration" => {
+                self.create_ecr_replication_configuration(resource)
+            }
+            "AWS::ECR::PullThroughCacheRule" => self.create_ecr_pull_through_cache_rule(resource),
             "AWS::CloudWatch::Alarm" => self.create_cloudwatch_alarm(resource),
             "AWS::CloudWatch::Dashboard" => self.create_cloudwatch_dashboard(resource),
             "AWS::ElasticLoadBalancingV2::LoadBalancer" => {
@@ -645,6 +651,14 @@ impl ResourceProvisioner {
             "AWS::KMS::Key" => self.delete_kms_key(&resource.physical_id),
             "AWS::KMS::Alias" => self.delete_kms_alias(&resource.physical_id),
             "AWS::ECR::Repository" => self.delete_ecr_repository(&resource.physical_id),
+            "AWS::ECR::RepositoryPolicy" => {
+                self.delete_ecr_repository_policy(&resource.physical_id)
+            }
+            "AWS::ECR::RegistryPolicy" => self.delete_ecr_registry_policy(),
+            "AWS::ECR::ReplicationConfiguration" => self.delete_ecr_replication_configuration(),
+            "AWS::ECR::PullThroughCacheRule" => {
+                self.delete_ecr_pull_through_cache_rule(&resource.physical_id)
+            }
             "AWS::CloudWatch::Alarm" => self.delete_cloudwatch_alarm(&resource.physical_id),
             "AWS::CloudWatch::Dashboard" => self.delete_cloudwatch_dashboard(&resource.physical_id),
             "AWS::ElasticLoadBalancingV2::LoadBalancer" => {
@@ -3860,6 +3874,216 @@ impl ResourceProvisioner {
         let mut accounts = self.ecr_state.write();
         let state = accounts.get_or_create(&self.account_id);
         state.repositories.remove(physical_id);
+        Ok(())
+    }
+
+    /// Provision a standalone `AWS::ECR::RepositoryPolicy` against an
+    /// existing repository. Physical id encodes `account/repo` so the
+    /// delete path can find the right repository.
+    fn create_ecr_repository_policy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let repository_name = props
+            .get("RepositoryName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "RepositoryName is required".to_string())?
+            .to_string();
+        let policy_text = props
+            .get("PolicyText")
+            .map(|v| {
+                if v.is_string() {
+                    v.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            })
+            .ok_or_else(|| "PolicyText is required".to_string())?;
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let repo = state
+            .repositories
+            .get_mut(&repository_name)
+            .ok_or_else(|| format!("Repository {repository_name} does not exist"))?;
+        repo.policy = Some(policy_text);
+        Ok(ProvisionResult::new(format!(
+            "{}/{}",
+            self.account_id, repository_name
+        )))
+    }
+
+    fn delete_ecr_repository_policy(&self, physical_id: &str) -> Result<(), String> {
+        let repository_name = physical_id
+            .split_once('/')
+            .map(|(_, n)| n.to_string())
+            .unwrap_or_else(|| physical_id.to_string());
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(repo) = state.repositories.get_mut(&repository_name) {
+            repo.policy = None;
+        }
+        Ok(())
+    }
+
+    /// Set the registry-wide policy for the active account. Physical id
+    /// is just the account id since the registry is a singleton.
+    fn create_ecr_registry_policy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let policy_text = props
+            .get("PolicyText")
+            .map(|v| {
+                if v.is_string() {
+                    v.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            })
+            .ok_or_else(|| "PolicyText is required".to_string())?;
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.registry_policy = Some(policy_text);
+        Ok(ProvisionResult::new(self.account_id.clone())
+            .with("RegistryId", self.account_id.clone()))
+    }
+
+    fn delete_ecr_registry_policy(&self) -> Result<(), String> {
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.registry_policy = None;
+        Ok(())
+    }
+
+    /// Provision the singleton `AWS::ECR::ReplicationConfiguration`.
+    fn create_ecr_replication_configuration(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        use fakecloud_ecr::state::{
+            ReplicationConfiguration, ReplicationDestination, ReplicationRule, RepositoryFilter,
+        };
+        let cfg = resource
+            .properties
+            .get("ReplicationConfiguration")
+            .ok_or_else(|| "ReplicationConfiguration is required".to_string())?;
+        let rules: Vec<ReplicationRule> = cfg
+            .get("Rules")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|r| {
+                        let destinations: Vec<ReplicationDestination> = r
+                            .get("Destinations")
+                            .and_then(|v| v.as_array())
+                            .map(|d| {
+                                d.iter()
+                                    .map(|dest| ReplicationDestination {
+                                        region: dest
+                                            .get("Region")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        registry_id: dest
+                                            .get("RegistryId")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let repository_filters: Vec<RepositoryFilter> = r
+                            .get("RepositoryFilters")
+                            .and_then(|v| v.as_array())
+                            .map(|f| {
+                                f.iter()
+                                    .map(|f| RepositoryFilter {
+                                        filter: f
+                                            .get("Filter")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        filter_type: f
+                                            .get("FilterType")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        ReplicationRule {
+                            destinations,
+                            repository_filters,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.replication_configuration = Some(ReplicationConfiguration { rules });
+        Ok(ProvisionResult::new(self.account_id.clone()))
+    }
+
+    fn delete_ecr_replication_configuration(&self) -> Result<(), String> {
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.replication_configuration = None;
+        Ok(())
+    }
+
+    fn create_ecr_pull_through_cache_rule(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        use fakecloud_ecr::state::PullThroughCacheRule;
+        let props = &resource.properties;
+        let prefix = props
+            .get("EcrRepositoryPrefix")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "EcrRepositoryPrefix is required".to_string())?
+            .to_string();
+        let upstream_url = props
+            .get("UpstreamRegistryUrl")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "UpstreamRegistryUrl is required".to_string())?
+            .to_string();
+        let upstream_registry = props
+            .get("UpstreamRegistry")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let credential_arn = props
+            .get("CredentialArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let custom_role_arn = props
+            .get("CustomRoleArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let now = Utc::now();
+        let rule = PullThroughCacheRule {
+            ecr_repository_prefix: prefix.clone(),
+            upstream_registry_url: upstream_url,
+            upstream_registry,
+            credential_arn,
+            created_at: now,
+            updated_at: now,
+            custom_role_arn,
+        };
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.pull_through_cache_rules.insert(prefix.clone(), rule);
+        Ok(ProvisionResult::new(prefix))
+    }
+
+    fn delete_ecr_pull_through_cache_rule(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.pull_through_cache_rules.remove(physical_id);
         Ok(())
     }
 
