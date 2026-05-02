@@ -150,3 +150,92 @@ async fn cfn_provisions_route53_resources() {
         .await;
     assert!(hc_after.is_err(), "health check should be gone");
 }
+
+const DNSSEC_TEMPLATE: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Zone": {
+      "Type": "AWS::Route53::HostedZone",
+      "Properties": {"Name": "dnssec.example.com."}
+    },
+    "Ksk": {
+      "Type": "AWS::Route53::KeySigningKey",
+      "Properties": {
+        "HostedZoneId": {"Ref": "Zone"},
+        "Name": "primary-ksk",
+        "KeyManagementServiceArn": "arn:aws:kms:us-east-1:123456789012:key/dummy",
+        "Status": "ACTIVE"
+      }
+    },
+    "EnableDnssec": {
+      "Type": "AWS::Route53::DNSSEC",
+      "DependsOn": "Ksk",
+      "Properties": {
+        "HostedZoneId": {"Ref": "Zone"}
+      }
+    }
+  },
+  "Outputs": {
+    "ZoneId": {"Value": {"Ref": "Zone"}}
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_provisions_route53_dnssec_and_ksk() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let r53 = aws_sdk_route53::Client::new(&server.aws_config().await);
+
+    cfn.create_stack()
+        .stack_name("r53-dnssec-stack")
+        .template_body(DNSSEC_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("r53-dnssec-stack")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let stack = described.stacks().first().unwrap();
+    assert_eq!(stack.stack_status().unwrap().as_str(), "CREATE_COMPLETE");
+
+    let zone_id = stack
+        .outputs()
+        .iter()
+        .find(|o| o.output_key() == Some("ZoneId"))
+        .and_then(|o| o.output_value())
+        .map(|s| s.to_string())
+        .expect("ZoneId output");
+
+    let dnssec = r53
+        .get_dnssec()
+        .hosted_zone_id(&zone_id)
+        .send()
+        .await
+        .expect("get_dnssec");
+    assert_eq!(
+        dnssec.status().and_then(|s| s.serve_signature()),
+        Some("SIGNING"),
+    );
+    let ksks = dnssec.key_signing_keys();
+    assert!(
+        ksks.iter().any(|k| k.name() == Some("primary-ksk")),
+        "KSK should be present: {ksks:?}"
+    );
+
+    cfn.delete_stack()
+        .stack_name("r53-dnssec-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+
+    // Hosted zone gone -> get_dnssec should error.
+    let after = r53.get_dnssec().hosted_zone_id(&zone_id).send().await;
+    assert!(
+        after.is_err(),
+        "DNSSEC config should be gone after stack deletion"
+    );
+}

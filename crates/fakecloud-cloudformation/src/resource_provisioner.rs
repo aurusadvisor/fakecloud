@@ -479,6 +479,8 @@ impl ResourceProvisioner {
             "AWS::Route53::HostedZone" => self.create_route53_hosted_zone(resource),
             "AWS::Route53::RecordSet" => self.create_route53_record_set(resource),
             "AWS::Route53::HealthCheck" => self.create_route53_health_check(resource),
+            "AWS::Route53::DNSSEC" => self.create_route53_dnssec(resource),
+            "AWS::Route53::KeySigningKey" => self.create_route53_key_signing_key(resource),
             "AWS::CloudFront::CloudFrontOriginAccessIdentity" => {
                 self.create_cf_origin_access_identity(resource)
             }
@@ -742,6 +744,10 @@ impl ResourceProvisioner {
                 self.delete_route53_record_set(&resource.physical_id, &resource.attributes)
             }
             "AWS::Route53::HealthCheck" => self.delete_route53_health_check(&resource.physical_id),
+            "AWS::Route53::DNSSEC" => self.delete_route53_dnssec(&resource.physical_id),
+            "AWS::Route53::KeySigningKey" => {
+                self.delete_route53_key_signing_key(&resource.physical_id)
+            }
             "AWS::CloudFront::CloudFrontOriginAccessIdentity" => {
                 self.delete_cf_origin_access_identity(&resource.physical_id)
             }
@@ -8229,6 +8235,106 @@ impl ResourceProvisioner {
         // default account bucket so SDK reads land on the same data.
         let state = accounts.entry("000000000000");
         state.health_checks.remove(physical_id);
+        Ok(())
+    }
+
+    /// `AWS::Route53::DNSSEC` flips the hosted zone's `dnssec_status` to
+    /// `SIGNING`. Physical id is the hosted zone id so the delete path can
+    /// flip it back without consulting the template.
+    fn create_route53_dnssec(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let zone_id = resource
+            .properties
+            .get("HostedZoneId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "HostedZoneId is required".to_string())?
+            .trim_start_matches("/hostedzone/")
+            .to_string();
+        let mut accounts = self.route53_state.write();
+        let state = accounts.entry("000000000000");
+        if !state.hosted_zones.contains_key(&zone_id) {
+            return Err(format!("HostedZone {zone_id} does not exist"));
+        }
+        state
+            .dnssec_status
+            .insert(zone_id.clone(), "SIGNING".to_string());
+        Ok(ProvisionResult::new(zone_id))
+    }
+
+    fn delete_route53_dnssec(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.route53_state.write();
+        let state = accounts.entry("000000000000");
+        state.dnssec_status.remove(physical_id);
+        Ok(())
+    }
+
+    /// `AWS::Route53::KeySigningKey` registers a KSK against a hosted
+    /// zone. Physical id encodes `<hosted_zone_id>/<name>` so the delete
+    /// path can find the (zone, name) tuple without re-reading inputs.
+    fn create_route53_key_signing_key(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let zone_id = props
+            .get("HostedZoneId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "HostedZoneId is required".to_string())?
+            .trim_start_matches("/hostedzone/")
+            .to_string();
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Name is required".to_string())?
+            .to_string();
+        let kms_arn = props
+            .get("KeyManagementServiceArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "KeyManagementServiceArn is required".to_string())?
+            .to_string();
+        let status = props
+            .get("Status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ACTIVE")
+            .to_string();
+        let now = Utc::now();
+        let ksk = fakecloud_route53::StoredKeySigningKey {
+            hosted_zone_id: zone_id.clone(),
+            name: name.clone(),
+            kms_arn,
+            status,
+            caller_reference: format!("cfn-{}", Uuid::new_v4()),
+            created_date: now,
+            last_modified_date: now,
+            // Real Route53 derives a deterministic key tag from the KSK
+            // material; we synthesize a stable one from the (zone, name)
+            // tuple so the value round-trips on read without depending on
+            // signing internals.
+            key_tag: ((zone_id.len() + name.len()) % 65536) as i32,
+        };
+        let mut accounts = self.route53_state.write();
+        let state = accounts.entry("000000000000");
+        if !state.hosted_zones.contains_key(&zone_id) {
+            return Err(format!("HostedZone {zone_id} does not exist"));
+        }
+        state
+            .key_signing_keys
+            .insert((zone_id.clone(), name.clone()), ksk);
+        Ok(ProvisionResult::new(format!("{zone_id}/{name}")))
+    }
+
+    fn delete_route53_key_signing_key(&self, physical_id: &str) -> Result<(), String> {
+        let (zone_id, name) = match physical_id.split_once('/') {
+            Some(parts) => parts,
+            None => return Ok(()),
+        };
+        let mut accounts = self.route53_state.write();
+        let state = accounts.entry("000000000000");
+        state
+            .key_signing_keys
+            .remove(&(zone_id.to_string(), name.to_string()));
         Ok(())
     }
 
