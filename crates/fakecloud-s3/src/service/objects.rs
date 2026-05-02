@@ -2695,7 +2695,10 @@ impl S3Service {
             let attr = attr.trim();
             match attr {
                 "ETag" => {
-                    body_parts.push(format!("<ETag>{}</ETag>", xml_escape(&obj.etag)));
+                    body_parts.push(format!(
+                        "<ETag>&quot;{}&quot;</ETag>",
+                        xml_escape(&obj.etag)
+                    ));
                 }
                 "StorageClass" => {
                     body_parts.push(format!(
@@ -2709,8 +2712,13 @@ impl S3Service {
                 "Checksum" => {
                     if let (Some(algo), Some(val)) = (&obj.checksum_algorithm, &obj.checksum_value)
                     {
+                        let checksum_type = if obj.parts_count.is_some() {
+                            "COMPOSITE"
+                        } else {
+                            "FULL_OBJECT"
+                        };
                         body_parts.push(format!(
-                            "<Checksum><Checksum{algo}>{val}</Checksum{algo}></Checksum>"
+                            "<Checksum><Checksum{algo}>{val}</Checksum{algo}><ChecksumType>{checksum_type}</ChecksumType></Checksum>"
                         ));
                     }
                 }
