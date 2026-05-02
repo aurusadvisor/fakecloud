@@ -738,6 +738,7 @@ async fn main() {
             cloudfront: cloudfront_state.clone(),
             stepfunctions: stepfunctions_state.clone(),
             wafv2: wafv2_state.clone(),
+            apigateway: apigatewayv1_state.clone(),
             delivery: delivery_for_cf,
         },
     );

@@ -752,6 +752,7 @@ mod tests {
             cloudfront: Arc::new(RwLock::new(fakecloud_cloudfront::CloudFrontAccounts::new())),
             stepfunctions: shared::<fakecloud_stepfunctions::StepFunctionsState>(),
             wafv2: Arc::new(RwLock::new(fakecloud_wafv2::Wafv2Accounts::default())),
+            apigateway: shared::<fakecloud_apigateway::ApiGatewayState>(),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }
