@@ -143,6 +143,20 @@ pub struct Repository {
     /// snapshots portable.
     #[serde(default)]
     pub layers: BTreeMap<String, Layer>,
+    /// Per-image replication status entries, keyed by image digest.
+    /// Populated as PutImage fans out to each registered destination.
+    #[serde(default)]
+    pub replication_statuses: BTreeMap<String, Vec<ImageReplicationStatus>>,
+}
+
+/// Outcome of replicating one image to one destination registry/region.
+/// Surfaced through `DescribeImageReplicationStatus`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageReplicationStatus {
+    pub region: String,
+    pub registry_id: String,
+    pub status: String,
+    pub failure_code: Option<String>,
 }
 
 impl Repository {
@@ -175,6 +189,7 @@ impl Repository {
             images: BTreeMap::new(),
             image_tags: BTreeMap::new(),
             layers: BTreeMap::new(),
+            replication_statuses: BTreeMap::new(),
         }
     }
 }

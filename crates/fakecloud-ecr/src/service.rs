@@ -746,7 +746,106 @@ impl EcrService {
         if should_scan {
             self.trigger_scan(&account, &name, &digest);
         }
+        self.replicate_image(&account, &name, &digest);
         Ok(response)
+    }
+
+    /// Copy a freshly-pushed image to every destination configured by
+    /// the registry's replication rules, recording the per-destination
+    /// status so DescribeImageReplicationStatus returns real data.
+    /// Synchronous because every destination is in-process.
+    fn replicate_image(&self, source_account: &str, repo_name: &str, digest: &str) {
+        use crate::state::{ImageReplicationStatus, Repository};
+
+        let (rules, image, layer_blobs, source_registry_id, source_uri) = {
+            let accounts = self.state.read();
+            let Some(state) = accounts.get(source_account) else {
+                return;
+            };
+            let Some(cfg) = state.replication_configuration.as_ref() else {
+                return;
+            };
+            let Some(repo) = state.repositories.get(repo_name) else {
+                return;
+            };
+            let Some(image) = repo.images.get(digest).cloned() else {
+                return;
+            };
+            let layers: Vec<crate::state::Layer> = layers_for_image(repo, digest);
+            (
+                cfg.rules.clone(),
+                image,
+                layers,
+                repo.registry_id.clone(),
+                repo.repository_uri.clone(),
+            )
+        };
+
+        // Source URI is `<host>/<repo_name>` — strip the trailing repo
+        // name to recover the host so the destination repo's URI keeps
+        // pointing at the same fakecloud endpoint.
+        let endpoint = source_uri
+            .strip_suffix(&format!("/{repo_name}"))
+            .unwrap_or(&source_uri)
+            .to_string();
+
+        let matching: Vec<_> = rules
+            .into_iter()
+            .filter(|rule| repository_filters_match(&rule.repository_filters, repo_name))
+            .flat_map(|rule| rule.destinations.into_iter())
+            .collect();
+        if matching.is_empty() {
+            return;
+        }
+
+        let mut statuses: Vec<ImageReplicationStatus> = Vec::new();
+        let mut accounts = self.state.write();
+        for dest in matching {
+            // Same registry + same region = no replication target.
+            if dest.registry_id == source_registry_id {
+                continue;
+            }
+            let target_state = accounts.get_or_create(&dest.registry_id);
+            // Provision the mirror repo on demand. Real ECR only
+            // replicates into existing repos; create-on-write keeps the
+            // fakecloud flow honest by mirroring the source repo's
+            // metadata when the target hasn't been pre-provisioned.
+            if !target_state.repositories.contains_key(repo_name) {
+                let arn = format!(
+                    "arn:aws:ecr:{}:{}:repository/{}",
+                    dest.region, dest.registry_id, repo_name
+                );
+                let repo = Repository::new(repo_name, arn, &dest.registry_id, &endpoint);
+                target_state
+                    .repositories
+                    .insert(repo_name.to_string(), repo);
+            }
+            let target_repo = target_state.repositories.get_mut(repo_name).unwrap();
+            target_repo
+                .images
+                .entry(digest.to_string())
+                .or_insert_with(|| image.clone());
+            for layer in &layer_blobs {
+                target_repo
+                    .layers
+                    .entry(layer.digest.clone())
+                    .or_insert_with(|| layer.clone());
+            }
+            statuses.push(ImageReplicationStatus {
+                region: dest.region.clone(),
+                registry_id: dest.registry_id.clone(),
+                status: "COMPLETE".to_string(),
+                failure_code: None,
+            });
+        }
+
+        // Record per-destination replication status on the source repo
+        // so DescribeImageReplicationStatus surfaces real entries.
+        let source_state = accounts.get_or_create(source_account);
+        if let Some(repo) = source_state.repositories.get_mut(repo_name) {
+            repo.replication_statuses
+                .insert(digest.to_string(), statuses);
+        }
     }
 
     /// Mark `digest` as `IN_PROGRESS` and spawn the scanner task.
@@ -2012,13 +2111,32 @@ impl EcrService {
             .repositories
             .get(&name)
             .ok_or_else(|| repository_not_found(&name))?;
-        if resolve_image_digest(repo, &image_id).is_none() {
+        let Some(digest) = resolve_image_digest(repo, &image_id) else {
             return Err(image_not_found(&name, &image_id));
-        }
+        };
+        let statuses: Vec<Value> = repo
+            .replication_statuses
+            .get(&digest)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|s| {
+                        let mut obj = serde_json::Map::new();
+                        obj.insert("region".into(), Value::String(s.region.clone()));
+                        obj.insert("registryId".into(), Value::String(s.registry_id.clone()));
+                        obj.insert("status".into(), Value::String(s.status.clone()));
+                        if let Some(ref code) = s.failure_code {
+                            obj.insert("failureCode".into(), Value::String(code.clone()));
+                        }
+                        Value::Object(obj)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(AwsResponse::ok_json(json!({
             "repositoryName": name,
             "imageId": image_id,
-            "replicationStatuses": [],
+            "replicationStatuses": statuses,
         })))
     }
 

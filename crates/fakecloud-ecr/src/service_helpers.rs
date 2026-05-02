@@ -692,3 +692,17 @@ pub(crate) fn registry_scan_on_push_matches(
                     .any(|f| registry_filter_matches(f, repo)))
     })
 }
+
+/// Replication rule filter check. Empty filter list matches every
+/// repository — that's how AWS treats a rule with no filters.
+pub(crate) fn repository_filters_match(
+    filters: &[crate::state::RepositoryFilter],
+    repo_name: &str,
+) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    filters
+        .iter()
+        .any(|f| registry_filter_matches(f, repo_name))
+}
