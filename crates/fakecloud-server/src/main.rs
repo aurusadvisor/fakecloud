@@ -740,6 +740,7 @@ async fn main() {
             wafv2: wafv2_state.clone(),
             apigateway: apigatewayv1_state.clone(),
             apigatewayv2: apigatewayv2_state.clone(),
+            ses: ses_state.clone(),
             delivery: delivery_for_cf,
         },
     );
