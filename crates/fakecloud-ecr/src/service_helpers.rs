@@ -223,6 +223,16 @@ pub(crate) fn image_not_found(repo: &str, id: &Value) -> AwsServiceError {
     )
 }
 
+pub(crate) fn repository_policy_denied(repo: &str, action: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::FORBIDDEN,
+        "AccessDeniedException",
+        format!(
+            "User is not authorized to perform: {action} on resource: repository {repo} because no resource-based policy allows the {action} action"
+        ),
+    )
+}
+
 pub(crate) fn layer_not_found(digest: &str, repo: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -705,4 +715,41 @@ pub(crate) fn repository_filters_match(
     filters
         .iter()
         .any(|f| registry_filter_matches(f, repo_name))
+}
+
+/// Cross-account ECR repository policy gate. When the caller's account
+/// differs from the repository's owning account, the repo must have a
+/// resource policy that explicitly Allows the requested action — empty
+/// policies implicitly deny, mirroring real AWS.
+pub(crate) fn repository_policy_allows(
+    policy_doc: Option<&str>,
+    caller_account: &str,
+    repo_arn: &str,
+    action: &str,
+) -> bool {
+    let Some(doc) = policy_doc else {
+        return false;
+    };
+    if doc.is_empty() {
+        return false;
+    }
+    use fakecloud_core::auth::{Principal, PrincipalType};
+    use fakecloud_iam::evaluator::{evaluate, Decision, EvalRequest, PolicyDocument};
+    let parsed = PolicyDocument::parse(doc);
+    let principal_arn = format!("arn:aws:iam::{caller_account}:root");
+    let principal = Principal {
+        arn: principal_arn.clone(),
+        user_id: principal_arn,
+        account_id: caller_account.to_string(),
+        principal_type: PrincipalType::User,
+        source_identity: None,
+        tags: None,
+    };
+    let req = EvalRequest {
+        principal: &principal,
+        action: action.to_string(),
+        resource: repo_arn.to_string(),
+        context: Default::default(),
+    };
+    matches!(evaluate(&[parsed], &req), Decision::Allow)
 }

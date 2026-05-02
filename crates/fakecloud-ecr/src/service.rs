@@ -695,6 +695,20 @@ impl EcrService {
             .get_mut(&name)
             .ok_or_else(|| repository_not_found(&name))?;
 
+        // Cross-account repository policy gate: if the caller belongs
+        // to a different account than the repo owner, an explicit
+        // Allow on `ecr:PutImage` is required.
+        if request.account_id != account
+            && !repository_policy_allows(
+                repo.policy.as_deref(),
+                &request.account_id,
+                &repo.repository_arn,
+                "ecr:PutImage",
+            )
+        {
+            return Err(repository_policy_denied(&name, "ecr:PutImage"));
+        }
+
         // Immutable tag guard: if a tag is supplied, it already maps to
         // a different digest, and the repo is IMMUTABLE, reject.
         if let Some(ref tag) = supplied_tag {
@@ -922,6 +936,17 @@ impl EcrService {
             .repositories
             .get(&name)
             .ok_or_else(|| repository_not_found(&name))?;
+
+        if request.account_id != account
+            && !repository_policy_allows(
+                repo.policy.as_deref(),
+                &request.account_id,
+                &repo.repository_arn,
+                "ecr:BatchGetImage",
+            )
+        {
+            return Err(repository_policy_denied(&name, "ecr:BatchGetImage"));
+        }
 
         let mut images: Vec<Value> = Vec::new();
         let mut failures: Vec<Value> = Vec::new();
@@ -1228,6 +1253,19 @@ impl EcrService {
             .repositories
             .get(&name)
             .ok_or_else(|| repository_not_found(&name))?;
+        if request.account_id != account
+            && !repository_policy_allows(
+                repo.policy.as_deref(),
+                &request.account_id,
+                &repo.repository_arn,
+                "ecr:GetDownloadUrlForLayer",
+            )
+        {
+            return Err(repository_policy_denied(
+                &name,
+                "ecr:GetDownloadUrlForLayer",
+            ));
+        }
         if !repo.layers.contains_key(&digest) {
             return Err(layer_not_found(&digest, &name));
         }

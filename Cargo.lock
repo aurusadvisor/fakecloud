@@ -2980,6 +2980,7 @@ dependencies = [
  "bytes",
  "chrono",
  "fakecloud-core",
+ "fakecloud-iam",
  "fakecloud-kms",
  "fakecloud-persistence",
  "http 1.4.0",

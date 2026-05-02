@@ -350,3 +350,55 @@ fn replicate_image_copies_to_destination_account() {
     assert_eq!(statuses[0].status, "COMPLETE");
     assert_eq!(statuses[0].registry_id, TARGET);
 }
+
+#[test]
+fn repository_policy_allows_explicit_principal() {
+    use super::repository_policy_allows;
+    let policy = r#"{
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": "CrossAccountPull",
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::222222222222:root"},
+            "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+            "Resource": "*"
+        }]
+    }"#;
+    assert!(repository_policy_allows(
+        Some(policy),
+        "222222222222",
+        "arn:aws:ecr:us-east-1:111111111111:repository/app",
+        "ecr:BatchGetImage",
+    ));
+    // Wrong action -> deny.
+    assert!(!repository_policy_allows(
+        Some(policy),
+        "222222222222",
+        "arn:aws:ecr:us-east-1:111111111111:repository/app",
+        "ecr:PutImage",
+    ));
+    // Wrong principal account -> deny.
+    assert!(!repository_policy_allows(
+        Some(policy),
+        "333333333333",
+        "arn:aws:ecr:us-east-1:111111111111:repository/app",
+        "ecr:BatchGetImage",
+    ));
+}
+
+#[test]
+fn repository_policy_allows_empty_policy_denies() {
+    use super::repository_policy_allows;
+    assert!(!repository_policy_allows(
+        None,
+        "222",
+        "arn",
+        "ecr:PutImage"
+    ));
+    assert!(!repository_policy_allows(
+        Some(""),
+        "222",
+        "arn",
+        "ecr:PutImage"
+    ));
+}
