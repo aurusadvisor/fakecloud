@@ -2864,6 +2864,10 @@ impl ResourceProvisioner {
             signing_job_arn: None,
             runtime_version_config: None,
             master_arn: None,
+            state_reason: None,
+            state_reason_code: None,
+            last_update_status_reason: None,
+            last_update_status_reason_code: None,
         };
 
         let mut accounts = self.lambda_state.write();
@@ -3096,6 +3100,15 @@ impl ResourceProvisioner {
             starting_position_timestamp,
             parallelization_factor,
             function_response_types,
+            kms_key_arn: None,
+            metrics_config: None,
+            destination_config: None,
+            maximum_retry_attempts: None,
+            maximum_record_age_in_seconds: None,
+            bisect_batch_on_function_error: None,
+            tumbling_window_in_seconds: None,
+            topics: Vec::new(),
+            queues: Vec::new(),
         };
         state.event_source_mappings.insert(uuid.clone(), esm);
         Ok(ProvisionResult::new(uuid.clone()).with("Id", uuid))
@@ -7770,6 +7783,12 @@ impl ResourceProvisioner {
             container_id: String::new(),
             host_port: 0,
             replication_group_id: None,
+            cache_parameter_group_name: None,
+            security_group_ids: Vec::new(),
+            log_delivery_configurations: Vec::new(),
+            transit_encryption_enabled: false,
+            at_rest_encryption_enabled: false,
+            auth_token_enabled: false,
         };
         state.cache_clusters.insert(id.clone(), cluster);
         Ok(ProvisionResult::new(id.clone())
