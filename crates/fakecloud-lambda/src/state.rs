@@ -97,6 +97,23 @@ pub struct LambdaFunction {
     /// `$LATEST` ARN.
     #[serde(default)]
     pub master_arn: Option<String>,
+    /// Free-form `StateReason` populated when the function is not in the
+    /// happy `Active`/`Successful` path (e.g. image scan failed, KMS key
+    /// disabled, code-signing rejection). `None` for normal functions.
+    #[serde(default)]
+    pub state_reason: Option<String>,
+    /// Machine-readable `StateReasonCode` paired with `state_reason`
+    /// (`Idle`, `Creating`, `Restoring`, `EniLimitExceeded`, …).
+    #[serde(default)]
+    pub state_reason_code: Option<String>,
+    /// Free-form `LastUpdateStatusReason` set on the most recent failed
+    /// or in-progress configuration update.
+    #[serde(default)]
+    pub last_update_status_reason: Option<String>,
+    /// Machine-readable code paired with `last_update_status_reason`
+    /// (`EniLimitExceeded`, `InsufficientRolePermissions`, …).
+    #[serde(default)]
+    pub last_update_status_reason_code: Option<String>,
 }
 
 fn default_revision_id() -> String {

@@ -142,6 +142,10 @@ mod tests {
             signing_job_arn: None,
             runtime_version_config: None,
             master_arn: None,
+            state_reason: None,
+            state_reason_code: None,
+            last_update_status_reason: None,
+            last_update_status_reason_code: None,
         }
     }
 
