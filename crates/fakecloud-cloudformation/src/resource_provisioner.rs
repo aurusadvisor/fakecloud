@@ -14,6 +14,12 @@ use fakecloud_apigateway::{
     Model as ApiGwModel, Resource as ApiGwResource, RestApi as ApiGwRestApi, SharedApiGatewayState,
     Stage as ApiGwStage, UsagePlan as ApiGwUsagePlan,
 };
+use fakecloud_apigatewayv2::{
+    Authorizer as ApiGwV2Authorizer, CorsConfiguration as ApiGwV2CorsConfiguration,
+    Deployment as ApiGwV2Deployment, HttpApi as ApiGwV2HttpApi, Integration as ApiGwV2Integration,
+    JwtConfiguration as ApiGwV2JwtConfiguration, Route as ApiGwV2Route, SharedApiGatewayV2State,
+    Stage as ApiGwV2Stage,
+};
 use fakecloud_cloudfront::{
     functions::{
         CloudFrontOriginAccessIdentityConfig, FunctionConfig, KeyGroupConfig, KeyGroupItems,
@@ -348,6 +354,7 @@ pub struct ResourceProvisioner {
     pub stepfunctions_state: SharedStepFunctionsState,
     pub wafv2_state: SharedWafv2State,
     pub apigateway_state: SharedApiGatewayState,
+    pub apigatewayv2_state: SharedApiGatewayV2State,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -487,6 +494,20 @@ impl ResourceProvisioner {
             "AWS::ApiGateway::UsagePlanKey" => self.create_apigw_usage_plan_key(resource),
             "AWS::ApiGateway::DomainName" => self.create_apigw_domain_name(resource),
             "AWS::ApiGateway::BasePathMapping" => self.create_apigw_base_path_mapping(resource),
+            "AWS::ApiGatewayV2::Api" => self.create_apigwv2_api(resource),
+            "AWS::ApiGatewayV2::Route" => self.create_apigwv2_route(resource),
+            "AWS::ApiGatewayV2::Integration" => self.create_apigwv2_integration(resource),
+            "AWS::ApiGatewayV2::IntegrationResponse" => {
+                self.create_apigwv2_integration_response(resource)
+            }
+            "AWS::ApiGatewayV2::RouteResponse" => self.create_apigwv2_route_response(resource),
+            "AWS::ApiGatewayV2::Stage" => self.create_apigwv2_stage(resource),
+            "AWS::ApiGatewayV2::Deployment" => self.create_apigwv2_deployment(resource),
+            "AWS::ApiGatewayV2::Authorizer" => self.create_apigwv2_authorizer(resource),
+            "AWS::ApiGatewayV2::DomainName" => self.create_apigwv2_domain_name(resource),
+            "AWS::ApiGatewayV2::ApiMapping" => self.create_apigwv2_api_mapping(resource),
+            "AWS::ApiGatewayV2::VpcLink" => self.create_apigwv2_vpc_link(resource),
+            "AWS::ApiGatewayV2::Model" => self.create_apigwv2_model(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -718,6 +739,37 @@ impl ResourceProvisioner {
             "AWS::ApiGateway::DomainName" => self.delete_apigw_domain_name(&resource.physical_id),
             "AWS::ApiGateway::BasePathMapping" => {
                 self.delete_apigw_base_path_mapping(&resource.physical_id, &resource.attributes)
+            }
+            "AWS::ApiGatewayV2::Api" => self.delete_apigwv2_api(&resource.physical_id),
+            "AWS::ApiGatewayV2::Route" => {
+                self.delete_apigwv2_route(&resource.physical_id, &resource.attributes)
+            }
+            "AWS::ApiGatewayV2::Integration" => {
+                self.delete_apigwv2_integration(&resource.physical_id, &resource.attributes)
+            }
+            "AWS::ApiGatewayV2::IntegrationResponse" => self
+                .delete_apigwv2_integration_response(&resource.physical_id, &resource.attributes),
+            "AWS::ApiGatewayV2::RouteResponse" => {
+                self.delete_apigwv2_route_response(&resource.physical_id, &resource.attributes)
+            }
+            "AWS::ApiGatewayV2::Stage" => {
+                self.delete_apigwv2_stage(&resource.physical_id, &resource.attributes)
+            }
+            "AWS::ApiGatewayV2::Deployment" => {
+                self.delete_apigwv2_deployment(&resource.physical_id, &resource.attributes)
+            }
+            "AWS::ApiGatewayV2::Authorizer" => {
+                self.delete_apigwv2_authorizer(&resource.physical_id, &resource.attributes)
+            }
+            "AWS::ApiGatewayV2::DomainName" => {
+                self.delete_apigwv2_domain_name(&resource.physical_id)
+            }
+            "AWS::ApiGatewayV2::ApiMapping" => {
+                self.delete_apigwv2_api_mapping(&resource.physical_id, &resource.attributes)
+            }
+            "AWS::ApiGatewayV2::VpcLink" => self.delete_apigwv2_vpc_link(&resource.physical_id),
+            "AWS::ApiGatewayV2::Model" => {
+                self.delete_apigwv2_model(&resource.physical_id, &resource.attributes)
             }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
@@ -9306,6 +9358,793 @@ impl ResourceProvisioner {
         }
         Ok(())
     }
+
+    // --- API Gateway v2 (HTTP/WebSocket APIs) ---
+
+    fn create_apigwv2_api(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let protocol_type = props
+            .get("ProtocolType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("HTTP")
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let tags: Option<BTreeMap<String, String>> =
+            props.get("Tags").and_then(|v| v.as_object()).map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            });
+
+        let id = make_apigwv2_id(10);
+        let mut api = ApiGwV2HttpApi::new(id.clone(), name, description, tags, &self.region);
+        api.protocol_type = protocol_type.clone();
+        if let Some(expr) = props
+            .get("RouteSelectionExpression")
+            .and_then(|v| v.as_str())
+        {
+            api.route_selection_expression = expr.to_string();
+        }
+        if let Some(expr) = props
+            .get("ApiKeySelectionExpression")
+            .and_then(|v| v.as_str())
+        {
+            api.api_key_selection_expression = expr.to_string();
+        }
+        if let Some(b) = props
+            .get("DisableExecuteApiEndpoint")
+            .and_then(|v| v.as_bool())
+        {
+            api.disable_execute_api_endpoint = b;
+        }
+        if let Some(s) = props.get("IpAddressType").and_then(|v| v.as_str()) {
+            api.ip_address_type = s.to_string();
+        }
+        if let Some(cors) = props.get("CorsConfiguration").and_then(|v| v.as_object()) {
+            api.cors_configuration = Some(ApiGwV2CorsConfiguration {
+                allow_credentials: cors.get("AllowCredentials").and_then(|v| v.as_bool()),
+                allow_headers: cors
+                    .get("AllowHeaders")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    }),
+                allow_methods: cors
+                    .get("AllowMethods")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    }),
+                allow_origins: cors
+                    .get("AllowOrigins")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    }),
+                expose_headers: cors
+                    .get("ExposeHeaders")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    }),
+                max_age: cors
+                    .get("MaxAge")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n as i32),
+            });
+        }
+
+        let api_endpoint = api.api_endpoint.clone();
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.apis.insert(id.clone(), api);
+
+        Ok(ProvisionResult::new(id.clone())
+            .with("ApiId", id)
+            .with("ApiEndpoint", api_endpoint))
+    }
+
+    fn delete_apigwv2_api(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.apis.remove(physical_id);
+        state.routes.remove(physical_id);
+        state.integrations.remove(physical_id);
+        state.stages.remove(physical_id);
+        state.deployments.remove(physical_id);
+        state.authorizers.remove(physical_id);
+        state.models.remove(physical_id);
+        state.integration_responses.remove(physical_id);
+        state.route_responses.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_apigwv2_route(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let route_key = props
+            .get("RouteKey")
+            .and_then(|v| v.as_str())
+            .ok_or("RouteKey is required")?
+            .to_string();
+
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.apis.contains_key(&api_id) {
+            return Err(format!("Api {api_id} not yet provisioned"));
+        }
+        let id = make_apigwv2_id(10);
+        let route = ApiGwV2Route {
+            route_id: id.clone(),
+            route_key,
+            target: props
+                .get("Target")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            authorization_type: props
+                .get("AuthorizationType")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            authorizer_id: props
+                .get("AuthorizerId")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        };
+        state
+            .routes
+            .entry(api_id.clone())
+            .or_default()
+            .insert(id.clone(), route);
+
+        Ok(ProvisionResult::new(id.clone())
+            .with("RouteId", id)
+            .with("ApiId", api_id))
+    }
+
+    fn delete_apigwv2_route(
+        &self,
+        physical_id: &str,
+        attributes: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let Some(api_id) = attributes.get("ApiId") else {
+            return Ok(());
+        };
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(map) = state.routes.get_mut(api_id) {
+            map.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_apigwv2_integration(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let integration_type = props
+            .get("IntegrationType")
+            .and_then(|v| v.as_str())
+            .ok_or("IntegrationType is required")?
+            .to_string();
+
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.apis.contains_key(&api_id) {
+            return Err(format!("Api {api_id} not yet provisioned"));
+        }
+        let id = make_apigwv2_id(10);
+        let integration = ApiGwV2Integration {
+            integration_id: id.clone(),
+            integration_type,
+            integration_uri: props
+                .get("IntegrationUri")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            payload_format_version: props
+                .get("PayloadFormatVersion")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            timeout_in_millis: props.get("TimeoutInMillis").and_then(|v| v.as_i64()),
+        };
+        state
+            .integrations
+            .entry(api_id.clone())
+            .or_default()
+            .insert(id.clone(), integration);
+
+        Ok(ProvisionResult::new(id.clone())
+            .with("IntegrationId", id)
+            .with("ApiId", api_id))
+    }
+
+    fn delete_apigwv2_integration(
+        &self,
+        physical_id: &str,
+        attributes: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let Some(api_id) = attributes.get("ApiId") else {
+            return Ok(());
+        };
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(map) = state.integrations.get_mut(api_id) {
+            map.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_apigwv2_integration_response(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let integration_id = props
+            .get("IntegrationId")
+            .and_then(|v| v.as_str())
+            .ok_or("IntegrationId is required")?
+            .to_string();
+        let key_expr = props
+            .get("IntegrationResponseKey")
+            .and_then(|v| v.as_str())
+            .ok_or("IntegrationResponseKey is required")?
+            .to_string();
+        let id = make_apigwv2_id(10);
+        let body = serde_json::json!({
+            "integrationResponseId": id,
+            "integrationId": integration_id,
+            "integrationResponseKey": key_expr,
+            "responseTemplates": props.get("ResponseTemplates").cloned().unwrap_or(serde_json::json!({})),
+            "responseParameters": props.get("ResponseParameters").cloned().unwrap_or(serde_json::json!({})),
+            "templateSelectionExpression": props.get("TemplateSelectionExpression").and_then(|v| v.as_str()),
+            "contentHandlingStrategy": props.get("ContentHandlingStrategy").and_then(|v| v.as_str()),
+        });
+        let composite_key = format!("{integration_id}/{id}");
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state
+            .integrations
+            .get(&api_id)
+            .map(|m| m.contains_key(&integration_id))
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "Integration {integration_id} not yet provisioned for api {api_id}"
+            ));
+        }
+        state
+            .integration_responses
+            .entry(api_id.clone())
+            .or_default()
+            .insert(composite_key.clone(), body);
+        Ok(ProvisionResult::new(composite_key.clone())
+            .with("IntegrationResponseId", id)
+            .with("IntegrationId", integration_id)
+            .with("ApiId", api_id))
+    }
+
+    fn delete_apigwv2_integration_response(
+        &self,
+        physical_id: &str,
+        attributes: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let Some(api_id) = attributes.get("ApiId") else {
+            return Ok(());
+        };
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(map) = state.integration_responses.get_mut(api_id) {
+            map.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_apigwv2_route_response(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let route_id = props
+            .get("RouteId")
+            .and_then(|v| v.as_str())
+            .ok_or("RouteId is required")?
+            .to_string();
+        let key_expr = props
+            .get("RouteResponseKey")
+            .and_then(|v| v.as_str())
+            .ok_or("RouteResponseKey is required")?
+            .to_string();
+        let id = make_apigwv2_id(10);
+        let body = serde_json::json!({
+            "routeResponseId": id,
+            "routeId": route_id,
+            "routeResponseKey": key_expr,
+            "responseModels": props.get("ResponseModels").cloned().unwrap_or(serde_json::json!({})),
+            "modelSelectionExpression": props.get("ModelSelectionExpression").and_then(|v| v.as_str()),
+            "responseParameters": props.get("ResponseParameters").cloned().unwrap_or(serde_json::json!({})),
+        });
+        let composite = format!("{route_id}/{id}");
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state
+            .routes
+            .get(&api_id)
+            .map(|m| m.contains_key(&route_id))
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "Route {route_id} not yet provisioned for api {api_id}"
+            ));
+        }
+        state
+            .route_responses
+            .entry(api_id.clone())
+            .or_default()
+            .insert(composite.clone(), body);
+        Ok(ProvisionResult::new(composite.clone())
+            .with("RouteResponseId", id)
+            .with("RouteId", route_id)
+            .with("ApiId", api_id))
+    }
+
+    fn delete_apigwv2_route_response(
+        &self,
+        physical_id: &str,
+        attributes: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let Some(api_id) = attributes.get("ApiId") else {
+            return Ok(());
+        };
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(map) = state.route_responses.get_mut(api_id) {
+            map.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_apigwv2_stage(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let stage_name = props
+            .get("StageName")
+            .and_then(|v| v.as_str())
+            .ok_or("StageName is required")?
+            .to_string();
+        let auto_deploy = props
+            .get("AutoDeploy")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let deployment_id = props
+            .get("DeploymentId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let stage = ApiGwV2Stage {
+            stage_name: stage_name.clone(),
+            description: props
+                .get("Description")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            deployment_id: deployment_id.clone(),
+            auto_deploy,
+            created_date: Utc::now(),
+            last_updated_date: None,
+        };
+
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.apis.contains_key(&api_id) {
+            return Err(format!("Api {api_id} not yet provisioned"));
+        }
+        if let Some(dep) = &deployment_id {
+            if !state
+                .deployments
+                .get(&api_id)
+                .map(|m| m.contains_key(dep))
+                .unwrap_or(false)
+            {
+                return Err(format!(
+                    "Deployment {dep} not yet provisioned for api {api_id}"
+                ));
+            }
+        }
+        state
+            .stages
+            .entry(api_id.clone())
+            .or_default()
+            .insert(stage_name.clone(), stage);
+
+        Ok(ProvisionResult::new(stage_name.clone())
+            .with("StageName", stage_name)
+            .with("ApiId", api_id))
+    }
+
+    fn delete_apigwv2_stage(
+        &self,
+        physical_id: &str,
+        attributes: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let Some(api_id) = attributes.get("ApiId") else {
+            return Ok(());
+        };
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(map) = state.stages.get_mut(api_id) {
+            map.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_apigwv2_deployment(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let id = make_apigwv2_id(10);
+        let deployment = ApiGwV2Deployment {
+            deployment_id: id.clone(),
+            description: props
+                .get("Description")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            created_date: Utc::now(),
+            auto_deployed: false,
+        };
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.apis.contains_key(&api_id) {
+            return Err(format!("Api {api_id} not yet provisioned"));
+        }
+        state
+            .deployments
+            .entry(api_id.clone())
+            .or_default()
+            .insert(id.clone(), deployment);
+        Ok(ProvisionResult::new(id.clone())
+            .with("DeploymentId", id)
+            .with("ApiId", api_id))
+    }
+
+    fn delete_apigwv2_deployment(
+        &self,
+        physical_id: &str,
+        attributes: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let Some(api_id) = attributes.get("ApiId") else {
+            return Ok(());
+        };
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(map) = state.deployments.get_mut(api_id) {
+            map.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_apigwv2_authorizer(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let authorizer_type = props
+            .get("AuthorizerType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("REQUEST")
+            .to_string();
+        let identity_source = props
+            .get("IdentitySource")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<String>>()
+            });
+        let jwt_configuration = props
+            .get("JwtConfiguration")
+            .and_then(|v| v.as_object())
+            .map(|obj| ApiGwV2JwtConfiguration {
+                audience: obj.get("Audience").and_then(|v| v.as_array()).map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                }),
+                issuer: obj.get("Issuer").and_then(|v| v.as_str()).map(String::from),
+            });
+
+        let id = make_apigwv2_id(10);
+        let auth = ApiGwV2Authorizer {
+            authorizer_id: id.clone(),
+            name,
+            authorizer_type,
+            authorizer_uri: props
+                .get("AuthorizerUri")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            identity_source,
+            jwt_configuration,
+        };
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.apis.contains_key(&api_id) {
+            return Err(format!("Api {api_id} not yet provisioned"));
+        }
+        state
+            .authorizers
+            .entry(api_id.clone())
+            .or_default()
+            .insert(id.clone(), auth);
+        Ok(ProvisionResult::new(id.clone())
+            .with("AuthorizerId", id)
+            .with("ApiId", api_id))
+    }
+
+    fn delete_apigwv2_authorizer(
+        &self,
+        physical_id: &str,
+        attributes: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let Some(api_id) = attributes.get("ApiId") else {
+            return Ok(());
+        };
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(map) = state.authorizers.get_mut(api_id) {
+            map.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_apigwv2_domain_name(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let domain_name = props
+            .get("DomainName")
+            .and_then(|v| v.as_str())
+            .ok_or("DomainName is required")?
+            .to_string();
+        let body = serde_json::json!({
+            "domainName": domain_name,
+            "domainNameConfigurations": props.get("DomainNameConfigurations").cloned().unwrap_or(serde_json::json!([])),
+            "mutualTlsAuthentication": props.get("MutualTlsAuthentication").cloned(),
+            "apiMappingSelectionExpression": null,
+        });
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.domain_names.insert(domain_name.clone(), body);
+        Ok(ProvisionResult::new(domain_name.clone()).with("DomainName", domain_name))
+    }
+
+    fn delete_apigwv2_domain_name(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.domain_names.remove(physical_id);
+        state.api_mappings.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_apigwv2_api_mapping(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let domain_name = props
+            .get("DomainName")
+            .and_then(|v| v.as_str())
+            .ok_or("DomainName is required")?
+            .to_string();
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let stage = props
+            .get("Stage")
+            .and_then(|v| v.as_str())
+            .ok_or("Stage is required")?
+            .to_string();
+        let api_mapping_key = props
+            .get("ApiMappingKey")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let id = make_apigwv2_id(10);
+        let body = serde_json::json!({
+            "apiMappingId": id,
+            "apiId": api_id,
+            "stage": stage,
+            "apiMappingKey": api_mapping_key,
+        });
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.domain_names.contains_key(&domain_name) {
+            return Err(format!("DomainName {domain_name} not yet provisioned"));
+        }
+        if !state.apis.contains_key(&api_id) {
+            return Err(format!("Api {api_id} not yet provisioned"));
+        }
+        state
+            .api_mappings
+            .entry(domain_name.clone())
+            .or_default()
+            .insert(id.clone(), body);
+        Ok(ProvisionResult::new(id.clone())
+            .with("ApiMappingId", id)
+            .with("DomainName", domain_name))
+    }
+
+    fn delete_apigwv2_api_mapping(
+        &self,
+        physical_id: &str,
+        attributes: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let Some(domain) = attributes.get("DomainName") else {
+            return Ok(());
+        };
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(map) = state.api_mappings.get_mut(domain) {
+            map.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_apigwv2_vpc_link(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let id = make_apigwv2_id(10);
+        let body = serde_json::json!({
+            "vpcLinkId": id,
+            "name": name,
+            "subnetIds": props.get("SubnetIds").cloned().unwrap_or(serde_json::json!([])),
+            "securityGroupIds": props.get("SecurityGroupIds").cloned().unwrap_or(serde_json::json!([])),
+            "tags": props.get("Tags").cloned().unwrap_or(serde_json::json!({})),
+            "vpcLinkStatus": "AVAILABLE",
+            "vpcLinkVersion": "V2",
+            "createdDate": Utc::now().to_rfc3339(),
+        });
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.vpc_links.insert(id.clone(), body);
+        Ok(ProvisionResult::new(id.clone()).with("VpcLinkId", id))
+    }
+
+    fn delete_apigwv2_vpc_link(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.vpc_links.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_apigwv2_model(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let id = make_apigwv2_id(10);
+        let body = serde_json::json!({
+            "modelId": id,
+            "name": name,
+            "contentType": props.get("ContentType").and_then(|v| v.as_str()).unwrap_or("application/json"),
+            "description": props.get("Description").and_then(|v| v.as_str()),
+            "schema": props.get("Schema").map(|v| if let Some(s) = v.as_str() { s.to_string() } else { v.to_string() }),
+        });
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.apis.contains_key(&api_id) {
+            return Err(format!("Api {api_id} not yet provisioned"));
+        }
+        state
+            .models
+            .entry(api_id.clone())
+            .or_default()
+            .insert(id.clone(), body);
+        Ok(ProvisionResult::new(id.clone())
+            .with("ModelId", id)
+            .with("ApiId", api_id))
+    }
+
+    fn delete_apigwv2_model(
+        &self,
+        physical_id: &str,
+        attributes: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let Some(api_id) = attributes.get("ApiId") else {
+            return Ok(());
+        };
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(map) = state.models.get_mut(api_id) {
+            map.remove(physical_id);
+        }
+        Ok(())
+    }
+}
+
+/// Generate an N-character alphanumeric id for API Gateway v2 resources.
+/// AWS HTTP API ids are 10 chars; routes/integrations/etc are similarly
+/// short. This mirrors the runtime crate's id shape.
+fn make_apigwv2_id(n: usize) -> String {
+    let s = uuid::Uuid::new_v4().simple().to_string();
+    s[..n.min(s.len())].to_string()
 }
 
 /// Lowercase the first letter of each key in a JSON object, recursively.
@@ -9703,6 +10542,13 @@ mod tests {
             )),
             wafv2_state: Arc::new(RwLock::new(fakecloud_wafv2::Wafv2Accounts::default())),
             apigateway_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            apigatewayv2_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",
                     "us-east-1",

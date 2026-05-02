@@ -2692,6 +2692,7 @@ dependencies = [
  "chrono",
  "fakecloud-acm",
  "fakecloud-apigateway",
+ "fakecloud-apigatewayv2",
  "fakecloud-aws",
  "fakecloud-cloudfront",
  "fakecloud-cloudwatch",
