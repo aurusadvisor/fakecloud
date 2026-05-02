@@ -141,3 +141,150 @@ async fn cfn_provisions_and_deletes_ecr_repository() {
         "repository should be gone after stack deletion"
     );
 }
+
+const POLICY_TEMPLATE: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Repo": {
+      "Type": "AWS::ECR::Repository",
+      "Properties": {"RepositoryName": "ecr-cfn-policy-repo"}
+    },
+    "RepoPolicy": {
+      "Type": "AWS::ECR::RepositoryPolicy",
+      "Properties": {
+        "RepositoryName": {"Ref": "Repo"},
+        "PolicyText": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Sid": "AllowPull",
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+            "Action": ["ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"]
+          }]
+        }
+      }
+    },
+    "RegPolicy": {
+      "Type": "AWS::ECR::RegistryPolicy",
+      "Properties": {
+        "PolicyText": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Sid": "ReplicationAccess",
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::222222222222:root"},
+            "Action": ["ecr:CreateRepository", "ecr:ReplicateImage"],
+            "Resource": "*"
+          }]
+        }
+      }
+    },
+    "Replication": {
+      "Type": "AWS::ECR::ReplicationConfiguration",
+      "Properties": {
+        "ReplicationConfiguration": {
+          "Rules": [{
+            "Destinations": [{
+              "Region": "us-west-2",
+              "RegistryId": "222222222222"
+            }],
+            "RepositoryFilters": [{
+              "Filter": "ecr-cfn-policy-",
+              "FilterType": "PREFIX_MATCH"
+            }]
+          }]
+        }
+      }
+    },
+    "PtCache": {
+      "Type": "AWS::ECR::PullThroughCacheRule",
+      "Properties": {
+        "EcrRepositoryPrefix": "ecr-public",
+        "UpstreamRegistryUrl": "public.ecr.aws"
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_provisions_ecr_policies_and_registry_config() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let ecr = aws_sdk_ecr::Client::new(&server.aws_config().await);
+
+    cfn.create_stack()
+        .stack_name("ecr-policy-stack")
+        .template_body(POLICY_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("ecr-policy-stack")
+        .send()
+        .await
+        .expect("describe_stacks");
+    assert_eq!(
+        described
+            .stacks()
+            .first()
+            .unwrap()
+            .stack_status()
+            .unwrap()
+            .as_str(),
+        "CREATE_COMPLETE"
+    );
+
+    let repo_policy = ecr
+        .get_repository_policy()
+        .repository_name("ecr-cfn-policy-repo")
+        .send()
+        .await
+        .expect("get_repository_policy");
+    assert!(repo_policy
+        .policy_text()
+        .map(|s| s.contains("AllowPull"))
+        .unwrap_or(false));
+
+    let reg_policy = ecr
+        .get_registry_policy()
+        .send()
+        .await
+        .expect("get_registry_policy");
+    assert!(reg_policy
+        .policy_text()
+        .map(|s| s.contains("ReplicationAccess"))
+        .unwrap_or(false));
+
+    let replication = ecr
+        .describe_registry()
+        .send()
+        .await
+        .expect("describe_registry");
+    assert_eq!(
+        replication
+            .replication_configuration()
+            .map(|c| c.rules().len()),
+        Some(1)
+    );
+
+    let cache = ecr
+        .describe_pull_through_cache_rules()
+        .send()
+        .await
+        .expect("describe_pull_through_cache_rules");
+    assert!(cache
+        .pull_through_cache_rules()
+        .iter()
+        .any(|r| r.ecr_repository_prefix() == Some("ecr-public")));
+
+    cfn.delete_stack()
+        .stack_name("ecr-policy-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+
+    let reg_after = ecr.get_registry_policy().send().await;
+    assert!(reg_after.is_err(), "registry policy should be cleared");
+}
