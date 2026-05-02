@@ -13,5 +13,6 @@ pub mod xml_responses;
 
 pub use state::{
     IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy, IamRole, IamSnapshot, IamState, IamUser,
-    PolicyVersion, SharedIamState, Tag, IAM_SNAPSHOT_SCHEMA_VERSION,
+    OidcProvider, PolicyVersion, SamlProvider, SharedIamState, Tag, VirtualMfaDevice,
+    IAM_SNAPSHOT_SCHEMA_VERSION,
 };
