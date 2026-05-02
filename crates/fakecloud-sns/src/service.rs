@@ -1605,12 +1605,12 @@ pub(crate) struct SnsLambdaEventInput<'a> {
 /// re-filter the subscriptions map five times inline.
 pub(crate) struct TopicSubscribers {
     /// (queue_arn, raw_message_delivery)
-    sqs: Vec<(String, bool)>,
-    http: Vec<HttpSubscriber>,
+    pub(crate) sqs: Vec<(String, bool)>,
+    pub(crate) http: Vec<HttpSubscriber>,
     /// (function_arn, subscription_arn)
-    lambda: Vec<(String, String)>,
-    email: Vec<String>,
-    sms: Vec<String>,
+    pub(crate) lambda: Vec<(String, String)>,
+    pub(crate) email: Vec<String>,
+    pub(crate) sms: Vec<String>,
 }
 
 /// HTTP/HTTPS subscriber with the per-subscription DeliveryPolicy +
@@ -1656,6 +1656,9 @@ const UPPER_OPS: &[&str] = &["<", "<="];
 mod service_platform;
 #[path = "service_publish.rs"]
 mod service_publish;
+pub(crate) use service_publish::{
+    build_dlq_envelope, parse_http_delivery_policy, parse_redrive_dlq, retry_delay_ms,
+};
 #[path = "service_sms.rs"]
 mod service_sms;
 
