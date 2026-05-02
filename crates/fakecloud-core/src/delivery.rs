@@ -21,6 +21,8 @@ pub struct DeliveryBus {
     stepfunctions_starter: Option<Arc<dyn StepFunctionsDelivery>>,
     /// Write objects to S3 buckets.
     s3_writer: Option<Arc<dyn S3Delivery>>,
+    /// Put records into Firehose delivery streams.
+    firehose_sender: Option<Arc<dyn FirehoseDelivery>>,
 }
 
 /// Message attribute for SQS delivery from SNS.
@@ -175,6 +177,15 @@ pub trait StepFunctionsDelivery: Send + Sync {
     fn start_execution(&self, state_machine_arn: &str, input: &str);
 }
 
+/// Cross-service Kinesis Data Firehose dispatch used by services
+/// (CloudWatch Logs subscription filters, EventBridge targets) that
+/// route records into a delivery stream without depending on the
+/// firehose crate directly. ARN form is
+/// `arn:aws:firehose:<region>:<account>:deliverystream/<name>`.
+pub trait FirehoseDelivery: Send + Sync {
+    fn put_record(&self, delivery_stream_arn: &str, data: &[u8]);
+}
+
 /// Cross-service S3 writer used by services that need to deliver
 /// content to S3 buckets without taking a direct dep on the S3 crate
 /// (CloudWatch Logs export tasks, Kinesis Firehose, ELB access logs).
@@ -251,12 +262,27 @@ impl DeliveryBus {
             kinesis_sender: None,
             stepfunctions_starter: None,
             s3_writer: None,
+            firehose_sender: None,
         }
     }
 
     pub fn with_s3(mut self, sender: Arc<dyn S3Delivery>) -> Self {
         self.s3_writer = Some(sender);
         self
+    }
+
+    pub fn with_firehose(mut self, sender: Arc<dyn FirehoseDelivery>) -> Self {
+        self.firehose_sender = Some(sender);
+        self
+    }
+
+    /// Send a single record to a Firehose delivery stream by ARN.
+    /// Silently no-ops when no Firehose sender is wired (in-process
+    /// tests). Production wiring goes through fakecloud_firehose.
+    pub fn put_record_to_firehose(&self, delivery_stream_arn: &str, data: &[u8]) {
+        if let Some(ref sender) = self.firehose_sender {
+            sender.put_record(delivery_stream_arn, data);
+        }
     }
 
     /// Write content to S3. Returns Err when no S3 writer is wired or
