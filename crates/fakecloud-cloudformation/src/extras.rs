@@ -751,6 +751,7 @@ mod tests {
             route53: Arc::new(RwLock::new(fakecloud_route53::Route53Accounts::new())),
             cloudfront: Arc::new(RwLock::new(fakecloud_cloudfront::CloudFrontAccounts::new())),
             stepfunctions: shared::<fakecloud_stepfunctions::StepFunctionsState>(),
+            wafv2: Arc::new(RwLock::new(fakecloud_wafv2::Wafv2Accounts::default())),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }

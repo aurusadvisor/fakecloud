@@ -35,6 +35,7 @@ fakecloud-elasticache = { workspace = true }
 fakecloud-route53 = { workspace = true }
 fakecloud-cloudfront = { workspace = true }
 fakecloud-stepfunctions = { workspace = true }
+fakecloud-wafv2 = { workspace = true }
 rcgen = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
