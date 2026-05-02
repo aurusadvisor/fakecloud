@@ -148,12 +148,33 @@ impl RdsService {
                 Ok(xml_response(action.as_str(), db_cluster_xml(&id, &arn), &rid))
             }
             "DescribeDBClusters" => {
+                let id_filter = get_param(req, "DBClusterIdentifier");
                 let accounts = self.state_handle().read();
                 let items: Vec<Value> = accounts.get(&aid)
                     .and_then(|s| s.extras.get("clusters"))
-                    .map(|m| m.values().cloned().collect()).unwrap_or_default();
-                let inner = format!("    <DBClusters>\n{}\n    </DBClusters>",
-                    members(&items, db_cluster_member_xml));
+                    .map(|m| {
+                        m.values()
+                            .filter(|v| {
+                                id_filter
+                                    .as_deref()
+                                    .map(|filter| v["DBClusterIdentifier"].as_str() == Some(filter))
+                                    .unwrap_or(true)
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let body = items
+                    .iter()
+                    .map(|v| {
+                        format!(
+                            "      <DBCluster>\n{}\n      </DBCluster>",
+                            db_cluster_member_xml(v)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let inner = format!("    <DBClusters>\n{body}\n    </DBClusters>");
                 Ok(xml_response("DescribeDBClusters", inner, &rid))
             }
 
@@ -568,12 +589,104 @@ fn db_cluster_xml(id: &str, arn: &str) -> String {
 }
 
 fn db_cluster_member_xml(v: &Value) -> String {
-    format!(
-        "          <DBClusterIdentifier>{}</DBClusterIdentifier>\n          <DBClusterArn>{}</DBClusterArn>\n          <Status>{}</Status>",
-        xml_escape(v["DBClusterIdentifier"].as_str().unwrap_or("")),
-        xml_escape(v["DBClusterArn"].as_str().unwrap_or("")),
-        xml_escape(v["Status"].as_str().unwrap_or("available")),
-    )
+    let mut out = String::new();
+    out.push_str(&format!(
+        "          <DBClusterIdentifier>{}</DBClusterIdentifier>\n",
+        xml_escape(v["DBClusterIdentifier"].as_str().unwrap_or(""))
+    ));
+    out.push_str(&format!(
+        "          <DBClusterArn>{}</DBClusterArn>\n",
+        xml_escape(v["DBClusterArn"].as_str().unwrap_or(""))
+    ));
+    out.push_str(&format!(
+        "          <Status>{}</Status>\n",
+        xml_escape(v["Status"].as_str().unwrap_or("available"))
+    ));
+    if let Some(s) = v["Engine"].as_str() {
+        out.push_str(&format!("          <Engine>{}</Engine>\n", xml_escape(s)));
+    }
+    if let Some(s) = v["EngineVersion"].as_str() {
+        out.push_str(&format!(
+            "          <EngineVersion>{}</EngineVersion>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["MasterUsername"].as_str() {
+        out.push_str(&format!(
+            "          <MasterUsername>{}</MasterUsername>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["DatabaseName"].as_str() {
+        out.push_str(&format!(
+            "          <DatabaseName>{}</DatabaseName>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["Endpoint"].as_str() {
+        out.push_str(&format!(
+            "          <Endpoint>{}</Endpoint>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["ReaderEndpoint"].as_str() {
+        out.push_str(&format!(
+            "          <ReaderEndpoint>{}</ReaderEndpoint>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(n) = v["Port"].as_i64() {
+        out.push_str(&format!("          <Port>{}</Port>\n", n));
+    }
+    if let Some(n) = v["AllocatedStorage"].as_i64() {
+        out.push_str(&format!(
+            "          <AllocatedStorage>{}</AllocatedStorage>\n",
+            n
+        ));
+    }
+    if let Some(n) = v["BackupRetentionPeriod"].as_i64() {
+        out.push_str(&format!(
+            "          <BackupRetentionPeriod>{}</BackupRetentionPeriod>\n",
+            n
+        ));
+    }
+    if let Some(b) = v["StorageEncrypted"].as_bool() {
+        out.push_str(&format!(
+            "          <StorageEncrypted>{}</StorageEncrypted>\n",
+            b
+        ));
+    }
+    if let Some(s) = v["KmsKeyId"].as_str() {
+        out.push_str(&format!(
+            "          <KmsKeyId>{}</KmsKeyId>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(b) = v["DeletionProtection"].as_bool() {
+        out.push_str(&format!(
+            "          <DeletionProtection>{}</DeletionProtection>\n",
+            b
+        ));
+    }
+    if let Some(s) = v["DBSubnetGroup"].as_str() {
+        out.push_str(&format!(
+            "          <DBSubnetGroup>{}</DBSubnetGroup>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["DbClusterResourceId"].as_str() {
+        out.push_str(&format!(
+            "          <DbClusterResourceId>{}</DbClusterResourceId>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["ClusterCreateTime"].as_str() {
+        out.push_str(&format!(
+            "          <ClusterCreateTime>{}</ClusterCreateTime>\n",
+            xml_escape(s)
+        ));
+    }
+    out
 }
 
 fn cluster_snapshot_xml(id: &str, arn: &str, cluster: &str) -> String {
