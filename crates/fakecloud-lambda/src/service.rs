@@ -1018,6 +1018,10 @@ impl LambdaService {
             signing_job_arn: None,
             runtime_version_config: None,
             master_arn: None,
+            state_reason: None,
+            state_reason_code: None,
+            last_update_status_reason: None,
+            last_update_status_reason_code: None,
         };
 
         let response = self.function_config_json(&func);
@@ -1544,6 +1548,18 @@ impl LambdaService {
                 .iter()
                 .map(|l| json!({"Arn": l.arn, "CodeSize": l.code_size}))
                 .collect::<Vec<_>>());
+        }
+        if let Some(ref r) = func.state_reason {
+            config["StateReason"] = json!(r);
+        }
+        if let Some(ref c) = func.state_reason_code {
+            config["StateReasonCode"] = json!(c);
+        }
+        if let Some(ref r) = func.last_update_status_reason {
+            config["LastUpdateStatusReason"] = json!(r);
+        }
+        if let Some(ref c) = func.last_update_status_reason_code {
+            config["LastUpdateStatusReasonCode"] = json!(c);
         }
         config
     }

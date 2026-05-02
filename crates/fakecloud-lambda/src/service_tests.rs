@@ -1241,3 +1241,44 @@ async fn update_function_configuration_rotates_revision_id() {
     let rev_after = v["Configuration"]["RevisionId"].as_str().unwrap();
     assert_ne!(rev_before, rev_after);
 }
+
+#[tokio::test]
+async fn function_config_emits_state_reason_fields_when_populated() {
+    // GetFunctionConfiguration omits StateReason / StateReasonCode and
+    // their LastUpdateStatus counterparts when unset (default), and
+    // surfaces them verbatim once populated. Real AWS leaves these
+    // absent for healthy functions and only attaches them when a
+    // function transitions out of the happy path.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "reason").await;
+
+    // Default (unset) — fields must be absent, not null/empty-string.
+    let req = make_request(Method::GET, "/2015-03-31/functions/reason", "");
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert!(v["Configuration"]["StateReason"].is_null());
+    assert!(v["Configuration"]["StateReasonCode"].is_null());
+    assert!(v["Configuration"]["LastUpdateStatusReason"].is_null());
+    assert!(v["Configuration"]["LastUpdateStatusReasonCode"].is_null());
+
+    // Mutate state directly — these fields are AWS-internal, no public
+    // API path to set them. Confirm they round-trip into the response.
+    {
+        let mut accts = svc.state.write();
+        let acct = accts.get_or_create("123456789012");
+        let f = acct.functions.get_mut("reason").unwrap();
+        f.state_reason = Some("EFS access point unavailable".into());
+        f.state_reason_code = Some("EFSMountFailure".into());
+        f.last_update_status_reason = Some("Backoff after 3 attempts".into());
+        f.last_update_status_reason_code = Some("EniLimitExceeded".into());
+    }
+
+    let req = make_request(Method::GET, "/2015-03-31/functions/reason", "");
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let cfg = &v["Configuration"];
+    assert_eq!(cfg["StateReason"], "EFS access point unavailable");
+    assert_eq!(cfg["StateReasonCode"], "EFSMountFailure");
+    assert_eq!(cfg["LastUpdateStatusReason"], "Backoff after 3 attempts");
+    assert_eq!(cfg["LastUpdateStatusReasonCode"], "EniLimitExceeded");
+}
