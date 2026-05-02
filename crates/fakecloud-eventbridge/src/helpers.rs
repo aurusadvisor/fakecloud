@@ -945,3 +945,198 @@ pub(crate) fn apply_connection_auth(
     }
     builder
 }
+
+/// Context shared by both put_events (direct) and put_event_in_account
+/// (cross-service) when dispatching matched targets. Optional state
+/// handles let cross-service callers (which may not be wired with full
+/// service plumbing) gracefully degrade — e.g. Lambda dispatch becomes
+/// a fire-and-forget log unless `lambda_state` is wired.
+pub(crate) struct EventDispatchContext<'a> {
+    pub(crate) state: &'a crate::state::SharedEventBridgeState,
+    pub(crate) delivery: &'a std::sync::Arc<fakecloud_core::delivery::DeliveryBus>,
+    pub(crate) lambda_state: Option<&'a fakecloud_lambda::SharedLambdaState>,
+    pub(crate) logs_state: Option<&'a fakecloud_logs::SharedLogsState>,
+    pub(crate) container_runtime:
+        &'a Option<std::sync::Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
+    pub(crate) account_id: &'a str,
+    pub(crate) region: &'a str,
+}
+
+/// Single-target dispatch shared by direct PutEvents and cross-service
+/// put_event_in_account so both honour the same target shape (SQS/SNS/
+/// Lambda/Logs/Kinesis/StepFunctions/ApiDestination/HTTP) and the same
+/// InputTransformer + InputPath body resolution.
+pub(crate) fn dispatch_event_target(
+    ctx: &EventDispatchContext,
+    target: &crate::state::EventTarget,
+    event_json: &Value,
+    event_id: &str,
+    detail_type: &str,
+) {
+    let arn = &target.arn;
+    let event_str = event_json.to_string();
+    let body_str = if let Some(ref transformer) = target.input_transformer {
+        apply_input_transformer(transformer, event_json)
+    } else if let Some(ref input) = target.input {
+        input.clone()
+    } else if let Some(ref input_path) = target.input_path {
+        resolve_json_path(event_json, input_path)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| event_str.clone())
+    } else {
+        event_str.clone()
+    };
+
+    if arn.contains(":sqs:") {
+        let group_id = target
+            .sqs_parameters
+            .as_ref()
+            .and_then(|p| p["MessageGroupId"].as_str())
+            .map(|s| s.to_string());
+        if group_id.is_some() {
+            ctx.delivery.send_to_sqs_with_attrs(
+                arn,
+                &body_str,
+                &HashMap::new(),
+                group_id.as_deref(),
+                None,
+            );
+        } else {
+            ctx.delivery.send_to_sqs(arn, &body_str, &HashMap::new());
+        }
+    } else if arn.contains(":sns:") {
+        ctx.delivery
+            .publish_to_sns(arn, &body_str, Some(detail_type));
+    } else if arn.contains(":lambda:") {
+        tracing::info!(
+            function_arn = %arn,
+            payload = %body_str,
+            "EventBridge delivering to Lambda function"
+        );
+        let now = chrono::Utc::now();
+        {
+            let mut accounts = ctx.state.write();
+            let s = accounts.get_or_create(ctx.account_id);
+            s.lambda_invocations.push(crate::state::LambdaInvocation {
+                function_arn: arn.clone(),
+                payload: body_str.clone(),
+                timestamp: now,
+            });
+        }
+        if let Some(ls) = ctx.lambda_state {
+            ls.write()
+                .default_mut()
+                .invocations
+                .push(fakecloud_lambda::LambdaInvocation {
+                    function_arn: arn.clone(),
+                    payload: body_str.clone(),
+                    timestamp: now,
+                    source: "aws:events".to_string(),
+                });
+        }
+        invoke_lambda_async(
+            ctx.container_runtime,
+            &ctx.lambda_state.cloned(),
+            arn,
+            &body_str,
+        );
+    } else if arn.contains(":logs:") {
+        tracing::info!(
+            log_group_arn = %arn,
+            payload = %body_str,
+            "EventBridge delivering to CloudWatch Logs"
+        );
+        let now = chrono::Utc::now();
+        {
+            let mut accounts = ctx.state.write();
+            let s = accounts.get_or_create(ctx.account_id);
+            s.log_deliveries.push(crate::state::LogDelivery {
+                log_group_arn: arn.clone(),
+                payload: body_str.clone(),
+                timestamp: now,
+            });
+        }
+        if let Some(log_state) = ctx.logs_state {
+            deliver_to_logs(log_state, arn, &body_str, now);
+        }
+    } else if arn.contains(":kinesis:") {
+        tracing::info!(
+            stream_arn = %arn,
+            "EventBridge delivering to Kinesis stream"
+        );
+        ctx.delivery.send_to_kinesis(arn, &body_str, event_id);
+    } else if arn.contains(":states:") {
+        tracing::info!(
+            state_machine_arn = %arn,
+            "EventBridge delivering to Step Functions"
+        );
+        ctx.delivery.start_stepfunctions_execution(arn, &body_str);
+        let mut accounts = ctx.state.write();
+        let s = accounts.get_or_create(ctx.account_id);
+        s.step_function_executions
+            .push(crate::state::StepFunctionExecution {
+                state_machine_arn: arn.clone(),
+                payload: body_str.clone(),
+                timestamp: chrono::Utc::now(),
+            });
+    } else if arn.contains(":api-destination/") {
+        let accounts = ctx.state.read();
+        let empty = crate::state::EventBridgeState::new(ctx.account_id, ctx.region);
+        let s = accounts.get(ctx.account_id).unwrap_or(&empty);
+        let dest = s.api_destinations.values().find(|d| d.arn == *arn).cloned();
+        let conn = dest.as_ref().and_then(|d| {
+            s.connections
+                .values()
+                .find(|c| c.arn == d.connection_arn)
+                .cloned()
+        });
+        drop(accounts);
+        if let Some(dest) = dest {
+            let url = dest.invocation_endpoint;
+            let method = dest.http_method;
+            let payload = body_str.clone();
+            tokio::spawn(async move {
+                let client = reqwest::Client::new();
+                let mut req_builder = match method.as_str() {
+                    "GET" => client.get(&url),
+                    "PUT" => client.put(&url),
+                    "DELETE" => client.delete(&url),
+                    "PATCH" => client.patch(&url),
+                    "HEAD" => client.head(&url),
+                    _ => client.post(&url),
+                };
+                req_builder = req_builder.header("Content-Type", "application/json");
+                if let Some(conn) = conn {
+                    req_builder = apply_connection_auth(req_builder, &conn);
+                }
+                let result = req_builder.body(payload).send().await;
+                if let Err(e) = result {
+                    tracing::warn!(
+                        endpoint = %url,
+                        error = %e,
+                        "EventBridge ApiDestination delivery failed"
+                    );
+                }
+            });
+        }
+    } else if arn.starts_with("https://") || arn.starts_with("http://") {
+        let url = arn.clone();
+        let payload = body_str.clone();
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let result = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .body(payload)
+                .send()
+                .await;
+            if let Err(e) = result {
+                tracing::warn!(
+                    endpoint = %url,
+                    error = %e,
+                    "EventBridge HTTP target delivery failed"
+                );
+            }
+        });
+    }
+}

@@ -1,11 +1,13 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
 
 use fakecloud_core::delivery::{DeliveryBus, EventBridgeDelivery};
+use fakecloud_lambda::runtime::ContainerRuntime;
+use fakecloud_lambda::SharedLambdaState;
+use fakecloud_logs::SharedLogsState;
 
-use crate::service::matches_pattern;
+use crate::service::{dispatch_event_target, matches_pattern, EventDispatchContext};
 use crate::state::{PutEvent, SharedEventBridgeState};
 
 /// Implements EventBridgeDelivery so other services (SES) can put events
@@ -13,11 +15,35 @@ use crate::state::{PutEvent, SharedEventBridgeState};
 pub struct EventBridgeDeliveryImpl {
     state: SharedEventBridgeState,
     delivery: Arc<DeliveryBus>,
+    lambda_state: Option<SharedLambdaState>,
+    logs_state: Option<SharedLogsState>,
+    container_runtime: Option<Arc<ContainerRuntime>>,
 }
 
 impl EventBridgeDeliveryImpl {
     pub fn new(state: SharedEventBridgeState, delivery: Arc<DeliveryBus>) -> Self {
-        Self { state, delivery }
+        Self {
+            state,
+            delivery,
+            lambda_state: None,
+            logs_state: None,
+            container_runtime: None,
+        }
+    }
+
+    pub fn with_lambda(mut self, lambda_state: SharedLambdaState) -> Self {
+        self.lambda_state = Some(lambda_state);
+        self
+    }
+
+    pub fn with_logs(mut self, logs_state: SharedLogsState) -> Self {
+        self.logs_state = Some(logs_state);
+        self
+    }
+
+    pub fn with_runtime(mut self, runtime: Arc<ContainerRuntime>) -> Self {
+        self.container_runtime = Some(runtime);
+        self
     }
 }
 
@@ -95,15 +121,23 @@ impl EventBridgeDeliveryImpl {
         });
         let event_str = event_json.to_string();
 
+        let _ = event_str;
+        let resolved_account = if let Some(acct) = target_account_id {
+            acct.to_string()
+        } else {
+            account_id.clone()
+        };
+        let ctx = EventDispatchContext {
+            state: &self.state,
+            delivery: &self.delivery,
+            lambda_state: self.lambda_state.as_ref(),
+            logs_state: self.logs_state.as_ref(),
+            container_runtime: &self.container_runtime,
+            account_id: &resolved_account,
+            region: &region,
+        };
         for target in matching_targets {
-            let arn = &target.arn;
-            if arn.contains(":sqs:") {
-                self.delivery.send_to_sqs(arn, &event_str, &HashMap::new());
-            } else if arn.contains(":sns:") {
-                self.delivery
-                    .publish_to_sns(arn, &event_str, Some(detail_type));
-            }
-            // Lambda and other targets could be added here
+            dispatch_event_target(&ctx, &target, &event_json, &event_id, detail_type);
         }
     }
 }
@@ -138,7 +172,7 @@ mod tests {
     use fakecloud_aws::arn::Arn;
     use fakecloud_core::delivery::{SnsDelivery, SqsDelivery};
     use parking_lot::RwLock;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Mutex;
 
     #[derive(Default)]
