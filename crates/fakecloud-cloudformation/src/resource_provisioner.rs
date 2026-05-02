@@ -78,7 +78,7 @@ use fakecloud_organizations::{
     OrganizationState, OrganizationalUnit, Policy as OrgPolicy, SharedOrganizationsState,
     POLICY_TYPE_SCP,
 };
-use fakecloud_rds::{DbParameterGroup, DbSubnetGroup, RdsTag, SharedRdsState};
+use fakecloud_rds::{DbInstance, DbParameterGroup, DbSubnetGroup, RdsTag, SharedRdsState};
 use fakecloud_route53::{
     model::{HealthCheckConfig, HostedZoneFeatures, ResourceRecordSet},
     SharedRoute53State, StoredHealthCheck, StoredHostedZone,
@@ -449,6 +449,8 @@ impl ResourceProvisioner {
             "AWS::RDS::EventSubscription" => self.create_rds_event_subscription(resource),
             "AWS::RDS::DBSecurityGroup" => self.create_rds_security_group(resource),
             "AWS::RDS::DBProxy" => self.create_rds_db_proxy(resource),
+            "AWS::RDS::DBInstance" => self.create_rds_db_instance(resource),
+            "AWS::RDS::DBCluster" => self.create_rds_db_cluster(resource),
             "AWS::ECS::Cluster" => self.create_ecs_cluster(resource),
             "AWS::ECS::TaskDefinition" => self.create_ecs_task_definition(resource),
             "AWS::ECS::Service" => self.create_ecs_service(resource),
@@ -678,6 +680,8 @@ impl ResourceProvisioner {
             }
             "AWS::RDS::DBSecurityGroup" => self.delete_rds_security_group(&resource.physical_id),
             "AWS::RDS::DBProxy" => self.delete_rds_db_proxy(&resource.physical_id),
+            "AWS::RDS::DBInstance" => self.delete_rds_db_instance(&resource.physical_id),
+            "AWS::RDS::DBCluster" => self.delete_rds_db_cluster(&resource.physical_id),
             "AWS::ECS::Cluster" => self.delete_ecs_cluster(&resource.physical_id),
             "AWS::ECS::TaskDefinition" => self.delete_ecs_task_definition(&resource.physical_id),
             "AWS::ECS::Service" => self.delete_ecs_service(&resource.physical_id),
@@ -5974,6 +5978,326 @@ impl ResourceProvisioner {
         let mut accounts = self.rds_state.write();
         let state = accounts.get_or_create(&self.account_id);
         if let Some(m) = state.extras.get_mut("proxies") {
+            m.remove(physical_id);
+        }
+        Ok(())
+    }
+
+    fn create_rds_db_instance(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let identifier = props
+            .get("DBInstanceIdentifier")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                format!(
+                    "cfn-{}-{}",
+                    resource.logical_id.to_lowercase(),
+                    Uuid::new_v4().simple().to_string()[..8].to_lowercase()
+                )
+            });
+        let class = props
+            .get("DBInstanceClass")
+            .and_then(|v| v.as_str())
+            .unwrap_or("db.t4g.micro")
+            .to_string();
+        let engine = props
+            .get("Engine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("postgres")
+            .to_string();
+        let engine_version = props
+            .get("EngineVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("16.0")
+            .to_string();
+        let master_username = props
+            .get("MasterUsername")
+            .and_then(|v| v.as_str())
+            .unwrap_or("admin")
+            .to_string();
+        let master_user_password = props
+            .get("MasterUserPassword")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let db_name = props
+            .get("DBName")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let port = props
+            .get("Port")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32)
+            .unwrap_or(5432);
+        let allocated_storage = props
+            .get("AllocatedStorage")
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+            })
+            .map(|n| n as i32)
+            .unwrap_or(20);
+        let publicly_accessible = props
+            .get("PubliclyAccessible")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let deletion_protection = props
+            .get("DeletionProtection")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let backup_retention_period = props
+            .get("BackupRetentionPeriod")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32)
+            .unwrap_or(0);
+        let multi_az = props
+            .get("MultiAZ")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let availability_zone = props
+            .get("AvailabilityZone")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let storage_type = props
+            .get("StorageType")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let storage_encrypted = props
+            .get("StorageEncrypted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let kms_key_id = props
+            .get("KmsKeyId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let iam_database_authentication_enabled = props
+            .get("EnableIAMDatabaseAuthentication")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let db_parameter_group_name = props
+            .get("DBParameterGroupName")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let option_group_name = props
+            .get("OptionGroupName")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let vpc_security_group_ids: Vec<String> = props
+            .get("VPCSecurityGroups")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let enabled_cloudwatch_logs_exports: Vec<String> = props
+            .get("EnableCloudwatchLogsExports")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tags = parse_rds_tags(props.get("Tags"));
+
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let arn = state.db_instance_arn(&identifier);
+        let endpoint_address = format!(
+            "{identifier}.cluster-fakecloud.{}.rds.amazonaws.com",
+            state.region
+        );
+        let dbi_resource_id = format!("db-{}", Uuid::new_v4().simple());
+        let inst = DbInstance {
+            db_instance_identifier: identifier.clone(),
+            db_instance_arn: arn.clone(),
+            db_instance_class: class,
+            engine,
+            engine_version,
+            db_instance_status: "available".to_string(),
+            master_username,
+            db_name,
+            endpoint_address,
+            port,
+            allocated_storage,
+            publicly_accessible,
+            deletion_protection,
+            created_at: Utc::now(),
+            dbi_resource_id,
+            master_user_password,
+            container_id: String::new(),
+            host_port: 0,
+            tags,
+            read_replica_source_db_instance_identifier: None,
+            read_replica_db_instance_identifiers: Vec::new(),
+            vpc_security_group_ids,
+            db_parameter_group_name,
+            backup_retention_period,
+            preferred_backup_window: "03:00-04:00".to_string(),
+            latest_restorable_time: None,
+            option_group_name,
+            multi_az,
+            pending_modified_values: None,
+            availability_zone,
+            storage_type,
+            storage_encrypted,
+            kms_key_id,
+            iam_database_authentication_enabled,
+            iops: props.get("Iops").and_then(|v| v.as_i64()).map(|n| n as i32),
+            monitoring_interval: props
+                .get("MonitoringInterval")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
+            monitoring_role_arn: props
+                .get("MonitoringRoleArn")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            performance_insights_enabled: props
+                .get("EnablePerformanceInsights")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            performance_insights_kms_key_id: props
+                .get("PerformanceInsightsKMSKeyId")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            performance_insights_retention_period: props
+                .get("PerformanceInsightsRetentionPeriod")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
+            enabled_cloudwatch_logs_exports,
+            ca_certificate_identifier: props
+                .get("CACertificateIdentifier")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            network_type: props
+                .get("NetworkType")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            character_set_name: props
+                .get("CharacterSetName")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            auto_minor_version_upgrade: props
+                .get("AutoMinorVersionUpgrade")
+                .and_then(|v| v.as_bool()),
+            copy_tags_to_snapshot: props.get("CopyTagsToSnapshot").and_then(|v| v.as_bool()),
+            master_user_secret_arn: None,
+            master_user_secret_kms_key_id: props
+                .get("MasterUserSecret")
+                .and_then(|v| v.get("KmsKeyId"))
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        };
+        let endpoint = inst.endpoint_address.clone();
+        let endpoint_port = inst.port;
+        state.instances.insert(identifier.clone(), inst);
+
+        Ok(ProvisionResult::new(identifier.clone())
+            .with("DBInstanceArn", arn)
+            .with("Endpoint.Address", endpoint)
+            .with("Endpoint.Port", endpoint_port.to_string())
+            .with("DbiResourceId", format!("db-{identifier}")))
+    }
+
+    fn delete_rds_db_instance(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.instances.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_rds_db_cluster(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let identifier = props
+            .get("DBClusterIdentifier")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                format!(
+                    "cfn-cluster-{}-{}",
+                    resource.logical_id.to_lowercase(),
+                    Uuid::new_v4().simple().to_string()[..8].to_lowercase()
+                )
+            });
+        let engine = props
+            .get("Engine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("aurora-postgresql")
+            .to_string();
+        let engine_version = props
+            .get("EngineVersion")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let master_username = props
+            .get("MasterUsername")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let port = props.get("Port").and_then(|v| v.as_i64()).unwrap_or(5432);
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let arn = format!(
+            "arn:aws:rds:{}:{}:cluster:{}",
+            state.region, state.account_id, identifier
+        );
+        let cluster_resource_id = format!("cluster-{}", Uuid::new_v4().simple());
+        let endpoint = format!(
+            "{identifier}.cluster-fakecloud.{}.rds.amazonaws.com",
+            state.region
+        );
+        let reader_endpoint = format!(
+            "{identifier}.cluster-ro-fakecloud.{}.rds.amazonaws.com",
+            state.region
+        );
+        let body = serde_json::json!({
+            "DBClusterIdentifier": identifier,
+            "DBClusterArn": arn,
+            "Engine": engine,
+            "EngineVersion": engine_version,
+            "MasterUsername": master_username,
+            "Status": "available",
+            "DbClusterResourceId": cluster_resource_id,
+            "Endpoint": endpoint,
+            "ReaderEndpoint": reader_endpoint,
+            "Port": port,
+            "AllocatedStorage": props.get("AllocatedStorage").and_then(|v| v.as_i64()).unwrap_or(1),
+            "BackupRetentionPeriod": props.get("BackupRetentionPeriod").and_then(|v| v.as_i64()).unwrap_or(1),
+            "DatabaseName": props.get("DatabaseName").and_then(|v| v.as_str()),
+            "DBSubnetGroup": props.get("DBSubnetGroupName").and_then(|v| v.as_str()),
+            "VpcSecurityGroupIds": props.get("VpcSecurityGroupIds").cloned().unwrap_or(serde_json::json!([])),
+            "StorageEncrypted": props.get("StorageEncrypted").and_then(|v| v.as_bool()).unwrap_or(false),
+            "KmsKeyId": props.get("KmsKeyId").and_then(|v| v.as_str()),
+            "DeletionProtection": props.get("DeletionProtection").and_then(|v| v.as_bool()).unwrap_or(false),
+            "ClusterCreateTime": Utc::now().to_rfc3339(),
+            "EnabledCloudwatchLogsExports": props.get("EnableCloudwatchLogsExports").cloned().unwrap_or(serde_json::json!([])),
+            "MultiAZ": false,
+            "DBClusterMembers": [],
+        });
+        state
+            .extras
+            .entry("clusters".to_string())
+            .or_default()
+            .insert(identifier.clone(), body);
+        Ok(ProvisionResult::new(identifier.clone())
+            .with("DBClusterArn", arn)
+            .with("Endpoint.Address", endpoint)
+            .with("ReadEndpoint.Address", reader_endpoint)
+            .with("Endpoint.Port", port.to_string())
+            .with("DBClusterResourceId", cluster_resource_id))
+    }
+
+    fn delete_rds_db_cluster(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(m) = state.extras.get_mut("clusters") {
             m.remove(physical_id);
         }
         Ok(())
