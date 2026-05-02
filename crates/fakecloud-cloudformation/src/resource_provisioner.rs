@@ -50,8 +50,8 @@ use fakecloud_eventbridge::{
     ApiDestination, Archive, Connection, Endpoint, EventBus, EventRule, SharedEventBridgeState,
 };
 use fakecloud_iam::{
-    IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy, IamRole, IamUser, PolicyVersion,
-    SharedIamState, Tag,
+    IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy, IamRole, IamUser, OidcProvider,
+    PolicyVersion, SamlProvider, SharedIamState, Tag, VirtualMfaDevice,
 };
 use fakecloud_kinesis::{build_stream_shards, KinesisConsumer, KinesisStream, SharedKinesisState};
 use fakecloud_kms::{KmsAlias, KmsKey, SharedKmsState};
@@ -363,6 +363,10 @@ impl ResourceProvisioner {
             "AWS::IAM::UserToGroupAddition" => self.create_iam_user_to_group_addition(resource),
             "AWS::IAM::AccessKey" => self.create_iam_access_key(resource),
             "AWS::IAM::InstanceProfile" => self.create_iam_instance_profile(resource),
+            "AWS::IAM::OIDCProvider" => self.create_iam_oidc_provider(resource),
+            "AWS::IAM::SAMLProvider" => self.create_iam_saml_provider(resource),
+            "AWS::IAM::ServiceLinkedRole" => self.create_iam_service_linked_role(resource),
+            "AWS::IAM::VirtualMFADevice" => self.create_iam_virtual_mfa_device(resource),
             "AWS::S3::Bucket" => self.create_s3_bucket(resource),
             "AWS::Events::Rule" => self.create_eventbridge_rule(resource),
             "AWS::Events::Connection" => self.create_eventbridge_connection(resource),
@@ -506,6 +510,14 @@ impl ResourceProvisioner {
             }
             "AWS::IAM::AccessKey" => self.delete_iam_access_key(&resource.physical_id),
             "AWS::IAM::InstanceProfile" => self.delete_iam_instance_profile(&resource.physical_id),
+            "AWS::IAM::OIDCProvider" => self.delete_iam_oidc_provider(&resource.physical_id),
+            "AWS::IAM::SAMLProvider" => self.delete_iam_saml_provider(&resource.physical_id),
+            "AWS::IAM::ServiceLinkedRole" => {
+                self.delete_iam_service_linked_role(&resource.physical_id)
+            }
+            "AWS::IAM::VirtualMFADevice" => {
+                self.delete_iam_virtual_mfa_device(&resource.physical_id)
+            }
             "AWS::S3::Bucket" => self.delete_s3_bucket(&resource.physical_id),
             "AWS::Events::Rule" => self.delete_eventbridge_rule(&resource.physical_id),
             "AWS::Events::Connection" => self.delete_eventbridge_connection(&resource.physical_id),
@@ -1517,6 +1529,219 @@ impl ResourceProvisioner {
         let mut accounts = self.iam_state.write();
         let state = accounts.get_or_create(&self.account_id);
         state.instance_profiles.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_iam_oidc_provider(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let url = props
+            .get("Url")
+            .and_then(|v| v.as_str())
+            .ok_or("Url is required")?
+            .to_string();
+        let client_id_list: Vec<String> = props
+            .get("ClientIdList")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let thumbprint_list: Vec<String> = props
+            .get("ThumbprintList")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Real AWS strips the scheme to form the resource path component.
+        let url_path = url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .to_string();
+        let arn = format!(
+            "arn:aws:iam::{}:oidc-provider/{}",
+            self.account_id, url_path
+        );
+        let provider = OidcProvider {
+            arn: arn.clone(),
+            url,
+            client_id_list,
+            thumbprint_list,
+            created_at: Utc::now(),
+            tags: Vec::new(),
+        };
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.oidc_providers.insert(arn.clone(), provider);
+        Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
+    }
+
+    fn delete_iam_oidc_provider(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.oidc_providers.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_iam_saml_provider(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                let suffix = Uuid::new_v4().simple().to_string();
+                format!("{}-{}", resource.logical_id, &suffix[..8])
+            });
+        let saml_metadata_document = props
+            .get("SamlMetadataDocument")
+            .and_then(|v| v.as_str())
+            .ok_or("SamlMetadataDocument is required")?
+            .to_string();
+        let arn = format!("arn:aws:iam::{}:saml-provider/{name}", self.account_id);
+        let now = Utc::now();
+        let valid_until = now + chrono::Duration::days(365 * 10);
+        let provider = SamlProvider {
+            arn: arn.clone(),
+            name,
+            saml_metadata_document,
+            created_at: now,
+            valid_until,
+            tags: Vec::new(),
+        };
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.saml_providers.insert(arn.clone(), provider);
+        Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
+    }
+
+    fn delete_iam_saml_provider(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.saml_providers.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_iam_service_linked_role(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let aws_service_name = props
+            .get("AWSServiceName")
+            .and_then(|v| v.as_str())
+            .ok_or("AWSServiceName is required")?
+            .to_string();
+        let custom_suffix = props
+            .get("CustomSuffix")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        // AWS service-linked role naming convention.
+        let service_short = aws_service_name.split('.').next().unwrap_or("Service");
+        let role_name = match &custom_suffix {
+            Some(s) => format!("AWSServiceRoleFor{service_short}_{s}"),
+            None => format!("AWSServiceRoleFor{service_short}"),
+        };
+        let path = format!("/aws-service-role/{aws_service_name}/");
+        let arn = format!("arn:aws:iam::{}:role{path}{role_name}", self.account_id);
+        // Service-linked roles get a trust policy specific to the service.
+        let assume_role_policy_document = serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"Service": aws_service_name.clone()},
+                "Action": "sts:AssumeRole"
+            }]
+        })
+        .to_string();
+        let role_id_suffix = Uuid::new_v4().simple().to_string();
+        let role = IamRole {
+            role_name: role_name.clone(),
+            role_id: format!("AROA{}", role_id_suffix[..16].to_uppercase()),
+            arn: arn.clone(),
+            path,
+            assume_role_policy_document,
+            created_at: Utc::now(),
+            description: Some(description),
+            max_session_duration: 3600,
+            tags: Vec::new(),
+            permissions_boundary: None,
+        };
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.roles.insert(role_name.clone(), role);
+        Ok(ProvisionResult::new(role_name)
+            .with("Arn", arn)
+            .with("RoleId", String::new()))
+    }
+
+    fn delete_iam_service_linked_role(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.roles.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_iam_virtual_mfa_device(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("VirtualMfaDeviceName")
+            .and_then(|v| v.as_str())
+            .ok_or("VirtualMfaDeviceName is required")?
+            .to_string();
+        let path = props
+            .get("Path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/")
+            .to_string();
+        let serial_number = format!("arn:aws:iam::{}:mfa{}{name}", self.account_id, path);
+        // Real AWS returns a base32 seed + a PNG QR code; we synthesize
+        // deterministic placeholders so callers can read them back.
+        let seed = format!("BASE32SEED{}", Uuid::new_v4().simple());
+        let user = props
+            .get("Users")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let device = VirtualMfaDevice {
+            serial_number: serial_number.clone(),
+            base32_string_seed: seed,
+            qr_code_png: String::new(),
+            enable_date: user.as_ref().map(|_| Utc::now()),
+            user,
+            tags: Vec::new(),
+        };
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state
+            .virtual_mfa_devices
+            .insert(serial_number.clone(), device);
+        Ok(ProvisionResult::new(serial_number.clone()).with("SerialNumber", serial_number))
+    }
+
+    fn delete_iam_virtual_mfa_device(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.virtual_mfa_devices.remove(physical_id);
         Ok(())
     }
 
