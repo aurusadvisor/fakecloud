@@ -398,7 +398,12 @@ pub(crate) fn collect_topic_subscribers(
         .values()
         .filter(|s| s.protocol == "http" || s.protocol == "https")
         .filter(confirmed_for_topic)
-        .map(|s| s.endpoint.clone())
+        .map(|s| crate::service::HttpSubscriber {
+            endpoint: s.endpoint.clone(),
+            subscription_arn: s.subscription_arn.clone(),
+            delivery_policy: s.attributes.get("DeliveryPolicy").cloned(),
+            redrive_policy: s.attributes.get("RedrivePolicy").cloned(),
+        })
         .collect();
 
     let lambda = state
