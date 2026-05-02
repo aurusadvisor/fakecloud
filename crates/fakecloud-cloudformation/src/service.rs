@@ -142,6 +142,7 @@ pub struct CloudFormationDeps {
     pub wafv2: fakecloud_wafv2::SharedWafv2State,
     pub apigateway: fakecloud_apigateway::SharedApiGatewayState,
     pub apigatewayv2: fakecloud_apigatewayv2::SharedApiGatewayV2State,
+    pub ses: fakecloud_ses::SharedSesState,
     pub delivery: Arc<DeliveryBus>,
 }
 
@@ -219,6 +220,7 @@ impl CloudFormationService {
             wafv2_state: self.deps.wafv2.clone(),
             apigateway_state: self.deps.apigateway.clone(),
             apigatewayv2_state: self.deps.apigatewayv2.clone(),
+            ses_state: self.deps.ses.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1351,6 +1353,13 @@ mod tests {
                 ),
             )),
             apigatewayv2: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            ses: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
                     "123456789012",
                     "us-east-1",

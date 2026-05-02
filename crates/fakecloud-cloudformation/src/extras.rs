@@ -754,6 +754,7 @@ mod tests {
             wafv2: Arc::new(RwLock::new(fakecloud_wafv2::Wafv2Accounts::default())),
             apigateway: shared::<fakecloud_apigateway::ApiGatewayState>(),
             apigatewayv2: shared::<fakecloud_apigatewayv2::ApiGatewayV2State>(),
+            ses: shared::<fakecloud_ses::SesState>(),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }
