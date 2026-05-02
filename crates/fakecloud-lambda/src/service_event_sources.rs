@@ -136,6 +136,39 @@ impl LambdaService {
         let maximum_batching_window_in_seconds = body
             .get("MaximumBatchingWindowInSeconds")
             .and_then(|v| v.as_i64());
+        let kms_key_arn = body
+            .get("KMSKeyArn")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let metrics_config = body.get("MetricsConfig").cloned();
+        let destination_config = body.get("DestinationConfig").cloned();
+        let maximum_retry_attempts = body.get("MaximumRetryAttempts").and_then(|v| v.as_i64());
+        let maximum_record_age_in_seconds = body
+            .get("MaximumRecordAgeInSeconds")
+            .and_then(|v| v.as_i64());
+        let bisect_batch_on_function_error = body
+            .get("BisectBatchOnFunctionError")
+            .and_then(|v| v.as_bool());
+        let tumbling_window_in_seconds =
+            body.get("TumblingWindowInSeconds").and_then(|v| v.as_i64());
+        let topics: Vec<String> = body
+            .get("Topics")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let queues: Vec<String> = body
+            .get("Queues")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let mapping = EventSourceMapping {
             uuid: mapping_uuid.clone(),
@@ -155,6 +188,15 @@ impl LambdaService {
             starting_position_timestamp,
             parallelization_factor,
             function_response_types,
+            kms_key_arn,
+            metrics_config,
+            destination_config,
+            maximum_retry_attempts,
+            maximum_record_age_in_seconds,
+            bisect_batch_on_function_error,
+            tumbling_window_in_seconds,
+            topics,
+            queues,
         };
 
         let response = self.event_source_mapping_json(&mapping);
@@ -245,14 +287,14 @@ impl LambdaService {
             "State": mapping.state,
             "LastModified": mapping.last_modified.timestamp_millis() as f64 / 1000.0,
             "EventSourceMappingArn": esm_arn,
-            // Default fields AWS always returns (zeros / empty arrays / nulls
-            // when unset). Avoids SDK deserialiser breaks on missing keys.
-            "MaximumRetryAttempts": -1,
-            "MaximumRecordAgeInSeconds": -1,
-            "BisectBatchOnFunctionError": false,
-            "TumblingWindowInSeconds": 0,
-            "Topics": [],
-            "Queues": [],
+            // AWS always returns these — emit stored values, falling back to
+            // the documented defaults (-1 = infinite, false, 0).
+            "MaximumRetryAttempts": mapping.maximum_retry_attempts.unwrap_or(-1),
+            "MaximumRecordAgeInSeconds": mapping.maximum_record_age_in_seconds.unwrap_or(-1),
+            "BisectBatchOnFunctionError": mapping.bisect_batch_on_function_error.unwrap_or(false),
+            "TumblingWindowInSeconds": mapping.tumbling_window_in_seconds.unwrap_or(0),
+            "Topics": mapping.topics,
+            "Queues": mapping.queues,
             "SourceAccessConfigurations": [],
             "LastProcessingResult": "No records processed",
             "StateTransitionReason": "User action",
@@ -283,6 +325,15 @@ impl LambdaService {
         }
         if let Some(w) = mapping.maximum_batching_window_in_seconds {
             obj.insert("MaximumBatchingWindowInSeconds".into(), json!(w));
+        }
+        if let Some(ref kms) = mapping.kms_key_arn {
+            obj.insert("KMSKeyArn".into(), json!(kms));
+        }
+        if let Some(ref mc) = mapping.metrics_config {
+            obj.insert("MetricsConfig".into(), mc.clone());
+        }
+        if let Some(ref dc) = mapping.destination_config {
+            obj.insert("DestinationConfig".into(), dc.clone());
         }
         out
     }

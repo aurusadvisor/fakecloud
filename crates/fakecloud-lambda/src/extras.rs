@@ -1732,6 +1732,33 @@ impl LambdaService {
         if let Some(p) = body.get("ParallelizationFactor").and_then(|v| v.as_i64()) {
             esm.parallelization_factor = Some(p);
         }
+        if let Some(s) = body.get("KMSKeyArn").and_then(|v| v.as_str()) {
+            esm.kms_key_arn = Some(s.to_string());
+        }
+        if let Some(mc) = body.get("MetricsConfig") {
+            esm.metrics_config = Some(mc.clone());
+        }
+        if let Some(dc) = body.get("DestinationConfig") {
+            esm.destination_config = Some(dc.clone());
+        }
+        if let Some(n) = body.get("MaximumRetryAttempts").and_then(|v| v.as_i64()) {
+            esm.maximum_retry_attempts = Some(n);
+        }
+        if let Some(n) = body
+            .get("MaximumRecordAgeInSeconds")
+            .and_then(|v| v.as_i64())
+        {
+            esm.maximum_record_age_in_seconds = Some(n);
+        }
+        if let Some(b) = body
+            .get("BisectBatchOnFunctionError")
+            .and_then(|v| v.as_bool())
+        {
+            esm.bisect_batch_on_function_error = Some(b);
+        }
+        if let Some(n) = body.get("TumblingWindowInSeconds").and_then(|v| v.as_i64()) {
+            esm.tumbling_window_in_seconds = Some(n);
+        }
         let mut body_json = json!({
             "UUID": esm.uuid,
             "FunctionArn": esm.function_arn,

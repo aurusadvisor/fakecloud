@@ -161,6 +161,40 @@ pub struct EventSourceMapping {
     /// semantics. Empty / unset = entire batch is retried on error.
     #[serde(default)]
     pub function_response_types: Vec<String>,
+    /// KMS key for encrypting the filter-criteria document at rest. AWS
+    /// added this in 2024 for Kafka/Kinesis sources whose filters carry
+    /// sensitive selectors.
+    #[serde(default)]
+    pub kms_key_arn: Option<String>,
+    /// `MetricsConfig.Metrics` — set of opted-in CloudWatch metrics
+    /// (`["EventCount"]`). Round-tripped only; fakecloud doesn't yet
+    /// publish these metrics.
+    #[serde(default)]
+    pub metrics_config: Option<serde_json::Value>,
+    /// `DestinationConfig` — `OnFailure.Destination` arn (and rarely
+    /// `OnSuccess.Destination` for self-managed Kafka). Round-tripped.
+    #[serde(default)]
+    pub destination_config: Option<serde_json::Value>,
+    /// `MaximumRetryAttempts` for the source. AWS uses `-1` to mean
+    /// "infinite" so we keep the int rather than a bool.
+    #[serde(default)]
+    pub maximum_retry_attempts: Option<i64>,
+    /// `MaximumRecordAgeInSeconds`. `-1` = infinite.
+    #[serde(default)]
+    pub maximum_record_age_in_seconds: Option<i64>,
+    /// `BisectBatchOnFunctionError` — split the batch in half and retry
+    /// on Lambda invoke failure (Kinesis / DDB streams only).
+    #[serde(default)]
+    pub bisect_batch_on_function_error: Option<bool>,
+    /// `TumblingWindowInSeconds` — Kinesis-only batch aggregation window.
+    #[serde(default)]
+    pub tumbling_window_in_seconds: Option<i64>,
+    /// `Topics` — MSK / self-managed-Kafka topic list.
+    #[serde(default)]
+    pub topics: Vec<String>,
+    /// `Queues` — Amazon MQ broker queue list.
+    #[serde(default)]
+    pub queues: Vec<String>,
 }
 
 /// A recorded Lambda invocation from cross-service delivery.

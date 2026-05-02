@@ -1282,3 +1282,70 @@ async fn function_config_emits_state_reason_fields_when_populated() {
     assert_eq!(cfg["LastUpdateStatusReason"], "Backoff after 3 attempts");
     assert_eq!(cfg["LastUpdateStatusReasonCode"], "EniLimitExceeded");
 }
+
+#[tokio::test]
+async fn create_event_source_mapping_round_trips_advanced_fields() {
+    // KMSKeyArn / MetricsConfig / DestinationConfig / MaximumRetryAttempts /
+    // MaximumRecordAgeInSeconds / BisectBatchOnFunctionError /
+    // TumblingWindowInSeconds / Topics / Queues all need to round-trip
+    // through Create → Get so SDK clients can read what they wrote. The
+    // 2024+ AWS shape requires every one of these fields in the response
+    // when the caller supplied them.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "esm-fn").await;
+
+    let body = json!({
+        "FunctionName": "esm-fn",
+        "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:queue1",
+        "BatchSize": 10,
+        "Enabled": true,
+        "KMSKeyArn": "arn:aws:kms:us-east-1:123456789012:key/abc-def",
+        "MetricsConfig": {"Metrics": ["EventCount"]},
+        "DestinationConfig": {"OnFailure": {"Destination": "arn:aws:sqs:us-east-1:123456789012:dlq"}},
+        "MaximumRetryAttempts": 5,
+        "MaximumRecordAgeInSeconds": 3600,
+        "BisectBatchOnFunctionError": true,
+        "TumblingWindowInSeconds": 60,
+        "Topics": ["t1"],
+        "Queues": ["q1"],
+    });
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/event-source-mappings",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let uuid = v["UUID"].as_str().unwrap().to_string();
+    assert_eq!(
+        v["KMSKeyArn"],
+        "arn:aws:kms:us-east-1:123456789012:key/abc-def"
+    );
+    assert_eq!(v["MetricsConfig"]["Metrics"][0], "EventCount");
+    assert_eq!(
+        v["DestinationConfig"]["OnFailure"]["Destination"],
+        "arn:aws:sqs:us-east-1:123456789012:dlq"
+    );
+    assert_eq!(v["MaximumRetryAttempts"], 5);
+    assert_eq!(v["MaximumRecordAgeInSeconds"], 3600);
+    assert_eq!(v["BisectBatchOnFunctionError"], true);
+    assert_eq!(v["TumblingWindowInSeconds"], 60);
+    assert_eq!(v["Topics"][0], "t1");
+    assert_eq!(v["Queues"][0], "q1");
+
+    // Get the mapping back and assert all fields survive a round-trip.
+    let req = make_request(
+        Method::GET,
+        &format!("/2015-03-31/event-source-mappings/{uuid}"),
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        v["KMSKeyArn"],
+        "arn:aws:kms:us-east-1:123456789012:key/abc-def"
+    );
+    assert_eq!(v["BisectBatchOnFunctionError"], true);
+    assert_eq!(v["MaximumRetryAttempts"], 5);
+    assert_eq!(v["Topics"][0], "t1");
+}
