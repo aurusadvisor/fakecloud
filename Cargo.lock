@@ -2716,6 +2716,7 @@ dependencies = [
  "fakecloud-sns",
  "fakecloud-sqs",
  "fakecloud-ssm",
+ "fakecloud-stepfunctions",
  "http 1.4.0",
  "parking_lot",
  "rcgen",
