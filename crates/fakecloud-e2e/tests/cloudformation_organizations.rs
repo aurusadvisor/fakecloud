@@ -140,3 +140,110 @@ async fn cfn_provisions_organization_ou_policy_resource_policy() {
         "organization should be gone after stack deletion"
     );
 }
+
+const ACCOUNT_TEMPLATE: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Org": {
+      "Type": "AWS::Organizations::Organization",
+      "Properties": {"FeatureSet": "ALL"}
+    },
+    "Sandbox": {
+      "Type": "AWS::Organizations::OrganizationalUnit",
+      "Properties": {
+        "Name": "Sandbox",
+        "ParentId": {"Fn::GetAtt": ["Org", "RootId"]}
+      }
+    },
+    "DevAcct": {
+      "Type": "AWS::Organizations::Account",
+      "Properties": {
+        "AccountName": "DevAccount",
+        "Email": "dev@example.com",
+        "ParentIds": [{"Ref": "Sandbox"}],
+        "Tags": [{"Key": "Env", "Value": "dev"}]
+      }
+    }
+  },
+  "Outputs": {
+    "AcctId": {"Value": {"Ref": "DevAcct"}},
+    "AcctArn": {"Value": {"Fn::GetAtt": ["DevAcct", "Arn"]}},
+    "AcctStatus": {"Value": {"Fn::GetAtt": ["DevAcct", "Status"]}}
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_provisions_organizations_account() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let orgs = aws_sdk_organizations::Client::new(&server.aws_config().await);
+
+    cfn.create_stack()
+        .stack_name("orgs-account-stack")
+        .template_body(ACCOUNT_TEMPLATE)
+        .capabilities(Capability::CapabilityIam)
+        .on_failure(OnFailure::Rollback)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("orgs-account-stack")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let stack = described.stacks().first().expect("stack present");
+    assert_eq!(stack.stack_status().unwrap().as_str(), "CREATE_COMPLETE");
+
+    let mut acct_id = None;
+    let mut acct_arn = None;
+    let mut acct_status = None;
+    for o in stack.outputs() {
+        match o.output_key() {
+            Some("AcctId") => acct_id = o.output_value().map(|s| s.to_string()),
+            Some("AcctArn") => acct_arn = o.output_value().map(|s| s.to_string()),
+            Some("AcctStatus") => acct_status = o.output_value().map(|s| s.to_string()),
+            _ => {}
+        }
+    }
+    let acct_id = acct_id.expect("AcctId output");
+    let acct_arn = acct_arn.expect("AcctArn output");
+    assert_eq!(acct_status.as_deref(), Some("ACTIVE"));
+    assert!(acct_arn.starts_with("arn:aws:organizations::"));
+    assert_eq!(acct_id.len(), 12);
+
+    let described_acct = orgs
+        .describe_account()
+        .account_id(&acct_id)
+        .send()
+        .await
+        .expect("describe_account");
+    let acct = described_acct.account().expect("account body");
+    assert_eq!(acct.name(), Some("DevAccount"));
+    assert_eq!(acct.email(), Some("dev@example.com"));
+    assert_eq!(acct.status().map(|s| s.as_str()), Some("ACTIVE"));
+
+    // Confirm parent placement under the Sandbox OU.
+    let parents = orgs
+        .list_parents()
+        .child_id(&acct_id)
+        .send()
+        .await
+        .expect("list_parents");
+    let parent = parents.parents().first().expect("parent present");
+    assert_eq!(
+        parent.r#type().map(|t| t.as_str()),
+        Some("ORGANIZATIONAL_UNIT")
+    );
+
+    cfn.delete_stack()
+        .stack_name("orgs-account-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+
+    // The Organization itself is also torn down — calls should error.
+    let after = orgs.describe_organization().send().await;
+    assert!(after.is_err());
+}
