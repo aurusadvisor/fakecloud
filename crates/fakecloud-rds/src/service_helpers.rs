@@ -1053,6 +1053,37 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
 }
 
 pub(crate) fn db_snapshot_xml(snapshot: &DbSnapshot) -> String {
+    let opt = |tag: &str, value: Option<&str>| -> String {
+        value
+            .map(|v| format!("<{tag}>{}</{tag}>", xml_escape(v)))
+            .unwrap_or_default()
+    };
+    let opt_int = |tag: &str, value: Option<i32>| -> String {
+        value
+            .map(|v| format!("<{tag}>{v}</{tag}>"))
+            .unwrap_or_default()
+    };
+
+    let availability_zone_xml = opt("AvailabilityZone", snapshot.availability_zone.as_deref());
+    let vpc_id_xml = opt("VpcId", snapshot.vpc_id.as_deref());
+    let instance_create_time_xml = snapshot
+        .instance_create_time
+        .map(|t| {
+            format!(
+                "<InstanceCreateTime>{}</InstanceCreateTime>",
+                t.to_rfc3339()
+            )
+        })
+        .unwrap_or_default();
+    let license_model_xml = opt("LicenseModel", snapshot.license_model.as_deref());
+    let iops_xml = opt_int("Iops", snapshot.iops);
+    let option_group_xml = opt("OptionGroupName", snapshot.option_group_name.as_deref());
+    let percent_progress_xml = opt_int("PercentProgress", snapshot.percent_progress);
+    let storage_type_xml = opt("StorageType", snapshot.storage_type.as_deref());
+    let kms_key_id_xml = opt("KmsKeyId", snapshot.kms_key_id.as_deref());
+    let timezone_xml = opt("Timezone", snapshot.timezone.as_deref());
+    let storage_throughput_xml = opt_int("StorageThroughput", snapshot.storage_throughput);
+
     format!(
         "<DBSnapshotIdentifier>{}</DBSnapshotIdentifier>\
          <DBInstanceIdentifier>{}</DBInstanceIdentifier>\
@@ -1063,9 +1094,23 @@ pub(crate) fn db_snapshot_xml(snapshot: &DbSnapshot) -> String {
          <Status>{}</Status>\
          <Port>{}</Port>\
          <MasterUsername>{}</MasterUsername>\
-         {}\
+         {db_name_xml}\
          <DbiResourceId>{}</DbiResourceId>\
          <SnapshotType>{}</SnapshotType>\
+         {availability_zone_xml}\
+         {vpc_id_xml}\
+         {instance_create_time_xml}\
+         {license_model_xml}\
+         {iops_xml}\
+         {option_group_xml}\
+         {percent_progress_xml}\
+         {storage_type_xml}\
+         <Encrypted>{encrypted}</Encrypted>\
+         {kms_key_id_xml}\
+         <IAMDatabaseAuthenticationEnabled>{iam_auth}</IAMDatabaseAuthenticationEnabled>\
+         {timezone_xml}\
+         {storage_throughput_xml}\
+         <ProcessorFeatures/>\
          <DBSnapshotArn>{}</DBSnapshotArn>",
         xml_escape(&snapshot.db_snapshot_identifier),
         xml_escape(&snapshot.db_instance_identifier),
@@ -1076,14 +1121,20 @@ pub(crate) fn db_snapshot_xml(snapshot: &DbSnapshot) -> String {
         xml_escape(&snapshot.status),
         snapshot.port,
         xml_escape(&snapshot.master_username),
-        snapshot
+        xml_escape(&snapshot.dbi_resource_id),
+        xml_escape(&snapshot.snapshot_type),
+        xml_escape(&snapshot.db_snapshot_arn),
+        db_name_xml = snapshot
             .db_name
             .as_ref()
             .map(|name| format!("<DBName>{}</DBName>", xml_escape(name)))
             .unwrap_or_default(),
-        xml_escape(&snapshot.dbi_resource_id),
-        xml_escape(&snapshot.snapshot_type),
-        xml_escape(&snapshot.db_snapshot_arn),
+        encrypted = if snapshot.encrypted { "true" } else { "false" },
+        iam_auth = if snapshot.iam_database_authentication_enabled {
+            "true"
+        } else {
+            "false"
+        },
     )
 }
 

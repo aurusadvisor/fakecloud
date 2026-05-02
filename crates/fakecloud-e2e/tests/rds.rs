@@ -355,6 +355,11 @@ async fn rds_create_describe_delete_snapshot() {
     assert_eq!(snapshot.engine(), Some("postgres"));
     assert_eq!(snapshot.status(), Some("available"));
     assert_eq!(snapshot.master_username(), Some("admin"));
+    assert_eq!(snapshot.percent_progress(), Some(100));
+    assert_eq!(snapshot.license_model(), Some("postgresql-license"));
+    assert!(snapshot.instance_create_time().is_some());
+    assert!(!snapshot.encrypted().unwrap_or(true));
+    assert_eq!(snapshot.iam_database_authentication_enabled(), Some(false));
 
     let describe_response = client
         .describe_db_snapshots()
