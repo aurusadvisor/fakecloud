@@ -151,6 +151,13 @@ impl EcsService {
                     container_name: name,
                 })
             });
+            let capacity_provider_name = body
+                .get("capacityProviderStrategy")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|item| item.get("capacityProvider"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let task = Task {
                 task_arn: task_arn.clone(),
                 task_id: task_id.clone(),
@@ -159,6 +166,7 @@ impl EcsService {
                 task_definition_arn: td_arn.clone(),
                 family: td_family.clone(),
                 revision: td_revision,
+                capacity_provider_name,
                 last_status: "PROVISIONING".into(),
                 desired_status: "RUNNING".into(),
                 launch_type: launch_type.clone(),

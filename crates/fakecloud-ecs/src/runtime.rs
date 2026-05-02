@@ -905,6 +905,7 @@ mod tests {
             task_definition_arn: "arn:aws:ecs:us-east-1:000000000000:task-definition/app:1".into(),
             family: "app".into(),
             revision: 1,
+            capacity_provider_name: None,
             last_status: "PENDING".into(),
             desired_status: "RUNNING".into(),
             launch_type: "FARGATE".into(),

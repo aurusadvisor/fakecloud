@@ -500,6 +500,9 @@ pub(crate) fn task_to_json(task: &Task) -> Value {
             .unwrap_or("HEALTHY")),
     );
     map.insert("version".into(), json!(1));
+    if let Some(ref cp) = task.capacity_provider_name {
+        map.insert("capacityProviderName".into(), json!(cp));
+    }
     map.insert(
         "platformFamily".into(),
         match task.launch_type.as_str() {
@@ -711,6 +714,7 @@ pub(crate) fn spawn_service_tasks(
             task_definition_arn: td_arn.clone(),
             family: family.clone(),
             revision,
+            capacity_provider_name: None,
             last_status: "PENDING".into(),
             desired_status: "RUNNING".into(),
             launch_type: launch_type.into(),
