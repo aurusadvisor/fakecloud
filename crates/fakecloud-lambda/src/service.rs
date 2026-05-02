@@ -67,7 +67,6 @@ pub(crate) fn action_takes_function_name(action: &str) -> bool {
             | "DeleteAlias"
             | "PutRuntimeManagementConfig"
             | "GetRuntimeManagementConfig"
-            | "ListDurableExecutionsByFunction"
     )
 }
 
@@ -776,87 +775,10 @@ impl LambdaService {
             };
         }
 
-        // Capacity providers (any prefix).
-        if segs.get(1).map(|s| s.as_str()) == Some("capacity-providers") {
-            let res = segs.get(2).map(|s| s.to_string());
-            return match (
-                req.method.clone(),
-                segs.len(),
-                segs.get(3).map(|s| s.as_str()),
-            ) {
-                (Method::POST, 2, _) => Some(("CreateCapacityProvider", None)),
-                (Method::GET, 2, _) => Some(("ListCapacityProviders", None)),
-                (Method::GET, 3, _) => Some(("GetCapacityProvider", res)),
-                (Method::PUT, 3, _) => Some(("UpdateCapacityProvider", res)),
-                (Method::DELETE, 3, _) => Some(("DeleteCapacityProvider", res)),
-                (Method::GET, 4, Some("function-versions")) => {
-                    Some(("ListFunctionVersionsByCapacityProvider", res))
-                }
-                _ => None,
-            };
-        }
-
-        // ListDurableExecutionsByFunction lives under functions/{name}.
-        if segs.get(1).map(|s| s.as_str()) == Some("functions")
-            && segs.get(3).map(|s| s.as_str()) == Some("durable-executions")
-            && req.method == Method::GET
-        {
-            return Some((
-                "ListDurableExecutionsByFunction",
-                segs.get(2).map(|s| s.to_string()),
-            ));
-        }
-
-        // Durable execution callbacks at /durable-execution-callbacks/{id}/{kind}
-        if segs.get(1).map(|s| s.as_str()) == Some("durable-execution-callbacks")
-            && req.method == Method::POST
-        {
-            let res = segs.get(2).map(|s| s.to_string());
-            return match segs.get(3).map(|s| s.as_str()) {
-                Some("success") | Some("succeed") => {
-                    Some(("SendDurableExecutionCallbackSuccess", res))
-                }
-                Some("failure") | Some("fail") => {
-                    Some(("SendDurableExecutionCallbackFailure", res))
-                }
-                Some("heartbeat") => Some(("SendDurableExecutionCallbackHeartbeat", res)),
-                _ => None,
-            };
-        }
-
-        // Durable executions (any prefix).
-        if segs.get(1).map(|s| s.as_str()) == Some("durable-executions") {
-            let res = segs.get(2).map(|s| s.to_string());
-            return match (
-                req.method.clone(),
-                segs.len(),
-                segs.get(3).map(|s| s.as_str()),
-                segs.get(4).map(|s| s.as_str()),
-            ) {
-                (Method::GET, 3, _, _) => Some(("GetDurableExecution", res)),
-                (Method::GET, 4, Some("history"), _) => Some(("GetDurableExecutionHistory", res)),
-                (Method::GET, 4, Some("state"), _) => Some(("GetDurableExecutionState", res)),
-                (Method::POST, 4, Some("checkpoint"), _) => {
-                    Some(("CheckpointDurableExecution", res))
-                }
-                (Method::POST, 4, Some("stop"), _) => Some(("StopDurableExecution", res)),
-                (Method::POST, 5, Some("callback"), Some("success")) => {
-                    Some(("SendDurableExecutionCallbackSuccess", res))
-                }
-                (Method::POST, 5, Some("callback"), Some("failure")) => {
-                    Some(("SendDurableExecutionCallbackFailure", res))
-                }
-                (Method::POST, 5, Some("callback"), Some("heartbeat")) => {
-                    Some(("SendDurableExecutionCallbackHeartbeat", res))
-                }
-                _ => None,
-            };
-        }
-
-        // NOTE: concurrency, event-invoke-config, recursion-config,
-        // capacity-providers, durable-executions, and code-signing-configs
-        // routes are all handled by the prefix-agnostic blocks above.
-        // The previously-present date-specific blocks were dead code.
+        // NOTE: concurrency, event-invoke-config, recursion-config, and
+        // code-signing-configs routes are all handled by the prefix-agnostic
+        // blocks above. The previously-present date-specific blocks were
+        // dead code.
 
         // /2018-10-31/layers
         if prefix == "2018-10-31" && segs.get(1).map(|s| s.as_str()) == Some("layers") {
@@ -995,9 +917,6 @@ impl LambdaService {
             }
             (&Method::GET, 4, Some("functions"), Some("recursion-config")) => {
                 "GetFunctionRecursionConfig"
-            }
-            (&Method::GET, 4, Some("functions"), Some("durable-executions")) => {
-                "ListDurableExecutionsByFunction"
             }
             (&Method::POST, 2, Some("event-source-mappings"), _) => "CreateEventSourceMapping",
             (&Method::GET, 2, Some("event-source-mappings"), _) => "ListEventSourceMappings",
@@ -1694,14 +1613,6 @@ impl AwsService for LambdaService {
                 | "PutFunctionRecursionConfig"
                 | "TagResource"
                 | "UntagResource"
-                | "CreateCapacityProvider"
-                | "UpdateCapacityProvider"
-                | "DeleteCapacityProvider"
-                | "CheckpointDurableExecution"
-                | "StopDurableExecution"
-                | "SendDurableExecutionCallbackSuccess"
-                | "SendDurableExecutionCallbackFailure"
-                | "SendDurableExecutionCallbackHeartbeat"
                 | "InvokeAsync"
                 | "InvokeWithResponseStream"
         );
@@ -1842,21 +1753,6 @@ impl AwsService for LambdaService {
             "TagResource",
             "UntagResource",
             "ListTags",
-            "CreateCapacityProvider",
-            "GetCapacityProvider",
-            "UpdateCapacityProvider",
-            "DeleteCapacityProvider",
-            "ListCapacityProviders",
-            "ListFunctionVersionsByCapacityProvider",
-            "CheckpointDurableExecution",
-            "GetDurableExecution",
-            "GetDurableExecutionHistory",
-            "GetDurableExecutionState",
-            "ListDurableExecutionsByFunction",
-            "StopDurableExecution",
-            "SendDurableExecutionCallbackSuccess",
-            "SendDurableExecutionCallbackFailure",
-            "SendDurableExecutionCallbackHeartbeat",
         ]
     }
 

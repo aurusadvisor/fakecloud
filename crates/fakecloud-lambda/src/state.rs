@@ -210,12 +210,6 @@ pub struct LambdaState {
     /// Tags keyed by resource ARN.
     #[serde(default)]
     pub tags: BTreeMap<String, Vec<(String, String)>>,
-    /// Capacity providers keyed by name.
-    #[serde(default)]
-    pub capacity_providers: BTreeMap<String, CapacityProvider>,
-    /// Durable executions keyed by id.
-    #[serde(default)]
-    pub durable_executions: BTreeMap<String, DurableExecution>,
     /// Account settings (single per-account record).
     #[serde(default)]
     pub account_settings: Option<AccountSettings>,
@@ -306,25 +300,6 @@ pub struct FunctionScalingConfig {
     pub maximum_concurrency: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapacityProvider {
-    pub name: String,
-    pub arn: String,
-    pub status: String,
-    pub created: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DurableExecution {
-    pub id: String,
-    pub function_arn: String,
-    pub status: String,
-    pub started: DateTime<Utc>,
-    pub stopped: Option<DateTime<Utc>>,
-    pub history: Vec<serde_json::Value>,
-    pub state: serde_json::Value,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AccountSettings {
     pub concurrent_executions: i64,
@@ -355,8 +330,6 @@ impl LambdaState {
             scaling_configs: BTreeMap::new(),
             recursion_configs: BTreeMap::new(),
             tags: BTreeMap::new(),
-            capacity_providers: BTreeMap::new(),
-            durable_executions: BTreeMap::new(),
             account_settings: None,
         }
     }
@@ -379,8 +352,6 @@ impl LambdaState {
         self.scaling_configs.clear();
         self.recursion_configs.clear();
         self.tags.clear();
-        self.capacity_providers.clear();
-        self.durable_executions.clear();
         self.account_settings = None;
     }
 }
