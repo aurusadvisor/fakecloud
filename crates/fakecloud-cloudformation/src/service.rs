@@ -138,6 +138,7 @@ pub struct CloudFormationDeps {
     pub elasticache: fakecloud_elasticache::SharedElastiCacheState,
     pub route53: fakecloud_route53::SharedRoute53State,
     pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
+    pub stepfunctions: fakecloud_stepfunctions::SharedStepFunctionsState,
     pub delivery: Arc<DeliveryBus>,
 }
 
@@ -211,6 +212,7 @@ impl CloudFormationService {
             elasticache_state: self.deps.elasticache.clone(),
             route53_state: self.deps.route53.clone(),
             cloudfront_state: self.deps.cloudfront.clone(),
+            stepfunctions_state: self.deps.stepfunctions.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1327,6 +1329,13 @@ mod tests {
             )),
             route53: Arc::new(RwLock::new(fakecloud_route53::Route53Accounts::new())),
             cloudfront: Arc::new(RwLock::new(fakecloud_cloudfront::CloudFrontAccounts::new())),
+            stepfunctions: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
         };
         CloudFormationService::new(cf_state, deps)
