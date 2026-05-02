@@ -267,3 +267,86 @@ fn registry_scan_no_rules_no_match() {
     let cfg = RegistryScanningConfiguration::default();
     assert!(!registry_scan_on_push_matches(&cfg, "x"));
 }
+
+#[test]
+fn repository_filters_match_returns_true_on_empty_list() {
+    use super::repository_filters_match;
+    assert!(repository_filters_match(&[], "any-repo"));
+}
+
+#[test]
+fn repository_filters_match_honours_wildcard() {
+    use super::repository_filters_match;
+    use crate::state::RepositoryFilter;
+    let filters = vec![RepositoryFilter {
+        filter: "team-a/*".to_string(),
+        filter_type: "WILDCARD".to_string(),
+    }];
+    assert!(repository_filters_match(&filters, "team-a/svc"));
+    assert!(!repository_filters_match(&filters, "team-b/svc"));
+}
+
+#[test]
+fn replicate_image_copies_to_destination_account() {
+    use super::EcrService;
+    use crate::state::{
+        EcrState, Image, ReplicationConfiguration, ReplicationDestination, ReplicationRule,
+        Repository,
+    };
+    use fakecloud_core::multi_account::MultiAccountState;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    const SOURCE: &str = "111111111111";
+    const TARGET: &str = "222222222222";
+
+    let mut mas: MultiAccountState<EcrState> =
+        MultiAccountState::new(SOURCE, "us-east-1", "http://fakecloud:4566");
+    let source_state = mas.get_or_create(SOURCE);
+    source_state.replication_configuration = Some(ReplicationConfiguration {
+        rules: vec![ReplicationRule {
+            destinations: vec![ReplicationDestination {
+                region: "us-west-2".to_string(),
+                registry_id: TARGET.to_string(),
+            }],
+            repository_filters: Vec::new(),
+        }],
+    });
+    let arn = source_state.repository_arn("app");
+    let mut repo = Repository::new("app", arn, SOURCE, "fakecloud:4566");
+    repo.images.insert(
+        "sha256:abc".to_string(),
+        Image {
+            image_digest: "sha256:abc".to_string(),
+            image_manifest: "{\"mediaType\":\"x\"}".to_string(),
+            image_manifest_media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            artifact_media_type: None,
+            image_size_in_bytes: 0,
+            image_pushed_at: chrono::Utc::now(),
+            last_recorded_pull_time: None,
+        },
+    );
+    source_state.repositories.insert("app".to_string(), repo);
+
+    let state: crate::state::SharedEcrState = Arc::new(RwLock::new(mas));
+    let svc = EcrService::new(state.clone());
+    svc.replicate_image(SOURCE, "app", "sha256:abc");
+
+    let accounts = state.read();
+    let target_state = accounts.get(TARGET).expect("target account created");
+    let target_repo = target_state
+        .repositories
+        .get("app")
+        .expect("target repo provisioned");
+    assert!(target_repo.images.contains_key("sha256:abc"));
+
+    let source_state = accounts.get(SOURCE).expect("source account intact");
+    let source_repo = source_state.repositories.get("app").unwrap();
+    let statuses = source_repo
+        .replication_statuses
+        .get("sha256:abc")
+        .expect("status entry recorded");
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].status, "COMPLETE");
+    assert_eq!(statuses[0].registry_id, TARGET);
+}
