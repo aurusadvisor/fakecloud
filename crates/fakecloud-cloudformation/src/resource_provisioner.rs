@@ -84,7 +84,7 @@ use fakecloud_route53::{
     SharedRoute53State, StoredHealthCheck, StoredHostedZone,
 };
 use fakecloud_s3::{S3Bucket, SharedS3State};
-use fakecloud_secretsmanager::{Secret, SecretVersion, SharedSecretsManagerState};
+use fakecloud_secretsmanager::{RotationRules, Secret, SecretVersion, SharedSecretsManagerState};
 use fakecloud_ses::{
     ConfigurationSet as SesConfigurationSet, ContactList as SesContactList,
     DedicatedIpPool as SesDedicatedIpPool, EmailIdentity as SesEmailIdentity,
@@ -528,6 +528,15 @@ impl ResourceProvisioner {
             "AWS::SES::ReceiptRuleSet" => self.create_ses_receipt_rule_set(resource),
             "AWS::SES::ReceiptFilter" => self.create_ses_receipt_filter(resource),
             "AWS::SES::VdmAttributes" => self.create_ses_vdm_attributes(resource),
+            "AWS::SecretsManager::RotationSchedule" => {
+                self.create_secrets_manager_rotation_schedule(resource)
+            }
+            "AWS::SecretsManager::ResourcePolicy" => {
+                self.create_secrets_manager_resource_policy(resource)
+            }
+            "AWS::SecretsManager::SecretTargetAttachment" => {
+                self.create_secrets_manager_target_attachment(resource)
+            }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -807,6 +816,13 @@ impl ResourceProvisioner {
             "AWS::SES::ReceiptRuleSet" => self.delete_ses_receipt_rule_set(&resource.physical_id),
             "AWS::SES::ReceiptFilter" => self.delete_ses_receipt_filter(&resource.physical_id),
             "AWS::SES::VdmAttributes" => Ok(()),
+            "AWS::SecretsManager::RotationSchedule" => {
+                self.delete_secrets_manager_rotation_schedule(&resource.physical_id)
+            }
+            "AWS::SecretsManager::ResourcePolicy" => {
+                self.delete_secrets_manager_resource_policy(&resource.physical_id)
+            }
+            "AWS::SecretsManager::SecretTargetAttachment" => Ok(()),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -10693,6 +10709,182 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         state.account_settings.vdm_attributes = Some(props.clone());
         Ok(ProvisionResult::new(format!("vdm-{}", resource.logical_id)))
+    }
+
+    // --- SecretsManager extras ---
+
+    fn create_secrets_manager_rotation_schedule(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let secret_id = props
+            .get("SecretId")
+            .and_then(|v| v.as_str())
+            .ok_or("SecretId is required")?
+            .to_string();
+        let rotation_lambda_arn = props
+            .get("RotationLambdaARN")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let automatically_after_days = props
+            .get("RotationRules")
+            .and_then(|v| v.get("AutomaticallyAfterDays"))
+            .and_then(|v| v.as_i64());
+        let mut accounts = self.secretsmanager_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let secret_arn = if state.secrets.contains_key(&secret_id) {
+            secret_id.clone()
+        } else {
+            let candidate = format!(
+                "arn:aws:secretsmanager:{}:{}:secret:{}",
+                state.region, state.account_id, secret_id
+            );
+            if state.secrets.contains_key(&candidate) {
+                candidate
+            } else {
+                return Err(format!("Secret {secret_id} not yet provisioned"));
+            }
+        };
+        let secret = state
+            .secrets
+            .get_mut(&secret_arn)
+            .ok_or_else(|| format!("Secret {secret_arn} not found"))?;
+        secret.rotation_enabled = Some(true);
+        secret.rotation_lambda_arn = rotation_lambda_arn;
+        secret.rotation_rules = Some(RotationRules {
+            automatically_after_days,
+        });
+        secret.last_changed_at = Utc::now();
+        Ok(ProvisionResult::new(secret_arn.clone()).with("SecretArn", secret_arn))
+    }
+
+    fn delete_secrets_manager_rotation_schedule(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.secretsmanager_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(secret) = state.secrets.get_mut(physical_id) {
+            secret.rotation_enabled = Some(false);
+            secret.rotation_lambda_arn = None;
+            secret.rotation_rules = None;
+            secret.last_changed_at = Utc::now();
+        }
+        Ok(())
+    }
+
+    fn create_secrets_manager_resource_policy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let secret_id = props
+            .get("SecretId")
+            .and_then(|v| v.as_str())
+            .ok_or("SecretId is required")?
+            .to_string();
+        let policy_doc = props
+            .get("ResourcePolicy")
+            .ok_or("ResourcePolicy is required")?;
+        let policy_str = match policy_doc {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let mut accounts = self.secretsmanager_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let secret_arn = if state.secrets.contains_key(&secret_id) {
+            secret_id.clone()
+        } else {
+            let candidate = format!(
+                "arn:aws:secretsmanager:{}:{}:secret:{}",
+                state.region, state.account_id, secret_id
+            );
+            if state.secrets.contains_key(&candidate) {
+                candidate
+            } else {
+                return Err(format!("Secret {secret_id} not yet provisioned"));
+            }
+        };
+        let secret = state
+            .secrets
+            .get_mut(&secret_arn)
+            .ok_or_else(|| format!("Secret {secret_arn} not found"))?;
+        secret.resource_policy = Some(policy_str);
+        secret.last_changed_at = Utc::now();
+        Ok(ProvisionResult::new(secret_arn.clone()).with("SecretArn", secret_arn))
+    }
+
+    fn delete_secrets_manager_resource_policy(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.secretsmanager_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(secret) = state.secrets.get_mut(physical_id) {
+            secret.resource_policy = None;
+            secret.last_changed_at = Utc::now();
+        }
+        Ok(())
+    }
+
+    fn create_secrets_manager_target_attachment(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let secret_id = props
+            .get("SecretId")
+            .and_then(|v| v.as_str())
+            .ok_or("SecretId is required")?
+            .to_string();
+        let target_type = props
+            .get("TargetType")
+            .and_then(|v| v.as_str())
+            .ok_or("TargetType is required")?;
+        let target_id = props
+            .get("TargetId")
+            .and_then(|v| v.as_str())
+            .ok_or("TargetId is required")?;
+        let mut accounts = self.secretsmanager_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let secret_arn = if state.secrets.contains_key(&secret_id) {
+            secret_id.clone()
+        } else {
+            let candidate = format!(
+                "arn:aws:secretsmanager:{}:{}:secret:{}",
+                state.region, state.account_id, secret_id
+            );
+            if state.secrets.contains_key(&candidate) {
+                candidate
+            } else {
+                return Err(format!("Secret {secret_id} not yet provisioned"));
+            }
+        };
+        let secret = state
+            .secrets
+            .get_mut(&secret_arn)
+            .ok_or_else(|| format!("Secret {secret_arn} not found"))?;
+        // Update SecretString JSON in current version with engine/host/port
+        // /username/password placeholders so it shows as "attached" via the
+        // RDS-style schema CFN expects.
+        if let Some(version_id) = secret.current_version_id.clone() {
+            if let Some(version) = secret.versions.get_mut(&version_id) {
+                let mut existing: serde_json::Value = version
+                    .secret_string
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(obj) = existing.as_object_mut() {
+                    let engine = match target_type {
+                        "AWS::RDS::DBInstance" | "AWS::RDS::DBCluster" => "postgres",
+                        _ => "unknown",
+                    };
+                    obj.entry("engine".to_string())
+                        .or_insert(serde_json::json!(engine));
+                    obj.insert("host".to_string(), serde_json::json!(target_id));
+                    obj.entry("dbInstanceIdentifier".to_string())
+                        .or_insert(serde_json::json!(target_id));
+                }
+                version.secret_string = Some(existing.to_string());
+            }
+        }
+        secret.last_changed_at = Utc::now();
+        Ok(ProvisionResult::new(secret_arn.clone()).with("SecretArn", secret_arn))
     }
 }
 
