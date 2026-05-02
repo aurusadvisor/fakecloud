@@ -15,11 +15,12 @@ pub mod dispatch;
 pub mod facade;
 pub mod lambda_proxy;
 pub(crate) mod service;
-pub(crate) mod state;
+pub mod state;
 
 pub use facade::ApiGatewayFacade;
 pub use state::{
-    ApiGatewaySnapshot, ApiGatewayState, RestApi, SharedApiGatewayState,
+    make_id, ApiGatewaySnapshot, ApiGatewayState, ApiKey, Authorizer, Deployment, Integration,
+    Method, Model, Resource, RestApi, SharedApiGatewayState, Stage, UsagePlan,
     APIGATEWAY_SNAPSHOT_SCHEMA_VERSION,
 };
 
