@@ -440,6 +440,7 @@ fn evaluate_waf_for_request(
 /// the WAF state for one ALB and returns the resolved
 /// [`WafEvalOutcome`]. Split out so unit tests can drive it without
 /// constructing a full hyper data plane.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_waf_outcome(
     waf_state: &SharedWafv2State,
     lb_arn: &str,
