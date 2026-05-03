@@ -590,6 +590,173 @@ impl ResourceProvisioner {
         })
     }
 
+    /// Resolve a `Fn::GetAtt` against a previously provisioned resource.
+    /// Returns the attribute value as a string, or `None` if the resource
+    /// type doesn't expose that attribute (caller falls back to a placeholder
+    /// so multi-pass provisioning can retry).
+    ///
+    /// The lookup first checks attributes captured at create time on the
+    /// `StackResource`, then falls back to live service-state queries for
+    /// the well-known attribute names of each resource type. This means
+    /// attributes that change after creation (e.g. Lambda `FunctionUrl`)
+    /// resolve correctly even when the URL was added in a separate pass.
+    pub fn get_att(&self, resource: &StackResource, attribute: &str) -> Option<String> {
+        // Captured attributes are the source of truth — they were computed
+        // at create time and never go stale for the resources we ship today.
+        if let Some(v) = resource.attributes.get(attribute) {
+            return Some(v.clone());
+        }
+        // Live-state fallback for attributes that aren't pre-captured. This
+        // is the extension point for future provisioners.
+        match resource.resource_type.as_str() {
+            "AWS::S3::Bucket" => self.get_att_s3_bucket(&resource.physical_id, attribute),
+            "AWS::Lambda::Function" => {
+                self.get_att_lambda_function(&resource.physical_id, attribute)
+            }
+            "AWS::IAM::Role" => self.get_att_iam_role(&resource.physical_id, attribute),
+            "AWS::SQS::Queue" => self.get_att_sqs_queue(&resource.physical_id, attribute),
+            "AWS::SNS::Topic" => self.get_att_sns_topic(&resource.physical_id, attribute),
+            "AWS::DynamoDB::Table" => self.get_att_dynamodb_table(&resource.physical_id, attribute),
+            "AWS::KMS::Key" => self.get_att_kms_key(&resource.physical_id, attribute),
+            "AWS::SecretsManager::Secret" => {
+                self.get_att_secrets_manager_secret(&resource.physical_id, attribute)
+            }
+            "AWS::CloudFront::Distribution" => {
+                self.get_att_cf_distribution(&resource.physical_id, attribute)
+            }
+            _ => None,
+        }
+    }
+
+    fn get_att_s3_bucket(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.s3_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let bucket = state.buckets.get(physical_id)?;
+        match attribute {
+            "Arn" => Some(format!("arn:aws:s3:::{}", bucket.name)),
+            "DomainName" => Some(format!("{}.s3.amazonaws.com", bucket.name)),
+            "RegionalDomainName" => {
+                Some(format!("{}.s3.{}.amazonaws.com", bucket.name, self.region))
+            }
+            "DualStackDomainName" => Some(format!(
+                "{}.s3.dualstack.{}.amazonaws.com",
+                bucket.name, self.region
+            )),
+            "WebsiteURL" => Some(format!(
+                "http://{}.s3-website-{}.amazonaws.com",
+                bucket.name, self.region
+            )),
+            _ => None,
+        }
+    }
+
+    fn get_att_lambda_function(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let function_name = parse_lambda_function_name(physical_id);
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        match attribute {
+            "Arn" => state
+                .functions
+                .get(&function_name)
+                .map(|f| f.function_arn.clone()),
+            "FunctionUrl" => state
+                .function_url_configs
+                .get(&function_name)
+                .map(|u| u.function_url.clone()),
+            "Version" => state
+                .functions
+                .get(&function_name)
+                .map(|f| f.version.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_iam_role(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        // physical_id may be the role ARN or the role name depending on how
+        // provisioning resolved Ref. Try both shapes.
+        let role = state
+            .roles
+            .values()
+            .find(|r| r.arn == physical_id || r.role_name == physical_id)?;
+        match attribute {
+            "Arn" => Some(role.arn.clone()),
+            "RoleId" => Some(role.role_id.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_sqs_queue(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.sqs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let queue = state.queues.get(physical_id)?;
+        match attribute {
+            "Arn" => Some(queue.arn.clone()),
+            "QueueName" => Some(queue.queue_name.clone()),
+            "QueueUrl" => Some(queue.queue_url.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_sns_topic(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.sns_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let topic = state.topics.get(physical_id)?;
+        match attribute {
+            "TopicArn" => Some(topic.topic_arn.clone()),
+            "TopicName" => Some(topic.name.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_dynamodb_table(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.dynamodb_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let table = state.tables.get(physical_id)?;
+        match attribute {
+            "Arn" => Some(table.arn.clone()),
+            "StreamArn" => table.stream_arn.clone(),
+            _ => None,
+        }
+    }
+
+    fn get_att_kms_key(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.kms_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let key = state.keys.get(physical_id)?;
+        match attribute {
+            "Arn" => Some(key.arn.clone()),
+            "KeyId" => Some(key.key_id.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_secrets_manager_secret(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.secretsmanager_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let secret = state.secrets.get(physical_id)?;
+        match attribute {
+            // Secrets Manager's CFN doc treats Id and Arn interchangeably —
+            // both resolve to the secret ARN.
+            "Arn" | "Id" => Some(secret.arn.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_cf_distribution(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        // CloudFront state is keyed under a fixed "000000000000" account in the
+        // fakecloud_cloudfront crate; matching create_cf_distribution above.
+        let accounts = self.cloudfront_state.read();
+        let state = accounts.get("000000000000")?;
+        let dist = state.distributions.get(physical_id)?;
+        match attribute {
+            "DomainName" => Some(dist.domain_name.clone()),
+            "Id" => Some(dist.id.clone()),
+            _ => None,
+        }
+    }
+
     /// Delete a previously created resource.
     pub fn delete_resource(&self, resource: &StackResource) -> Result<(), String> {
         match resource.resource_type.as_str() {
@@ -13595,5 +13762,160 @@ mod tests {
         );
         let sr = prov.create_resource(&res).unwrap();
         assert!(sr.physical_id.ends_with(".fifo"));
+    }
+
+    // ── get_att dispatch ──
+
+    #[test]
+    fn getatt_s3_bucket_arn_returns_arn() {
+        let prov = make_provisioner();
+        let bucket = make_resource(
+            "AWS::S3::Bucket",
+            "MyBucket",
+            serde_json::json!({"BucketName": "my-bucket"}),
+        );
+        let sr = prov.create_resource(&bucket).unwrap();
+        assert_eq!(
+            prov.get_att(&sr, "Arn"),
+            Some("arn:aws:s3:::my-bucket".to_string())
+        );
+    }
+
+    #[test]
+    fn getatt_s3_bucket_domain_name_returns_dns_name() {
+        let prov = make_provisioner();
+        let bucket = make_resource(
+            "AWS::S3::Bucket",
+            "MyBucket",
+            serde_json::json!({"BucketName": "my-bucket"}),
+        );
+        let sr = prov.create_resource(&bucket).unwrap();
+        assert_eq!(
+            prov.get_att(&sr, "DomainName"),
+            Some("my-bucket.s3.amazonaws.com".to_string())
+        );
+    }
+
+    #[test]
+    fn getatt_lambda_function_arn_returns_function_arn() {
+        let prov = make_provisioner();
+        // Lambda needs an existing IAM role to validate the function role.
+        let role = make_resource(
+            "AWS::IAM::Role",
+            "MyRole",
+            serde_json::json!({
+                "RoleName": "my-role",
+                "AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": []}
+            }),
+        );
+        let role_sr = prov.create_resource(&role).unwrap();
+        let fn_res = make_resource(
+            "AWS::Lambda::Function",
+            "MyFn",
+            serde_json::json!({
+                "FunctionName": "my-fn",
+                "Runtime": "python3.11",
+                "Handler": "index.handler",
+                "Role": role_sr.physical_id,
+                "Code": {"ZipFile": "def handler(e,c): return e"}
+            }),
+        );
+        let fn_sr = prov.create_resource(&fn_res).unwrap();
+        let arn = prov.get_att(&fn_sr, "Arn").expect("Arn should resolve");
+        assert!(arn.starts_with("arn:aws:lambda:"));
+        assert!(arn.contains(":function:my-fn"));
+    }
+
+    #[test]
+    fn getatt_iam_role_arn_returns_role_arn() {
+        let prov = make_provisioner();
+        let role = make_resource(
+            "AWS::IAM::Role",
+            "MyRole",
+            serde_json::json!({
+                "RoleName": "my-role",
+                "AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": []}
+            }),
+        );
+        let sr = prov.create_resource(&role).unwrap();
+        assert_eq!(
+            prov.get_att(&sr, "Arn"),
+            Some("arn:aws:iam::123456789012:role/my-role".to_string())
+        );
+        // RoleId is a real value generated at create time (FKIA-prefixed).
+        let role_id = prov.get_att(&sr, "RoleId").expect("RoleId should resolve");
+        assert!(role_id.starts_with("FKIA"));
+    }
+
+    #[test]
+    fn getatt_unknown_attribute_returns_none() {
+        let prov = make_provisioner();
+        let bucket = make_resource(
+            "AWS::S3::Bucket",
+            "MyBucket",
+            serde_json::json!({"BucketName": "my-bucket"}),
+        );
+        let sr = prov.create_resource(&bucket).unwrap();
+        // Fall-back behaviour: unknown attribute on a known type returns
+        // None; the resolver in template.rs surfaces a "Logical.Attr"
+        // placeholder so the existing template still builds.
+        assert_eq!(prov.get_att(&sr, "NotARealAttr"), None);
+    }
+
+    #[test]
+    fn getatt_unknown_resource_type_returns_none() {
+        let prov = make_provisioner();
+        // Hand-crafted StackResource with a resource_type we don't dispatch
+        // on at all. The captured attributes map is also empty, so there's
+        // nothing to return.
+        let stack_resource = StackResource {
+            logical_id: "Mystery".to_string(),
+            physical_id: "mystery-id".to_string(),
+            resource_type: "AWS::Made::Up".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: BTreeMap::new(),
+        };
+        assert_eq!(prov.get_att(&stack_resource, "Arn"), None);
+    }
+
+    #[test]
+    fn getatt_falls_back_to_captured_attributes() {
+        let prov = make_provisioner();
+        // Captured attributes always win — even if live-state dispatch
+        // would return something different. This keeps `Fn::GetAtt`
+        // deterministic for resources with cached attrs.
+        let stack_resource = StackResource {
+            logical_id: "MyTopic".to_string(),
+            physical_id: "arn:aws:sns:us-east-1:123456789012:my-topic".to_string(),
+            resource_type: "AWS::SNS::Topic".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: {
+                let mut m = BTreeMap::new();
+                m.insert("TopicArn".to_string(), "captured-arn".to_string());
+                m
+            },
+        };
+        assert_eq!(
+            prov.get_att(&stack_resource, "TopicArn"),
+            Some("captured-arn".to_string())
+        );
+    }
+
+    #[test]
+    fn getatt_secrets_manager_arn_resolves_via_live_state() {
+        // Secrets create handler captures Id but not Arn; live-state
+        // fallback fills in Arn.
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::SecretsManager::Secret",
+            "MySecret",
+            serde_json::json!({"Name": "my-secret", "SecretString": "hunter2"}),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        let arn = prov.get_att(&sr, "Arn").expect("Arn should resolve");
+        assert!(arn.starts_with("arn:aws:secretsmanager:"));
+        assert!(arn.ends_with(":secret:my-secret"));
     }
 }
