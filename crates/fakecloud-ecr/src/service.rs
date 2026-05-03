@@ -722,6 +722,11 @@ impl EcrService {
             image_size_in_bytes: manifest.len() as u64,
             image_pushed_at: Utc::now(),
             last_recorded_pull_time: None,
+            image_status: "ACTIVE".to_string(),
+            last_archived_at: None,
+            last_activated_at: None,
+            last_in_use_at: None,
+            in_use_count: 0,
         });
         // If the caller re-pushes an existing digest with a new manifest
         // payload (shouldn't happen under sha256 addressing but tolerate
@@ -969,13 +974,17 @@ impl EcrService {
             .cloned()
             .unwrap_or_default();
         let account = target_account_id(request, &body);
-        let accounts = self.state.read();
+        // Take a write lock so pull-time bookkeeping (`lastInUseAt`,
+        // `inUseCount`, `lastRecordedPullTime`) can update in place. Real
+        // ECR records pull time at least every 24 h on the data plane;
+        // fakecloud bumps unconditionally so tests can observe each call.
+        let mut accounts = self.state.write();
         let state = accounts
-            .get(&account)
+            .get_mut(&account)
             .ok_or_else(|| repository_not_found(&name))?;
         let repo = state
             .repositories
-            .get(&name)
+            .get_mut(&name)
             .ok_or_else(|| repository_not_found(&name))?;
 
         check_repo_policy(
@@ -989,6 +998,7 @@ impl EcrService {
 
         let mut images: Vec<Value> = Vec::new();
         let mut failures: Vec<Value> = Vec::new();
+        let mut hit_digests: Vec<String> = Vec::new();
         for id in &ids {
             match resolve_image_digest(repo, id) {
                 Some(digest) => {
@@ -1001,6 +1011,7 @@ impl EcrService {
                         "imageManifest": img.image_manifest,
                         "imageManifestMediaType": img.image_manifest_media_type,
                     }));
+                    hit_digests.push(digest);
                 }
                 None => failures.push(json!({
                     "imageId": id,
@@ -1009,6 +1020,7 @@ impl EcrService {
                 })),
             }
         }
+        touch_image_pull(repo, &hit_digests);
         Ok(AwsResponse::ok_json(json!({
             "images": images,
             "failures": failures,
@@ -1292,13 +1304,13 @@ impl EcrService {
         let name = req_str(&body, "repositoryName")?.to_string();
         let digest = req_str(&body, "layerDigest")?.to_string();
         let account = target_account_id(request, &body);
-        let accounts = self.state.read();
+        let mut accounts = self.state.write();
         let state = accounts
-            .get(&account)
+            .get_mut(&account)
             .ok_or_else(|| repository_not_found(&name))?;
         let repo = state
             .repositories
-            .get(&name)
+            .get_mut(&name)
             .ok_or_else(|| repository_not_found(&name))?;
         check_repo_policy(
             &account,
@@ -1311,9 +1323,32 @@ impl EcrService {
         if !repo.layers.contains_key(&digest) {
             return Err(layer_not_found(&digest, &name));
         }
-        // Batch 3 will host `/v2/<name>/blobs/<digest>` — return that
-        // path as a relative URL so callers that trust the endpoint
-        // they're already talking to can resolve it.
+        // Pull bookkeeping: the OCI client requested a layer blob, which
+        // means at least one image whose manifest references that layer
+        // is being pulled. Touch every such image so DescribeImages
+        // reflects the access. Don't touch unrelated images.
+        let mut touched: Vec<String> = Vec::new();
+        for (img_digest, img) in &repo.images {
+            let parsed: Value = match serde_json::from_str(&img.image_manifest) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let references = parsed
+                .get("layers")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .any(|l| l.get("digest").and_then(|d| d.as_str()) == Some(digest.as_str()))
+                })
+                .unwrap_or(false);
+            if references {
+                touched.push(img_digest.clone());
+            }
+        }
+        touch_image_pull(repo, &touched);
+        // The OCI v2 endpoint hosts `/v2/<name>/blobs/<digest>` — return
+        // that absolute URL so callers that trust the endpoint they're
+        // already talking to can resolve it.
         let endpoint = accounts.endpoint();
         let url = format!(
             "{}/v2/{}/blobs/{}",
@@ -2972,6 +3007,22 @@ impl EcrService {
             .and_then(|v| v.as_str())
             .ok_or_else(|| invalid_parameter("subjectId.imageDigest is required"))?
             .to_string();
+        // Optional filter: artifactTypes + artifactStatus. Defaults match
+        // AWS: `artifactStatus = ACTIVE` only when no filter is supplied.
+        let filter = body.get("filter").cloned().unwrap_or(Value::Null);
+        let artifact_type_filter: Option<Vec<String>> = filter
+            .get("artifactTypes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
+        let artifact_status_filter: String = filter
+            .get("artifactStatus")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ACTIVE")
+            .to_string();
         let account = target_account_id(request, &body);
         let accounts = self.state.read();
         let state = accounts
@@ -2988,8 +3039,63 @@ impl EcrService {
                 format!("Subject image {digest} not found in repository '{name}'"),
             ));
         }
+        // Walk every image; include those whose manifest has a
+        // `subject.digest` matching the requested subject. The subject
+        // is the OCI Distribution v1.1 referrer relation.
+        let mut referrers: Vec<Value> = Vec::new();
+        for image in repo.images.values() {
+            let parsed: Value = match serde_json::from_str(&image.image_manifest) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let subject_digest = parsed
+                .get("subject")
+                .and_then(|s| s.get("digest"))
+                .and_then(|d| d.as_str());
+            if subject_digest != Some(digest.as_str()) {
+                continue;
+            }
+            // OCI artifact type lives at `artifactType` (image manifest)
+            // or `config.mediaType` (image-config-as-artifact).
+            let artifact_type = parsed
+                .get("artifactType")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    parsed
+                        .get("config")
+                        .and_then(|c| c.get("mediaType"))
+                        .and_then(|v| v.as_str())
+                })
+                .map(str::to_string);
+            if let Some(ref allowed) = artifact_type_filter {
+                if !allowed.iter().any(|t| Some(t) == artifact_type.as_ref()) {
+                    continue;
+                }
+            }
+            // Status filter: `ANY` matches everything; otherwise the
+            // referrer's `image_status` must equal the filter value.
+            if artifact_status_filter != "ANY" && image.image_status != artifact_status_filter {
+                continue;
+            }
+            // Annotations live on the manifest under `annotations`.
+            let annotations = parsed
+                .get("annotations")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let mut referrer = json!({
+                "digest": image.image_digest,
+                "mediaType": image.image_manifest_media_type,
+                "size": image.image_size_in_bytes,
+                "annotations": annotations,
+                "artifactStatus": image.image_status,
+            });
+            if let Some(t) = artifact_type {
+                referrer["artifactType"] = json!(t);
+            }
+            referrers.push(referrer);
+        }
         Ok(AwsResponse::ok_json(json!({
-            "imageReferrers": [],
+            "referrers": referrers,
         })))
     }
 
@@ -3004,28 +3110,44 @@ impl EcrService {
             .cloned()
             .ok_or_else(|| invalid_parameter("Missing imageId"))?;
         let target_class = req_str(&body, "targetStorageClass")?.to_string();
+        // Smithy `TargetStorageClass` is `STANDARD | ARCHIVE`. Anything
+        // else is rejected the way AWS would reject an enum mismatch.
         if target_class != "STANDARD" && target_class != "ARCHIVE" {
             return Err(invalid_parameter(format!(
                 "Invalid targetStorageClass '{target_class}'. Must be STANDARD or ARCHIVE."
             )));
         }
         let account = target_account_id(request, &body);
-        let accounts = self.state.read();
+        let mut accounts = self.state.write();
         let state = accounts
-            .get(&account)
+            .get_mut(&account)
             .ok_or_else(|| repository_not_found(&name))?;
         let repo = state
             .repositories
-            .get(&name)
+            .get_mut(&name)
             .ok_or_else(|| repository_not_found(&name))?;
-        if resolve_image_digest(repo, &image_id).is_none() {
-            return Err(image_not_found(&name, &image_id));
-        }
+        let digest = resolve_image_digest(repo, &image_id)
+            .ok_or_else(|| image_not_found(&name, &image_id))?;
+        let registry_id = repo.registry_id.clone();
+        let now = Utc::now();
+        let image = repo.images.get_mut(&digest).expect("digest resolves");
+        let new_status = match target_class.as_str() {
+            "ARCHIVE" => {
+                image.last_archived_at = Some(now);
+                "ARCHIVED"
+            }
+            // STANDARD = restore from archive.
+            _ => {
+                image.last_activated_at = Some(now);
+                "ACTIVE"
+            }
+        };
+        image.image_status = new_status.to_string();
         Ok(AwsResponse::ok_json(json!({
-            "registryId": repo.registry_id,
+            "registryId": registry_id,
             "repositoryName": name,
             "imageId": image_id,
-            "targetStorageClass": target_class,
+            "imageStatus": new_status,
         })))
     }
 }

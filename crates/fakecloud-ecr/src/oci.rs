@@ -495,12 +495,36 @@ async fn blob_get(
     name: &str,
     digest: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    // Snapshot the layer under a write lock so we can bump pull metadata
+    // on every image whose manifest references this blob digest.
     let local = {
-        let accounts = service.state_handle().read();
-        accounts
-            .get(&request.account_id)
-            .and_then(|s| s.repositories.get(name))
-            .and_then(|r| r.layers.get(digest).cloned())
+        let mut accounts = service.state_handle().write();
+        let layer = accounts
+            .get_mut(&request.account_id)
+            .and_then(|s| s.repositories.get_mut(name))
+            .and_then(|repo| {
+                let layer = repo.layers.get(digest).cloned()?;
+                let touched: Vec<String> = repo
+                    .images
+                    .iter()
+                    .filter(|(_, img)| {
+                        serde_json::from_str::<serde_json::Value>(&img.image_manifest)
+                            .ok()
+                            .and_then(|v| v.get("layers").cloned())
+                            .and_then(|v| v.as_array().cloned())
+                            .map(|arr| {
+                                arr.iter().any(|l| {
+                                    l.get("digest").and_then(|d| d.as_str()) == Some(digest)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                    .map(|(d, _)| d.clone())
+                    .collect();
+                crate::service::touch_image_pull(repo, &touched);
+                Some(layer)
+            });
+        layer
     };
     if let Some(layer) = local {
         let bytes = decrypt_layer_bytes(service, &request.account_id, &layer)?;
@@ -891,21 +915,26 @@ async fn manifest_get(
     name: &str,
     reference: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    // Pull-shaped op: snapshot the manifest under a write lock so we can
+    // bump `last_in_use_at`/`in_use_count` on the touched image.
     let local = {
-        let accounts = service.state_handle().read();
+        let mut accounts = service.state_handle().write();
         accounts
-            .get(&request.account_id)
-            .and_then(|s| s.repositories.get(name))
+            .get_mut(&request.account_id)
+            .and_then(|s| s.repositories.get_mut(name))
             .and_then(|repo| {
-                resolve_reference(repo, reference).and_then(|digest| {
-                    repo.images.get(&digest).map(|img| {
-                        (
-                            digest,
-                            img.image_manifest_media_type.clone(),
-                            img.image_manifest.as_bytes().to_vec(),
-                        )
-                    })
-                })
+                let digest = resolve_reference(repo, reference)?;
+                let manifest = repo.images.get(&digest).map(|img| {
+                    (
+                        digest.clone(),
+                        img.image_manifest_media_type.clone(),
+                        img.image_manifest.as_bytes().to_vec(),
+                    )
+                });
+                if manifest.is_some() {
+                    crate::service::touch_image_pull(repo, &[digest]);
+                }
+                manifest
             })
     };
     if let Some((digest, media_type, body)) = local {
@@ -958,6 +987,11 @@ fn manifest_put(
             image_size_in_bytes: body.len() as u64,
             image_pushed_at: Utc::now(),
             last_recorded_pull_time: None,
+            image_status: "ACTIVE".to_string(),
+            last_archived_at: None,
+            last_activated_at: None,
+            last_in_use_at: None,
+            in_use_count: 0,
         },
     );
     // If the reference isn't a digest, treat it as a tag.

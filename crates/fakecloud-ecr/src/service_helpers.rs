@@ -1,6 +1,9 @@
 use super::*;
 
 /// Actions that mutate persisted state. Only these trigger a snapshot save.
+/// Pull-shaped reads (`BatchGetImage`, `GetDownloadUrlForLayer`) are listed
+/// because they bump `last_in_use_at`/`in_use_count` on the touched image,
+/// which is persisted state.
 pub(crate) fn is_mutating(action: &str) -> bool {
     matches!(
         action,
@@ -13,7 +16,9 @@ pub(crate) fn is_mutating(action: &str) -> bool {
             | "TagResource"
             | "UntagResource"
             | "PutImage"
+            | "BatchGetImage"
             | "BatchDeleteImage"
+            | "GetDownloadUrlForLayer"
             | "InitiateLayerUpload"
             | "UploadLayerPart"
             | "CompleteLayerUpload"
@@ -302,6 +307,37 @@ pub(crate) fn image_to_details(repo: &Repository, image: &Image, registry_id: &s
     if let Some(t) = image.last_recorded_pull_time {
         out["lastRecordedPullTime"] = json!(t.timestamp());
     }
+    // Storage-class lifecycle fields. `imageStatus` is in the AWS Smithy
+    // model; `lastArchivedAt` / `lastActivatedAt` are too. Real ECR omits
+    // these until they're set, so do the same.
+    out["imageStatus"] = json!(image.image_status);
+    if let Some(t) = image.last_archived_at {
+        out["lastArchivedAt"] = json!(t.timestamp());
+    }
+    if let Some(t) = image.last_activated_at {
+        out["lastActivatedAt"] = json!(t.timestamp());
+    }
+    // fakecloud-extension fields (not in AWS Smithy). `lastInUseAt` is
+    // bumped by every pull-shaped op (BatchGetImage, GetDownloadUrlForLayer,
+    // OCI manifest/blob GET); `inUseCount` is the monotonic counter.
+    // Tests can rely on these to assert pull frequency without scraping
+    // logs. See P5 ECR polish PR.
+    if let Some(t) = image.last_in_use_at {
+        out["lastInUseAt"] = json!(t.timestamp());
+    }
+    out["inUseCount"] = json!(image.in_use_count);
+    // If this image is a referrer (its manifest carries a `subject`),
+    // surface the subject digest the way AWS does. Parse defensively —
+    // not every image is JSON.
+    if let Ok(parsed) = serde_json::from_str::<Value>(&image.image_manifest) {
+        if let Some(subject_digest) = parsed
+            .get("subject")
+            .and_then(|s| s.get("digest"))
+            .and_then(|d| d.as_str())
+        {
+            out["subjectManifestDigest"] = json!(subject_digest);
+        }
+    }
     // Surface scan state on the image itself (real ECR returns these
     // unconditionally; SDK callers that watch scan-on-push completion poll
     // DescribeImages and previously saw nothing).
@@ -324,6 +360,24 @@ pub(crate) fn image_to_details(repo: &Repository, image: &Image, registry_id: &s
         out["imageScanStatus"] = json!({ "status": "PENDING" });
     }
     out
+}
+
+/// Stamp pull metadata on every image whose digest matches one of `digests`.
+/// Used by `BatchGetImage`, `GetDownloadUrlForLayer`, and the OCI manifest /
+/// blob GET handlers so DescribeImages reports a fresh `lastInUseAt` and
+/// the `inUseCount` matches actual pull traffic.
+pub(crate) fn touch_image_pull(repo: &mut Repository, digests: &[String]) {
+    if digests.is_empty() {
+        return;
+    }
+    let now = chrono::Utc::now();
+    for digest in digests {
+        if let Some(image) = repo.images.get_mut(digest) {
+            image.last_in_use_at = Some(now);
+            image.last_recorded_pull_time = Some(now);
+            image.in_use_count = image.in_use_count.saturating_add(1);
+        }
+    }
 }
 
 /// Return only the layer blobs referenced by the manifest of `image_digest`.

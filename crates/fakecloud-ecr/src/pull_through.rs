@@ -325,6 +325,11 @@ fn cache_manifest(
             image_size_in_bytes: bytes.len() as u64,
             image_pushed_at: Utc::now(),
             last_recorded_pull_time: Some(Utc::now()),
+            image_status: "ACTIVE".to_string(),
+            last_archived_at: None,
+            last_activated_at: None,
+            last_in_use_at: Some(Utc::now()),
+            in_use_count: 1,
         },
     );
     // A reference can be a tag (alphanumeric) or a digest. Only store

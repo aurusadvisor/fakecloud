@@ -14,7 +14,7 @@ impl fakecloud_core::multi_account::AccountState for EcrState {
     }
 }
 
-pub const ECR_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+pub const ECR_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
 
 /// Top-level persisted ECR snapshot. The shape mirrors the convention
 /// used by other multi-account services (Kinesis, ElastiCache) so the
@@ -263,6 +263,40 @@ pub struct Image {
     pub image_size_in_bytes: u64,
     pub image_pushed_at: DateTime<Utc>,
     pub last_recorded_pull_time: Option<DateTime<Utc>>,
+    /// Lifecycle/storage state surfaced through `ImageDetail.imageStatus`
+    /// in `DescribeImages`. One of `ACTIVE`, `ARCHIVED`, `ACTIVATING`.
+    /// Defaults to `ACTIVE` (the only value AWS exposes for newly pushed
+    /// images); transitions are driven by `UpdateImageStorageClass`.
+    #[serde(default = "default_image_status")]
+    pub image_status: String,
+    /// Last time `UpdateImageStorageClass` archived this image. `None`
+    /// while the image has never been archived. Surfaced as
+    /// `ImageDetail.lastArchivedAt`.
+    #[serde(default)]
+    pub last_archived_at: Option<DateTime<Utc>>,
+    /// Last time `UpdateImageStorageClass` restored this image from
+    /// archive. `None` while the image has never been activated from
+    /// archive. Surfaced as `ImageDetail.lastActivatedAt`.
+    #[serde(default)]
+    pub last_activated_at: Option<DateTime<Utc>>,
+    /// Last time the image was read by a pull-shaped op (`BatchGetImage`,
+    /// `GetDownloadUrlForLayer`, OCI manifest GET, OCI blob GET). Updated
+    /// alongside `last_recorded_pull_time` so callers that rely on the
+    /// fakecloud-extension `lastInUseAt`/`inUseCount` pair can introspect
+    /// pull frequency in tests.
+    #[serde(default)]
+    pub last_in_use_at: Option<DateTime<Utc>>,
+    /// Monotonic counter of pull-shaped accesses. Bumped by the same
+    /// touch points that update `last_in_use_at`. Defaults to 0; not
+    /// part of the AWS Smithy model — fakecloud surfaces it as
+    /// `inUseCount` in `DescribeImages` for parity with the user
+    /// expectation.
+    #[serde(default)]
+    pub in_use_count: u64,
+}
+
+fn default_image_status() -> String {
+    "ACTIVE".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
