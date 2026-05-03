@@ -294,7 +294,10 @@ impl CloudFrontService {
         body.push_str(XML_DECL);
         body.push_str(&format!("<ConnectionFunctionTestResult xmlns=\"{NS}\">"));
         body.push_str(&render_connection_function_summary_inner(&f));
-        body.push_str("<ComputeUtilization>0</ComputeUtilization>");
+        body.push_str(&format!(
+            "<ComputeUtilization>{}</ComputeUtilization>",
+            exec.compute_utilization
+        ));
         body.push_str("<ConnectionFunctionExecutionLogs>");
         for line in &exec.logs {
             body.push_str(&format!("<member>{}</member>", esc(line)));
@@ -525,5 +528,67 @@ mod tests {
         };
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
         assert_eq!(err.code(), "EntityNotFound");
+    }
+
+    #[tokio::test]
+    async fn test_connection_function_logs_error_and_marks_compute_over_100() {
+        let svc = svc();
+        let etag = create_cfn(
+            &svc,
+            "cfn-throws",
+            r#"function handler() { throw new Error("kaboom"); }"#,
+        )
+        .await;
+        let body = test_cfn_request_xml("{}");
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/connection-function/cfn-throws/test",
+                &body,
+                Some(&etag),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let xml = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(xml.contains("kaboom"), "expected kaboom, got {xml}");
+        assert!(
+            xml.contains("<ConnectionFunctionExecutionLogs>") && xml.contains("ERROR: "),
+            "expected error log, got {xml}"
+        );
+        let cu_open = xml.find("<ComputeUtilization>").unwrap() + "<ComputeUtilization>".len();
+        let cu_close = xml.find("</ComputeUtilization>").unwrap();
+        let pct: u32 = xml[cu_open..cu_close].parse().unwrap();
+        assert!(pct > 100, "expected pct > 100 on error, got {pct}");
+    }
+
+    #[tokio::test]
+    async fn test_connection_function_infinite_loop_is_killed() {
+        let svc = svc();
+        let etag = create_cfn(&svc, "cfn-loop", r#"function handler() { while(1){} }"#).await;
+        let body = test_cfn_request_xml("{}");
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/connection-function/cfn-loop/test",
+                &body,
+                Some(&etag),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let xml = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(
+            xml.contains("<ConnectionFunctionOutput></ConnectionFunctionOutput>"),
+            "expected empty output after kill, got {xml}"
+        );
+        assert!(
+            xml.contains("ERROR:") && xml.contains("limit"),
+            "expected timeout/limit log, got {xml}"
+        );
+        let cu_open = xml.find("<ComputeUtilization>").unwrap() + "<ComputeUtilization>".len();
+        let cu_close = xml.find("</ComputeUtilization>").unwrap();
+        let pct: u32 = xml[cu_open..cu_close].parse().unwrap();
+        assert!(pct > 100, "expected pct > 100, got {pct}");
     }
 }

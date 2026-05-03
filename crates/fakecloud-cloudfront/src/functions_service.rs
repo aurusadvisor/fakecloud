@@ -285,7 +285,10 @@ impl CloudFrontService {
         body.push_str(XML_DECL);
         body.push_str(&format!("<TestResult xmlns=\"{NS}\">"));
         body.push_str(&render_function_summary_inner(&f));
-        body.push_str("<ComputeUtilization>0</ComputeUtilization>");
+        body.push_str(&format!(
+            "<ComputeUtilization>{}</ComputeUtilization>",
+            exec.compute_utilization
+        ));
         body.push_str("<FunctionExecutionLogs>");
         for line in &exec.logs {
             body.push_str(&format!("<member>{}</member>", esc(line)));
@@ -1431,5 +1434,112 @@ mod tests {
         };
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
         assert_eq!(err.code(), "NoSuchFunctionExists");
+    }
+
+    #[tokio::test]
+    async fn test_function_modifies_aws_request_shape() {
+        // Mirrors the canonical CloudFront Functions example from the
+        // AWS docs: handler rewrites a request header and returns the
+        // request, fakecloud passes the JSON shape straight through.
+        let svc = svc();
+        let etag = create_function(
+            &svc,
+            "fn-aws-shape",
+            r#"function handler(event) { event.request.headers["x-foo"] = {value: "bar"}; return event.request; }"#,
+        )
+        .await;
+        let body = test_function_request_xml(
+            r#"{"version":"1.0","context":{},"viewer":{},"request":{"method":"GET","uri":"/","querystring":{},"headers":{},"cookies":{}}}"#,
+        );
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/function/fn-aws-shape/test",
+                &body,
+                Some(&etag),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let xml = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(
+            xml.contains("x-foo"),
+            "expected request header rewrite in output, got {xml}"
+        );
+        assert!(
+            xml.contains("bar"),
+            "expected header value in output, got {xml}"
+        );
+        assert!(
+            xml.contains("<FunctionErrorMessage></FunctionErrorMessage>"),
+            "expected empty error, got {xml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_function_logs_error_and_marks_compute_over_100() {
+        let svc = svc();
+        let etag = create_function(
+            &svc,
+            "fn-throws",
+            r#"function handler() { throw new Error("kaboom"); }"#,
+        )
+        .await;
+        let body = test_function_request_xml("{}");
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/function/fn-throws/test",
+                &body,
+                Some(&etag),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let xml = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        // Error appears in both the dedicated message and in the logs
+        assert!(xml.contains("kaboom"), "expected kaboom in body, got {xml}");
+        assert!(
+            xml.contains("<FunctionExecutionLogs>")
+                && xml.contains("<member>ERROR: ")
+                && xml.contains("kaboom"),
+            "expected error log line, got {xml}"
+        );
+        // ComputeUtilization is rendered as a plain integer; on failure
+        // we saturate past 100.
+        let cu_open = xml.find("<ComputeUtilization>").unwrap() + "<ComputeUtilization>".len();
+        let cu_close = xml.find("</ComputeUtilization>").unwrap();
+        let pct: u32 = xml[cu_open..cu_close].parse().unwrap();
+        assert!(pct > 100, "expected pct > 100 on error, got {pct}");
+    }
+
+    #[tokio::test]
+    async fn test_function_infinite_loop_is_killed() {
+        let svc = svc();
+        let etag = create_function(&svc, "fn-loop", r#"function handler() { while(1){} }"#).await;
+        let body = test_function_request_xml("{}");
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/function/fn-loop/test",
+                &body,
+                Some(&etag),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let xml = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(
+            xml.contains("<FunctionOutput></FunctionOutput>"),
+            "expected empty output, got {xml}"
+        );
+        assert!(
+            xml.contains("ERROR:") && xml.contains("limit"),
+            "expected timeout/limit error in logs, got {xml}"
+        );
+        let cu_open = xml.find("<ComputeUtilization>").unwrap() + "<ComputeUtilization>".len();
+        let cu_close = xml.find("</ComputeUtilization>").unwrap();
+        let pct: u32 = xml[cu_open..cu_close].parse().unwrap();
+        assert!(pct > 100, "expected pct > 100 after kill, got {pct}");
     }
 }
