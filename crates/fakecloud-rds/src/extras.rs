@@ -1010,8 +1010,6 @@ impl RdsService {
             "DescribeEventCategories" => Ok(xml_response("DescribeEventCategories", "    <EventCategoriesMapList/>".to_string(), &rid)),
             "DescribeEvents" => self.describe_events(req, &rid),
             "DescribeSourceRegions" => Ok(xml_response("DescribeSourceRegions", "    <SourceRegions/>".to_string(), &rid)),
-            "DescribeDBLogFiles" => Ok(xml_response("DescribeDBLogFiles", "    <DescribeDBLogFiles/>".to_string(), &rid)),
-            "DownloadDBLogFilePortion" => Ok(xml_response("DownloadDBLogFilePortion", "    <LogFileData></LogFileData>\n    <Marker>0</Marker>\n    <AdditionalDataPending>false</AdditionalDataPending>".to_string(), &rid)),
             "DescribeDBMajorEngineVersions" => Ok(xml_response("DescribeDBMajorEngineVersions", "    <DBMajorEngineVersions/>".to_string(), &rid)),
             "DescribeValidDBInstanceModifications" => Ok(xml_response("DescribeValidDBInstanceModifications", "    <ValidDBInstanceModificationsMessage>\n      <ValidProcessorFeatures/>\n      <Storage/>\n    </ValidDBInstanceModificationsMessage>".to_string(), &rid)),
             "ModifyCurrentDBClusterCapacity" => Ok(xml_response("ModifyCurrentDBClusterCapacity", "    <DBClusterIdentifier>x</DBClusterIdentifier>\n    <CurrentCapacity>4</CurrentCapacity>".to_string(), &rid)),
@@ -1795,8 +1793,6 @@ mod tests {
         ok("DescribeEventCategories", &[]);
         ok("DescribeEvents", &[]);
         ok("DescribeSourceRegions", &[]);
-        ok("DescribeDBLogFiles", &[]);
-        ok("DownloadDBLogFilePortion", &[]);
         ok("DescribeDBMajorEngineVersions", &[]);
         ok("DescribeValidDBInstanceModifications", &[]);
         ok("ModifyCurrentDBClusterCapacity", &[]);

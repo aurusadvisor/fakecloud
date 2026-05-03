@@ -2328,3 +2328,84 @@ async fn save_snapshot_static_is_noop_without_store() {
     ));
     save_snapshot_static(state, None, lock).await;
 }
+
+// ── DescribeDBLogFiles / DownloadDBLogFilePortion (M10) ─────────
+
+#[tokio::test]
+async fn describe_db_log_files_returns_synthetic_files_when_runtime_absent() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request("DescribeDBLogFiles", &[("DBInstanceIdentifier", "db1")]);
+    let body = body_of(svc.describe_db_log_files(&req).await.unwrap());
+    assert!(
+        body.contains("<LogFileName>error/postgres.log</LogFileName>"),
+        "expected error/postgres.log entry in {body}"
+    );
+    assert!(body.contains("<LastWritten>"));
+    assert!(body.contains("<Size>"));
+}
+
+#[tokio::test]
+async fn describe_db_log_files_unknown_instance_returns_not_found() {
+    let svc = make_service();
+    let req = request("DescribeDBLogFiles", &[("DBInstanceIdentifier", "ghost")]);
+    assert_code(svc.describe_db_log_files(&req).await, "DBInstanceNotFound");
+}
+
+#[tokio::test]
+async fn describe_db_log_files_filename_contains_filter_applied() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request(
+        "DescribeDBLogFiles",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("FilenameContains", "trace"),
+        ],
+    );
+    let body = body_of(svc.describe_db_log_files(&req).await.unwrap());
+    assert!(
+        body.contains("<LogFileName>trace/postgres-trace.log</LogFileName>"),
+        "trace file should pass filter: {body}"
+    );
+    assert!(
+        !body.contains("<LogFileName>error/postgres.log</LogFileName>"),
+        "error file should be filtered out: {body}"
+    );
+}
+
+#[tokio::test]
+async fn download_db_log_file_portion_unknown_instance_errors() {
+    let svc = make_service();
+    let req = request(
+        "DownloadDBLogFilePortion",
+        &[
+            ("DBInstanceIdentifier", "ghost"),
+            ("LogFileName", "error/postgres.log"),
+        ],
+    );
+    assert_code(
+        svc.download_db_log_file_portion(&req).await,
+        "DBInstanceNotFound",
+    );
+}
+
+#[tokio::test]
+async fn download_db_log_file_portion_returns_empty_when_runtime_absent() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request(
+        "DownloadDBLogFilePortion",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("LogFileName", "error/postgres.log"),
+        ],
+    );
+    let body = body_of(svc.download_db_log_file_portion(&req).await.unwrap());
+    assert!(
+        body.contains("<LogFileData></LogFileData>"),
+        "expected empty LogFileData in {body}"
+    );
+    assert!(body.contains("<AdditionalDataPending>false</AdditionalDataPending>"));
+    assert!(body.contains("<Marker>0</Marker>"));
+}

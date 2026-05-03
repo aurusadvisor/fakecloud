@@ -919,6 +919,39 @@ impl RdsRuntime {
         Ok(output.stdout)
     }
 
+    /// Cat a file inside the running container by absolute path.
+    /// Returns `Unavailable` when the runtime/daemon is missing or the
+    /// instance has no live container; returns `ContainerStartFailed`
+    /// when the file is missing or unreadable. Callers map those to the
+    /// AWS-shaped responses.
+    pub async fn read_log_file(
+        &self,
+        db_instance_identifier: &str,
+        container_path: &str,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let container = self
+            .containers
+            .read()
+            .get(db_instance_identifier)
+            .cloned()
+            .ok_or(RuntimeError::Unavailable)?;
+
+        let output = tokio::process::Command::new(&self.cli)
+            .args(["exec", &container.container_id, "cat", container_path])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(format!(
+                "cat {container_path} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        Ok(output.stdout)
+    }
+
     pub async fn restore_database(
         &self,
         db_instance_identifier: &str,
