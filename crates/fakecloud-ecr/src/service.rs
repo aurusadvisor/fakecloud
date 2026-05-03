@@ -695,19 +695,14 @@ impl EcrService {
             .get_mut(&name)
             .ok_or_else(|| repository_not_found(&name))?;
 
-        // Cross-account repository policy gate: if the caller belongs
-        // to a different account than the repo owner, an explicit
-        // Allow on `ecr:PutImage` is required.
-        if request.account_id != account
-            && !repository_policy_allows(
-                repo.policy.as_deref(),
-                &request.account_id,
-                &repo.repository_arn,
-                "ecr:PutImage",
-            )
-        {
-            return Err(repository_policy_denied(&name, "ecr:PutImage"));
-        }
+        check_repo_policy(
+            &account,
+            &request.account_id,
+            &repo.repository_arn,
+            &name,
+            repo.policy.as_deref(),
+            "ecr:PutImage",
+        )?;
 
         // Immutable tag guard: if a tag is supplied, it already maps to
         // a different digest, and the repo is IMMUTABLE, reject.
@@ -983,16 +978,14 @@ impl EcrService {
             .get(&name)
             .ok_or_else(|| repository_not_found(&name))?;
 
-        if request.account_id != account
-            && !repository_policy_allows(
-                repo.policy.as_deref(),
-                &request.account_id,
-                &repo.repository_arn,
-                "ecr:BatchGetImage",
-            )
-        {
-            return Err(repository_policy_denied(&name, "ecr:BatchGetImage"));
-        }
+        check_repo_policy(
+            &account,
+            &request.account_id,
+            &repo.repository_arn,
+            &name,
+            repo.policy.as_deref(),
+            "ecr:BatchGetImage",
+        )?;
 
         let mut images: Vec<Value> = Vec::new();
         let mut failures: Vec<Value> = Vec::new();
@@ -1113,6 +1106,14 @@ impl EcrService {
             .repositories
             .get(&name)
             .ok_or_else(|| repository_not_found(&name))?;
+        check_repo_policy(
+            &account,
+            &request.account_id,
+            &repo.repository_arn,
+            &name,
+            repo.policy.as_deref(),
+            "ecr:BatchCheckLayerAvailability",
+        )?;
         let mut layers: Vec<Value> = Vec::new();
         let mut failures: Vec<Value> = Vec::new();
         for digest in &digests {
@@ -1299,19 +1300,14 @@ impl EcrService {
             .repositories
             .get(&name)
             .ok_or_else(|| repository_not_found(&name))?;
-        if request.account_id != account
-            && !repository_policy_allows(
-                repo.policy.as_deref(),
-                &request.account_id,
-                &repo.repository_arn,
-                "ecr:GetDownloadUrlForLayer",
-            )
-        {
-            return Err(repository_policy_denied(
-                &name,
-                "ecr:GetDownloadUrlForLayer",
-            ));
-        }
+        check_repo_policy(
+            &account,
+            &request.account_id,
+            &repo.repository_arn,
+            &name,
+            repo.policy.as_deref(),
+            "ecr:GetDownloadUrlForLayer",
+        )?;
         if !repo.layers.contains_key(&digest) {
             return Err(layer_not_found(&digest, &name));
         }
@@ -1339,9 +1335,18 @@ impl EcrService {
         let state = accounts
             .get_mut(&account)
             .ok_or_else(|| repository_not_found(&name))?;
-        if !state.repositories.contains_key(&name) {
-            return Err(repository_not_found(&name));
-        }
+        let repo = state
+            .repositories
+            .get(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        check_repo_policy(
+            &account,
+            &request.account_id,
+            &repo.repository_arn,
+            &name,
+            repo.policy.as_deref(),
+            "ecr:InitiateLayerUpload",
+        )?;
         let upload_id = Uuid::new_v4().to_string();
         let spool = crate::oci::create_upload_spool(&upload_id).map_err(|e| {
             AwsServiceError::aws_error(
@@ -1388,6 +1393,18 @@ impl EcrService {
         let state = accounts
             .get_mut(&account)
             .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        check_repo_policy(
+            &account,
+            &request.account_id,
+            &repo.repository_arn,
+            &name,
+            repo.policy.as_deref(),
+            "ecr:UploadLayerPart",
+        )?;
         let upload = state
             .layer_uploads
             .get_mut(&upload_id)
@@ -1491,6 +1508,18 @@ impl EcrService {
         let state = accounts
             .get_mut(&account)
             .ok_or_else(|| repository_not_found(&name))?;
+        let repo = state
+            .repositories
+            .get(&name)
+            .ok_or_else(|| repository_not_found(&name))?;
+        check_repo_policy(
+            &account,
+            &request.account_id,
+            &repo.repository_arn,
+            &name,
+            repo.policy.as_deref(),
+            "ecr:CompleteLayerUpload",
+        )?;
         // Peek, validate, then commit — so a digest mismatch lets the
         // caller retry CompleteLayerUpload with the correct digest
         // instead of having to re-upload the entire blob.
