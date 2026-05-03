@@ -197,10 +197,25 @@ impl AwsService for EcrService {
                 }
             }
             let result = crate::oci::dispatch(self, &request).await;
-            let mutates_oci = matches!(
-                request.method,
-                http::Method::POST | http::Method::PUT | http::Method::PATCH | http::Method::DELETE
-            );
+            // POST/PUT/PATCH/DELETE always mutate. GET to a `blobs/<digest>`
+            // or `manifests/<reference>` endpoint also mutates because those
+            // handlers bump the touched image's `last_in_use_at` /
+            // `in_use_count` / `last_recorded_pull_time`. `tags/list` (also
+            // GET) is read-only and excluded.
+            let is_pull_get = request.method == http::Method::GET
+                && request.path_segments.len() >= 3
+                && matches!(
+                    request.path_segments[request.path_segments.len() - 2].as_str(),
+                    "blobs" | "manifests"
+                );
+            let mutates_oci = is_pull_get
+                || matches!(
+                    request.method,
+                    http::Method::POST
+                        | http::Method::PUT
+                        | http::Method::PATCH
+                        | http::Method::DELETE
+                );
             if mutates_oci && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
                 self.save_snapshot().await;
             }
@@ -982,6 +997,10 @@ impl EcrService {
         let state = accounts
             .get_mut(&account)
             .ok_or_else(|| repository_not_found(&name))?;
+        // Snapshot the registered exclusion ARNs before grabbing the repo
+        // mut so `touch_image_pull` can honour the exclusion contract
+        // without holding two `&mut`s on `EcrState`.
+        let exclusions = pull_time_exclusion_set(state);
         let repo = state
             .repositories
             .get_mut(&name)
@@ -1020,7 +1039,8 @@ impl EcrService {
                 })),
             }
         }
-        touch_image_pull(repo, &hit_digests);
+        let caller_arn = request.principal.as_ref().map(|p| p.arn.as_str());
+        touch_image_pull(repo, &hit_digests, caller_arn, &exclusions);
         Ok(AwsResponse::ok_json(json!({
             "images": images,
             "failures": failures,
@@ -1308,6 +1328,7 @@ impl EcrService {
         let state = accounts
             .get_mut(&account)
             .ok_or_else(|| repository_not_found(&name))?;
+        let exclusions = pull_time_exclusion_set(state);
         let repo = state
             .repositories
             .get_mut(&name)
@@ -1345,7 +1366,8 @@ impl EcrService {
                 touched.push(img_digest.clone());
             }
         }
-        touch_image_pull(repo, &touched);
+        let caller_arn = request.principal.as_ref().map(|p| p.arn.as_str());
+        touch_image_pull(repo, &touched, caller_arn, &exclusions);
         // The OCI v2 endpoint hosts `/v2/<name>/blobs/<digest>` — return
         // that absolute URL so callers that trust the endpoint they're
         // already talking to can resolve it.

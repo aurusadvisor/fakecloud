@@ -1549,4 +1549,103 @@ mod p5_polish_tests {
         let detail = &body["imageDetails"][0];
         assert_eq!(detail["subjectManifestDigest"], "sha256:parent");
     }
+
+    // ── Pull-time exclusion suppresses in-use bookkeeping ─────────
+    #[test]
+    fn batch_get_image_skips_pull_metadata_for_excluded_principal() {
+        use fakecloud_core::auth::{Principal, PrincipalType};
+
+        let (svc, state) = fixture();
+        seed_image(&state, "sha256:hot", "{}");
+
+        let role_arn = "arn:aws:iam::111111111111:role/ci-puller";
+        let req = make_request(
+            "RegisterPullTimeUpdateExclusion",
+            json!({ "principalArn": role_arn }),
+        );
+        svc.register_pull_time_update_exclusion(&req).unwrap();
+
+        let mut req = make_request(
+            "BatchGetImage",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:hot" }],
+            }),
+        );
+        req.principal = Some(Principal {
+            arn: role_arn.to_string(),
+            user_id: "AROAEXCLUDED".to_string(),
+            account_id: ACCOUNT.to_string(),
+            principal_type: PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        });
+        svc.batch_get_image(&req).unwrap();
+
+        let req = make_request(
+            "DescribeImages",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:hot" }],
+            }),
+        );
+        let resp = svc.describe_images(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let detail = &body["imageDetails"][0];
+        assert_eq!(
+            detail["inUseCount"], 0,
+            "excluded principal must not bump inUseCount"
+        );
+        assert!(
+            detail.get("lastInUseAt").is_none(),
+            "excluded principal must not set lastInUseAt"
+        );
+    }
+
+    // ── Non-excluded principals still bump after a registration ───
+    #[test]
+    fn batch_get_image_still_tracks_other_principals_after_exclusion() {
+        use fakecloud_core::auth::{Principal, PrincipalType};
+
+        let (svc, state) = fixture();
+        seed_image(&state, "sha256:hot", "{}");
+
+        let excluded_arn = "arn:aws:iam::111111111111:role/excluded";
+        let active_arn = "arn:aws:iam::111111111111:role/active";
+        let req = make_request(
+            "RegisterPullTimeUpdateExclusion",
+            json!({ "principalArn": excluded_arn }),
+        );
+        svc.register_pull_time_update_exclusion(&req).unwrap();
+
+        let mut req = make_request(
+            "BatchGetImage",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:hot" }],
+            }),
+        );
+        req.principal = Some(Principal {
+            arn: active_arn.to_string(),
+            user_id: "AROAACTIVE".to_string(),
+            account_id: ACCOUNT.to_string(),
+            principal_type: PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        });
+        svc.batch_get_image(&req).unwrap();
+
+        let req = make_request(
+            "DescribeImages",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:hot" }],
+            }),
+        );
+        let resp = svc.describe_images(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let detail = &body["imageDetails"][0];
+        assert_eq!(detail["inUseCount"], 1);
+        assert!(detail["lastInUseAt"].is_i64());
+    }
 }

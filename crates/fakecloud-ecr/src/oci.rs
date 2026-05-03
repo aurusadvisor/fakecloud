@@ -497,12 +497,16 @@ async fn blob_get(
 ) -> Result<AwsResponse, AwsServiceError> {
     // Snapshot the layer under a write lock so we can bump pull metadata
     // on every image whose manifest references this blob digest.
+    let caller_arn = request.principal.as_ref().map(|p| p.arn.clone());
     let local = {
         let mut accounts = service.state_handle().write();
         let layer = accounts
             .get_mut(&request.account_id)
-            .and_then(|s| s.repositories.get_mut(name))
-            .and_then(|repo| {
+            .and_then(|s| {
+                let exclusions = crate::service::pull_time_exclusion_set(s);
+                s.repositories.get_mut(name).map(|repo| (repo, exclusions))
+            })
+            .and_then(|(repo, exclusions)| {
                 let layer = repo.layers.get(digest).cloned()?;
                 let touched: Vec<String> = repo
                     .images
@@ -521,7 +525,12 @@ async fn blob_get(
                     })
                     .map(|(d, _)| d.clone())
                     .collect();
-                crate::service::touch_image_pull(repo, &touched);
+                crate::service::touch_image_pull(
+                    repo,
+                    &touched,
+                    caller_arn.as_deref(),
+                    &exclusions,
+                );
                 Some(layer)
             });
         layer
@@ -539,6 +548,40 @@ async fn blob_get(
         crate::pull_through::proxy_blob(service, &request.account_id, name, digest).await
     {
         let proxied = outcome?;
+        // Pull-through cached the blob; mirror the local-hit code path
+        // and bump the in-use counters on every image whose manifest
+        // references this layer digest. Honours pull-time exclusions.
+        {
+            let mut accounts = service.state_handle().write();
+            if let Some(state) = accounts.get_mut(&request.account_id) {
+                let exclusions = crate::service::pull_time_exclusion_set(state);
+                if let Some(repo) = state.repositories.get_mut(name) {
+                    let touched: Vec<String> = repo
+                        .images
+                        .iter()
+                        .filter(|(_, img)| {
+                            serde_json::from_str::<serde_json::Value>(&img.image_manifest)
+                                .ok()
+                                .and_then(|v| v.get("layers").cloned())
+                                .and_then(|v| v.as_array().cloned())
+                                .map(|arr| {
+                                    arr.iter().any(|l| {
+                                        l.get("digest").and_then(|d| d.as_str()) == Some(digest)
+                                    })
+                                })
+                                .unwrap_or(false)
+                        })
+                        .map(|(d, _)| d.clone())
+                        .collect();
+                    crate::service::touch_image_pull(
+                        repo,
+                        &touched,
+                        caller_arn.as_deref(),
+                        &exclusions,
+                    );
+                }
+            }
+        }
         return Ok(crate::pull_through::blob_response(&proxied, digest));
     }
     Err(blob_not_found(name, digest))
@@ -894,8 +937,14 @@ async fn manifest_head(
             .insert("Content-Length", HeaderValue::from(size));
         return Ok(resp);
     }
-    if let Some(outcome) =
-        crate::pull_through::proxy_manifest(service, &request.account_id, name, reference).await
+    if let Some(outcome) = crate::pull_through::proxy_manifest(
+        service,
+        &request.account_id,
+        name,
+        reference,
+        request.principal.as_ref().map(|p| p.arn.as_str()),
+    )
+    .await
     {
         let proxied = outcome?;
         let mut resp = crate::pull_through::manifest_response(&proxied);
@@ -917,12 +966,16 @@ async fn manifest_get(
 ) -> Result<AwsResponse, AwsServiceError> {
     // Pull-shaped op: snapshot the manifest under a write lock so we can
     // bump `last_in_use_at`/`in_use_count` on the touched image.
+    let caller_arn = request.principal.as_ref().map(|p| p.arn.clone());
     let local = {
         let mut accounts = service.state_handle().write();
         accounts
             .get_mut(&request.account_id)
-            .and_then(|s| s.repositories.get_mut(name))
-            .and_then(|repo| {
+            .and_then(|s| {
+                let exclusions = crate::service::pull_time_exclusion_set(s);
+                s.repositories.get_mut(name).map(|repo| (repo, exclusions))
+            })
+            .and_then(|(repo, exclusions)| {
                 let digest = resolve_reference(repo, reference)?;
                 let manifest = repo.images.get(&digest).map(|img| {
                     (
@@ -932,7 +985,12 @@ async fn manifest_get(
                     )
                 });
                 if manifest.is_some() {
-                    crate::service::touch_image_pull(repo, &[digest]);
+                    crate::service::touch_image_pull(
+                        repo,
+                        &[digest],
+                        caller_arn.as_deref(),
+                        &exclusions,
+                    );
                 }
                 manifest
             })
@@ -945,8 +1003,14 @@ async fn manifest_get(
         );
         return Ok(resp);
     }
-    if let Some(outcome) =
-        crate::pull_through::proxy_manifest(service, &request.account_id, name, reference).await
+    if let Some(outcome) = crate::pull_through::proxy_manifest(
+        service,
+        &request.account_id,
+        name,
+        reference,
+        request.principal.as_ref().map(|p| p.arn.as_str()),
+    )
+    .await
     {
         let proxied = outcome?;
         return Ok(crate::pull_through::manifest_response(&proxied));

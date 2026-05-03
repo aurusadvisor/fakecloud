@@ -366,9 +366,25 @@ pub(crate) fn image_to_details(repo: &Repository, image: &Image, registry_id: &s
 /// Used by `BatchGetImage`, `GetDownloadUrlForLayer`, and the OCI manifest /
 /// blob GET handlers so DescribeImages reports a fresh `lastInUseAt` and
 /// the `inUseCount` matches actual pull traffic.
-pub(crate) fn touch_image_pull(repo: &mut Repository, digests: &[String]) {
+///
+/// When `caller_arn` matches a principal registered via
+/// `RegisterPullTimeUpdateExclusion` (passed in `exclusion_arns`), nothing
+/// is touched. The exclusion contract has to apply uniformly across the
+/// `lastRecordedPullTime`, `lastInUseAt`, and `inUseCount` fields — all
+/// three are pull-time bookkeeping.
+pub(crate) fn touch_image_pull(
+    repo: &mut Repository,
+    digests: &[String],
+    caller_arn: Option<&str>,
+    exclusion_arns: &std::collections::HashSet<String>,
+) {
     if digests.is_empty() {
         return;
+    }
+    if let Some(arn) = caller_arn {
+        if exclusion_arns.contains(arn) {
+            return;
+        }
     }
     let now = chrono::Utc::now();
     for digest in digests {
@@ -378,6 +394,16 @@ pub(crate) fn touch_image_pull(repo: &mut Repository, digests: &[String]) {
             image.in_use_count = image.in_use_count.saturating_add(1);
         }
     }
+}
+
+/// Snapshot the registered pull-time-exclusion principal ARNs for the
+/// account. Cheap clone (`String`s in a `HashSet`) intended to be taken
+/// before grabbing a repo `&mut` so `touch_image_pull` can run without
+/// borrowing the surrounding `EcrState`.
+pub(crate) fn pull_time_exclusion_set(
+    state: &crate::state::EcrState,
+) -> std::collections::HashSet<String> {
+    state.pull_time_exclusions.keys().cloned().collect()
 }
 
 /// Return only the layer blobs referenced by the manifest of `image_digest`.
