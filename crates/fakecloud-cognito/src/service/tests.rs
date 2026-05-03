@@ -6699,3 +6699,181 @@ fn two_pools_have_distinct_keys() {
         "two distinct pools must hold distinct RSA keypairs"
     );
 }
+
+// ── Y2: JWKS + OIDC discovery endpoints ──
+
+#[test]
+fn jwks_endpoint_returns_pool_public_key() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+
+    let jwks = block_on(pool_jwks_document(&state, &pool_id))
+        .expect("pool_jwks_document should return a JWKS for an existing pool");
+    let keys = jwks["keys"].as_array().expect("keys array must be present");
+    assert_eq!(keys.len(), 1, "exactly one key per pool");
+    let key = &keys[0];
+    assert_eq!(key["kty"], "RSA");
+    assert_eq!(key["alg"], "RS256");
+    assert_eq!(key["use"], "sig");
+    assert_eq!(key["e"], "AQAB");
+    assert_eq!(key["kid"], format!("{pool_id}-key-1"));
+}
+
+#[test]
+fn jwks_endpoint_n_is_valid_base64url() {
+    use base64::Engine as _;
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+
+    let jwks = block_on(pool_jwks_document(&state, &pool_id)).unwrap();
+    let n_b64 = jwks["keys"][0]["n"].as_str().unwrap();
+    assert!(
+        !n_b64.contains('='),
+        "JWK `n` must be base64url-no-pad, got padding: {n_b64}"
+    );
+    let n_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(n_b64)
+        .expect("`n` must decode as base64url-no-pad");
+
+    let pem = {
+        let mas = state.read();
+        mas.default_ref()
+            .user_pools
+            .get(&pool_id)
+            .unwrap()
+            .signing_key_pem
+            .clone()
+            .unwrap()
+    };
+    let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(&pem).unwrap();
+    let public_key = rsa::RsaPublicKey::from(&private_key);
+    assert_eq!(
+        n_bytes,
+        public_key.n().to_bytes_be(),
+        "JWK `n` must match the RSA modulus from the pool's stored private key"
+    );
+}
+
+#[test]
+fn jwks_endpoint_unknown_pool_returns_404() {
+    let (_svc, state) = make_svc();
+    // pool_jwks_document returns None for unknown pools; the HTTP layer
+    // in main.rs maps that to a 404 response.
+    let result = block_on(pool_jwks_document(&state, "us-east-1_DOESNOTEXIST"));
+    assert!(
+        result.is_none(),
+        "unknown pool must return None so the HTTP wrapper can emit 404"
+    );
+}
+
+#[test]
+fn openid_configuration_returns_standard_doc() {
+    let (svc, _state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let doc = oidc_discovery_document(&pool_id, "us-east-1", "http://localhost:4569");
+
+    assert_eq!(
+        doc["issuer"],
+        format!("https://cognito-idp.us-east-1.amazonaws.com/{pool_id}")
+    );
+    assert_eq!(
+        doc["authorization_endpoint"],
+        "http://localhost:4569/oauth2/authorize"
+    );
+    assert_eq!(doc["token_endpoint"], "http://localhost:4569/oauth2/token");
+    assert_eq!(
+        doc["userinfo_endpoint"],
+        "http://localhost:4569/oauth2/userInfo"
+    );
+    assert_eq!(
+        doc["id_token_signing_alg_values_supported"],
+        json!(["RS256"])
+    );
+    assert_eq!(doc["subject_types_supported"], json!(["public"]));
+    let response_types = doc["response_types_supported"].as_array().unwrap();
+    assert!(response_types.contains(&json!("code")));
+    assert!(response_types.contains(&json!("token")));
+    let scopes = doc["scopes_supported"].as_array().unwrap();
+    for required in ["openid", "email", "phone", "profile"] {
+        assert!(
+            scopes.contains(&json!(required)),
+            "scopes_supported must include {required}: {scopes:?}"
+        );
+    }
+    let auth_methods = doc["token_endpoint_auth_methods_supported"]
+        .as_array()
+        .unwrap();
+    assert!(auth_methods.contains(&json!("client_secret_basic")));
+    assert!(auth_methods.contains(&json!("client_secret_post")));
+}
+
+#[test]
+fn openid_configuration_jwks_uri_matches_jwks_endpoint() {
+    let (svc, _state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let doc = oidc_discovery_document(&pool_id, "us-east-1", "http://localhost:4569");
+    assert_eq!(
+        doc["jwks_uri"],
+        format!("http://localhost:4569/{pool_id}/.well-known/jwks.json"),
+        "discovery doc's jwks_uri must point at the same pool's JWKS endpoint"
+    );
+}
+
+#[test]
+fn id_token_verifies_against_jwks_public_key() {
+    use base64::Engine as _;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::sha2::Sha256;
+    use rsa::signature::Verifier;
+    use rsa::{BigUint, RsaPublicKey};
+
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "jwksuser");
+    set_user_password(&svc, &pool_id, "jwksuser", "SecurePass1!");
+
+    let body = json!({
+        "ClientId": client_id,
+        "AuthFlow": "USER_PASSWORD_AUTH",
+        "AuthParameters": {"USERNAME": "jwksuser", "PASSWORD": "SecurePass1!"},
+    });
+    let req = make_req("InitiateAuth", &body.to_string());
+    let resp = block_on(svc.initiate_auth(&req)).unwrap();
+    let id_token = resp_json(&resp)["AuthenticationResult"]["IdToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let parts: Vec<&str> = id_token.split('.').collect();
+
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header: Value = serde_json::from_slice(&b64url.decode(parts[0]).unwrap()).unwrap();
+    let token_kid = header["kid"].as_str().unwrap();
+
+    // Pull the public key strictly from the JWKS document (matches what
+    // an SDK would do via the discovery endpoint).
+    let jwks = block_on(pool_jwks_document(&state, &pool_id)).unwrap();
+    let key = jwks["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["kid"].as_str() == Some(token_kid))
+        .expect("JWKS must contain a key with the JWT's kid");
+
+    let n_bytes = b64url.decode(key["n"].as_str().unwrap()).unwrap();
+    let e_bytes = b64url.decode(key["e"].as_str().unwrap()).unwrap();
+    let n = BigUint::from_bytes_be(&n_bytes);
+    let e = BigUint::from_bytes_be(&e_bytes);
+    let public_key = RsaPublicKey::new(n, e).unwrap();
+    let verifying_key = VerifyingKey::<Sha256>::new(public_key);
+
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig_bytes = b64url.decode(parts[2]).unwrap();
+    let signature = Signature::try_from(sig_bytes.as_slice()).unwrap();
+    verifying_key
+        .verify(signing_input.as_bytes(), &signature)
+        .expect("ID token must verify against the JWKS-published public key");
+}
