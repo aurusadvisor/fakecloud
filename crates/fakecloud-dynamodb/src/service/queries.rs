@@ -321,9 +321,17 @@ impl DynamoDbService {
         // table (fakecloud doesn't keep separate per-index storage)
         // but the projection is restricted to what the index defines.
         let index_name = body["IndexName"].as_str();
+        let consistent_read = body["ConsistentRead"].as_bool().unwrap_or(false);
         let (index_projection, index_key_attrs): (Option<Projection>, Vec<String>) =
             if let Some(idx) = index_name {
                 if let Some(g) = table.gsi.iter().find(|g| g.index_name == idx) {
+                    if consistent_read {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ValidationException",
+                            "Consistent reads are not supported on global secondary indexes",
+                        ));
+                    }
                     (
                         Some(g.projection.clone()),
                         g.key_schema

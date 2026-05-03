@@ -170,6 +170,28 @@ pub struct BackupDescription {
     pub size_bytes: i64,
     /// Snapshot of the table items at backup creation time.
     pub items: Vec<HashMap<String, AttributeValue>>,
+    /// Real DDB persists GSI/LSI/tags/TTL/SSE/Stream into the backup
+    /// payload so RestoreTableFromBackup brings the full table back
+    /// up. Older snapshots may not have these fields, so all default
+    /// to empty/false via serde.
+    #[serde(default)]
+    pub gsi: Vec<GlobalSecondaryIndex>,
+    #[serde(default)]
+    pub lsi: Vec<LocalSecondaryIndex>,
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+    #[serde(default)]
+    pub ttl_attribute: Option<String>,
+    #[serde(default)]
+    pub ttl_enabled: bool,
+    #[serde(default)]
+    pub sse_type: Option<String>,
+    #[serde(default)]
+    pub sse_kms_key_arn: Option<String>,
+    #[serde(default)]
+    pub stream_enabled: bool,
+    #[serde(default)]
+    pub stream_view_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
