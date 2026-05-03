@@ -509,14 +509,17 @@ impl CloudFormationService {
             out
         };
 
-        let parsed = template::parse_outputs(
+        let parsed = match template::parse_outputs(
             &value,
             parameters,
             &resources_obj,
             &physical_ids,
             &attributes,
             &imports,
-        );
+        ) {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
 
         parsed
             .into_iter()
