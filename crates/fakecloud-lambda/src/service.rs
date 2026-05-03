@@ -1414,7 +1414,16 @@ impl LambdaService {
         &self,
         function_name: &str,
         account_id: &str,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Optional preconditions from the body. Both compare the supplied
+        // value against the live `$LATEST` state; mismatch yields 412
+        // PreconditionFailedException, matching AWS optimistic-concurrency.
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let supplied_revision = body["RevisionId"].as_str().map(String::from);
+        let supplied_sha = body["CodeSha256"].as_str().map(String::from);
+        let description_override = body["Description"].as_str().map(String::from);
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(account_id);
         let func = state.functions.get(function_name).ok_or_else(|| {
@@ -1427,6 +1436,25 @@ impl LambdaService {
                 ),
             )
         })?;
+
+        if let Some(ref rev) = supplied_revision {
+            if rev != &func.revision_id {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::PRECONDITION_FAILED,
+                    "PreconditionFailedException",
+                    "The RevisionId provided does not match the latest RevisionId for the Lambda function. Call the GetFunction or the GetAlias API to retrieve the latest RevisionId for your resource.",
+                ));
+            }
+        }
+        if let Some(ref sha) = supplied_sha {
+            if sha != &func.code_sha256 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::PRECONDITION_FAILED,
+                    "PreconditionFailedException",
+                    "CodeSha256 does not match the SHA-256 of the function's deployment package.",
+                ));
+            }
+        }
 
         // Pick the next version number per function, monotonic per
         // function arn, never reused. AWS uses sequential decimal
@@ -1448,6 +1476,11 @@ impl LambdaService {
         let mut snapshot = func.clone();
         snapshot.version = next_str.clone();
         snapshot.master_arn = Some(func.function_arn.clone());
+        if let Some(desc) = description_override {
+            snapshot.description = desc;
+        }
+        // Each numbered version gets its own RevisionId, decoupled from $LATEST.
+        snapshot.revision_id = uuid::Uuid::new_v4().to_string();
 
         // Append to numbered list and store the snapshot.
         state
@@ -1670,7 +1703,9 @@ impl AwsService for LambdaService {
                 )
                 .await
             }
-            "PublishVersion" => self.publish_version(resource_name.as_deref().unwrap_or(""), aid),
+            "PublishVersion" => {
+                self.publish_version(resource_name.as_deref().unwrap_or(""), aid, &req)
+            }
             "AddPermission" => self.add_permission(resource_name.as_deref().unwrap_or(""), &req),
             "GetPolicy" => self.get_policy(resource_name.as_deref().unwrap_or(""), aid),
             "RemovePermission" => {

@@ -1108,7 +1108,8 @@ async fn unknown_route_returns_error() {
 #[tokio::test]
 async fn publish_version_unknown_function_errors() {
     let svc = LambdaService::new(make_state());
-    assert!(svc.publish_version("ghost", "123456789012").is_err());
+    let req = make_request(Method::POST, "/2015-03-31/functions/ghost/versions", "{}");
+    assert!(svc.publish_version("ghost", "123456789012", &req).is_err());
 }
 
 #[tokio::test]
@@ -1564,6 +1565,138 @@ async fn update_function_code_dry_run_does_not_mutate() {
     assert_eq!(cfg["CodeSha256"].as_str().unwrap(), pre_sha);
     assert_eq!(cfg["CodeSize"].as_i64().unwrap(), pre_size);
     assert_eq!(cfg["RevisionId"].as_str().unwrap(), pre_rev);
+}
+
+// ── PublishVersion behavior tests (D2) ──
+
+#[tokio::test]
+async fn publish_version_returns_numeric_version_and_versioned_arn() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "pv1").await;
+    let req = make_request(Method::POST, "/2015-03-31/functions/pv1/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::CREATED);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Version"], "1");
+    assert!(body["FunctionArn"].as_str().unwrap().ends_with(":1"));
+    assert_eq!(
+        body["MasterArn"].as_str().unwrap(),
+        "arn:aws:lambda:us-east-1:123456789012:function:pv1"
+    );
+}
+
+#[tokio::test]
+async fn publish_version_increments_per_function_counter() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "pv2").await;
+
+    let req = make_request(Method::POST, "/2015-03-31/functions/pv2/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let v1: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v1["Version"], "1");
+
+    let req = make_request(Method::POST, "/2015-03-31/functions/pv2/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let v2: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v2["Version"], "2");
+}
+
+#[tokio::test]
+async fn publish_version_snapshots_code_immutable() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "pv3").await;
+
+    // Publish v1 of the seed (empty code).
+    let req = make_request(Method::POST, "/2015-03-31/functions/pv3/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let v1: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let v1_sha = v1["CodeSha256"].as_str().unwrap().to_string();
+
+    // Push new code into $LATEST.
+    let new_zip_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"newer-bytes");
+    let body = json!({ "ZipFile": new_zip_b64 });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/pv3/code",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // GetFunctionConfiguration?Qualifier=1 returns the original snapshot.
+    let mut req = make_request(Method::GET, "/2015-03-31/functions/pv3/configuration", "");
+    req.query_params
+        .insert("Qualifier".to_string(), "1".to_string());
+    let resp = svc.handle(req).await.unwrap();
+    let snap: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(snap["Version"], "1");
+    assert_eq!(snap["CodeSha256"].as_str().unwrap(), v1_sha);
+
+    // $LATEST has the new code SHA.
+    let req = make_request(Method::GET, "/2015-03-31/functions/pv3/configuration", "");
+    let resp = svc.handle(req).await.unwrap();
+    let live: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(live["Version"], "$LATEST");
+    assert_ne!(live["CodeSha256"].as_str().unwrap(), v1_sha);
+}
+
+#[tokio::test]
+async fn list_versions_by_function_returns_all_plus_latest() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "pv4").await;
+
+    for _ in 0..2 {
+        let req = make_request(Method::POST, "/2015-03-31/functions/pv4/versions", "{}");
+        svc.handle(req).await.unwrap();
+    }
+
+    let req = make_request(Method::GET, "/2015-03-31/functions/pv4/versions", "");
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let versions: Vec<String> = body["Versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["Version"].as_str().unwrap().to_string())
+        .collect();
+    assert!(versions.contains(&"$LATEST".to_string()));
+    assert!(versions.contains(&"1".to_string()));
+    assert!(versions.contains(&"2".to_string()));
+    assert_eq!(versions.len(), 3);
+}
+
+#[tokio::test]
+async fn publish_version_revision_id_mismatch_returns_412() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "pv5").await;
+
+    let body = json!({ "RevisionId": "stale-revision-id-deadbeef" });
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/pv5/versions",
+        &body.to_string(),
+    );
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected PreconditionFailedException"),
+    };
+    assert_eq!(err.status(), StatusCode::PRECONDITION_FAILED);
+    assert!(err.code().contains("PreconditionFailed"));
+}
+
+#[tokio::test]
+async fn publish_version_unknown_function_returns_404() {
+    let svc = LambdaService::new(make_state());
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/missing-fn/versions",
+        "{}",
+    );
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected ResourceNotFoundException"),
+    };
+    assert_eq!(err.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
