@@ -204,6 +204,12 @@ pub trait S3Delivery: Send + Sync {
         body: Vec<u8>,
         content_type: Option<&str>,
     ) -> Result<(), String>;
+
+    /// Read an object's body. Returns Err when the bucket or key does
+    /// not exist or when the body cannot be read. Used by RDS
+    /// `RestoreDBInstanceFromS3` to ingest a backup blob without taking
+    /// a direct dep on the S3 crate.
+    fn get_object(&self, account_id: &str, bucket: &str, key: &str) -> Result<Vec<u8>, String>;
 }
 
 /// SES SendEmail dispatch for callers that already speak the AWS SES
@@ -385,6 +391,20 @@ impl DeliveryBus {
         match self.s3_writer {
             Some(ref sender) => sender.put_object(account_id, bucket, key, body, content_type),
             None => Err("S3 writer not configured".to_string()),
+        }
+    }
+
+    /// Read content from S3. Returns Err when no S3 client is wired or
+    /// when the underlying impl cannot resolve the object.
+    pub fn get_object_from_s3(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Vec<u8>, String> {
+        match self.s3_writer {
+            Some(ref sender) => sender.get_object(account_id, bucket, key),
+            None => Err("S3 client not configured".to_string()),
         }
     }
 

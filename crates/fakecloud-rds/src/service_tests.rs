@@ -1959,6 +1959,35 @@ async fn restore_db_instance_to_point_in_time_unknown_source_errors() {
     assert_eq!(err.code(), "DBInstanceNotFound");
 }
 
+#[tokio::test]
+async fn restore_db_instance_from_s3_missing_ids_errors() {
+    let svc = make_service();
+    let req = request("RestoreDBInstanceFromS3", &[]);
+    assert!(svc.restore_db_instance_from_s3(&req).await.is_err());
+}
+
+#[tokio::test]
+async fn restore_db_instance_from_s3_without_bus_errors() {
+    let svc = make_service();
+    let req = request(
+        "RestoreDBInstanceFromS3",
+        &[
+            ("DBInstanceIdentifier", "restored"),
+            ("S3BucketName", "backups"),
+            ("S3Prefix", "dump.sql"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "password"),
+            ("Engine", "postgres"),
+        ],
+    );
+    let err = svc
+        .restore_db_instance_from_s3(&req)
+        .await
+        .err()
+        .expect("missing bus should error");
+    assert_eq!(err.code(), "InvalidParameterValue");
+}
+
 // ── create_db_instance_read_replica ──
 
 #[tokio::test]
