@@ -256,6 +256,71 @@ fn generate_data_key_pair_without_plaintext_omits_private_plaintext() {
 }
 
 #[test]
+fn generate_data_key_pair_rsa_returns_parseable_pkcs8_and_spki() {
+    use base64::Engine;
+    use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey};
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+
+    let svc = make_service();
+    let key_id = create_key(&svc);
+
+    let req = make_request(
+        "GenerateDataKeyPair",
+        json!({ "KeyId": key_id, "KeyPairSpec": "RSA_2048" }),
+    );
+    let resp = svc.generate_data_key_pair(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+
+    let priv_der = base64::engine::general_purpose::STANDARD
+        .decode(body["PrivateKeyPlaintext"].as_str().unwrap())
+        .unwrap();
+    let pub_der = base64::engine::general_purpose::STANDARD
+        .decode(body["PublicKey"].as_str().unwrap())
+        .unwrap();
+
+    // Both halves must parse as standards-compliant DER. The fake-bytes
+    // path returned random noise that any real client would reject; the
+    // real path produces a key any standard tool can load.
+    let private = RsaPrivateKey::from_pkcs8_der(&priv_der)
+        .expect("PrivateKeyPlaintext must be parseable PKCS#8 DER");
+    let public = RsaPublicKey::from_public_key_der(&pub_der)
+        .expect("PublicKey must be parseable SubjectPublicKeyInfo DER");
+    // The public half must match the private half; otherwise verify
+    // would reject signatures the caller produced with the private key.
+    assert_eq!(RsaPublicKey::from(&private), public);
+}
+
+#[test]
+fn generate_data_key_pair_ecc_returns_parseable_pkcs8_and_spki() {
+    use base64::Engine;
+    use p256::pkcs8::{DecodePrivateKey, DecodePublicKey};
+    use p256::{PublicKey, SecretKey};
+
+    let svc = make_service();
+    let key_id = create_key(&svc);
+
+    let req = make_request(
+        "GenerateDataKeyPair",
+        json!({ "KeyId": key_id, "KeyPairSpec": "ECC_NIST_P256" }),
+    );
+    let resp = svc.generate_data_key_pair(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+
+    let priv_der = base64::engine::general_purpose::STANDARD
+        .decode(body["PrivateKeyPlaintext"].as_str().unwrap())
+        .unwrap();
+    let pub_der = base64::engine::general_purpose::STANDARD
+        .decode(body["PublicKey"].as_str().unwrap())
+        .unwrap();
+
+    let secret = SecretKey::from_pkcs8_der(&priv_der)
+        .expect("PrivateKeyPlaintext must be parseable PKCS#8 DER for P-256");
+    let public = PublicKey::from_public_key_der(&pub_der)
+        .expect("PublicKey must be parseable SubjectPublicKeyInfo DER for P-256");
+    assert_eq!(secret.public_key(), public);
+}
+
+#[test]
 fn derive_shared_secret_success() {
     let svc = make_service();
     let key_id = create_key_with_opts(
