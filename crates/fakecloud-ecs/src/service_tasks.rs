@@ -457,3 +457,226 @@ impl EcsService {
         Ok(AwsResponse::ok_json(out))
     }
 }
+
+#[cfg(test)]
+mod multi_container_tests {
+    use super::*;
+    use crate::EcsService;
+    use bytes::Bytes;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use http::{HeaderMap, Method};
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn fresh_service() -> EcsService {
+        let accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
+        let state = Arc::new(RwLock::new(accounts));
+        let svc = EcsService::new(state.clone());
+        // Pre-create the cluster so RunTask doesn't trip on a missing one.
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("000000000000");
+        let arn = s.cluster_arn("default");
+        s.clusters
+            .insert("default".into(), Cluster::new("default", arn));
+        drop(accounts);
+        svc
+    }
+
+    fn make_request(action: &str, body: Value) -> AwsRequest {
+        let body_bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+        AwsRequest {
+            service: "ecs".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: body_bytes,
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    #[test]
+    fn register_task_def_with_two_containers_then_run_task_starts_both() {
+        let svc = fresh_service();
+        let reg = make_request(
+            "RegisterTaskDefinition",
+            json!({
+                "family": "multi",
+                "containerDefinitions": [
+                    {"name": "app", "image": "alpine"},
+                    {"name": "sidecar", "image": "alpine"}
+                ]
+            }),
+        );
+        svc.register_task_definition(&reg)
+            .expect("register should succeed");
+
+        let run = make_request(
+            "RunTask",
+            json!({
+                "cluster": "default",
+                "taskDefinition": "multi",
+            }),
+        );
+        let resp = svc.run_task(&run).expect("run_task should succeed");
+        let body: Value =
+            serde_json::from_slice(resp.body.expect_bytes()).expect("body should be valid JSON");
+        let tasks = body
+            .get("tasks")
+            .and_then(|v| v.as_array())
+            .expect("tasks array");
+        assert_eq!(tasks.len(), 1);
+        let task = &tasks[0];
+        let containers = task
+            .get("containers")
+            .and_then(|v| v.as_array())
+            .expect("containers array on task");
+        assert_eq!(containers.len(), 2, "expected both containers in task");
+        let names: Vec<&str> = containers
+            .iter()
+            .filter_map(|c| c.get("name").and_then(|v| v.as_str()))
+            .collect();
+        assert!(names.contains(&"app"));
+        assert!(names.contains(&"sidecar"));
+
+        // Per-container ARNs must be distinct so DescribeTasks can address
+        // each container independently.
+        let arns: std::collections::HashSet<&str> = containers
+            .iter()
+            .filter_map(|c| c.get("containerArn").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(arns.len(), 2);
+    }
+
+    #[test]
+    fn register_task_def_defaults_essential_true() {
+        let svc = fresh_service();
+        let reg = make_request(
+            "RegisterTaskDefinition",
+            json!({
+                "family": "default-essential",
+                // No `essential` declared on either container.
+                "containerDefinitions": [
+                    {"name": "main", "image": "alpine"},
+                    {"name": "extra", "image": "alpine"}
+                ]
+            }),
+        );
+        svc.register_task_definition(&reg).unwrap();
+
+        let run = make_request(
+            "RunTask",
+            json!({
+                "cluster": "default",
+                "taskDefinition": "default-essential",
+            }),
+        );
+        let resp = svc.run_task(&run).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let containers = body["tasks"][0]["containers"].as_array().unwrap();
+        for c in containers {
+            assert_eq!(
+                c.get("essential").and_then(|v| v.as_bool()),
+                Some(true),
+                "container {:?} should default essential=true",
+                c.get("name")
+            );
+        }
+    }
+
+    #[test]
+    fn task_to_json_emits_full_container_array() {
+        // Build a Task with two containers directly and confirm helper
+        // emits both entries in the response shape.
+        let mut task = Task {
+            task_arn: "arn:aws:ecs:us-east-1:000000000000:task/default/abc".into(),
+            task_id: "abc".into(),
+            cluster_arn: "arn:aws:ecs:us-east-1:000000000000:cluster/default".into(),
+            cluster_name: "default".into(),
+            task_definition_arn: "arn:aws:ecs:us-east-1:000000000000:task-definition/multi:1"
+                .into(),
+            family: "multi".into(),
+            revision: 1,
+            capacity_provider_name: None,
+            last_status: "RUNNING".into(),
+            desired_status: "RUNNING".into(),
+            launch_type: "FARGATE".into(),
+            platform_version: None,
+            cpu: None,
+            memory: None,
+            containers: Vec::new(),
+            overrides: json!({}),
+            started_by: None,
+            group: None,
+            connectivity: "CONNECTED".into(),
+            stop_code: None,
+            stopped_reason: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            stopping_at: None,
+            stopped_at: None,
+            pull_started_at: None,
+            pull_stopped_at: None,
+            connectivity_at: None,
+            started_by_ref_id: None,
+            execution_role_arn: None,
+            task_role_arn: None,
+            tags: Vec::new(),
+            awslogs: None,
+            captured_logs: String::new(),
+            protection: None,
+        };
+        for name in ["app", "sidecar"] {
+            task.containers.push(Container {
+                container_arn: format!(
+                    "arn:aws:ecs:us-east-1:000000000000:container/default/abc/{name}"
+                ),
+                name: name.into(),
+                image: "alpine".into(),
+                task_arn: task.task_arn.clone(),
+                last_status: "RUNNING".into(),
+                exit_code: None,
+                reason: None,
+                runtime_id: Some(format!("docker-{name}")),
+                essential: true,
+                cpu: None,
+                memory: None,
+                memory_reservation: None,
+                network_bindings: Vec::new(),
+                network_interfaces: Vec::new(),
+                health_status: None,
+                managed_agents: None,
+            });
+        }
+
+        let v = task_to_json(&task);
+        let containers = v
+            .get("containers")
+            .and_then(|v| v.as_array())
+            .expect("containers array");
+        assert_eq!(containers.len(), 2);
+        let names: Vec<&str> = containers
+            .iter()
+            .filter_map(|c| c.get("name").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(names, vec!["app", "sidecar"]);
+        for c in containers {
+            assert!(c.get("containerArn").is_some());
+            assert!(c.get("name").is_some());
+            assert!(c.get("lastStatus").is_some());
+            assert!(c.get("runtimeId").is_some());
+            assert_eq!(c.get("essential").and_then(|v| v.as_bool()), Some(true));
+        }
+    }
+}
