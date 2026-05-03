@@ -442,6 +442,18 @@ impl LogsService {
         let group_name_owned = group_name.to_string();
         let stream_name_owned = stream_name.to_string();
 
+        // Snapshot metric filters bound to this log group; eval happens
+        // after we drop the lock so PutMetricData can re-lock cloudwatch
+        // state without blocking other PutLogEvents calls.
+        let metric_filters_for_group: Vec<crate::state::MetricFilter> = state
+            .metric_filters
+            .iter()
+            .filter(|f| f.log_group_name == group_name_owned)
+            .cloned()
+            .collect();
+        let region_owned = state.region.clone();
+        let account_id_for_metrics = state.account_id.clone();
+
         // Collect delivery pipeline info: find active deliveries whose source
         // resource ARN matches this log group's ARN.
         let group_arn = group.arn.clone();
@@ -526,6 +538,18 @@ impl LogsService {
                     &accepted_events,
                 );
             }
+        }
+
+        // Metric filter eval: per filter, per matching event, publish a
+        // CloudWatch metric data point. Real CloudWatch does this on
+        // ingestion; downstream alarms read those points.
+        if !metric_filters_for_group.is_empty() && !accepted_events.is_empty() {
+            self.publish_metric_filter_data(
+                &account_id_for_metrics,
+                &region_owned,
+                &metric_filters_for_group,
+                &accepted_events,
+            );
         }
 
         let mut response = json!({
@@ -634,6 +658,43 @@ impl LogsService {
             // can decode with the standard CloudWatch-Logs format.
             self.delivery_bus
                 .put_record_to_firehose(destination_arn, encoded.as_bytes());
+        }
+    }
+
+    /// Run each metric filter against the accepted events and publish
+    /// CloudWatch metric data points for matches. Mirrors real
+    /// CloudWatch Logs: one datum per matching event, value resolved
+    /// from the transformation's `MetricValue` (literal or `$.path`).
+    fn publish_metric_filter_data(
+        &self,
+        account_id: &str,
+        region: &str,
+        metric_filters: &[crate::state::MetricFilter],
+        accepted_events: &[LogEvent],
+    ) {
+        for filter in metric_filters {
+            for event in accepted_events {
+                if !crate::filter_pattern::matches(&filter.filter_pattern, &event.message) {
+                    continue;
+                }
+                for tx in &filter.metric_transformations {
+                    let value = crate::filter_pattern::resolve_metric_value(
+                        &tx.metric_value,
+                        tx.default_value,
+                        &event.message,
+                    );
+                    self.delivery_bus.put_cloudwatch_metric(
+                        account_id,
+                        region,
+                        &tx.metric_namespace,
+                        &tx.metric_name,
+                        value,
+                        None,
+                        std::collections::BTreeMap::new(),
+                        event.timestamp,
+                    );
+                }
+            }
         }
     }
 
@@ -2283,6 +2344,142 @@ mod tests {
         let resp = svc.describe_destinations(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert!(body["destinations"].is_array());
+    }
+
+    // ---- Metric filter publishes data to CloudWatch ----
+
+    #[derive(Default)]
+    struct MetricRecorder {
+        calls: parking_lot::Mutex<Vec<(String, String, f64, i64)>>,
+    }
+
+    impl fakecloud_core::delivery::CloudwatchDelivery for MetricRecorder {
+        fn put_metric(
+            &self,
+            _account_id: &str,
+            _region: &str,
+            namespace: &str,
+            metric_name: &str,
+            value: f64,
+            _unit: Option<&str>,
+            _dimensions: std::collections::BTreeMap<String, String>,
+            timestamp_ms: i64,
+        ) {
+            self.calls.lock().push((
+                namespace.to_string(),
+                metric_name.to_string(),
+                value,
+                timestamp_ms,
+            ));
+        }
+    }
+
+    fn make_service_with_metrics(recorder: std::sync::Arc<MetricRecorder>) -> LogsService {
+        use fakecloud_core::delivery::DeliveryBus;
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let bus = DeliveryBus::new().with_cloudwatch_metrics(recorder);
+        LogsService::new(state, std::sync::Arc::new(bus))
+    }
+
+    fn put_metric_filter(
+        svc: &LogsService,
+        group: &str,
+        name: &str,
+        pattern: &str,
+        namespace: &str,
+        metric: &str,
+        value: &str,
+    ) {
+        let req = make_request(
+            "PutMetricFilter",
+            json!({
+                "filterName": name,
+                "filterPattern": pattern,
+                "logGroupName": group,
+                "metricTransformations": [
+                    {
+                        "metricName": metric,
+                        "metricNamespace": namespace,
+                        "metricValue": value,
+                    }
+                ],
+            }),
+        );
+        svc.put_metric_filter(&req).unwrap();
+    }
+
+    #[test]
+    fn put_log_events_publishes_metric_for_matching_filter() {
+        let recorder = std::sync::Arc::new(MetricRecorder::default());
+        let svc = make_service_with_metrics(recorder.clone());
+        create_group(&svc, "mf-publish");
+        create_stream(&svc, "mf-publish", "s1");
+        put_metric_filter(
+            &svc,
+            "mf-publish",
+            "errors-filter",
+            "ERROR",
+            "MyApp",
+            "ErrorCount",
+            "1",
+        );
+
+        put_events(&svc, "mf-publish", "s1", &["ERROR: timeout"]);
+
+        let calls = recorder.calls.lock();
+        assert_eq!(calls.len(), 1, "expected one metric data point");
+        assert_eq!(calls[0].0, "MyApp");
+        assert_eq!(calls[0].1, "ErrorCount");
+        assert_eq!(calls[0].2, 1.0);
+    }
+
+    #[test]
+    fn put_log_events_skips_metric_when_pattern_does_not_match() {
+        let recorder = std::sync::Arc::new(MetricRecorder::default());
+        let svc = make_service_with_metrics(recorder.clone());
+        create_group(&svc, "mf-skip");
+        create_stream(&svc, "mf-skip", "s1");
+        put_metric_filter(
+            &svc,
+            "mf-skip",
+            "errors-filter",
+            "ERROR",
+            "MyApp",
+            "ErrorCount",
+            "1",
+        );
+
+        put_events(&svc, "mf-skip", "s1", &["INFO: ok"]);
+
+        assert!(
+            recorder.calls.lock().is_empty(),
+            "non-matching event must not publish a metric"
+        );
+    }
+
+    #[test]
+    fn put_log_events_extracts_metric_value_from_json_path() {
+        let recorder = std::sync::Arc::new(MetricRecorder::default());
+        let svc = make_service_with_metrics(recorder.clone());
+        create_group(&svc, "mf-json");
+        create_stream(&svc, "mf-json", "s1");
+        put_metric_filter(
+            &svc,
+            "mf-json",
+            "bytes-filter",
+            "{ $.bytes > 0 }",
+            "MyApp",
+            "BytesProcessed",
+            "$.bytes",
+        );
+
+        put_events(&svc, "mf-json", "s1", &[r#"{"bytes": 2048}"#]);
+
+        let calls = recorder.calls.lock();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].2, 2048.0);
     }
 
     #[test]

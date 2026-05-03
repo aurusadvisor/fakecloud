@@ -1,3 +1,4 @@
+pub mod filter_pattern;
 pub mod ingest;
 pub mod query;
 pub(crate) mod service;

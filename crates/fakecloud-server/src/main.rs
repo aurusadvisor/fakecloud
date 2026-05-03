@@ -493,7 +493,14 @@ async fn main() {
         Arc::new(bus)
     };
 
-    // Step 4: Logs delivery (subscription filters can push to SQS, Lambda, and Kinesis)
+    // CloudWatch state must be constructed before logs delivery so
+    // CloudWatch Logs metric filters can publish data points into it.
+    let cloudwatch_state: fakecloud_cloudwatch::SharedCloudWatchState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new()),
+    );
+
+    // Step 4: Logs delivery (subscription filters can push to SQS, Lambda, and Kinesis;
+    // metric filters publish CloudWatch metric data points)
     let sqs_delivery_for_ses = sqs_delivery.clone();
     let kinesis_delivery =
         fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
@@ -515,11 +522,15 @@ async fn main() {
             firehose_state.clone(),
             s3_state.clone(),
         ));
+    let cloudwatch_delivery_for_logs = Arc::new(fakecloud_cloudwatch::CloudwatchDeliveryImpl::new(
+        cloudwatch_state.clone(),
+    ));
     let mut delivery_for_logs = DeliveryBus::new()
         .with_sqs(sqs_delivery.clone())
         .with_kinesis(kinesis_delivery)
         .with_s3(s3_delivery_for_logs)
-        .with_firehose(firehose_delivery_for_logs);
+        .with_firehose(firehose_delivery_for_logs)
+        .with_cloudwatch_metrics(cloudwatch_delivery_for_logs);
     if let Some(ref ld) = lambda_delivery {
         delivery_for_logs = delivery_for_logs.with_lambda(ld.clone());
     }
@@ -604,10 +615,6 @@ async fn main() {
 
     let glue_state: fakecloud_glue::SharedGlueState =
         Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new()));
-
-    let cloudwatch_state: fakecloud_cloudwatch::SharedCloudWatchState = Arc::new(
-        parking_lot::RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new()),
-    );
 
     let elbv2_state: fakecloud_elbv2::SharedElbv2State = Arc::new(parking_lot::RwLock::new(
         fakecloud_elbv2::Elbv2Accounts::new(),
