@@ -667,7 +667,7 @@ impl DynamoDbService {
         let statement = require_str(&body, "Statement")?;
         let parameters = body["Parameters"].as_array().cloned().unwrap_or_default();
 
-        execute_partiql_statement(&self.state, statement, &parameters)
+        execute_partiql_statement(&self.state, &req.account_id, statement, &parameters)
     }
 
     pub(super) fn batch_execute_statement(
@@ -696,7 +696,7 @@ impl DynamoDbService {
                 .cloned()
                 .unwrap_or_default();
 
-            match execute_partiql_statement(&self.state, statement, &parameters) {
+            match execute_partiql_statement(&self.state, &req.account_id, statement, &parameters) {
                 Ok(resp) => {
                     let resp_body: Value =
                         serde_json::from_slice(resp.body.expect_bytes()).unwrap_or_default();
@@ -1016,6 +1016,75 @@ mod tests {
             2,
             "each PartiQL INSERT must emit one stream record"
         );
+    }
+
+    #[tokio::test]
+    async fn partiql_insert_rejects_missing_key_attribute() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        let req = req_for(
+            "ExecuteStatement",
+            json!({
+                "Statement": "INSERT INTO \"Widgets\" VALUE {'other': 'a'}",
+            }),
+        );
+        let err = svc.execute_statement(&req).err().expect("missing key");
+        assert!(format!("{err:?}").contains("Missing the key pk"));
+    }
+
+    #[tokio::test]
+    async fn partiql_select_isolated_per_account() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        // Insert into the default account.
+        let svc = DynamoDbService::new(state.clone());
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({
+                "Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}",
+            }),
+        ))
+        .unwrap();
+
+        // Foreign account selecting the same table sees an empty
+        // namespace (the table isn't created on demand for SELECT).
+        let mut foreign = req_for(
+            "ExecuteStatement",
+            json!({
+                "Statement": "SELECT * FROM \"Widgets\"",
+            }),
+        );
+        foreign.account_id = "999999999999".into();
+        let err = svc.execute_statement(&foreign).err().expect("not found");
+        assert!(format!("{err:?}").contains("ResourceNotFoundException"));
+    }
+
+    #[tokio::test]
+    async fn partiql_select_with_comparator_filters() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+        for v in ["a", "b", "c"] {
+            svc.execute_statement(&req_for(
+                "ExecuteStatement",
+                json!({
+                    "Statement": format!("INSERT INTO \"Widgets\" VALUE {{'pk': '{v}'}}"),
+                }),
+            ))
+            .unwrap();
+        }
+        let resp = svc
+            .execute_statement(&req_for(
+                "ExecuteStatement",
+                json!({
+                    "Statement": "SELECT * FROM \"Widgets\" WHERE pk > 'a'",
+                }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["Items"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]
