@@ -209,6 +209,77 @@ pub(crate) fn check_v1_verified_recipients(
     }
 }
 
+/// Reject the send if either account-level sending or the resolved
+/// configuration set's sending flag is paused. Real SES v1 surfaces both
+/// as `MessageRejected` with a message identifying the paused scope.
+pub(crate) fn check_v1_sending_enabled(
+    state: &SharedSesState,
+    account_id: &str,
+    config_set_name: Option<&str>,
+) -> Result<(), AwsServiceError> {
+    let accounts = state.read();
+    let Some(st) = accounts.get(account_id) else {
+        return Ok(());
+    };
+    if !st.account_settings.sending_enabled {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "MessageRejected",
+            "Email sending for the account is paused.".to_string(),
+        ));
+    }
+    if let Some(name) = config_set_name {
+        if let Some(cs) = st.configuration_sets.get(name) {
+            if !cs.sending_enabled {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MessageRejected",
+                    format!("Email sending for the configuration set {name} is paused."),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject sends targeting a recipient on the account suppression list.
+/// Real SES v1 surfaces this as `MessageRejected`.
+pub(crate) fn check_v1_recipients_not_suppressed(
+    state: &SharedSesState,
+    account_id: &str,
+    recipients: &[String],
+) -> Result<(), AwsServiceError> {
+    let accounts = state.read();
+    let Some(st) = accounts.get(account_id) else {
+        return Ok(());
+    };
+    for r in recipients {
+        let addr = extract_email_address(r);
+        if addr.is_empty() {
+            continue;
+        }
+        if st.suppressed_destinations.contains_key(addr) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MessageRejected",
+                "Address is on the suppression list".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// True when `addr` is on the account suppression list. Used by bulk
+/// paths that filter per-destination instead of failing the whole batch.
+pub(crate) fn is_address_suppressed(state: &SharedSesState, account_id: &str, addr: &str) -> bool {
+    let accounts = state.read();
+    let Some(st) = accounts.get(account_id) else {
+        return false;
+    };
+    st.suppressed_destinations
+        .contains_key(extract_email_address(addr))
+}
+
 /// Parse a receipt rule from form parameters (for Create/Update).
 pub(crate) fn parse_receipt_rule(
     params: &HashMap<String, String>,
@@ -1070,6 +1141,8 @@ pub(crate) fn send_email(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let from = required_param(&req.query_params, "Source")?;
+    let config_set_name = req.query_params.get("ConfigurationSetName").cloned();
+    check_v1_sending_enabled(state, &req.account_id, config_set_name.as_deref())?;
     check_v1_verified_sender(state, &req.account_id, from)?;
     let to = parse_member_list(&req.query_params, "Destination.ToAddresses");
     let cc = parse_member_list(&req.query_params, "Destination.CcAddresses");
@@ -1081,6 +1154,7 @@ pub(crate) fn send_email(
         .cloned()
         .collect();
     check_v1_verified_recipients(state, &req.account_id, &recipients)?;
+    check_v1_recipients_not_suppressed(state, &req.account_id, &recipients)?;
 
     let subject = req.query_params.get("Message.Subject.Data").cloned();
     let html_body = req.query_params.get("Message.Body.Html.Data").cloned();
@@ -1150,11 +1224,14 @@ pub(crate) fn send_raw_email(
 ) -> Result<AwsResponse, AwsServiceError> {
     let raw_data = required_param(&req.query_params, "RawMessage.Data")?;
     let from = req.query_params.get("Source").cloned().unwrap_or_default();
+    let config_set_name = req.query_params.get("ConfigurationSetName").cloned();
+    check_v1_sending_enabled(state, &req.account_id, config_set_name.as_deref())?;
     if !from.is_empty() {
         check_v1_verified_sender(state, &req.account_id, &from)?;
     }
     let to = parse_member_list(&req.query_params, "Destinations");
     check_v1_verified_recipients(state, &req.account_id, &to)?;
+    check_v1_recipients_not_suppressed(state, &req.account_id, &to)?;
 
     let message_id = format!(
         "{:016x}{:016x}-{:08x}-{:04x}",
@@ -1199,6 +1276,8 @@ pub(crate) fn send_templated_email(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let from = required_param(&req.query_params, "Source")?;
+    let config_set_name = req.query_params.get("ConfigurationSetName").cloned();
+    check_v1_sending_enabled(state, &req.account_id, config_set_name.as_deref())?;
     check_v1_verified_sender(state, &req.account_id, from)?;
     let template_name = required_param(&req.query_params, "Template")?;
     let template_data = required_param(&req.query_params, "TemplateData")?;
@@ -1227,6 +1306,7 @@ pub(crate) fn send_templated_email(
         .cloned()
         .collect();
     check_v1_verified_recipients(state, &req.account_id, &recipients)?;
+    check_v1_recipients_not_suppressed(state, &req.account_id, &recipients)?;
 
     let message_id = format!(
         "{:016x}{:016x}-{:08x}-{:04x}",
@@ -1271,6 +1351,8 @@ pub(crate) fn send_bulk_templated_email(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let from = required_param(&req.query_params, "Source")?;
+    let config_set_name = req.query_params.get("ConfigurationSetName").cloned();
+    check_v1_sending_enabled(state, &req.account_id, config_set_name.as_deref())?;
     check_v1_verified_sender(state, &req.account_id, from)?;
     let template_name = required_param(&req.query_params, "Template")?;
     let default_template_data = req
@@ -1327,6 +1409,15 @@ pub(crate) fn send_bulk_templated_email(
                 "<member><Status>MessageRejected</Status><Error>{}</Error></member>",
                 xml_escape(&err.message()),
             ));
+            continue;
+        }
+        let any_suppressed = recipients
+            .iter()
+            .any(|r| is_address_suppressed(state, &req.account_id, r));
+        if any_suppressed {
+            inner.push_str(
+                "<member><Status>MessageRejected</Status><Error>Address is on the suppression list</Error></member>",
+            );
             continue;
         }
         let message_id = send_bulk_destination(

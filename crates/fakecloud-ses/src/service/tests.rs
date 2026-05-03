@@ -3966,3 +3966,187 @@ async fn test_get_dedicated_ip_pool_unknown() {
     };
     assert_eq!(err.code(), "NotFoundException");
 }
+
+// ── X2: account + config-set sending pause + suppression enforcement ──
+
+#[tokio::test]
+async fn send_email_v2_rejects_when_account_sending_paused() {
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.account_settings.sending_enabled = false;
+    }
+    let svc = SesV2Service::new(state);
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["r@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["__type"], "AccountSendingPausedException");
+    assert_eq!(body["message"], "Email sending for the account is paused.");
+}
+
+#[tokio::test]
+async fn send_email_v2_succeeds_when_paused_then_resumed() {
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.account_settings.sending_enabled = false;
+    }
+    let svc = SesV2Service::new(state.clone());
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["r@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+
+    // Resume sending
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.account_settings.sending_enabled = true;
+    }
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["r@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn send_email_v2_rejects_when_config_set_sending_paused() {
+    use crate::state::ConfigurationSet;
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.configuration_sets.insert(
+            "my-cs".to_string(),
+            ConfigurationSet {
+                name: "my-cs".to_string(),
+                sending_enabled: false,
+                tls_policy: "OPTIONAL".to_string(),
+                sending_pool_name: None,
+                custom_redirect_domain: None,
+                https_policy: None,
+                suppressed_reasons: Vec::new(),
+                reputation_metrics_enabled: false,
+                vdm_options: None,
+                archive_arn: None,
+            },
+        );
+    }
+    let svc = SesV2Service::new(state);
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["r@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}},
+            "ConfigurationSetName": "my-cs"
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["__type"], "ConfigurationSetSendingPausedException");
+    assert_eq!(
+        body["message"],
+        "Email sending for the configuration set my-cs is paused."
+    );
+}
+
+#[tokio::test]
+async fn send_email_v2_skips_suppressed_recipient() {
+    use crate::state::SuppressedDestination;
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.suppressed_destinations.insert(
+            "blocked@example.com".to_string(),
+            SuppressedDestination {
+                email_address: "blocked@example.com".to_string(),
+                reason: "BOUNCE".to_string(),
+                last_update_time: chrono::Utc::now(),
+            },
+        );
+    }
+    let svc = SesV2Service::new(state);
+
+    // Single-recipient send: a suppressed To address fails the entire
+    // send with MessageRejected.
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["blocked@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["__type"], "MessageRejected");
+    assert!(body["message"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Address is on the suppression list"));
+
+    // Bulk send: suppressed entry is dropped, others go through.
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-bulk-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "DefaultContent": {"Template": {"TemplateName": "t", "TemplateData": "{}"}},
+            "BulkEmailEntries": [
+                {"Destination": {"ToAddresses": ["ok@example.com"]}},
+                {"Destination": {"ToAddresses": ["blocked@example.com"]}}
+            ]
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let results = body["BulkEmailEntryResults"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["Status"], "SUCCESS");
+    assert_eq!(results[1]["Status"], "MESSAGE_REJECTED");
+    assert_eq!(results[1]["Error"], "Address is on the suppression list");
+}

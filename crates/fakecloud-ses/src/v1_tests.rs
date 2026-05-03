@@ -1541,3 +1541,116 @@ fn test_get_account_sending_enabled() {
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
     assert!(body.contains("<Enabled>true</Enabled>"));
 }
+
+// ── X2: account + config-set sending pause for v1 ──
+
+#[test]
+fn send_email_v1_account_pause() {
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.account_settings.sending_enabled = false;
+    }
+    let req = make_v1_request(
+        "SendEmail",
+        vec![
+            ("Source", "sender@example.com"),
+            ("Destination.ToAddresses.member.1", "to@example.com"),
+            ("Message.Subject.Data", "Hi"),
+            ("Message.Body.Text.Data", "Hello"),
+        ],
+    );
+    match handle_v1_action(&state, &req) {
+        Err(e) => {
+            assert_eq!(e.code(), "MessageRejected");
+            assert_eq!(e.message(), "Email sending for the account is paused.");
+        }
+        Ok(_) => panic!("expected MessageRejected"),
+    }
+}
+
+#[test]
+fn send_email_v1_config_set_pause() {
+    use crate::state::ConfigurationSet;
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.configuration_sets.insert(
+            "my-cs".to_string(),
+            ConfigurationSet {
+                name: "my-cs".to_string(),
+                sending_enabled: false,
+                tls_policy: "OPTIONAL".to_string(),
+                sending_pool_name: None,
+                custom_redirect_domain: None,
+                https_policy: None,
+                suppressed_reasons: Vec::new(),
+                reputation_metrics_enabled: false,
+                vdm_options: None,
+                archive_arn: None,
+            },
+        );
+    }
+    let req = make_v1_request(
+        "SendEmail",
+        vec![
+            ("Source", "sender@example.com"),
+            ("Destination.ToAddresses.member.1", "to@example.com"),
+            ("Message.Subject.Data", "Hi"),
+            ("Message.Body.Text.Data", "Hello"),
+            ("ConfigurationSetName", "my-cs"),
+        ],
+    );
+    match handle_v1_action(&state, &req) {
+        Err(e) => {
+            assert_eq!(e.code(), "MessageRejected");
+            assert_eq!(
+                e.message(),
+                "Email sending for the configuration set my-cs is paused."
+            );
+        }
+        Ok(_) => panic!("expected MessageRejected"),
+    }
+}
+
+#[test]
+fn send_email_v1_skips_suppressed_recipient() {
+    use crate::state::SuppressedDestination;
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
+    {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.suppressed_destinations.insert(
+            "blocked@example.com".to_string(),
+            SuppressedDestination {
+                email_address: "blocked@example.com".to_string(),
+                reason: "BOUNCE".to_string(),
+                last_update_time: chrono::Utc::now(),
+            },
+        );
+    }
+    let req = make_v1_request(
+        "SendEmail",
+        vec![
+            ("Source", "sender@example.com"),
+            ("Destination.ToAddresses.member.1", "blocked@example.com"),
+            ("Message.Subject.Data", "Hi"),
+            ("Message.Body.Text.Data", "Hello"),
+        ],
+    );
+    match handle_v1_action(&state, &req) {
+        Err(e) => {
+            assert_eq!(e.code(), "MessageRejected");
+            assert_eq!(e.message(), "Address is on the suppression list");
+        }
+        Ok(_) => panic!("expected MessageRejected"),
+    }
+}
