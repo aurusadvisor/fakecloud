@@ -1309,6 +1309,7 @@ impl ElastiCacheService {
             notification_topic_arn,
             cluster_mode,
             data_tiering_enabled,
+            notification_topic_status: None,
         };
 
         let xml = replication_group_xml(&group, &region);
@@ -2361,6 +2362,25 @@ impl ElastiCacheService {
             parse_member_list(&request.query_params, "UserGroupIdsToAdd", "member");
         let user_group_ids_to_remove =
             parse_member_list(&request.query_params, "UserGroupIdsToRemove", "member");
+        let new_auth_token = optional_query_param(request, "AuthToken");
+        let new_auth_token_strategy = optional_query_param(request, "AuthTokenUpdateStrategy");
+        let new_transit_encryption_enabled = parse_optional_bool(
+            optional_query_param(request, "TransitEncryptionEnabled").as_deref(),
+        )?;
+        let new_multi_az_enabled =
+            parse_optional_bool(optional_query_param(request, "MultiAZEnabled").as_deref())?;
+        let remove_user_groups =
+            parse_optional_bool(optional_query_param(request, "RemoveUserGroups").as_deref())?;
+        let new_log_delivery_configurations = parse_log_delivery_configs(request);
+        let has_log_delivery_input = !new_log_delivery_configurations.is_empty()
+            || request.query_params.keys().any(|k| {
+                k.starts_with("LogDeliveryConfigurations.LogDeliveryConfigurationRequest.")
+            });
+        let new_ip_discovery = optional_query_param(request, "IpDiscovery");
+        let new_network_type = optional_query_param(request, "NetworkType");
+        let new_notification_topic_arn = optional_query_param(request, "NotificationTopicArn");
+        let new_notification_topic_status =
+            optional_query_param(request, "NotificationTopicStatus");
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -2393,6 +2413,59 @@ impl ElastiCacheService {
         }
         if let Some(window) = new_snapshot_window {
             group.snapshot_window = window;
+        }
+        if let Some(transit) = new_transit_encryption_enabled {
+            group.transit_encryption_enabled = transit;
+        }
+        if let Some(multi_az) = new_multi_az_enabled {
+            group.multi_az_enabled = multi_az;
+        }
+        if let Some(ip_discovery) = new_ip_discovery {
+            group.ip_discovery = Some(ip_discovery);
+        }
+        if let Some(network_type) = new_network_type {
+            group.network_type = Some(network_type);
+        }
+        if let Some(arn) = new_notification_topic_arn {
+            group.notification_topic_arn = Some(arn);
+        }
+        if let Some(status) = new_notification_topic_status {
+            group.notification_topic_status = Some(status);
+        }
+        if has_log_delivery_input {
+            group.log_delivery_configurations = new_log_delivery_configurations;
+        }
+        if remove_user_groups == Some(true) {
+            group.user_group_ids.clear();
+        }
+        // AuthToken rotation: SET / ROTATE store the new token, DELETE clears
+        // it. Default strategy is SET when AuthToken is supplied without one.
+        match new_auth_token_strategy.as_deref() {
+            Some("DELETE") => {
+                group.auth_token = None;
+                group.auth_token_enabled = false;
+            }
+            Some("SET") | Some("ROTATE") => {
+                if let Some(token) = new_auth_token {
+                    group.auth_token = Some(token);
+                    group.auth_token_enabled = true;
+                }
+            }
+            Some(other) => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "Invalid value for AuthTokenUpdateStrategy: '{other}'. Valid values: SET, ROTATE, DELETE."
+                    ),
+                ));
+            }
+            None => {
+                if let Some(token) = new_auth_token {
+                    group.auth_token = Some(token);
+                    group.auth_token_enabled = true;
+                }
+            }
         }
 
         // Associate/disassociate user groups

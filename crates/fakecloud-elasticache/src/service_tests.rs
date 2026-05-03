@@ -940,6 +940,7 @@ fn add_cluster_to_replication_group_updates_members_and_count() {
             notification_topic_arn: None,
             cluster_mode: None,
             data_tiering_enabled: None,
+            notification_topic_status: None,
         },
     );
 
@@ -1005,6 +1006,7 @@ async fn delete_cache_cluster_removes_cluster_from_replication_group() {
                 notification_topic_arn: None,
                 cluster_mode: None,
                 data_tiering_enabled: None,
+                notification_topic_status: None,
             },
         );
     }
@@ -1095,6 +1097,7 @@ fn service_with_replication_group(group_id: &str, num_clusters: i32) -> ElastiCa
                 notification_topic_arn: None,
                 cluster_mode: None,
                 data_tiering_enabled: None,
+                notification_topic_status: None,
             },
         );
     }
@@ -1363,6 +1366,7 @@ fn replication_group_xml_emits_dynamic_encryption_and_kms() {
             notification_topic_arn: Some("arn:aws:sns:us-east-1:123:topic-a".to_string()),
             cluster_mode: Some("enabled".to_string()),
             data_tiering_enabled: Some(false),
+            notification_topic_status: None,
         },
     );
     let xml =
@@ -1485,6 +1489,234 @@ fn modify_replication_group_not_found() {
         &[("ReplicationGroupId", "nonexistent")],
     );
     assert!(service.modify_replication_group(&req).is_err());
+}
+
+#[test]
+fn modify_replication_group_updates_auth_token_with_set() {
+    let service = service_with_replication_group("rg-auth", 1);
+    {
+        let mut a = service.state.write();
+        let g = a
+            .default_mut()
+            .replication_groups
+            .get_mut("rg-auth")
+            .unwrap();
+        g.auth_token = Some("a".to_string());
+        g.auth_token_enabled = true;
+    }
+    let req = request(
+        "ModifyReplicationGroup",
+        &[
+            ("ReplicationGroupId", "rg-auth"),
+            ("AuthToken", "b"),
+            ("AuthTokenUpdateStrategy", "SET"),
+        ],
+    );
+    let resp = service.modify_replication_group(&req).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    // Token is never echoed back in the XML payload.
+    assert!(!body.contains("<AuthToken>"));
+    assert!(body.contains("<AuthTokenEnabled>true</AuthTokenEnabled>"));
+
+    let a = service.state.read();
+    let g = a.default_ref().replication_groups.get("rg-auth").unwrap();
+    assert_eq!(g.auth_token.as_deref(), Some("b"));
+    assert!(g.auth_token_enabled);
+}
+
+#[test]
+fn modify_replication_group_delete_auth_token_strategy_clears_token() {
+    let service = service_with_replication_group("rg-del", 1);
+    {
+        let mut a = service.state.write();
+        let g = a
+            .default_mut()
+            .replication_groups
+            .get_mut("rg-del")
+            .unwrap();
+        g.auth_token = Some("secret".to_string());
+        g.auth_token_enabled = true;
+    }
+    let req = request(
+        "ModifyReplicationGroup",
+        &[
+            ("ReplicationGroupId", "rg-del"),
+            ("AuthTokenUpdateStrategy", "DELETE"),
+        ],
+    );
+    service.modify_replication_group(&req).unwrap();
+
+    let a = service.state.read();
+    let g = a.default_ref().replication_groups.get("rg-del").unwrap();
+    assert!(g.auth_token.is_none());
+    assert!(!g.auth_token_enabled);
+}
+
+#[test]
+fn modify_replication_group_remove_user_groups_clears_list() {
+    let service = service_with_replication_group("rg-ug", 1);
+    {
+        let mut a = service.state.write();
+        let g = a.default_mut().replication_groups.get_mut("rg-ug").unwrap();
+        g.user_group_ids = vec!["a".to_string(), "b".to_string()];
+    }
+    let req = request(
+        "ModifyReplicationGroup",
+        &[
+            ("ReplicationGroupId", "rg-ug"),
+            ("RemoveUserGroups", "true"),
+        ],
+    );
+    service.modify_replication_group(&req).unwrap();
+
+    let a = service.state.read();
+    let g = a.default_ref().replication_groups.get("rg-ug").unwrap();
+    assert!(g.user_group_ids.is_empty());
+}
+
+#[test]
+fn modify_replication_group_persists_log_delivery_changes() {
+    let service = service_with_replication_group("rg-log", 1);
+    {
+        let mut a = service.state.write();
+        let g = a
+            .default_mut()
+            .replication_groups
+            .get_mut("rg-log")
+            .unwrap();
+        g.log_delivery_configurations = vec![crate::state::LogDeliveryConfiguration {
+            log_type: "slow-log".to_string(),
+            destination_type: "cloudwatch-logs".to_string(),
+            destination_details: Some("/aws/orig".to_string()),
+            log_format: "json".to_string(),
+            status: "active".to_string(),
+        }];
+    }
+    let req = request(
+        "ModifyReplicationGroup",
+        &[
+            ("ReplicationGroupId", "rg-log"),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.LogType",
+                "slow-log",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.DestinationType",
+                "cloudwatch-logs",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.DestinationDetails.CloudWatchLogsDetails.LogGroup",
+                "/aws/new-slow",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.LogFormat",
+                "json",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.LogType",
+                "engine-log",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.DestinationType",
+                "kinesis-firehose",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.DestinationDetails.KinesisFirehoseDetails.DeliveryStream",
+                "engine-stream",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.LogFormat",
+                "text",
+            ),
+        ],
+    );
+    service.modify_replication_group(&req).unwrap();
+
+    let describe = request(
+        "DescribeReplicationGroups",
+        &[("ReplicationGroupId", "rg-log")],
+    );
+    let resp = service.describe_replication_groups(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("/aws/new-slow"));
+    assert!(body.contains("engine-stream"));
+    assert!(!body.contains("/aws/orig"));
+
+    let a = service.state.read();
+    let g = a.default_ref().replication_groups.get("rg-log").unwrap();
+    assert_eq!(g.log_delivery_configurations.len(), 2);
+}
+
+#[test]
+fn modify_replication_group_persists_multi_az_and_network_fields() {
+    let service = service_with_replication_group("rg-net", 1);
+    let req = request(
+        "ModifyReplicationGroup",
+        &[
+            ("ReplicationGroupId", "rg-net"),
+            ("MultiAZEnabled", "true"),
+            ("IpDiscovery", "ipv6"),
+            ("NetworkType", "dual_stack"),
+        ],
+    );
+    service.modify_replication_group(&req).unwrap();
+
+    let describe = request(
+        "DescribeReplicationGroups",
+        &[("ReplicationGroupId", "rg-net")],
+    );
+    let resp = service.describe_replication_groups(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<MultiAZ>enabled</MultiAZ>"));
+    assert!(body.contains("<IpDiscovery>ipv6</IpDiscovery>"));
+    assert!(body.contains("<NetworkType>dual_stack</NetworkType>"));
+}
+
+#[test]
+fn modify_replication_group_persists_snapshot_retention_and_window() {
+    let service = service_with_replication_group("rg-snap", 1);
+    let req = request(
+        "ModifyReplicationGroup",
+        &[
+            ("ReplicationGroupId", "rg-snap"),
+            ("SnapshotRetentionLimit", "14"),
+            ("SnapshotWindow", "01:00-03:00"),
+        ],
+    );
+    service.modify_replication_group(&req).unwrap();
+
+    let describe = request(
+        "DescribeReplicationGroups",
+        &[("ReplicationGroupId", "rg-snap")],
+    );
+    let resp = service.describe_replication_groups(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<SnapshotRetentionLimit>14</SnapshotRetentionLimit>"));
+    assert!(body.contains("<SnapshotWindow>01:00-03:00</SnapshotWindow>"));
+}
+
+#[test]
+fn modify_replication_group_persists_notification_topic_attrs() {
+    let service = service_with_replication_group("rg-notif", 1);
+    let topic_arn = "arn:aws:sns:us-east-1:123456789012:elasticache-events";
+    let req = request(
+        "ModifyReplicationGroup",
+        &[
+            ("ReplicationGroupId", "rg-notif"),
+            ("NotificationTopicArn", topic_arn),
+            ("NotificationTopicStatus", "inactive"),
+        ],
+    );
+    service.modify_replication_group(&req).unwrap();
+
+    let describe = request(
+        "DescribeReplicationGroups",
+        &[("ReplicationGroupId", "rg-notif")],
+    );
+    let resp = service.describe_replication_groups(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains(&format!("<TopicArn>{topic_arn}</TopicArn>")));
+    assert!(body.contains("<TopicStatus>inactive</TopicStatus>"));
 }
 
 #[test]
@@ -2667,6 +2899,7 @@ fn replication_group_from_request(req: &AwsRequest) -> crate::state::Replication
         notification_topic_arn,
         cluster_mode,
         data_tiering_enabled,
+        notification_topic_status: None,
     }
 }
 

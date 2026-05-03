@@ -937,9 +937,14 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
         .notification_topic_arn
         .as_ref()
         .map(|t| {
+            let status = g
+                .notification_topic_status
+                .as_deref()
+                .unwrap_or("active");
             format!(
-                "<NotificationConfiguration><TopicArn>{}</TopicArn><TopicStatus>active</TopicStatus></NotificationConfiguration>",
-                xml_escape(t)
+                "<NotificationConfiguration><TopicArn>{}</TopicArn><TopicStatus>{}</TopicStatus></NotificationConfiguration>",
+                xml_escape(t),
+                xml_escape(status),
             )
         })
         .unwrap_or_default();
