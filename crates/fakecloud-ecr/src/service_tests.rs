@@ -949,3 +949,205 @@ mod scan_on_push_tests {
         );
     }
 }
+
+// ── Lifecycle policy timestamp + ticker integration ─────────────
+#[cfg(test)]
+mod lifecycle_timestamp_tests {
+    use super::super::EcrService;
+    use crate::lifecycle_ticker::tick_once;
+    use crate::state::{EcrState, Image, Repository, SharedEcrState};
+    use bytes::Bytes;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::service::AwsRequest;
+    use http::{HeaderMap, Method};
+    use parking_lot::RwLock;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const ACCOUNT: &str = "111111111111";
+
+    fn make_request(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "ecr".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: ACCOUNT.into(),
+            request_id: "req-1".into(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn fixture() -> (EcrService, SharedEcrState) {
+        let mut mas: MultiAccountState<EcrState> =
+            MultiAccountState::new(ACCOUNT, "us-east-1", "http://fakecloud:4566");
+        let s = mas.get_or_create(ACCOUNT);
+        let arn = s.repository_arn("app");
+        let mut repo = Repository::new("app", arn, ACCOUNT, "fakecloud:4566");
+        // Seed an image old enough to be eligible for `sinceImagePushed`.
+        repo.images.insert(
+            "sha256:old".to_string(),
+            Image {
+                image_digest: "sha256:old".to_string(),
+                image_manifest: String::new(),
+                image_manifest_media_type: String::new(),
+                artifact_media_type: None,
+                image_size_in_bytes: 0,
+                image_pushed_at: chrono::Utc::now() - chrono::Duration::days(30),
+                last_recorded_pull_time: None,
+            },
+        );
+        repo.image_tags
+            .insert("v1".to_string(), "sha256:old".to_string());
+        s.repositories.insert("app".to_string(), repo);
+        let state: SharedEcrState = Arc::new(RwLock::new(mas));
+        let svc = EcrService::new(state.clone());
+        (svc, state)
+    }
+
+    fn parse_body(resp: fakecloud_core::service::AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).expect("response body is JSON")
+    }
+
+    #[tokio::test]
+    async fn put_lifecycle_policy_then_get_returns_last_evaluated_at() {
+        let (svc, _state) = fixture();
+        let policy = json!({
+            "rules": [{
+                "rulePriority": 1,
+                "selection": {
+                    "tagStatus": "any",
+                    "countType": "imageCountMoreThan",
+                    "countNumber": 100
+                }
+            }]
+        })
+        .to_string();
+        let put_req = make_request(
+            "PutLifecyclePolicy",
+            json!({
+                "repositoryName": "app",
+                "lifecyclePolicyText": policy,
+            }),
+        );
+        let put_resp = <EcrService as fakecloud_core::service::AwsService>::handle(&svc, put_req)
+            .await
+            .expect("PutLifecyclePolicy succeeds");
+        assert!(put_resp.status.is_success());
+
+        let get_req = make_request("GetLifecyclePolicy", json!({"repositoryName": "app"}));
+        let get_resp = <EcrService as fakecloud_core::service::AwsService>::handle(&svc, get_req)
+            .await
+            .expect("GetLifecyclePolicy succeeds");
+        let body = parse_body(get_resp);
+        let ts = body
+            .get("lastEvaluatedAt")
+            .and_then(|v| v.as_i64())
+            .expect("lastEvaluatedAt present");
+        assert!(
+            ts > 0,
+            "lastEvaluatedAt should be a non-zero epoch second after PutLifecyclePolicy"
+        );
+        assert_eq!(
+            body.get("repositoryName").and_then(|v| v.as_str()),
+            Some("app")
+        );
+    }
+
+    #[tokio::test]
+    async fn ticker_tick_once_updates_last_evaluated_at_and_prunes() {
+        let (svc, state) = fixture();
+        // Policy: prune images older than 7 days (the seeded image is 30 days old).
+        let policy = json!({
+            "rules": [{
+                "rulePriority": 1,
+                "selection": {
+                    "tagStatus": "any",
+                    "countType": "sinceImagePushed",
+                    "countUnit": "days",
+                    "countNumber": 7
+                }
+            }]
+        })
+        .to_string();
+        // Install policy with PutLifecyclePolicy (which already prunes
+        // synchronously).
+        let put_req = make_request(
+            "PutLifecyclePolicy",
+            json!({
+                "repositoryName": "app",
+                "lifecyclePolicyText": policy,
+            }),
+        );
+        <EcrService as fakecloud_core::service::AwsService>::handle(&svc, put_req)
+            .await
+            .expect("PutLifecyclePolicy succeeds");
+
+        // Capture the post-Put timestamp; the ticker should advance it.
+        let first_ts = {
+            let accounts = state.read();
+            accounts
+                .get(ACCOUNT)
+                .unwrap()
+                .repositories
+                .get("app")
+                .unwrap()
+                .lifecycle_policy_last_evaluated_at
+                .expect("Put stamped last_evaluated_at")
+        };
+        // Re-seed an old image to verify the ticker prunes it on the
+        // next pass (Put already pruned the original).
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_mut(ACCOUNT).unwrap();
+            let repo = s.repositories.get_mut("app").unwrap();
+            repo.images.insert(
+                "sha256:older".to_string(),
+                Image {
+                    image_digest: "sha256:older".to_string(),
+                    image_manifest: String::new(),
+                    image_manifest_media_type: String::new(),
+                    artifact_media_type: None,
+                    image_size_in_bytes: 0,
+                    image_pushed_at: chrono::Utc::now() - chrono::Duration::days(60),
+                    last_recorded_pull_time: None,
+                },
+            );
+        }
+        // Ensure clock advances at least one second so the new
+        // timestamp is strictly greater.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        // Simulate a periodic tick.
+        tick_once(&state);
+
+        let accounts = state.read();
+        let repo = accounts
+            .get(ACCOUNT)
+            .unwrap()
+            .repositories
+            .get("app")
+            .unwrap();
+        let later_ts = repo
+            .lifecycle_policy_last_evaluated_at
+            .expect("tick stamped last_evaluated_at");
+        assert!(
+            later_ts >= first_ts,
+            "tick should not move the timestamp backwards"
+        );
+        assert!(
+            !repo.images.contains_key("sha256:older"),
+            "tick should have pruned the 60-day-old image"
+        );
+    }
+}
