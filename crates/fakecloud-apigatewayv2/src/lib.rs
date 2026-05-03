@@ -6,10 +6,11 @@ pub mod mock;
 pub mod router;
 pub(crate) mod service;
 pub mod state;
+pub mod websocket;
 
 pub use service::ApiGatewayV2Service;
 pub use state::{
-    ApiGatewayV2Snapshot, ApiGatewayV2State, Authorizer, CorsConfiguration, Deployment, HttpApi,
-    Integration, JwtConfiguration, Route, SharedApiGatewayV2State, Stage,
-    APIGATEWAYV2_SNAPSHOT_SCHEMA_VERSION,
+    ApiGatewayV2Snapshot, ApiGatewayV2State, Authorizer, ConnectionInfo, CorsConfiguration,
+    Deployment, HttpApi, Integration, JwtConfiguration, Route, SharedApiGatewayV2State,
+    SharedWebSocketRegistry, Stage, WebSocketRegistry, APIGATEWAYV2_SNAPSHOT_SCHEMA_VERSION,
 };

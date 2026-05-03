@@ -256,10 +256,25 @@ async fn create_api_unsupported_protocol() {
     let state = make_state();
     let svc = ApiGatewayV2Service::new(state);
 
-    let body = serde_json::json!({"name": "ws", "protocolType": "WEBSOCKET"});
+    let body = serde_json::json!({"name": "grpc", "protocolType": "GRPC"});
     let req = make_request(Method::POST, "/v2/apis", &body.to_string());
     let err = expect_err(svc.handle(req).await);
     assert!(err.to_string().contains("BadRequestException"));
+}
+
+#[tokio::test]
+async fn create_api_websocket_protocol_succeeds() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+
+    let body = serde_json::json!({"name": "ws-api", "protocolType": "WEBSOCKET"});
+    let req = make_request(Method::POST, "/v2/apis", &body.to_string());
+    let resp = svc.handle(req).await.unwrap();
+    let b = body_json(&resp);
+    assert_eq!(b["name"], "ws-api");
+    assert_eq!(b["protocolType"], "WEBSOCKET");
+    // Default WS route selection expression follows AWS docs.
+    assert_eq!(b["routeSelectionExpression"], "$request.body.action");
 }
 
 // ── Route CRUD ──

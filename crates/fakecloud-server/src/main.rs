@@ -295,6 +295,10 @@ async fn main() {
         ),
     ));
 
+    let apigatewayv2_ws_registry: fakecloud_apigatewayv2::SharedWebSocketRegistry = Arc::new(
+        parking_lot::RwLock::new(fakecloud_apigatewayv2::WebSocketRegistry::default()),
+    );
+
     let apigatewayv1_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -4611,6 +4615,165 @@ async fn main() {
                         axum::Json(serde_json::json!({
                             "requests": state.request_history
                         }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/apigatewayv2/connections",
+            axum::routing::get({
+                let reg = apigatewayv2_ws_registry.clone();
+                move || {
+                    let reg = reg.clone();
+                    async move {
+                        let r = reg.read();
+                        let conns: Vec<_> = r
+                            .connections
+                            .values()
+                            .map(|c| {
+                                serde_json::json!({
+                                    "connectionId": c.connection_id,
+                                    "apiId": c.api_id,
+                                    "stage": c.stage,
+                                    "connectedAt": c.connected_at.to_rfc3339(),
+                                    "lastActiveAt": c.last_active_at.to_rfc3339(),
+                                    "sourceIp": c.source_ip,
+                                })
+                            })
+                            .collect();
+                        axum::Json(serde_json::json!({ "connections": conns }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/apigatewayv2/ws/{api_id}",
+            axum::routing::get({
+                let reg = apigatewayv2_ws_registry.clone();
+                move |ws: axum::extract::WebSocketUpgrade,
+                      axum::extract::Path(api_id): axum::extract::Path<String>,
+                      axum::extract::Query(params): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| {
+                    let reg = reg.clone();
+                    async move {
+                        let stage = params
+                            .get("stage")
+                            .cloned()
+                            .unwrap_or_else(|| "$default".to_string());
+                        ws.on_upgrade(move |socket| async move {
+                            let (conn_id, rx) = fakecloud_apigatewayv2::websocket::register(
+                                reg.clone(),
+                                api_id,
+                                stage,
+                                "127.0.0.1".to_string(),
+                            );
+                            // Echo dispatcher stub — real Lambda dispatch for
+                            // `$default` is wired up in a follow-up; for now
+                            // we just log. `@connections` POST exercises the
+                            // outbound path end-to-end.
+                            let on_message = |bytes: Vec<u8>, is_text: bool| {
+                                let preview =
+                                    String::from_utf8_lossy(&bytes[..bytes.len().min(64)])
+                                        .to_string();
+                                async move {
+                                    tracing::debug!(
+                                        is_text,
+                                        preview = %preview,
+                                        "apigwv2 ws message received"
+                                    );
+                                }
+                            };
+                            fakecloud_apigatewayv2::websocket::run_lifecycle(
+                                socket, rx, on_message,
+                            )
+                            .await;
+                            fakecloud_apigatewayv2::websocket::deregister(&reg, &conn_id);
+                        })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/@connections/{connection_id}",
+            axum::routing::post({
+                let reg = apigatewayv2_ws_registry.clone();
+                move |axum::extract::Path(connection_id): axum::extract::Path<String>,
+                      body: axum::body::Bytes| {
+                    let reg = reg.clone();
+                    async move {
+                        let sender = {
+                            let r = reg.read();
+                            r.get(&connection_id).map(|c| c.sender.clone())
+                        };
+                        let Some(sender) = sender else {
+                            return (
+                                axum::http::StatusCode::GONE,
+                                axum::Json(serde_json::json!({
+                                    "Message": "GoneException",
+                                })),
+                            );
+                        };
+                        let msg = match std::str::from_utf8(&body) {
+                            Ok(s) => axum::extract::ws::Message::Text(s.to_string().into()),
+                            Err(_) => axum::extract::ws::Message::Binary(body.clone()),
+                        };
+                        if sender.send(msg).is_err() {
+                            // Receiver dropped between read and send: treat as
+                            // gone too. Clean up the stale entry while we're
+                            // here so retries don't keep hitting this branch.
+                            reg.write().remove(&connection_id);
+                            return (
+                                axum::http::StatusCode::GONE,
+                                axum::Json(serde_json::json!({
+                                    "Message": "GoneException",
+                                })),
+                            );
+                        }
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({})),
+                        )
+                    }
+                }
+            })
+            .get({
+                let reg = apigatewayv2_ws_registry.clone();
+                move |axum::extract::Path(connection_id): axum::extract::Path<String>| {
+                    let reg = reg.clone();
+                    async move {
+                        let r = reg.read();
+                        let Some(c) = r.get(&connection_id) else {
+                            return (
+                                axum::http::StatusCode::GONE,
+                                axum::Json(serde_json::json!({
+                                    "Message": "GoneException",
+                                })),
+                            );
+                        };
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "ConnectedAt": c.connected_at.to_rfc3339(),
+                                "Identity": { "SourceIp": c.source_ip },
+                                "LastActiveAt": c.last_active_at.to_rfc3339(),
+                            })),
+                        )
+                    }
+                }
+            })
+            .delete({
+                let reg = apigatewayv2_ws_registry.clone();
+                move |axum::extract::Path(connection_id): axum::extract::Path<String>| {
+                    let reg = reg.clone();
+                    async move {
+                        let removed = reg.write().remove(&connection_id);
+                        let Some(info) = removed else {
+                            return axum::http::StatusCode::GONE;
+                        };
+                        // Trigger lifecycle exit on the connection task.
+                        let _ = info.sender.send(axum::extract::ws::Message::Close(None));
+                        axum::http::StatusCode::NO_CONTENT
                     }
                 }
             }),

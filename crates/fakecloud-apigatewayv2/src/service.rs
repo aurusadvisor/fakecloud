@@ -523,13 +523,14 @@ impl ApiGatewayV2Service {
             )
         })?;
 
-        if protocol_type != "HTTP" {
+        if protocol_type != "HTTP" && protocol_type != "WEBSOCKET" {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "BadRequestException",
                 format!("Unsupported protocol type: {}", protocol_type),
             ));
         }
+        let protocol_type = protocol_type.to_string();
 
         let description = body["description"].as_str().map(|s| s.to_string());
         let tags = body["tags"].as_object().map(|m| {
@@ -556,6 +557,25 @@ impl ApiGatewayV2Service {
 
         let mut api = HttpApi::new(api_id, name, description, tags, region);
         api.cors_configuration = cors_configuration;
+        api.protocol_type = protocol_type.clone();
+        if protocol_type == "WEBSOCKET" {
+            // WebSocket APIs use a body-based selection expression by default
+            // and have no implicit api-key header selector.
+            api.route_selection_expression = "$request.body.action".to_string();
+            api.api_key_selection_expression = "$request.header.x-api-key".to_string();
+            if let Some(rse) = body
+                .get("routeSelectionExpression")
+                .and_then(|v| v.as_str())
+            {
+                api.route_selection_expression = rse.to_string();
+            }
+            if let Some(akse) = body
+                .get("apiKeySelectionExpression")
+                .and_then(|v| v.as_str())
+            {
+                api.api_key_selection_expression = akse.to_string();
+            }
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
