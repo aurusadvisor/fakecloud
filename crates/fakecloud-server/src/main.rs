@@ -1547,6 +1547,13 @@ async fn main() {
         dynamodb_service = dynamodb_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(dynamodb_service));
+    // Companion data plane: DynamoDB Streams (`streams.dynamodb.<region>.amazonaws.com`)
+    // shares the same per-table state populated by mutations on the main
+    // service. Lambda event source mappings against
+    // `arn:aws:dynamodb:.../stream/...` poll this handler.
+    registry.register(Arc::new(fakecloud_dynamodb::DynamoDbStreamsService::new(
+        dynamodb_state.clone(),
+    )));
     // SES delivery bus (event fanout to SNS topics and EventBridge buses)
     let eb_delivery_for_ses = Arc::new(
         fakecloud_eventbridge::delivery::EventBridgeDeliveryImpl::new(
