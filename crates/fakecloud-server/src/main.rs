@@ -2012,6 +2012,14 @@ async fn main() {
     }
     registry.register(Arc::new(ecr_service));
 
+    // Periodic re-evaluation of ECR lifecycle policies. The ticker
+    // re-runs the prune evaluator on every repository with a policy
+    // set so time-based selections (e.g. `sinceImagePushed`) take
+    // effect even when no new push triggers an evaluation. The tick
+    // is a cheap read-only scan when no policies are set.
+    let ecr_lifecycle_ticker = fakecloud_ecr::LifecycleTicker::new(ecr_state.clone());
+    tokio::spawn(ecr_lifecycle_ticker.run());
+
     let ecs_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config

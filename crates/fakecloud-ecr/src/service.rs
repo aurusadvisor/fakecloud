@@ -1706,17 +1706,23 @@ impl EcrService {
                     .ok_or_else(|| lifecycle_policy_not_found(&name))?
             }
         };
-        let accounts = self.state.read();
+        // Run the preview eval and stamp `last_evaluated_at` so callers
+        // polling `GetLifecyclePolicy` after a preview see the most
+        // recent evaluation marker. Preview is non-destructive — we
+        // don't apply the prune here, just record that it ran.
+        let mut accounts = self.state.write();
         let state = accounts
-            .get(&account)
+            .get_mut(&account)
             .ok_or_else(|| repository_not_found(&name))?;
         let repo = state
             .repositories
-            .get(&name)
+            .get_mut(&name)
             .ok_or_else(|| repository_not_found(&name))?;
         let _prune = evaluate_lifecycle_policy(repo, &policy);
+        repo.lifecycle_policy_last_evaluated_at = Some(Utc::now());
+        let registry_id = repo.registry_id.clone();
         Ok(AwsResponse::ok_json(json!({
-            "registryId": repo.registry_id,
+            "registryId": registry_id,
             "repositoryName": name,
             "lifecyclePolicyText": policy,
             "status": "COMPLETE",
