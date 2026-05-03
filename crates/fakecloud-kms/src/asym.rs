@@ -218,6 +218,28 @@ fn rsa_verify_prehashed(
     }
 }
 
+/// RSA-OAEP unwrap encrypted key material under the supplied private
+/// key. KMS callers wrap their key material under the public key
+/// returned by GetParametersForImport using one of the documented
+/// `WrappingAlgorithm` values; ImportKeyMaterial reverses the wrap
+/// here to recover the raw key bytes for storage.
+pub fn rsa_oaep_unwrap(
+    priv_der: &[u8],
+    wrapping_algorithm: &str,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, AsymError> {
+    let private = RsaPrivateKey::from_pkcs8_der(priv_der)
+        .map_err(|e| AsymError::CorruptKey(format!("decode pkcs8: {e}")))?;
+    let padding = match wrapping_algorithm {
+        "RSAES_OAEP_SHA_1" => rsa::Oaep::new::<sha1::Sha1>(),
+        "RSAES_OAEP_SHA_256" => rsa::Oaep::new::<Sha256>(),
+        other => return Err(AsymError::UnsupportedAlgorithm(other.to_string())),
+    };
+    private
+        .decrypt(padding, ciphertext)
+        .map_err(|e| AsymError::CryptoFailure(format!("oaep unwrap: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

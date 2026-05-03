@@ -47,19 +47,54 @@ impl KmsService {
             ));
         }
 
+        // Drop the read lock — generating an RSA-2048 keypair is slow
+        // (~50ms) and we'll need a write lock to stash the private half.
+        let key_arn = key.arn.clone();
+        drop(accounts);
+
+        // Real RSA-2048 wrapping keypair. The public half goes back to
+        // the caller as SubjectPublicKeyInfo DER so they can RSA-OAEP
+        // encrypt their key material under it; the private half is
+        // stashed keyed by the import token so ImportKeyMaterial can
+        // unwrap on the way in.
+        let (priv_der, pub_der) = super::asym::generate_keypair("RSA_2048")
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMSInternalException",
+                    format!("failed to generate import wrapping key: {e}"),
+                )
+            })?
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMSInternalException",
+                    "RSA_2048 keygen returned None",
+                )
+            })?;
+
         let import_token_bytes = rand_bytes(64);
         let import_token_b64 =
             base64::engine::general_purpose::STANDARD.encode(&import_token_bytes);
-        let public_key_bytes = generate_fake_public_key("RSA_2048");
-        let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key_bytes);
+        let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&pub_der);
 
         // Valid for 24 hours
         let parameters_valid_to = Utc::now().timestamp() as f64 + 86400.0;
 
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.import_wrapping_keys.insert(
+            import_token_b64.clone(),
+            crate::state::ImportWrapEntry {
+                private_key_der: priv_der,
+                key_id: resolved.clone(),
+            },
+        );
+
         Ok(AwsResponse::json(
             StatusCode::OK,
             serde_json::to_string(&json!({
-                "KeyId": key.arn,
+                "KeyId": key_arn,
                 "ImportToken": import_token_b64,
                 "PublicKey": public_key_b64,
                 "ParametersValidTo": parameters_valid_to,
@@ -75,7 +110,7 @@ impl KmsService {
         let body = req.json_body();
         let key_id = Self::require_key_id(&body)?;
 
-        let _import_token = body["ImportToken"].as_str().ok_or_else(|| {
+        let import_token = body["ImportToken"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
@@ -90,6 +125,11 @@ impl KmsService {
                 "EncryptedKeyMaterial is required",
             )
         })?;
+
+        let wrapping_algorithm = body["WrappingAlgorithm"]
+            .as_str()
+            .unwrap_or("RSAES_OAEP_SHA_256")
+            .to_string();
 
         let resolved = self
             .resolve_key_id_for(&req.account_id, &req.region, &key_id)
@@ -119,10 +159,28 @@ impl KmsService {
             ));
         }
 
-        // Store the imported material bytes for use in encrypt/decrypt.
-        // In real AWS, the material is unwrapped with the import RSA key.
-        // Here we treat the EncryptedKeyMaterial as the raw key (base64-decoded).
-        let material_bytes = base64::engine::general_purpose::STANDARD
+        // Look up the wrapping keypair stashed by GetParametersForImport
+        // and verify the token belongs to this CMK.
+        let entry = state
+            .import_wrapping_keys
+            .get(import_token)
+            .cloned()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidImportTokenException",
+                    "ImportToken is invalid or expired",
+                )
+            })?;
+        if entry.key_id != resolved {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidImportTokenException",
+                "ImportToken was issued for a different key",
+            ));
+        }
+
+        let wrapped_bytes = base64::engine::general_purpose::STANDARD
             .decode(encrypted_key_material)
             .map_err(|_| {
                 AwsServiceError::aws_error(
@@ -131,17 +189,37 @@ impl KmsService {
                     "EncryptedKeyMaterial is not valid base64",
                 )
             })?;
-        if material_bytes.is_empty() {
+        if wrapped_bytes.is_empty() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
                 "EncryptedKeyMaterial must not be empty",
             ));
         }
+
+        // RSA-OAEP unwrap with the wrapping private key. AWS rejects a
+        // bad cipher with InvalidCiphertextException; mirror that.
+        let unwrapped = super::asym::rsa_oaep_unwrap(
+            &entry.private_key_der,
+            &wrapping_algorithm,
+            &wrapped_bytes,
+        )
+        .map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidCiphertextException",
+                "EncryptedKeyMaterial could not be unwrapped",
+            )
+        })?;
+
         key.imported_key_material = true;
-        key.imported_material_bytes = Some(material_bytes);
+        key.imported_material_bytes = Some(unwrapped);
         key.enabled = true;
         key.key_state = "Enabled".to_string();
+        // Token is single-use; drop it now that the import succeeded
+        // so a replay on the same token is rejected with the same
+        // InvalidImportTokenException as an unknown token.
+        state.import_wrapping_keys.remove(import_token);
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }

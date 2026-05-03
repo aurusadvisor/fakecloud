@@ -26,6 +26,24 @@ pub struct KmsState {
     /// decrypt afterwards.
     #[serde(default = "default_master_key_bytes")]
     pub master_key_bytes: Vec<u8>,
+    /// In-flight RSA wrapping keypairs handed out by GetParametersForImport
+    /// and consumed by ImportKeyMaterial to RSA-OAEP-unwrap the encrypted
+    /// key material. Keyed by the import token bytes returned to the
+    /// caller; entries are removed after a successful import.
+    #[serde(default)]
+    pub import_wrapping_keys: BTreeMap<String, ImportWrapEntry>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ImportWrapEntry {
+    /// PKCS#8 DER-encoded RSA-2048 private key half of the wrapping
+    /// keypair. The corresponding SubjectPublicKeyInfo DER was returned
+    /// to the caller in `GetParametersForImport.PublicKey` so they can
+    /// RSA-OAEP-encrypt the key material under it.
+    pub private_key_der: Vec<u8>,
+    /// CMK key id this token is bound to. ImportKeyMaterial rejects the
+    /// token when it doesn't match the CMK in the request.
+    pub key_id: String,
 }
 
 fn default_master_key_bytes() -> Vec<u8> {
@@ -46,6 +64,7 @@ impl KmsState {
             grants: Vec::new(),
             custom_key_stores: BTreeMap::new(),
             master_key_bytes: default_master_key_bytes(),
+            import_wrapping_keys: BTreeMap::new(),
         }
     }
 

@@ -43,6 +43,49 @@ fn create_key(svc: &KmsService) -> String {
     body["KeyMetadata"]["KeyId"].as_str().unwrap().to_string()
 }
 
+/// Helper: run GetParametersForImport, RSA-OAEP-wrap `material` under
+/// the returned public key, and call ImportKeyMaterial. Used by every
+/// import-flow test so they exercise the real OAEP unwrap path
+/// instead of relying on the previous fake-bytes shim.
+fn import_external_material(svc: &KmsService, key_id: &str, material: &[u8]) {
+    use base64::Engine;
+    use rsa::pkcs8::DecodePublicKey;
+
+    let resp = svc
+        .get_parameters_for_import(&make_request(
+            "GetParametersForImport",
+            json!({
+                "KeyId": key_id,
+                "WrappingAlgorithm": "RSAES_OAEP_SHA_256",
+                "WrappingKeySpec": "RSA_2048",
+            }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let token = body["ImportToken"].as_str().unwrap().to_string();
+    let pub_der = base64::engine::general_purpose::STANDARD
+        .decode(body["PublicKey"].as_str().unwrap())
+        .unwrap();
+    let public = rsa::RsaPublicKey::from_public_key_der(&pub_der).unwrap();
+    let mut rng = rand::thread_rng();
+    let wrapped = public
+        .encrypt(&mut rng, rsa::Oaep::new::<rsa::sha2::Sha256>(), material)
+        .unwrap();
+    let wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&wrapped);
+
+    svc.import_key_material(&make_request(
+        "ImportKeyMaterial",
+        json!({
+            "KeyId": key_id,
+            "ImportToken": token,
+            "EncryptedKeyMaterial": wrapped_b64,
+            "WrappingAlgorithm": "RSAES_OAEP_SHA_256",
+            "ExpirationModel": "KEY_MATERIAL_DOES_NOT_EXPIRE"
+        }),
+    ))
+    .unwrap();
+}
+
 #[test]
 fn list_keys_pagination_no_duplicates() {
     let svc = make_service();
@@ -289,20 +332,8 @@ fn import_key_material_lifecycle() {
     let svc = make_service();
     let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
 
-    let fake_token = base64::engine::general_purpose::STANDARD.encode(b"token");
-    let fake_material = base64::engine::general_purpose::STANDARD.encode(b"material");
-
-    // Import
-    let req = make_request(
-        "ImportKeyMaterial",
-        json!({
-            "KeyId": key_id,
-            "ImportToken": fake_token,
-            "EncryptedKeyMaterial": fake_material,
-            "ExpirationModel": "KEY_MATERIAL_DOES_NOT_EXPIRE"
-        }),
-    );
-    svc.import_key_material(&req).unwrap();
+    // Real RSA-OAEP wrap+unwrap flow.
+    import_external_material(&svc, &key_id, b"my-secret-aes-key-material!12345");
 
     // Key should be enabled
     {
@@ -333,6 +364,9 @@ fn import_key_material_non_external_fails() {
     let svc = make_service();
     let key_id = create_key(&svc);
 
+    // Non-EXTERNAL key rejects ImportKeyMaterial regardless of token
+    // validity, so the fake token + material here is fine — we never
+    // reach the unwrap step.
     let fake_token = base64::engine::general_purpose::STANDARD.encode(b"token");
     let fake_material = base64::engine::general_purpose::STANDARD.encode(b"material");
 
@@ -662,21 +696,10 @@ fn derive_shared_secret_is_deterministic() {
 fn imported_key_material_encrypt_decrypt_roundtrip() {
     let svc = make_service();
     let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
-
-    let fake_token = base64::engine::general_purpose::STANDARD.encode(b"token");
     let material = b"my-secret-aes-key-material!12345";
-    let fake_material = base64::engine::general_purpose::STANDARD.encode(material);
 
-    // Import key material
-    let req = make_request(
-        "ImportKeyMaterial",
-        json!({
-            "KeyId": key_id,
-            "ImportToken": fake_token,
-            "EncryptedKeyMaterial": fake_material,
-        }),
-    );
-    svc.import_key_material(&req).unwrap();
+    // Real RSA-OAEP wrap+unwrap flow.
+    import_external_material(&svc, &key_id, material);
 
     // Encrypt
     let plaintext = b"Hello imported key!";
@@ -717,21 +740,7 @@ fn imported_key_material_encrypt_decrypt_roundtrip() {
 fn imported_key_material_decrypt_fails_after_deletion() {
     let svc = make_service();
     let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
-
-    let fake_token = base64::engine::general_purpose::STANDARD.encode(b"token");
-    let fake_material =
-        base64::engine::general_purpose::STANDARD.encode(b"some-key-material-32bytes!!");
-
-    // Import and encrypt
-    svc.import_key_material(&make_request(
-        "ImportKeyMaterial",
-        json!({
-            "KeyId": key_id,
-            "ImportToken": fake_token,
-            "EncryptedKeyMaterial": fake_material,
-        }),
-    ))
-    .unwrap();
+    import_external_material(&svc, &key_id, b"some-key-material-32bytes!!");
 
     let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(b"secret");
     let resp = svc
@@ -2463,4 +2472,156 @@ fn decrypt_rejects_when_source_key_is_pending_deletion() {
     };
     let msg = format!("{:?}", err);
     assert!(msg.contains("KMSInvalidStateException"), "got: {msg}");
+}
+
+// ── G7: ImportKeyMaterial RSA-OAEP unwrap ──
+
+#[test]
+fn import_key_material_rejects_unknown_token() {
+    let svc = make_service();
+    let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
+    let bogus_token = base64::engine::general_purpose::STANDARD.encode(b"never-issued");
+    let bogus_material = base64::engine::general_purpose::STANDARD.encode(b"raw-bytes");
+    let err = match svc.import_key_material(&make_request(
+        "ImportKeyMaterial",
+        json!({
+            "KeyId": key_id,
+            "ImportToken": bogus_token,
+            "EncryptedKeyMaterial": bogus_material,
+        }),
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("expected InvalidImportTokenException"),
+    };
+    assert!(format!("{:?}", err).contains("InvalidImportTokenException"));
+}
+
+#[test]
+fn import_key_material_rejects_token_for_other_key() {
+    use base64::Engine;
+    use rsa::pkcs8::DecodePublicKey;
+
+    let svc = make_service();
+    let key_a = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
+    let key_b = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
+
+    // Token issued for key_a, but caller tries to use it for key_b.
+    let resp = svc
+        .get_parameters_for_import(&make_request(
+            "GetParametersForImport",
+            json!({"KeyId": key_a, "WrappingAlgorithm": "RSAES_OAEP_SHA_256"}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let token = body["ImportToken"].as_str().unwrap().to_string();
+    let pub_der = base64::engine::general_purpose::STANDARD
+        .decode(body["PublicKey"].as_str().unwrap())
+        .unwrap();
+    let public = rsa::RsaPublicKey::from_public_key_der(&pub_der).unwrap();
+    let mut rng = rand::thread_rng();
+    let wrapped = public
+        .encrypt(&mut rng, rsa::Oaep::new::<rsa::sha2::Sha256>(), b"material")
+        .unwrap();
+    let wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&wrapped);
+
+    let err = match svc.import_key_material(&make_request(
+        "ImportKeyMaterial",
+        json!({
+            "KeyId": key_b,
+            "ImportToken": token,
+            "EncryptedKeyMaterial": wrapped_b64,
+            "WrappingAlgorithm": "RSAES_OAEP_SHA_256",
+        }),
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("expected InvalidImportTokenException for cross-key token"),
+    };
+    assert!(format!("{:?}", err).contains("InvalidImportTokenException"));
+}
+
+#[test]
+fn import_key_material_token_is_single_use() {
+    use base64::Engine;
+    use rsa::pkcs8::DecodePublicKey;
+
+    let svc = make_service();
+    let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
+
+    let resp = svc
+        .get_parameters_for_import(&make_request(
+            "GetParametersForImport",
+            json!({"KeyId": key_id, "WrappingAlgorithm": "RSAES_OAEP_SHA_256"}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let token = body["ImportToken"].as_str().unwrap().to_string();
+    let pub_der = base64::engine::general_purpose::STANDARD
+        .decode(body["PublicKey"].as_str().unwrap())
+        .unwrap();
+    let public = rsa::RsaPublicKey::from_public_key_der(&pub_der).unwrap();
+    let mut rng = rand::thread_rng();
+    let wrapped = public
+        .encrypt(&mut rng, rsa::Oaep::new::<rsa::sha2::Sha256>(), b"material")
+        .unwrap();
+    let wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&wrapped);
+
+    // First import succeeds.
+    svc.import_key_material(&make_request(
+        "ImportKeyMaterial",
+        json!({
+            "KeyId": key_id,
+            "ImportToken": token.clone(),
+            "EncryptedKeyMaterial": wrapped_b64.clone(),
+            "WrappingAlgorithm": "RSAES_OAEP_SHA_256",
+        }),
+    ))
+    .unwrap();
+
+    // Replay with the same token must fail — the token was single-use.
+    let err = match svc.import_key_material(&make_request(
+        "ImportKeyMaterial",
+        json!({
+            "KeyId": key_id,
+            "ImportToken": token,
+            "EncryptedKeyMaterial": wrapped_b64,
+            "WrappingAlgorithm": "RSAES_OAEP_SHA_256",
+        }),
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("expected InvalidImportTokenException on token replay"),
+    };
+    assert!(format!("{:?}", err).contains("InvalidImportTokenException"));
+}
+
+#[test]
+fn import_key_material_rejects_garbage_ciphertext() {
+    let svc = make_service();
+    let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
+
+    let resp = svc
+        .get_parameters_for_import(&make_request(
+            "GetParametersForImport",
+            json!({"KeyId": key_id, "WrappingAlgorithm": "RSAES_OAEP_SHA_256"}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let token = body["ImportToken"].as_str().unwrap().to_string();
+
+    // Random 256-byte payload — won't OAEP-decrypt under any key.
+    let garbage = vec![0xab_u8; 256];
+    let garbage_b64 = base64::engine::general_purpose::STANDARD.encode(&garbage);
+
+    let err = match svc.import_key_material(&make_request(
+        "ImportKeyMaterial",
+        json!({
+            "KeyId": key_id,
+            "ImportToken": token,
+            "EncryptedKeyMaterial": garbage_b64,
+            "WrappingAlgorithm": "RSAES_OAEP_SHA_256",
+        }),
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("expected InvalidCiphertextException"),
+    };
+    assert!(format!("{:?}", err).contains("InvalidCiphertextException"));
 }
