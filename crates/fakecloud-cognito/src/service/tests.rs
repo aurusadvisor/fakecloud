@@ -6500,3 +6500,202 @@ fn list_web_authn_credentials_empty_when_none() {
     let b = resp_json(&resp);
     assert!(b["Credentials"].as_array().unwrap().is_empty());
 }
+
+// ── Y1: real RSA-2048 RS256 JWT signing ──
+
+#[test]
+fn create_user_pool_generates_rsa_keypair() {
+    use rsa::pkcs8::DecodePrivateKey;
+
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+
+    let pem = {
+        let mas = state.read();
+        mas.default_ref()
+            .user_pools
+            .get(&pool_id)
+            .unwrap()
+            .signing_key_pem
+            .clone()
+            .expect("signing_key_pem should be set on CreateUserPool")
+    };
+
+    let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(&pem)
+        .expect("stored PEM should round-trip through RsaPrivateKey::from_pkcs8_pem");
+    // Sanity-check 2048-bit modulus.
+    use rsa::traits::PublicKeyParts;
+    assert_eq!(private_key.n().bits(), 2048);
+}
+
+#[test]
+fn initiate_auth_returns_real_rs256_signed_id_token() {
+    use base64::Engine as _;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::sha2::Sha256;
+    use rsa::signature::Verifier;
+
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "rs256user");
+    set_user_password(&svc, &pool_id, "rs256user", "SecurePass1!");
+
+    let body = json!({
+        "ClientId": client_id,
+        "AuthFlow": "USER_PASSWORD_AUTH",
+        "AuthParameters": {
+            "USERNAME": "rs256user",
+            "PASSWORD": "SecurePass1!",
+        },
+    });
+    let req = make_req("InitiateAuth", &body.to_string());
+    let resp = block_on(svc.initiate_auth(&req)).unwrap();
+    let b = resp_json(&resp);
+    let id_token = b["AuthenticationResult"]["IdToken"]
+        .as_str()
+        .expect("IdToken in response")
+        .to_string();
+
+    let parts: Vec<&str> = id_token.split('.').collect();
+    assert_eq!(parts.len(), 3, "JWT must be three dot-separated segments");
+
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header: Value = serde_json::from_slice(&b64url.decode(parts[0]).unwrap()).unwrap();
+    assert_eq!(header["alg"], "RS256");
+    assert!(
+        header["kid"].as_str().is_some_and(|k| !k.is_empty()),
+        "kid must be non-empty: {header:?}"
+    );
+
+    let pem = {
+        let mas = state.read();
+        mas.default_ref()
+            .user_pools
+            .get(&pool_id)
+            .unwrap()
+            .signing_key_pem
+            .clone()
+            .unwrap()
+    };
+    let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(&pem).unwrap();
+    let public_key = rsa::RsaPublicKey::from(&private_key);
+    let verifying_key = VerifyingKey::<Sha256>::new(public_key);
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig_bytes = b64url.decode(parts[2]).unwrap();
+    let signature = Signature::try_from(sig_bytes.as_slice()).unwrap();
+    verifying_key
+        .verify(signing_input.as_bytes(), &signature)
+        .expect("ID token signature must verify against pool's public key");
+}
+
+#[test]
+fn id_token_signature_changes_with_payload() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "siguser1");
+    set_user_password(&svc, &pool_id, "siguser1", "SecurePass1!");
+    admin_create_user_helper(&svc, &pool_id, "siguser2");
+    set_user_password(&svc, &pool_id, "siguser2", "SecurePass1!");
+
+    let auth = |username: &str| -> String {
+        let body = json!({
+            "ClientId": client_id,
+            "AuthFlow": "USER_PASSWORD_AUTH",
+            "AuthParameters": {"USERNAME": username, "PASSWORD": "SecurePass1!"},
+        });
+        let req = make_req("InitiateAuth", &body.to_string());
+        let resp = block_on(svc.initiate_auth(&req)).unwrap();
+        resp_json(&resp)["AuthenticationResult"]["IdToken"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    let a = auth("siguser1");
+    let b = auth("siguser2");
+    let sig_a = a.split('.').nth(2).unwrap();
+    let sig_b = b.split('.').nth(2).unwrap();
+    assert_ne!(
+        sig_a, sig_b,
+        "two different InitiateAuth payloads should produce distinct signatures"
+    );
+}
+
+#[test]
+fn id_token_signature_invalid_when_tampered() {
+    use base64::Engine as _;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::sha2::Sha256;
+    use rsa::signature::Verifier;
+
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "tamperuser");
+    set_user_password(&svc, &pool_id, "tamperuser", "SecurePass1!");
+
+    let body = json!({
+        "ClientId": client_id,
+        "AuthFlow": "USER_PASSWORD_AUTH",
+        "AuthParameters": {"USERNAME": "tamperuser", "PASSWORD": "SecurePass1!"},
+    });
+    let req = make_req("InitiateAuth", &body.to_string());
+    let resp = block_on(svc.initiate_auth(&req)).unwrap();
+    let id_token = resp_json(&resp)["AuthenticationResult"]["IdToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let parts: Vec<&str> = id_token.split('.').collect();
+
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let mut payload: Value = serde_json::from_slice(&b64url.decode(parts[1]).unwrap()).unwrap();
+    payload["sub"] = json!("attacker");
+    let tampered_payload_b64 = b64url.encode(payload.to_string().as_bytes());
+    let tampered_input = format!("{}.{}", parts[0], tampered_payload_b64);
+
+    let pem = {
+        let mas = state.read();
+        mas.default_ref()
+            .user_pools
+            .get(&pool_id)
+            .unwrap()
+            .signing_key_pem
+            .clone()
+            .unwrap()
+    };
+    let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(&pem).unwrap();
+    let public_key = rsa::RsaPublicKey::from(&private_key);
+    let verifying_key = VerifyingKey::<Sha256>::new(public_key);
+    let sig_bytes = b64url.decode(parts[2]).unwrap();
+    let signature = Signature::try_from(sig_bytes.as_slice()).unwrap();
+    verifying_key
+        .verify(tampered_input.as_bytes(), &signature)
+        .expect_err("tampered payload must not verify with original signature");
+}
+
+#[test]
+fn two_pools_have_distinct_keys() {
+    let (svc, state) = make_svc();
+    // create_pool reuses the same name; CreateUserPool happily creates
+    // multiple pools with the same name (each gets a unique ID).
+    let pool_a = create_pool(&svc);
+    let pool_b = create_pool(&svc);
+    assert_ne!(pool_a, pool_b);
+
+    let (pem_a, pem_b) = {
+        let mas = state.read();
+        let pools = &mas.default_ref().user_pools;
+        (
+            pools.get(&pool_a).unwrap().signing_key_pem.clone().unwrap(),
+            pools.get(&pool_b).unwrap().signing_key_pem.clone().unwrap(),
+        )
+    };
+    assert_ne!(
+        pem_a, pem_b,
+        "two distinct pools must hold distinct RSA keypairs"
+    );
+}

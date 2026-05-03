@@ -141,12 +141,12 @@ impl CognitoService {
         let verification_message_template =
             parse_verification_message_template(&body["VerificationMessageTemplate"]);
 
-        // Defer RSA-2048 keypair generation until first JWT sign /
-        // JWKS read. Generating eagerly here makes CreateUserPool spend
-        // ~100ms on every call (sometimes much more under load), which
-        // also blocks the Tokio worker thread and cascades into
-        // connection failures when many CreateUserPool calls fly in
-        // simultaneously (conformance burst tests, integration suites).
+        // Generate the per-pool RSA-2048 keypair eagerly so every
+        // token-issuing path (InitiateAuth, RespondToAuthChallenge,
+        // AdminInitiateAuth, GetTokensFromRefreshToken, OAuth2 token
+        // grant) signs with a real RS256 signature out of the box.
+        // Real AWS Cognito assigns the keypair at pool creation time too.
+        let signing_key_pem = crate::jwt::generate_pool_signing_key();
         let signing_kid = format!("{pool_id}-key-1");
         let pool = UserPool {
             id: pool_id.clone(),
@@ -176,7 +176,7 @@ impl CognitoService {
             sms_mfa_configuration: None,
             user_pool_tier,
             verification_message_template,
-            signing_key_pem: None,
+            signing_key_pem: Some(signing_key_pem),
             signing_kid: Some(signing_kid),
         };
 
