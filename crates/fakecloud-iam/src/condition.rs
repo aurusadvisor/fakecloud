@@ -27,26 +27,31 @@
 //! Plus the `...IfExists` suffix and the `ForAllValues:` / `ForAnyValue:`
 //! qualifiers on every operator.
 //!
-//! **Implemented global keys** (Phase 2 initial set):
+//! **Implemented global keys**:
 //!
-//! - `aws:username`
-//! - `aws:userid`
-//! - `aws:PrincipalArn`
-//! - `aws:PrincipalAccount`
-//! - `aws:PrincipalType`
-//! - `aws:SourceIp`
-//! - `aws:CurrentTime`
-//! - `aws:EpochTime`
-//! - `aws:SecureTransport`
-//! - `aws:RequestedRegion`
-//! - `aws:MultiFactorAuthPresent`
-//! - `aws:MultiFactorAuthAge`
-//! - `aws:CalledVia`
-//! - `aws:SourceVpc`
-//! - `aws:SourceVpce`
-//! - `aws:VpcSourceIp`
-//! - `aws:FederatedProvider`
-//! - `aws:TokenIssueTime`
+//! - `aws:username` — populated from the IAM user ARN at dispatch time;
+//!   absent for assumed-role / federated-user / root principals,
+//!   matching AWS.
+//! - `aws:userid` — `<role-id>:<RoleSessionName>` for assumed-role
+//!   sessions, the IAM user's `AIDA...` id for IAM users.
+//! - `aws:PrincipalArn`, `aws:PrincipalAccount`, `aws:PrincipalType`
+//! - `aws:SourceIp` — remote-address of the HTTP connection.
+//! - `aws:CurrentTime`, `aws:EpochTime`
+//! - `aws:SecureTransport`, `aws:RequestedRegion`
+//! - `aws:MultiFactorAuthPresent` — `true` iff the underlying STS
+//!   session was minted with `SerialNumber` + `TokenCode`.
+//! - `aws:MultiFactorAuthAge` — seconds since the MFA-asserted session
+//!   was minted; only present when MFA was supplied at mint time.
+//! - `aws:CalledVia` — multi-value chain of service principals that
+//!   re-invoked downstream services on the caller's behalf.
+//! - `aws:SourceVpc`, `aws:SourceVpce`, `aws:VpcSourceIp` — populated
+//!   when the request transited a VPC interface endpoint.
+//! - `aws:FederatedProvider` — SAML provider ARN for
+//!   `AssumeRoleWithSAML`, OIDC provider ARN (or `ProviderId` host)
+//!   for `AssumeRoleWithWebIdentity`. Absent for IAM user keys, plain
+//!   `AssumeRole`, `GetSessionToken`, `GetFederationToken`.
+//! - `aws:TokenIssueTime` — wall-clock time at which the underlying
+//!   STS credential was issued. Absent for IAM user access keys.
 //!
 //! Service-specific keys (`s3:prefix`, `sqs:MessageAttribute`, …) are
 //! deferred to a follow-up batch; the [`ConditionContext::service_keys`]
@@ -931,5 +936,268 @@ mod tests {
         assert!(!cidr_match("10.0.0.0/8", "11.0.0.1"));
         assert!(cidr_match("0.0.0.0/0", "1.2.3.4"));
         assert!(!cidr_match("invalid", "1.2.3.4"));
+    }
+
+    // ---- F3 global condition keys ----
+
+    #[test]
+    fn mfa_present_bool_true() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_mfa_present = Some(true);
+        let b = compile(json!({
+            "Bool": { "aws:MultiFactorAuthPresent": "true" }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn mfa_present_bool_false_when_absent_session() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_mfa_present = Some(false);
+        let b = compile(json!({
+            "Bool": { "aws:MultiFactorAuthPresent": "true" }
+        }));
+        assert!(!b.matches(&ctx));
+    }
+
+    #[test]
+    fn mfa_present_missing_key_safe_fails_without_if_exists() {
+        // Long-lived IAM user keys never have MFA; a policy that
+        // requires it must safe-fail.
+        let ctx = ctx_user("alice");
+        let b = compile(json!({
+            "Bool": { "aws:MultiFactorAuthPresent": "true" }
+        }));
+        assert!(!b.matches(&ctx));
+    }
+
+    #[test]
+    fn mfa_present_if_exists_passes_when_absent() {
+        let ctx = ctx_user("alice");
+        let b = compile(json!({
+            "BoolIfExists": { "aws:MultiFactorAuthPresent": "true" }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn mfa_age_numeric_less_than() {
+        // Session minted 60 seconds ago — policy requires age < 3600.
+        let mut ctx = ctx_user("alice");
+        ctx.aws_mfa_age_seconds = Some(60);
+        let b = compile(json!({
+            "NumericLessThan": { "aws:MultiFactorAuthAge": "3600" }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn mfa_age_numeric_greater_than_blocks_old_sessions() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_mfa_age_seconds = Some(7200);
+        let b = compile(json!({
+            "NumericLessThan": { "aws:MultiFactorAuthAge": "3600" }
+        }));
+        assert!(!b.matches(&ctx));
+    }
+
+    #[test]
+    fn called_via_string_equals_matches_first_hop() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_called_via = vec!["cloudformation.amazonaws.com".into()];
+        let b = compile(json!({
+            "StringEquals": { "aws:CalledVia": "cloudformation.amazonaws.com" }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn called_via_for_any_value_matches_in_chain() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_called_via = vec![
+            "cloudformation.amazonaws.com".into(),
+            "athena.amazonaws.com".into(),
+        ];
+        let b = compile(json!({
+            "ForAnyValue:StringEquals": {
+                "aws:CalledVia": ["athena.amazonaws.com", "lambda.amazonaws.com"]
+            }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn called_via_for_all_values_requires_every_hop_in_set() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_called_via = vec![
+            "cloudformation.amazonaws.com".into(),
+            "athena.amazonaws.com".into(),
+        ];
+        let b = compile(json!({
+            "ForAllValues:StringEquals": {
+                "aws:CalledVia": ["cloudformation.amazonaws.com", "athena.amazonaws.com", "lambda.amazonaws.com"]
+            }
+        }));
+        assert!(b.matches(&ctx));
+        // Add a hop not in the policy set; ForAllValues now fails.
+        ctx.aws_called_via.push("ec2.amazonaws.com".into());
+        assert!(!b.matches(&ctx));
+    }
+
+    #[test]
+    fn source_vpce_string_equals() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_source_vpce = Some("vpce-0abcd1234".into());
+        let b = compile(json!({
+            "StringEquals": { "aws:SourceVpce": "vpce-0abcd1234" }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn source_vpce_string_not_equals_blocks_other() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_source_vpce = Some("vpce-bad".into());
+        let b = compile(json!({
+            "StringEquals": { "aws:SourceVpce": "vpce-good" }
+        }));
+        assert!(!b.matches(&ctx));
+    }
+
+    #[test]
+    fn source_vpc_string_equals() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_source_vpc = Some("vpc-1a2b3c".into());
+        let b = compile(json!({
+            "StringEquals": { "aws:SourceVpc": "vpc-1a2b3c" }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn vpc_source_ip_cidr_match() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_vpc_source_ip = Some("172.31.5.10".parse().unwrap());
+        let b = compile(json!({
+            "IpAddress": { "aws:VpcSourceIp": "172.31.0.0/16" }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn vpc_source_ip_cidr_outside() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_vpc_source_ip = Some("10.0.0.5".parse().unwrap());
+        let b = compile(json!({
+            "IpAddress": { "aws:VpcSourceIp": "172.31.0.0/16" }
+        }));
+        assert!(!b.matches(&ctx));
+    }
+
+    #[test]
+    fn federated_provider_string_equals_saml_arn() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_federated_provider = Some("arn:aws:iam::123456789012:saml-provider/idp".into());
+        let b = compile(json!({
+            "StringEquals": {
+                "aws:FederatedProvider": "arn:aws:iam::123456789012:saml-provider/idp"
+            }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn federated_provider_string_like_oidc_host() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_federated_provider = Some("accounts.google.com".into());
+        let b = compile(json!({
+            "StringLike": { "aws:FederatedProvider": "accounts.*" }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn token_issue_time_date_less_than() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_token_issue_time = DateTime::parse_from_rfc3339("2024-06-01T00:00:00Z")
+            .ok()
+            .map(|d| d.with_timezone(&Utc));
+        let b = compile(json!({
+            "DateLessThan": { "aws:TokenIssueTime": "2024-12-31T23:59:59Z" }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn token_issue_time_date_greater_than_blocks_old_token() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_token_issue_time = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .ok()
+            .map(|d| d.with_timezone(&Utc));
+        let b = compile(json!({
+            "DateGreaterThan": { "aws:TokenIssueTime": "2024-06-01T00:00:00Z" }
+        }));
+        assert!(!b.matches(&ctx));
+    }
+
+    #[test]
+    fn userid_string_equals_assumed_role_format() {
+        // AWS userid format for assumed roles: <role-id>:<RoleSessionName>
+        let mut ctx = ctx_user("alice");
+        ctx.aws_userid = Some("AROAEXAMPLE:bob-session".into());
+        let b = compile(json!({
+            "StringEquals": { "aws:userid": "AROAEXAMPLE:bob-session" }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn userid_string_like_wildcard() {
+        let mut ctx = ctx_user("alice");
+        ctx.aws_userid = Some("AROAEXAMPLE:bob-session".into());
+        let b = compile(json!({
+            "StringLike": { "aws:userid": "AROAEXAMPLE:*" }
+        }));
+        assert!(b.matches(&ctx));
+    }
+
+    #[test]
+    fn username_lookup_case_insensitive_for_f3_keys() {
+        // AWS treats every condition key case-insensitively. Spot-check
+        // each F3 key's lookup with mixed case.
+        let mut ctx = ctx_user("alice");
+        ctx.aws_mfa_present = Some(true);
+        ctx.aws_called_via = vec!["lambda.amazonaws.com".into()];
+        ctx.aws_source_vpc = Some("vpc-x".into());
+        ctx.aws_federated_provider = Some("accounts.google.com".into());
+        ctx.aws_token_issue_time = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .ok()
+            .map(|d| d.with_timezone(&Utc));
+
+        assert!(ctx.lookup("AWS:MULTIFACTORAUTHPRESENT").is_some());
+        assert!(ctx.lookup("aws:multifactorauthpresent").is_some());
+        assert!(ctx.lookup("aws:CalledVia").is_some());
+        assert!(ctx.lookup("AWS:SOURCEVPC").is_some());
+        assert!(ctx.lookup("aws:FederatedProvider").is_some());
+        assert!(ctx.lookup("aws:tokenissuetime").is_some());
+    }
+
+    #[test]
+    fn combined_mfa_and_token_issue_time() {
+        // Realistic policy: only allow when MFA is present AND the
+        // session was minted in the last hour. Combined AND semantics.
+        let mut ctx = ctx_user("alice");
+        ctx.aws_mfa_present = Some(true);
+        ctx.aws_mfa_age_seconds = Some(120);
+        ctx.aws_token_issue_time = Some(Utc::now() - chrono::Duration::seconds(120));
+        let b = compile(json!({
+            "Bool": { "aws:MultiFactorAuthPresent": "true" },
+            "NumericLessThan": { "aws:MultiFactorAuthAge": "3600" }
+        }));
+        assert!(b.matches(&ctx));
+
+        // Bump the age past the policy ceiling — denied.
+        ctx.aws_mfa_age_seconds = Some(7200);
+        assert!(!b.matches(&ctx));
     }
 }

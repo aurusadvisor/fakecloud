@@ -525,6 +525,10 @@ impl StsService {
                 expiration: expiration_at,
                 session_policies,
                 mfa_present: mfa_present_for_session,
+                issued_at: Utc::now(),
+                // Plain AssumeRole does not federate — `aws:FederatedProvider`
+                // stays absent for the resulting session.
+                federated_provider: None,
             },
         );
 
@@ -636,6 +640,20 @@ impl StsService {
                 account_id: account_id.clone(),
             },
         );
+        // `aws:FederatedProvider` is the OIDC provider ARN (or the
+        // friendly host name when supplied via `ProviderId`). Real AWS
+        // populates it from the registered OIDC provider used during
+        // token validation; this emulator carries the caller-supplied
+        // ProviderId verbatim, falling back to a synthetic OIDC
+        // provider ARN keyed off the role's account when absent so a
+        // policy condition that just checks for "any federated session"
+        // still has a value to bind to.
+        let federated_provider = req.query_params.get("ProviderId").cloned().or_else(|| {
+            Some(format!(
+                "arn:aws:iam::{}:oidc-provider/web-identity",
+                account_id
+            ))
+        });
         target_state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
@@ -648,6 +666,8 @@ impl StsService {
                 expiration: expiration_at,
                 session_policies,
                 mfa_present: false,
+                issued_at: Utc::now(),
+                federated_provider,
             },
         );
 
@@ -685,7 +705,9 @@ impl StsService {
             )
         })?;
         validate_string_length("principalArn", principal_arn, 20, 2048)?;
-        let _principal_arn = principal_arn.clone();
+        // Snapshot the SAML provider ARN so we can stash it on the
+        // session as `aws:FederatedProvider` after this scope ends.
+        let saml_provider_arn = principal_arn.clone();
 
         // SAMLAssertion is required but we just need to extract session name from it
         let saml_assertion = req.query_params.get("SAMLAssertion").ok_or_else(|| {
@@ -755,6 +777,10 @@ impl StsService {
                 account_id: account_id.clone(),
             },
         );
+        // SAML federation: the PrincipalArn parameter carries the SAML
+        // provider ARN that vouched for the assertion, and AWS surfaces
+        // exactly that ARN as `aws:FederatedProvider` for the session.
+        let federated_provider = Some(saml_provider_arn);
         target_state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
@@ -767,6 +793,8 @@ impl StsService {
                 expiration: expiration_at,
                 session_policies,
                 mfa_present: false,
+                issued_at: Utc::now(),
+                federated_provider,
             },
         );
 
@@ -874,6 +902,9 @@ impl StsService {
                 expiration: expiration_at,
                 session_policies: Vec::new(),
                 mfa_present: mfa_present_for_session,
+                issued_at: Utc::now(),
+                // GetSessionToken doesn't federate.
+                federated_provider: None,
             },
         );
 
@@ -953,6 +984,10 @@ impl StsService {
                 expiration: expiration_at,
                 session_policies,
                 mfa_present: false,
+                issued_at: Utc::now(),
+                // GetFederationToken yields a federated user, not a federated
+                // provider — `aws:FederatedProvider` stays absent.
+                federated_provider: None,
             },
         );
 
@@ -1126,6 +1161,8 @@ impl StsService {
                 expiration: expiration_at,
                 session_policies: Vec::new(),
                 mfa_present: false,
+                issued_at: Utc::now(),
+                federated_provider: None,
             },
         );
 
@@ -1839,6 +1876,251 @@ mod tests {
         assert!(
             any_mfa,
             "expected at least one minted credential with mfa_present=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn assume_role_with_mfa_resolved_credential_drives_iam_evaluator() {
+        // E2E: assume role with MFA, fetch the issued credential through
+        // the same `CredentialResolver` adapter dispatch uses, then run
+        // the IAM evaluator on a policy that gates on
+        // `aws:MultiFactorAuthPresent: true`. This wires
+        // sts_service -> StsTempCredential -> SecretLookup ->
+        // ResolvedCredential -> ConditionContext end to end and proves
+        // the MFA assertion survives every hop.
+        use crate::credential_resolver::IamCredentialResolver;
+        use crate::evaluator::{
+            evaluate as eval_policies, EvalRequest, PolicyDocument, RequestContext,
+        };
+        use fakecloud_core::auth::{ConditionContext, CredentialResolver};
+
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "mfa-e2e", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "ops"),
+                ("SerialNumber", "arn:aws:iam::123456789012:mfa/alice"),
+                ("TokenCode", "654321"),
+            ],
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        // Pull the AccessKeyId out of the XML response and resolve it.
+        let access_key_id = body
+            .split("<AccessKeyId>")
+            .nth(1)
+            .and_then(|s| s.split("</AccessKeyId>").next())
+            .expect("response should contain AccessKeyId")
+            .to_string();
+        let resolver = IamCredentialResolver::new(state.clone());
+        let resolved = resolver
+            .resolve(&access_key_id)
+            .expect("issued credential must resolve through the resolver");
+        assert!(
+            resolved.mfa_present,
+            "F3: MFA flag must survive the resolver hop"
+        );
+        assert!(
+            resolved.token_issued_at.is_some(),
+            "F3: token_issued_at must be populated for STS sessions"
+        );
+
+        // Mirror what dispatch does: build a ConditionContext from the
+        // resolved credential, then evaluate a permission policy that
+        // requires MFA.
+        let mut ctx: RequestContext = ConditionContext {
+            aws_principal_arn: Some(resolved.principal.arn.clone()),
+            aws_principal_account: Some(resolved.principal.account_id.clone()),
+            aws_userid: Some(resolved.principal.user_id.clone()),
+            aws_mfa_present: Some(resolved.mfa_present),
+            aws_token_issue_time: resolved.token_issued_at,
+            aws_federated_provider: resolved.federated_provider.clone(),
+            ..Default::default()
+        };
+        if resolved.mfa_present {
+            if let Some(issued) = resolved.token_issued_at {
+                ctx.aws_mfa_age_seconds = Some(
+                    Utc::now()
+                        .signed_duration_since(issued)
+                        .num_seconds()
+                        .max(0),
+                );
+            }
+        }
+
+        let policy = PolicyDocument::parse(
+            r#"{"Version":"2012-10-17","Statement":[{
+                "Effect":"Allow",
+                "Action":"s3:GetObject",
+                "Resource":"*",
+                "Condition":{"Bool":{"aws:MultiFactorAuthPresent":"true"}}
+            }]}"#,
+        );
+        let eval = EvalRequest {
+            principal: &resolved.principal,
+            action: "s3:GetObject".to_string(),
+            resource: "arn:aws:s3:::secrets/k".to_string(),
+            context: ctx,
+        };
+        let decision = eval_policies(&[policy], &eval);
+        assert_eq!(
+            decision,
+            crate::evaluator::Decision::Allow,
+            "F3: MFA-gated allow must fire when session was minted with MFA"
+        );
+
+        // Negative control: same evaluator wiring but without MFA on
+        // the resolved credential -> implicit deny.
+        let req_no_mfa = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "no-mfa")],
+        );
+        let resp_no_mfa = svc.handle(req_no_mfa).await.unwrap();
+        let body_no_mfa = std::str::from_utf8(resp_no_mfa.body.expect_bytes()).unwrap();
+        let akid_no_mfa = body_no_mfa
+            .split("<AccessKeyId>")
+            .nth(1)
+            .and_then(|s| s.split("</AccessKeyId>").next())
+            .unwrap()
+            .to_string();
+        let resolved_no_mfa = resolver.resolve(&akid_no_mfa).unwrap();
+        assert!(!resolved_no_mfa.mfa_present);
+        let policy2 = PolicyDocument::parse(
+            r#"{"Version":"2012-10-17","Statement":[{
+                "Effect":"Allow",
+                "Action":"s3:GetObject",
+                "Resource":"*",
+                "Condition":{"Bool":{"aws:MultiFactorAuthPresent":"true"}}
+            }]}"#,
+        );
+        let ctx2 = ConditionContext {
+            aws_principal_arn: Some(resolved_no_mfa.principal.arn.clone()),
+            aws_userid: Some(resolved_no_mfa.principal.user_id.clone()),
+            aws_mfa_present: Some(resolved_no_mfa.mfa_present),
+            aws_token_issue_time: resolved_no_mfa.token_issued_at,
+            ..Default::default()
+        };
+        let eval2 = EvalRequest {
+            principal: &resolved_no_mfa.principal,
+            action: "s3:GetObject".to_string(),
+            resource: "arn:aws:s3:::secrets/k".to_string(),
+            context: ctx2,
+        };
+        assert_eq!(
+            eval_policies(&[policy2], &eval2),
+            crate::evaluator::Decision::ImplicitDeny,
+            "F3: MFA-gated allow must NOT fire when session was minted without MFA"
+        );
+    }
+
+    #[tokio::test]
+    async fn assume_role_with_saml_populates_federated_provider() {
+        // F3: AssumeRoleWithSAML must surface the SAML provider ARN as
+        // `aws:FederatedProvider` on the resulting session.
+        use crate::credential_resolver::IamCredentialResolver;
+        use base64::Engine;
+        use fakecloud_core::auth::CredentialResolver;
+        let (svc, state) = make_sts_service();
+        let role_arn = create_role_in_state(&state, "saml-role");
+        let saml_xml = r#"<?xml version="1.0"?><samlp:Response><Assertion><AttributeStatement><Attribute Name="https://aws.amazon.com/SAML/Attributes/RoleSessionName"><AttributeValue>jane</AttributeValue></Attribute></AttributeStatement></Assertion></samlp:Response>"#;
+        let saml_b64 = base64::engine::general_purpose::STANDARD.encode(saml_xml);
+        let provider_arn = "arn:aws:iam::123456789012:saml-provider/idp";
+        let req = sts_request(
+            "AssumeRoleWithSAML",
+            vec![
+                ("RoleArn", &role_arn),
+                ("PrincipalArn", provider_arn),
+                ("SAMLAssertion", &saml_b64),
+            ],
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        let access_key_id = body
+            .split("<AccessKeyId>")
+            .nth(1)
+            .and_then(|s| s.split("</AccessKeyId>").next())
+            .unwrap()
+            .to_string();
+        let resolver = IamCredentialResolver::new(state.clone());
+        let resolved = resolver.resolve(&access_key_id).unwrap();
+        assert_eq!(
+            resolved.federated_provider.as_deref(),
+            Some(provider_arn),
+            "AssumeRoleWithSAML must populate aws:FederatedProvider with the SAML provider ARN"
+        );
+    }
+
+    #[tokio::test]
+    async fn assume_role_with_web_identity_populates_federated_provider() {
+        // F3: AssumeRoleWithWebIdentity must populate
+        // `aws:FederatedProvider`. With ProviderId we carry it verbatim;
+        // without ProviderId we synthesize an OIDC provider ARN keyed
+        // off the role's account so policies that simply check for the
+        // presence of a federated provider still bind.
+        use crate::credential_resolver::IamCredentialResolver;
+        use fakecloud_core::auth::CredentialResolver;
+        let (svc, state) = make_sts_service();
+        let role_arn = create_role_in_state(&state, "oidc-role");
+        let req = sts_request(
+            "AssumeRoleWithWebIdentity",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "oidc-session"),
+                ("WebIdentityToken", "fake-jwt-blob"),
+                ("ProviderId", "accounts.google.com"),
+            ],
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        let access_key_id = body
+            .split("<AccessKeyId>")
+            .nth(1)
+            .and_then(|s| s.split("</AccessKeyId>").next())
+            .unwrap()
+            .to_string();
+        let resolver = IamCredentialResolver::new(state.clone());
+        let resolved = resolver.resolve(&access_key_id).unwrap();
+        assert_eq!(
+            resolved.federated_provider.as_deref(),
+            Some("accounts.google.com"),
+            "AssumeRoleWithWebIdentity must carry ProviderId as aws:FederatedProvider"
+        );
+    }
+
+    #[tokio::test]
+    async fn assume_role_userid_format_matches_aws() {
+        // AWS userid for assumed-role sessions: <role-id>:<RoleSessionName>.
+        // Verify the resolved credential's user_id matches that shape so
+        // a policy condition `aws:userid` can be matched correctly.
+        use crate::credential_resolver::IamCredentialResolver;
+        use fakecloud_core::auth::CredentialResolver;
+        let (svc, state) = make_sts_service();
+        let role_arn = create_role_in_state(&state, "userid-role");
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "carol")],
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        let access_key_id = body
+            .split("<AccessKeyId>")
+            .nth(1)
+            .and_then(|s| s.split("</AccessKeyId>").next())
+            .unwrap()
+            .to_string();
+        let resolver = IamCredentialResolver::new(state);
+        let resolved = resolver.resolve(&access_key_id).unwrap();
+        let uid = &resolved.principal.user_id;
+        assert!(
+            uid.contains(':'),
+            "assumed-role userid must be `<role-id>:<RoleSessionName>`, got `{uid}`"
+        );
+        assert!(
+            uid.ends_with(":carol"),
+            "assumed-role userid must end with the RoleSessionName, got `{uid}`"
         );
     }
 
