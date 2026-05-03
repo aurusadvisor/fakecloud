@@ -2,6 +2,7 @@ pub mod cors;
 pub mod extras;
 pub mod http_proxy;
 pub mod lambda_proxy;
+pub mod management;
 pub mod mock;
 pub mod router;
 pub(crate) mod service;

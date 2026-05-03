@@ -112,9 +112,10 @@ curl http://localhost:4566/_fakecloud/health
 
 ## API Gateway v2
 
-| Endpoint                            | Method | Description |
-| ----------------------------------- | ------ | ----------- |
-| `/_fakecloud/apigatewayv2/requests` | GET    | List all HTTP API requests received. |
+| Endpoint                              | Method | Description |
+| ------------------------------------- | ------ | ----------- |
+| `/_fakecloud/apigatewayv2/requests`   | GET    | List all HTTP API requests received. |
+| `/_fakecloud/apigatewayv2/connections` | GET   | List live WebSocket connections (id, api, stage, timestamps, source IP). |
 
 ## RDS
 

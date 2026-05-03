@@ -34,6 +34,15 @@ impl WebSocketRegistry {
     pub fn contains(&self, connection_id: &str) -> bool {
         self.connections.contains_key(connection_id)
     }
+
+    /// Bump `last_active_at` to now. AWS updates this whenever traffic flows
+    /// in either direction; we mirror that on inbound frames and outbound
+    /// `PostToConnection` calls.
+    pub fn touch(&mut self, connection_id: &str) {
+        if let Some(info) = self.connections.get_mut(connection_id) {
+            info.last_active_at = Utc::now();
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +53,10 @@ pub struct ConnectionInfo {
     pub connected_at: DateTime<Utc>,
     pub last_active_at: DateTime<Utc>,
     pub source_ip: String,
+    /// User-Agent header captured at WebSocket upgrade. Returned via
+    /// `GetConnection.identity.userAgent`. Optional: real AWS omits the
+    /// field entirely when the client didn't send a User-Agent.
+    pub user_agent: Option<String>,
     /// Outbound channel — `axum::extract::ws::Message::Close` triggers a close.
     pub sender: UnboundedSender<axum::extract::ws::Message>,
 }
