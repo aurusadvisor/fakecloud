@@ -2690,3 +2690,117 @@ fn import_key_material_rejects_garbage_ciphertext() {
     };
     assert!(format!("{:?}", err).contains("InvalidCiphertextException"));
 }
+
+#[test]
+fn encrypt_decrypt_round_trip_with_matching_encryption_context() {
+    use base64::Engine;
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"hello-world");
+
+    let enc = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({
+                "KeyId": key_id,
+                "Plaintext": plaintext,
+                "EncryptionContext": {"app": "prod", "owner": "platform"}
+            }),
+        ))
+        .unwrap();
+    let enc_body: Value = serde_json::from_slice(enc.body.expect_bytes()).unwrap();
+    let ciphertext = enc_body["CiphertextBlob"].as_str().unwrap().to_string();
+
+    let dec = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({
+                "CiphertextBlob": ciphertext,
+                // Same EC, different key order — canonicalization sorts.
+                "EncryptionContext": {"owner": "platform", "app": "prod"}
+            }),
+        ))
+        .unwrap();
+    let dec_body: Value = serde_json::from_slice(dec.body.expect_bytes()).unwrap();
+    assert_eq!(dec_body["Plaintext"].as_str().unwrap(), plaintext);
+}
+
+#[test]
+fn decrypt_rejects_mismatched_encryption_context() {
+    use base64::Engine;
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"hello-world");
+
+    let enc = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({
+                "KeyId": key_id,
+                "Plaintext": plaintext,
+                "EncryptionContext": {"app": "prod"}
+            }),
+        ))
+        .unwrap();
+    let enc_body: Value = serde_json::from_slice(enc.body.expect_bytes()).unwrap();
+    let ciphertext = enc_body["CiphertextBlob"].as_str().unwrap().to_string();
+
+    // Different EC at decrypt — must surface InvalidCiphertextException.
+    let err = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({
+                "CiphertextBlob": &ciphertext,
+                "EncryptionContext": {"app": "staging"}
+            }),
+        ))
+        .err()
+        .expect("EC mismatch must error");
+    assert!(format!("{err:?}").contains("InvalidCiphertextException"));
+
+    // Missing EC at decrypt — same outcome.
+    let err = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({"CiphertextBlob": &ciphertext}),
+        ))
+        .err()
+        .expect("missing EC must error when ciphertext was encrypted with one");
+    assert!(format!("{err:?}").contains("InvalidCiphertextException"));
+}
+
+#[test]
+fn re_encrypt_rejects_mismatched_source_encryption_context() {
+    use base64::Engine;
+    let svc = make_service();
+    let src_key = create_key(&svc);
+    let dst_key = create_key(&svc);
+    let plaintext = base64::engine::general_purpose::STANDARD.encode(b"swap-me");
+
+    let enc = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({
+                "KeyId": src_key,
+                "Plaintext": plaintext,
+                "EncryptionContext": {"src": "yes"}
+            }),
+        ))
+        .unwrap();
+    let enc_body: Value = serde_json::from_slice(enc.body.expect_bytes()).unwrap();
+    let ciphertext = enc_body["CiphertextBlob"].as_str().unwrap().to_string();
+
+    let err = svc
+        .re_encrypt(&make_request(
+            "ReEncrypt",
+            json!({
+                "CiphertextBlob": ciphertext,
+                "DestinationKeyId": dst_key,
+                // Wrong source EC.
+                "SourceEncryptionContext": {"src": "no"}
+            }),
+        ))
+        .err()
+        .expect("source EC mismatch must abort ReEncrypt");
+    assert!(format!("{err:?}").contains("InvalidCiphertextException"));
+}
