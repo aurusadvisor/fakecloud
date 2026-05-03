@@ -150,6 +150,12 @@ pub struct ApiGatewayService {
     delivery: Option<Arc<DeliveryBus>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// In-memory throttle + quota counters keyed per
+    /// `(account_id, plan_id, key_id)`. Token-bucket and per-period
+    /// counters are inherently transient — AWS itself doesn't expose
+    /// these to control-plane reads, and quotas reset on a wall-clock
+    /// boundary. Restart resetting the buckets is acceptable.
+    pub(crate) meters: Arc<parking_lot::Mutex<crate::data_plane::UsageMeters>>,
 }
 
 impl ApiGatewayService {
@@ -159,6 +165,9 @@ impl ApiGatewayService {
             delivery: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            meters: Arc::new(parking_lot::Mutex::new(
+                crate::data_plane::UsageMeters::default(),
+            )),
         }
     }
 
