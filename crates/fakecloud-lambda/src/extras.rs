@@ -387,9 +387,24 @@ impl LambdaService {
         };
         let new_image_uri = body["ImageUri"].as_str().map(String::from);
         let supplied_signing_profile = body["SigningProfileVersionArn"].as_str().map(String::from);
+        let supplied_revision_id = body["RevisionId"].as_str().map(String::from);
+        let new_architectures: Option<Vec<String>> = body["Architectures"].as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
+        let dry_run = body["DryRun"].as_bool().unwrap_or(false);
+        let publish = body["Publish"].as_bool().unwrap_or(false);
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+
+        // Function existence is the first check so callers always see
+        // ResourceNotFoundException 404 even when CSC / sig-profile
+        // fields would otherwise reject the request.
+        if !state.functions.contains_key(function_name) {
+            return Err(not_found("Function", function_name));
+        }
 
         // Code-signing gate: if a CSC is bound to this function and at
         // least one allowed publisher is registered, the caller must
@@ -410,7 +425,7 @@ impl LambdaService {
                     if !allowed {
                         return Err(AwsServiceError::aws_error(
                             StatusCode::BAD_REQUEST,
-                            "InvalidCodeSignatureException",
+                            "CodeVerificationFailedException",
                             "The code signature failed the integrity check or the signing profile is not in the allowed publishers list.",
                         ));
                     }
@@ -423,11 +438,30 @@ impl LambdaService {
             .get_mut(function_name)
             .ok_or_else(|| not_found("Function", function_name))?;
 
+        // Optimistic-concurrency precondition: when the caller supplies
+        // a RevisionId, it must match the function's current revision
+        // or AWS rejects with PreconditionFailedException 412.
+        if let Some(ref rev) = supplied_revision_id {
+            if rev != &func.revision_id {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::PRECONDITION_FAILED,
+                    "PreconditionFailedException",
+                    format!(
+                        "The Revision Id provided: {rev} does not match the latest Revision Id of function: {function_name}. Call the GetFunction/GetAlias API to retrieve the latest Revision Id"
+                    ),
+                ));
+            }
+        }
+
+        // DryRun validates the request shape but never mutates state.
+        if dry_run {
+            return ok(self.function_config_json(func));
+        }
+
         let mut changed = false;
         if let Some(bytes) = new_zip {
             // SHA256(base64) of the new code, matching CreateFunction's
             // hash so GetFunction returns identical CodeSha256 round-trip.
-            use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
             let hash = hasher.finalize();
@@ -440,12 +474,21 @@ impl LambdaService {
             func.code_zip = Some(bytes);
             func.code_sha256 = code_sha256;
             func.image_uri = None;
+            func.package_type = "Zip".to_string();
         } else if let Some(uri) = new_image_uri {
             if func.image_uri.as_deref() != Some(uri.as_str()) {
                 changed = true;
             }
             func.image_uri = Some(uri);
             func.code_zip = None;
+            func.package_type = "Image".to_string();
+        }
+
+        if let Some(arns) = new_architectures {
+            if !arns.is_empty() && arns != func.architectures {
+                changed = true;
+                func.architectures = arns;
+            }
         }
 
         if let Some(arn) = supplied_signing_profile {
@@ -463,6 +506,14 @@ impl LambdaService {
         if changed {
             func.revision_id = uuid::Uuid::new_v4().to_string();
         }
+
+        // Publish=true mints a new immutable version snapshot off the
+        // freshly updated $LATEST and returns that version's config.
+        if publish {
+            drop(accounts);
+            return self.publish_version(function_name, &req.account_id);
+        }
+
         ok(self.function_config_json(func))
     }
 

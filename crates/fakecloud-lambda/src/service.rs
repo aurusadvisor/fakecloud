@@ -1410,7 +1410,7 @@ impl LambdaService {
             .filter(|v| !v.is_null() && !v.as_object().map(|o| o.is_empty()).unwrap_or(false))
     }
 
-    fn publish_version(
+    pub(crate) fn publish_version(
         &self,
         function_name: &str,
         account_id: &str,
