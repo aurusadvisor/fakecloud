@@ -1,10 +1,52 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 
 pub type SharedApiGatewayV2State =
     Arc<parking_lot::RwLock<fakecloud_core::multi_account::MultiAccountState<ApiGatewayV2State>>>;
+
+/// Registry of live WebSocket connections, keyed by AWS-style connection id.
+/// Lives outside the persisted `ApiGatewayV2State` because senders can't be
+/// serialized; a single registry covers all accounts and APIs since connection
+/// ids are globally unique within a fakecloud process.
+pub type SharedWebSocketRegistry = Arc<parking_lot::RwLock<WebSocketRegistry>>;
+
+#[derive(Debug, Default)]
+pub struct WebSocketRegistry {
+    pub connections: HashMap<String, ConnectionInfo>,
+}
+
+impl WebSocketRegistry {
+    pub fn insert(&mut self, info: ConnectionInfo) {
+        self.connections.insert(info.connection_id.clone(), info);
+    }
+
+    pub fn remove(&mut self, connection_id: &str) -> Option<ConnectionInfo> {
+        self.connections.remove(connection_id)
+    }
+
+    pub fn get(&self, connection_id: &str) -> Option<&ConnectionInfo> {
+        self.connections.get(connection_id)
+    }
+
+    pub fn contains(&self, connection_id: &str) -> bool {
+        self.connections.contains_key(connection_id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConnectionInfo {
+    pub connection_id: String,
+    pub api_id: String,
+    pub stage: String,
+    pub connected_at: DateTime<Utc>,
+    pub last_active_at: DateTime<Utc>,
+    pub source_ip: String,
+    /// Outbound channel — `axum::extract::ws::Message::Close` triggers a close.
+    pub sender: UnboundedSender<axum::extract::ws::Message>,
+}
 
 impl fakecloud_core::multi_account::AccountState for ApiGatewayV2State {
     fn new_for_account(account_id: &str, region: &str, _endpoint: &str) -> Self {
