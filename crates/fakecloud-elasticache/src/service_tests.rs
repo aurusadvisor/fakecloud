@@ -890,6 +890,11 @@ fn add_cluster_to_replication_group_updates_members_and_count() {
             configuration_endpoint_address: None,
             configuration_endpoint_port: None,
             replicas_per_node_group: None,
+            auth_token: None,
+            port: 6379,
+            notification_topic_arn: None,
+            cluster_mode: None,
+            data_tiering_enabled: None,
         },
     );
 
@@ -950,6 +955,11 @@ async fn delete_cache_cluster_removes_cluster_from_replication_group() {
                 configuration_endpoint_address: None,
                 configuration_endpoint_port: None,
                 replicas_per_node_group: None,
+                auth_token: None,
+                port: 6379,
+                notification_topic_arn: None,
+                cluster_mode: None,
+                data_tiering_enabled: None,
             },
         );
     }
@@ -1035,6 +1045,11 @@ fn service_with_replication_group(group_id: &str, num_clusters: i32) -> ElastiCa
                 configuration_endpoint_address: None,
                 configuration_endpoint_port: None,
                 replicas_per_node_group: None,
+                auth_token: None,
+                port: 6379,
+                notification_topic_arn: None,
+                cluster_mode: None,
+                data_tiering_enabled: None,
             },
         );
     }
@@ -1298,6 +1313,11 @@ fn replication_group_xml_emits_dynamic_encryption_and_kms() {
             configuration_endpoint_address: Some("config.local".to_string()),
             configuration_endpoint_port: Some(6379),
             replicas_per_node_group: Some(1),
+            auth_token: Some("supersecret".to_string()),
+            port: 6379,
+            notification_topic_arn: Some("arn:aws:sns:us-east-1:123:topic-a".to_string()),
+            cluster_mode: Some("enabled".to_string()),
+            data_tiering_enabled: Some(false),
         },
     );
     let xml =
@@ -2500,6 +2520,284 @@ async fn create_replication_group_missing_description_errors() {
     let svc = ElastiCacheService::new(shared);
     let req = request("CreateReplicationGroup", &[("ReplicationGroupId", "rg")]);
     assert!(svc.create_replication_group(&req).await.is_err());
+}
+
+// Build a ReplicationGroup as if `CreateReplicationGroup` had run, by
+// running the same parsing path the handler does (sans runtime). Used
+// by the persistence round-trip tests below to exercise every input
+// the handler claims to accept.
+fn replication_group_from_request(req: &AwsRequest) -> crate::state::ReplicationGroup {
+    let id = required_query_param(req, "ReplicationGroupId").unwrap();
+    let description = required_query_param(req, "ReplicationGroupDescription").unwrap();
+    let engine = optional_query_param(req, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
+    let engine_version = optional_query_param(req, "EngineVersion").unwrap_or("7.1".into());
+    let cache_node_type =
+        optional_query_param(req, "CacheNodeType").unwrap_or("cache.t3.micro".into());
+    let num_cache_clusters: i32 = optional_query_param(req, "NumCacheClusters")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let automatic_failover_enabled =
+        parse_optional_bool(optional_query_param(req, "AutomaticFailoverEnabled").as_deref())
+            .unwrap()
+            .unwrap_or(false);
+    let transit_encryption_enabled =
+        parse_optional_bool(optional_query_param(req, "TransitEncryptionEnabled").as_deref())
+            .unwrap()
+            .unwrap_or(false);
+    let at_rest_encryption_enabled =
+        parse_optional_bool(optional_query_param(req, "AtRestEncryptionEnabled").as_deref())
+            .unwrap()
+            .unwrap_or(false);
+    let multi_az_enabled =
+        parse_optional_bool(optional_query_param(req, "MultiAZEnabled").as_deref())
+            .unwrap()
+            .unwrap_or(false);
+    let auth_token = optional_query_param(req, "AuthToken");
+    let auth_token_enabled = auth_token.is_some();
+    let kms_key_id = optional_query_param(req, "KmsKeyId");
+    let user_group_ids = parse_query_list_param(req, "UserGroupIds", "UserGroupId");
+    let num_node_groups: i32 = optional_query_param(req, "NumNodeGroups")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let replicas_per_node_group: Option<i32> =
+        optional_query_param(req, "ReplicasPerNodeGroup").and_then(|v| v.parse().ok());
+    let data_tiering_enabled =
+        parse_optional_bool(optional_query_param(req, "DataTieringEnabled").as_deref()).unwrap();
+    let data_tiering =
+        data_tiering_enabled.map(|b| if b { "enabled" } else { "disabled" }.to_string());
+    let ip_discovery = optional_query_param(req, "IpDiscovery");
+    let network_type =
+        Some(optional_query_param(req, "NetworkType").unwrap_or_else(|| "ipv4".into()));
+    let transit_encryption_mode = optional_query_param(req, "TransitEncryptionMode");
+    let log_delivery_configurations = parse_log_delivery_configs(req);
+    let notification_topic_arn = optional_query_param(req, "NotificationTopicArn");
+    let cluster_mode = optional_query_param(req, "ClusterMode");
+    let cluster_enabled = num_node_groups > 1
+        || cluster_mode.as_deref() == Some("enabled")
+        || cluster_mode.as_deref() == Some("compatible");
+    let port: u16 = optional_query_param(req, "Port")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6379);
+    let arn = format!("arn:aws:elasticache:us-east-1:123456789012:replicationgroup:{id}");
+    crate::state::ReplicationGroup {
+        replication_group_id: id.clone(),
+        description,
+        global_replication_group_id: None,
+        global_replication_group_role: None,
+        status: "available".to_string(),
+        cache_node_type,
+        engine,
+        engine_version,
+        num_cache_clusters,
+        automatic_failover_enabled,
+        endpoint_address: "127.0.0.1".to_string(),
+        endpoint_port: port,
+        arn,
+        created_at: "2024-01-01T00:00:00Z".to_string(),
+        container_id: "test-container".to_string(),
+        host_port: port,
+        member_clusters: (1..=num_cache_clusters)
+            .map(|i| format!("{id}-{i:03}"))
+            .collect(),
+        snapshot_retention_limit: 0,
+        snapshot_window: "05:00-09:00".to_string(),
+        transit_encryption_enabled,
+        at_rest_encryption_enabled,
+        cluster_enabled,
+        kms_key_id,
+        auth_token_enabled,
+        user_group_ids,
+        multi_az_enabled,
+        log_delivery_configurations,
+        data_tiering,
+        ip_discovery,
+        network_type,
+        transit_encryption_mode,
+        num_node_groups,
+        configuration_endpoint_address: cluster_enabled.then(|| "127.0.0.1".to_string()),
+        configuration_endpoint_port: cluster_enabled.then_some(port),
+        replicas_per_node_group,
+        auth_token,
+        port,
+        notification_topic_arn,
+        cluster_mode,
+        data_tiering_enabled,
+    }
+}
+
+fn service_with_replication_group_from_request(req: &AwsRequest) -> ElastiCacheService {
+    let group = replication_group_from_request(req);
+    let shared: SharedElastiCacheState = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    {
+        let mut __a = shared.write();
+        let s = __a.default_mut();
+        s.tags.insert(group.arn.clone(), Vec::new());
+        s.replication_groups
+            .insert(group.replication_group_id.clone(), group);
+    }
+    ElastiCacheService::new(shared)
+}
+
+#[test]
+fn create_replication_group_persists_all_encryption_fields() {
+    let create_req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "enc-rg"),
+            ("ReplicationGroupDescription", "encryption fields"),
+            ("AuthToken", "supersecret"),
+            ("TransitEncryptionEnabled", "true"),
+            ("AtRestEncryptionEnabled", "true"),
+            ("KmsKeyId", "arn:aws:kms:us-east-1:123:key/abc-123"),
+        ],
+    );
+    let svc = service_with_replication_group_from_request(&create_req);
+
+    let describe = request(
+        "DescribeReplicationGroups",
+        &[("ReplicationGroupId", "enc-rg")],
+    );
+    let resp = svc.describe_replication_groups(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<TransitEncryptionEnabled>true</TransitEncryptionEnabled>"));
+    assert!(body.contains("<AtRestEncryptionEnabled>true</AtRestEncryptionEnabled>"));
+    assert!(body.contains("<AuthTokenEnabled>true</AuthTokenEnabled>"));
+    assert!(body.contains("<KmsKeyId>arn:aws:kms:us-east-1:123:key/abc-123</KmsKeyId>"));
+    // Auth token itself must never be echoed back.
+    assert!(!body.contains("supersecret"));
+}
+
+#[test]
+fn create_replication_group_persists_log_delivery_configurations() {
+    let create_req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "log-rg"),
+            ("ReplicationGroupDescription", "log delivery"),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.LogType",
+                "slow-log",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.DestinationType",
+                "cloudwatch-logs",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.DestinationDetails.CloudWatchLogsDetails.LogGroup",
+                "/aws/elasticache/slow",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.LogFormat",
+                "json",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.LogType",
+                "engine-log",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.DestinationType",
+                "kinesis-firehose",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.DestinationDetails.KinesisFirehoseDetails.DeliveryStream",
+                "engine-stream",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.LogFormat",
+                "text",
+            ),
+        ],
+    );
+    let svc = service_with_replication_group_from_request(&create_req);
+
+    let describe = request(
+        "DescribeReplicationGroups",
+        &[("ReplicationGroupId", "log-rg")],
+    );
+    let resp = svc.describe_replication_groups(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<LogType>slow-log</LogType>"));
+    assert!(body.contains("<DestinationType>cloudwatch-logs</DestinationType>"));
+    assert!(body.contains("<LogGroup>/aws/elasticache/slow</LogGroup>"));
+    assert!(body.contains("<LogType>engine-log</LogType>"));
+    assert!(body.contains("<DestinationType>kinesis-firehose</DestinationType>"));
+    assert!(body.contains("<DeliveryStream>engine-stream</DeliveryStream>"));
+    assert!(body.contains("<LogFormat>text</LogFormat>"));
+}
+
+#[test]
+fn create_replication_group_persists_network_fields() {
+    let create_req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "net-rg"),
+            ("ReplicationGroupDescription", "network fields"),
+            ("IpDiscovery", "ipv6"),
+            ("NetworkType", "dual_stack"),
+            ("Port", "6380"),
+        ],
+    );
+    let svc = service_with_replication_group_from_request(&create_req);
+
+    let describe = request(
+        "DescribeReplicationGroups",
+        &[("ReplicationGroupId", "net-rg")],
+    );
+    let resp = svc.describe_replication_groups(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<IpDiscovery>ipv6</IpDiscovery>"));
+    assert!(body.contains("<NetworkType>dual_stack</NetworkType>"));
+    assert!(body.contains("<Port>6380</Port>"));
+}
+
+#[test]
+fn create_replication_group_persists_cluster_mode_and_user_groups() {
+    let create_req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "cm-rg"),
+            ("ReplicationGroupDescription", "cluster mode + user groups"),
+            ("ClusterMode", "enabled"),
+            ("UserGroupIds.UserGroupId.1", "ug-prod"),
+            ("UserGroupIds.UserGroupId.2", "ug-readonly"),
+        ],
+    );
+    let svc = service_with_replication_group_from_request(&create_req);
+
+    let describe = request(
+        "DescribeReplicationGroups",
+        &[("ReplicationGroupId", "cm-rg")],
+    );
+    let resp = svc.describe_replication_groups(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<ClusterMode>enabled</ClusterMode>"));
+    assert!(body.contains("<member>ug-prod</member>"));
+    assert!(body.contains("<member>ug-readonly</member>"));
+    // ClusterMode=enabled must imply ClusterEnabled=true downstream.
+    assert!(body.contains("<ClusterEnabled>true</ClusterEnabled>"));
+}
+
+#[test]
+fn create_replication_group_defaults_port_and_network_type() {
+    let create_req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "default-rg"),
+            ("ReplicationGroupDescription", "defaults"),
+        ],
+    );
+    let svc = service_with_replication_group_from_request(&create_req);
+
+    let describe = request(
+        "DescribeReplicationGroups",
+        &[("ReplicationGroupId", "default-rg")],
+    );
+    let resp = svc.describe_replication_groups(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<Port>6379</Port>"));
+    assert!(body.contains("<NetworkType>ipv4</NetworkType>"));
 }
 
 // ── cache subnet group ──

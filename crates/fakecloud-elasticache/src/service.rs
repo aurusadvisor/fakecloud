@@ -1133,22 +1133,34 @@ impl ElastiCacheService {
         let multi_az_enabled =
             parse_optional_bool(optional_query_param(request, "MultiAZEnabled").as_deref())?
                 .unwrap_or(false);
-        let auth_token_enabled = optional_query_param(request, "AuthToken").is_some();
+        let auth_token = optional_query_param(request, "AuthToken");
+        let auth_token_enabled = auth_token.is_some();
         let kms_key_id = optional_query_param(request, "KmsKeyId");
         let user_group_ids = parse_query_list_param(request, "UserGroupIds", "UserGroupId");
         let num_node_groups = optional_query_param(request, "NumNodeGroups")
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(1);
-        let cluster_enabled = num_node_groups > 1;
         let replicas_per_node_group = optional_query_param(request, "ReplicasPerNodeGroup")
             .and_then(|v| v.parse::<i32>().ok());
+        let data_tiering_enabled =
+            parse_optional_bool(optional_query_param(request, "DataTieringEnabled").as_deref())?;
         let data_tiering =
-            parse_optional_bool(optional_query_param(request, "DataTieringEnabled").as_deref())?
-                .map(|b| if b { "enabled" } else { "disabled" }.to_string());
+            data_tiering_enabled.map(|b| if b { "enabled" } else { "disabled" }.to_string());
         let ip_discovery = optional_query_param(request, "IpDiscovery");
-        let network_type = optional_query_param(request, "NetworkType");
+        // Default to ipv4 when unspecified, matching AWS's default network stack.
+        let network_type =
+            Some(optional_query_param(request, "NetworkType").unwrap_or_else(|| "ipv4".into()));
         let transit_encryption_mode = optional_query_param(request, "TransitEncryptionMode");
         let log_delivery_configurations = parse_log_delivery_configs(request);
+        let notification_topic_arn = optional_query_param(request, "NotificationTopicArn");
+        let cluster_mode = optional_query_param(request, "ClusterMode");
+        let cluster_enabled = num_node_groups > 1
+            || cluster_mode.as_deref() == Some("enabled")
+            || cluster_mode.as_deref() == Some("compatible");
+        // ElastiCache Redis defaults to 6379 when Port is omitted.
+        let port = optional_query_param(request, "Port")
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(6379);
         // Reserve the ID under a write lock before starting the container.
         {
             let mut accounts = self.state.write();
@@ -1245,6 +1257,11 @@ impl ElastiCacheService {
                 None
             },
             replicas_per_node_group,
+            auth_token,
+            port,
+            notification_topic_arn,
+            cluster_mode,
+            data_tiering_enabled,
         };
 
         let xml = replication_group_xml(&group, &region);
