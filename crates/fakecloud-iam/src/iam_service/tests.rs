@@ -3611,6 +3611,116 @@ fn simulate_custom_policy_requires_action_names() {
 }
 
 #[test]
+fn simulate_custom_policy_evaluates_condition_keys() {
+    let svc = make_service();
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*","Condition":{"StringEquals":{"aws:RequestTag/foo":"bar"}}}]}"#;
+
+    // Matching tag value -> allowed.
+    let resp = svc
+        .simulate_custom_policy(&make_request(
+            "SimulateCustomPolicy",
+            vec![
+                ("PolicyInputList.member.1", policy),
+                ("ActionNames.member.1", "s3:PutObject"),
+                ("ResourceArns.member.1", "arn:aws:s3:::b/k"),
+                (
+                    "ContextEntries.member.1.ContextKeyName",
+                    "aws:RequestTag/foo",
+                ),
+                ("ContextEntries.member.1.ContextKeyValues.member.1", "bar"),
+                ("ContextEntries.member.1.ContextKeyType", "string"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>allowed</EvalDecision>"),
+        "expected allowed when condition matches, body: {body}"
+    );
+
+    // Different tag value -> implicit deny (Condition false, no Allow matches).
+    let resp = svc
+        .simulate_custom_policy(&make_request(
+            "SimulateCustomPolicy",
+            vec![
+                ("PolicyInputList.member.1", policy),
+                ("ActionNames.member.1", "s3:PutObject"),
+                ("ResourceArns.member.1", "arn:aws:s3:::b/k"),
+                (
+                    "ContextEntries.member.1.ContextKeyName",
+                    "aws:RequestTag/foo",
+                ),
+                ("ContextEntries.member.1.ContextKeyValues.member.1", "baz"),
+                ("ContextEntries.member.1.ContextKeyType", "string"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>implicitDeny</EvalDecision>"),
+        "expected implicitDeny when condition fails, body: {body}"
+    );
+}
+
+#[test]
+fn simulate_principal_policy_blocked_by_permission_boundary() {
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "bob")]))
+        .unwrap();
+
+    // Identity policy grants s3:GetObject.
+    let identity_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+    svc.create_policy(&make_request(
+        "CreatePolicy",
+        vec![
+            ("PolicyName", "GrantS3Get"),
+            ("PolicyDocument", identity_doc),
+        ],
+    ))
+    .unwrap();
+    let identity_arn = "arn:aws:iam::123456789012:policy/GrantS3Get";
+    svc.attach_user_policy(&make_request(
+        "AttachUserPolicy",
+        vec![("UserName", "bob"), ("PolicyArn", identity_arn)],
+    ))
+    .unwrap();
+
+    // Boundary only allows ec2 actions, so it does not allow s3:GetObject.
+    let boundary_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ec2:Describe*","Resource":"*"}]}"#;
+    svc.create_policy(&make_request(
+        "CreatePolicy",
+        vec![
+            ("PolicyName", "BoundaryEc2Only"),
+            ("PolicyDocument", boundary_doc),
+        ],
+    ))
+    .unwrap();
+    let boundary_arn = "arn:aws:iam::123456789012:policy/BoundaryEc2Only";
+    svc.put_user_permissions_boundary(&make_request(
+        "PutUserPermissionsBoundary",
+        vec![("UserName", "bob"), ("PermissionsBoundary", boundary_arn)],
+    ))
+    .unwrap();
+
+    let user_arn = "arn:aws:iam::123456789012:user/bob";
+    let resp = svc
+        .simulate_principal_policy(&make_request(
+            "SimulatePrincipalPolicy",
+            vec![
+                ("PolicySourceArn", user_arn),
+                ("ActionNames.member.1", "s3:GetObject"),
+                ("ResourceArns.member.1", "arn:aws:s3:::b/k"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>implicitDeny</EvalDecision>"),
+        "expected implicitDeny when boundary blocks, body: {body}"
+    );
+}
+
+#[test]
 fn misc_extras_smoke() {
     let svc = make_service();
     svc.create_user(&make_request("CreateUser", vec![("UserName", "u1")]))
