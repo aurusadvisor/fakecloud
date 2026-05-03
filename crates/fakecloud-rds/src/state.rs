@@ -299,6 +299,11 @@ pub struct RdsState {
     /// (matching real RDS retention) by [`Self::push_event`].
     #[serde(default)]
     pub events: Vec<RdsEventRecord>,
+    /// Account-level default CA certificate identifier set by
+    /// `ModifyCertificates`. Returned by `DescribeCertificates` so
+    /// callers see their override on subsequent reads.
+    #[serde(default)]
+    pub default_certificate_identifier: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -366,6 +371,7 @@ impl RdsState {
             parameter_groups: default_parameter_groups(account_id, region),
             extras: BTreeMap::new(),
             events: Vec::new(),
+            default_certificate_identifier: None,
         }
     }
 
@@ -377,6 +383,7 @@ impl RdsState {
         self.parameter_groups = default_parameter_groups(&self.account_id, &self.region);
         self.extras.clear();
         self.events.clear();
+        self.default_certificate_identifier = None;
     }
 
     /// Append an event row to the in-memory ring, dropping the oldest
