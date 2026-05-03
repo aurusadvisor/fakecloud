@@ -22,6 +22,26 @@ pub struct Ticker {
     delivery: Arc<DeliveryBus>,
 }
 
+/// Bookkeeping for an in-flight retry: how many delivery attempts the
+/// scheduler has already made for this fire, the last error, and the
+/// timestamp of the original due moment so MaximumEventAgeInSeconds can
+/// retire the attempt.
+#[derive(Clone, Debug)]
+struct RetryState {
+    attempts: i64,
+    first_due: DateTime<Utc>,
+    last_error: String,
+}
+
+/// Pending fire deferred by FlexibleTimeWindow: the actual delivery is
+/// pushed out by `0..=max_window_in_minutes*60` seconds from when the
+/// schedule first became due, picked deterministically per schedule
+/// per-window so the perturbation is stable across ticks.
+#[derive(Clone, Copy, Debug)]
+struct PendingFire {
+    fire_at: DateTime<Utc>,
+}
+
 impl Ticker {
     pub fn new(state: SharedSchedulerState, delivery: Arc<DeliveryBus>) -> Self {
         Self { state, delivery }
@@ -34,13 +54,20 @@ impl Ticker {
         // identity — keeps cron schedules from firing multiple times
         // inside the same minute when the 1s tick runs 60+ times.
         let mut cron_last_minute: HashMap<(String, ScheduleKey), CronFireStamp> = HashMap::new();
+        let mut pending_fires: HashMap<(String, ScheduleKey), PendingFire> = HashMap::new();
+        let mut retries: HashMap<(String, ScheduleKey), RetryState> = HashMap::new();
         loop {
             interval.tick().await;
-            self.tick(&mut cron_last_minute);
+            self.tick(&mut cron_last_minute, &mut pending_fires, &mut retries);
         }
     }
 
-    fn tick(&self, cron_last_minute: &mut HashMap<(String, ScheduleKey), CronFireStamp>) {
+    fn tick(
+        &self,
+        cron_last_minute: &mut HashMap<(String, ScheduleKey), CronFireStamp>,
+        pending_fires: &mut HashMap<(String, ScheduleKey), PendingFire>,
+        retries: &mut HashMap<(String, ScheduleKey), RetryState>,
+    ) {
         let now = Utc::now();
         // Phase 1: collect due schedules while holding a short write lock.
         let mut due: Vec<(String, ScheduleKey)> = Vec::new();
@@ -74,16 +101,60 @@ impl Ticker {
                         continue;
                     };
                     let tz = sched.schedule_expression_timezone.clone();
+                    let pending_key = (account_id.clone(), key.clone());
+
+                    // 1. Check pending FIRST so retries and FLEXIBLE
+                    //    deferrals fire even when the underlying
+                    //    expression isn't "due" again.
+                    if let Some(p) = pending_fires.get(&pending_key).copied() {
+                        if now >= p.fire_at {
+                            pending_fires.remove(&pending_key);
+                            if let Some(sched_mut) = state.schedules.get_mut(&key) {
+                                sched_mut.last_fired = Some(now);
+                                let post = post_fire_action(&expr, sched_mut);
+                                post_fire_actions.push((account_id.clone(), key.clone(), post));
+                            }
+                            due.push(pending_key);
+                            continue;
+                        }
+                        // Pending exists but not yet ready — don't
+                        // re-evaluate is_due for this schedule, the
+                        // queued fire owns it.
+                        continue;
+                    }
+
                     if !is_due_with_dedup(
                         &expr,
                         sched.last_fired,
                         now,
                         tz.as_deref(),
-                        &(account_id.clone(), key.clone()),
+                        &pending_key,
                         cron_last_minute,
                     ) {
                         continue;
                     }
+
+                    // FlexibleTimeWindow: when MODE=FLEXIBLE, defer the
+                    // first fire by a deterministic random offset within
+                    // [0, max_window_in_minutes*60) seconds. The offset
+                    // is picked the first tick the schedule is due and
+                    // honored on subsequent ticks until reached.
+                    let window_minutes = match sched.flexible_time_window.mode.as_str() {
+                        "FLEXIBLE" => sched
+                            .flexible_time_window
+                            .maximum_window_in_minutes
+                            .unwrap_or(0)
+                            .max(0),
+                        _ => 0,
+                    };
+                    if window_minutes > 0 {
+                        let offset_seconds =
+                            stable_offset_seconds(&pending_key, now, window_minutes);
+                        let fire_at = now + chrono::Duration::seconds(offset_seconds);
+                        pending_fires.insert(pending_key, PendingFire { fire_at });
+                        continue;
+                    }
+
                     if let Some(sched_mut) = state.schedules.get_mut(&key) {
                         sched_mut.last_fired = Some(now);
                         let post = post_fire_action(&expr, sched_mut);
@@ -95,7 +166,6 @@ impl Ticker {
         }
 
         // Phase 2: deliver without holding the state lock.
-        let mut fired: Vec<(String, ScheduleKey)> = Vec::with_capacity(due.len());
         for (account_id, key) in &due {
             let snapshot = {
                 let accounts = self.state.read();
@@ -106,8 +176,10 @@ impl Ticker {
             let Some(sched) = snapshot else {
                 continue;
             };
+            let retry_key = (account_id.clone(), key.clone());
             match deliver_target(&self.delivery, &sched) {
                 Ok(()) => {
+                    retries.remove(&retry_key);
                     tracing::debug!(
                         schedule = %sched.name,
                         group = %sched.group_name,
@@ -116,15 +188,46 @@ impl Ticker {
                     );
                 }
                 Err(err) => {
-                    route_to_dlq(
-                        &self.delivery,
-                        &sched,
-                        "TargetDeliveryFailed",
-                        &err.to_string(),
-                    );
+                    let max_attempts = sched
+                        .target
+                        .retry_policy
+                        .as_ref()
+                        .and_then(|r| r.maximum_retry_attempts)
+                        .unwrap_or(0);
+                    let max_age = sched
+                        .target
+                        .retry_policy
+                        .as_ref()
+                        .and_then(|r| r.maximum_event_age_in_seconds);
+                    let entry = retries.entry(retry_key.clone()).or_insert(RetryState {
+                        attempts: 0,
+                        first_due: now,
+                        last_error: err.to_string(),
+                    });
+                    entry.attempts += 1;
+                    entry.last_error = err.to_string();
+                    let aged_out = max_age
+                        .map(|s| (now - entry.first_due).num_seconds() >= s)
+                        .unwrap_or(false);
+                    if entry.attempts <= max_attempts && !aged_out {
+                        // Retry: schedule a re-fire on a later tick by
+                        // pushing this schedule back onto the pending
+                        // map a few seconds out (no exponential backoff
+                        // — fakecloud does not promise wall-clock
+                        // accuracy, just retry budget exhaustion).
+                        pending_fires.insert(
+                            retry_key,
+                            PendingFire {
+                                fire_at: now + chrono::Duration::seconds(1),
+                            },
+                        );
+                    } else {
+                        let last_error = entry.last_error.clone();
+                        retries.remove(&retry_key);
+                        route_to_dlq(&self.delivery, &sched, "TargetDeliveryFailed", &last_error);
+                    }
                 }
             }
-            fired.push((account_id.clone(), key.clone()));
         }
 
         // Phase 3: apply post-fire actions (DELETE on completion for at()).
@@ -143,6 +246,24 @@ impl Ticker {
             }
         }
     }
+}
+
+/// Pick a deterministic random offset within [0, window_minutes*60)
+/// seconds for a given schedule key + now. Stable per schedule + minute
+/// so the offset is honored across multiple ticks at the same boundary.
+fn stable_offset_seconds(
+    key: &(String, ScheduleKey),
+    now: DateTime<Utc>,
+    window_minutes: i64,
+) -> i64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    key.0.hash(&mut h);
+    key.1.hash(&mut h);
+    now.timestamp().div_euclid(60).hash(&mut h);
+    let bound = (window_minutes * 60).max(1) as u64;
+    (h.finish() % bound) as i64
 }
 
 enum PostFire {
@@ -329,7 +450,9 @@ mod tests {
         let bus = Arc::new(DeliveryBus::new().with_sqs(rec.clone()));
         let ticker = Ticker::new(state.clone(), bus);
         let mut cron = HashMap::new();
-        ticker.tick(&mut cron);
+        let mut pending = HashMap::new();
+        let mut retries = HashMap::new();
+        ticker.tick(&mut cron, &mut pending, &mut retries);
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "arn:aws:sqs:us-east-1:111122223333:q");
@@ -357,7 +480,9 @@ mod tests {
         let bus = Arc::new(DeliveryBus::new().with_sqs(rec.clone()));
         let ticker = Ticker::new(state.clone(), bus);
         let mut cron = HashMap::new();
-        ticker.tick(&mut cron);
+        let mut pending = HashMap::new();
+        let mut retries = HashMap::new();
+        ticker.tick(&mut cron, &mut pending, &mut retries);
         assert!(rec.calls.lock().unwrap().is_empty());
     }
 
@@ -383,7 +508,9 @@ mod tests {
         let bus = Arc::new(DeliveryBus::new().with_sqs(rec.clone()));
         let ticker = Ticker::new(state.clone(), bus);
         let mut cron = HashMap::new();
-        ticker.tick(&mut cron);
+        let mut pending = HashMap::new();
+        let mut retries = HashMap::new();
+        ticker.tick(&mut cron, &mut pending, &mut retries);
         assert_eq!(rec.calls.lock().unwrap().len(), 1);
         let accounts = state.read();
         let s = accounts.get(ACCOUNT).unwrap();
@@ -444,11 +571,153 @@ mod tests {
         let bus = Arc::new(DeliveryBus::new().with_sqs(rec.clone()));
         let ticker = Ticker::new(state.clone(), bus);
         let mut cron = HashMap::new();
-        ticker.tick(&mut cron);
+        let mut pending = HashMap::new();
+        let mut retries = HashMap::new();
+        ticker.tick(&mut cron, &mut pending, &mut retries);
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].0.ends_with(":dlq"));
         assert!(calls[0].1.contains_key("X-Amz-Scheduler-Attempt"));
+    }
+
+    #[test]
+    fn retry_policy_retries_before_routing_to_dlq() {
+        // Schedule with MaximumRetryAttempts=2 should attempt delivery
+        // 3 times (initial + 2 retries) before falling through to DLQ.
+        let state = make_state();
+        seed_schedule(
+            &state,
+            "retried",
+            "rate(1 minute)",
+            "arn:aws:sqs:us-east-1:111122223333:missing",
+        );
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(ACCOUNT);
+            let sched = s
+                .schedules
+                .get_mut(&("default".to_string(), "retried".to_string()))
+                .unwrap();
+            sched.target.retry_policy = Some(crate::state::RetryPolicy {
+                maximum_event_age_in_seconds: Some(86400),
+                maximum_retry_attempts: Some(2),
+            });
+            sched.target.dead_letter_config = Some(crate::state::DeadLetterConfig {
+                arn: Some("arn:aws:sqs:us-east-1:111122223333:dlq".to_string()),
+            });
+        }
+
+        // Track which queue each delivery went to.
+        struct Failing {
+            calls: Mutex<Vec<String>>,
+        }
+        impl SqsDelivery for Failing {
+            fn deliver_to_queue(&self, _: &str, _: &str, _: &HashMap<String, String>) {}
+            fn try_deliver_to_queue_with_attrs(
+                &self,
+                queue_arn: &str,
+                _body: &str,
+                _attrs: &HashMap<String, SqsMessageAttribute>,
+                _g: Option<&str>,
+                _d: Option<&str>,
+            ) -> Result<(), SqsDeliveryError> {
+                self.calls.lock().unwrap().push(queue_arn.to_string());
+                if queue_arn.ends_with(":missing") {
+                    Err(SqsDeliveryError::QueueNotFound(queue_arn.to_string()))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let rec = Arc::new(Failing {
+            calls: Mutex::new(Vec::new()),
+        });
+        let bus = Arc::new(DeliveryBus::new().with_sqs(rec.clone()));
+        let ticker = Ticker::new(state.clone(), bus);
+        let mut cron = HashMap::new();
+        let mut pending = HashMap::new();
+        let mut retries = HashMap::new();
+
+        // Tick 1: initial fire fails, retry queued.
+        ticker.tick(&mut cron, &mut pending, &mut retries);
+        // Manually advance the pending fire so the next tick can pick it up.
+        for (_, p) in pending.iter_mut() {
+            p.fire_at = Utc::now() - chrono::Duration::seconds(1);
+        }
+        // Tick 2: first retry, fails, second retry queued.
+        ticker.tick(&mut cron, &mut pending, &mut retries);
+        for (_, p) in pending.iter_mut() {
+            p.fire_at = Utc::now() - chrono::Duration::seconds(1);
+        }
+        // Tick 3: second retry, fails, retry budget exhausted -> DLQ.
+        ticker.tick(&mut cron, &mut pending, &mut retries);
+
+        let calls = rec.calls.lock().unwrap();
+        // 3 attempts at the missing queue + 1 DLQ delivery.
+        let missing_attempts = calls.iter().filter(|q| q.ends_with(":missing")).count();
+        let dlq_deliveries = calls.iter().filter(|q| q.ends_with(":dlq")).count();
+        assert_eq!(
+            missing_attempts, 3,
+            "expected initial + 2 retries before exhausting RetryPolicy budget"
+        );
+        assert_eq!(
+            dlq_deliveries, 1,
+            "DLQ must fire exactly once after exhaust"
+        );
+    }
+
+    #[test]
+    fn flexible_time_window_defers_fire_within_window() {
+        // FLEXIBLE mode + max_window_in_minutes=2 means the schedule
+        // must NOT fire on the first tick when due — it gets queued
+        // for a deferred fire up to 120s out.
+        let state = make_state();
+        seed_schedule(
+            &state,
+            "flex",
+            "rate(1 minute)",
+            "arn:aws:sqs:us-east-1:111122223333:q",
+        );
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(ACCOUNT);
+            let sched = s
+                .schedules
+                .get_mut(&("default".to_string(), "flex".to_string()))
+                .unwrap();
+            sched.flexible_time_window = FlexibleTimeWindow {
+                mode: "FLEXIBLE".to_string(),
+                maximum_window_in_minutes: Some(2),
+            };
+        }
+        let rec = Arc::new(Recorder::default());
+        let bus = Arc::new(DeliveryBus::new().with_sqs(rec.clone()));
+        let ticker = Ticker::new(state.clone(), bus);
+        let mut cron = HashMap::new();
+        let mut pending = HashMap::new();
+        let mut retries = HashMap::new();
+
+        ticker.tick(&mut cron, &mut pending, &mut retries);
+        assert!(
+            rec.calls.lock().unwrap().is_empty(),
+            "FLEXIBLE-windowed schedule must defer first fire, not deliver immediately"
+        );
+        assert_eq!(
+            pending.len(),
+            1,
+            "deferred fire must be queued for a later tick"
+        );
+
+        // Advance the pending timestamp into the past and tick again.
+        for (_, p) in pending.iter_mut() {
+            p.fire_at = Utc::now() - chrono::Duration::seconds(1);
+        }
+        ticker.tick(&mut cron, &mut pending, &mut retries);
+        assert_eq!(
+            rec.calls.lock().unwrap().len(),
+            1,
+            "deferred fire must deliver once its window timestamp is reached"
+        );
     }
 
     #[test]
@@ -472,7 +741,9 @@ mod tests {
         let bus = Arc::new(DeliveryBus::new().with_sqs(rec.clone()));
         let ticker = Ticker::new(state.clone(), bus);
         let mut cron = HashMap::new();
-        ticker.tick(&mut cron);
+        let mut pending = HashMap::new();
+        let mut retries = HashMap::new();
+        ticker.tick(&mut cron, &mut pending, &mut retries);
         assert!(rec.calls.lock().unwrap().is_empty());
     }
 }
