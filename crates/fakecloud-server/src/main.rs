@@ -2080,8 +2080,8 @@ async fn main() {
     ));
     registry.register(route53_service.clone());
 
-    let acm_service = fakecloud_acm::AcmService::new(acm_state.clone());
-    registry.register(Arc::new(acm_service));
+    let acm_service = Arc::new(fakecloud_acm::AcmService::new(acm_state.clone()));
+    registry.register(acm_service.clone());
 
     let firehose_service =
         fakecloud_firehose::FirehoseService::new(firehose_state.clone()).with_s3(s3_state.clone());
@@ -5038,6 +5038,23 @@ async fn main() {
                             }
                         };
                         if svc.set_health_check_status(&id, status, body.reason) {
+                            axum::http::StatusCode::NO_CONTENT
+                        } else {
+                            axum::http::StatusCode::NOT_FOUND
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/acm/certificates/{arn_or_id}/status",
+            axum::routing::post({
+                let svc = acm_service.clone();
+                move |axum::extract::Path(arn_or_id): axum::extract::Path<String>,
+                      axum::Json(body): axum::Json<types::AcmCertificateStatusRequest>| {
+                    let svc = svc.clone();
+                    async move {
+                        if svc.set_certificate_status(&arn_or_id, &body.status, body.reason) {
                             axum::http::StatusCode::NO_CONTENT
                         } else {
                             axum::http::StatusCode::NOT_FOUND

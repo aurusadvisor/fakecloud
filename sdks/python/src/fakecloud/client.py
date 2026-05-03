@@ -397,6 +397,76 @@ class _SyncRoute53Client:
         _check(resp)
 
 
+def _acm_id(arn_or_id: str) -> str:
+    """Extract the trailing UUID from an ACM ARN, or return ``arn_or_id``
+    unchanged when no ``certificate/`` segment is present."""
+    marker = "certificate/"
+    idx = arn_or_id.rfind(marker)
+    if idx >= 0:
+        return arn_or_id[idx + len(marker):]
+    return arn_or_id
+
+
+class AcmClient:
+    """Async ACM admin client.
+
+    Wraps the per-certificate status admin endpoint that lets tests flip a
+    stored certificate between ``PENDING_VALIDATION``, ``ISSUED``,
+    ``FAILED``, and ``VALIDATION_TIMED_OUT`` synchronously, without
+    waiting on the auto-issue tick.
+    """
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def set_certificate_status(
+        self,
+        arn_or_id: str,
+        status: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Flip a certificate's status.
+
+        ``status`` is one of ``"ISSUED"``, ``"FAILED"``, or
+        ``"VALIDATION_TIMED_OUT"``. ``reason`` is recorded as
+        ``FailureReason`` on ``DescribeCertificate`` for non-``ISSUED``
+        statuses; ignored when ``ISSUED``. ``arn_or_id`` accepts either
+        the full ACM ARN or the trailing UUID portion.
+        """
+        body: Dict[str, str] = {"status": status}
+        if reason is not None:
+            body["reason"] = reason
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/acm/certificates/{_acm_id(arn_or_id)}/status",
+            json=body,
+        )
+        _check(resp)
+
+
+class _SyncAcmClient:
+    """Sync ACM admin client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def set_certificate_status(
+        self,
+        arn_or_id: str,
+        status: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        body: Dict[str, str] = {"status": status}
+        if reason is not None:
+            body["reason"] = reason
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/acm/certificates/{_acm_id(arn_or_id)}/status",
+            json=body,
+        )
+        _check(resp)
+
+
 class SesClient:
     """Async SES introspection client."""
 
@@ -1168,6 +1238,10 @@ class FakeCloud:
     def route53(self) -> Route53Client:
         return Route53Client(self._client, self._base)
 
+    @property
+    def acm(self) -> AcmClient:
+        return AcmClient(self._client, self._base)
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def aclose(self) -> None:
@@ -1293,6 +1367,10 @@ class FakeCloudSync:
     @property
     def route53(self) -> _SyncRoute53Client:
         return _SyncRoute53Client(self._client, self._base)
+
+    @property
+    def acm(self) -> _SyncAcmClient:
+        return _SyncAcmClient(self._client, self._base)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 

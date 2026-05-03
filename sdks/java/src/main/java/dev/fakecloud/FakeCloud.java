@@ -48,6 +48,7 @@ import dev.fakecloud.Types.ResetServiceResponse;
 import dev.fakecloud.Types.RotationTickResponse;
 import dev.fakecloud.Types.S3NotificationsResponse;
 import dev.fakecloud.Types.SesEmailsResponse;
+import dev.fakecloud.Types.SetCertificateStatusRequest;
 import dev.fakecloud.Types.SetHealthCheckStatusRequest;
 import dev.fakecloud.Types.SnsMessagesResponse;
 import dev.fakecloud.Types.SqsMessagesResponse;
@@ -95,6 +96,7 @@ public final class FakeCloud {
     private final EcsClient ecs;
     private final Elbv2Client elbv2;
     private final Route53Client route53;
+    private final AcmClient acm;
 
     public FakeCloud() {
         this(DEFAULT_BASE_URL);
@@ -121,6 +123,7 @@ public final class FakeCloud {
         this.ecs = new EcsClient(http);
         this.elbv2 = new Elbv2Client(http);
         this.route53 = new Route53Client(http);
+        this.acm = new AcmClient(http);
     }
 
     static String trimTrailingSlashes(String url) {
@@ -179,6 +182,7 @@ public final class FakeCloud {
     public EcsClient ecs() { return ecs; }
     public Elbv2Client elbv2() { return elbv2; }
     public Route53Client route53() { return route53; }
+    public AcmClient acm() { return acm; }
 
     // ── Sub-clients ────────────────────────────────────────────────
 
@@ -558,6 +562,40 @@ public final class FakeCloud {
             http.postJsonNoContent(
                     "/_fakecloud/route53/health-checks/" + encodePath(healthCheckId) + "/status",
                     new SetHealthCheckStatusRequest(status, reason));
+        }
+    }
+
+    /**
+     * ACM admin client.
+     *
+     * Wraps the per-certificate status admin endpoint that lets tests
+     * flip a stored certificate between PENDING_VALIDATION, ISSUED,
+     * FAILED, and VALIDATION_TIMED_OUT without waiting on the
+     * auto-issue tick, so validation-failure flows can be exercised
+     * end-to-end.
+     */
+    public static final class AcmClient {
+        private final HttpTransport http;
+        AcmClient(HttpTransport http) { this.http = http; }
+
+        /**
+         * Flip an ACM certificate's status synchronously. {@code status}
+         * is one of {@code "ISSUED"}, {@code "FAILED"},
+         * {@code "VALIDATION_TIMED_OUT"}; {@code reason} is recorded as
+         * {@code FailureReason} on {@code DescribeCertificate} for
+         * non-ISSUED statuses (pass {@code null} to omit).
+         * {@code arnOrId} accepts either the full ACM ARN or the
+         * trailing UUID portion.
+         */
+        public void setCertificateStatus(String arnOrId, String status, String reason) {
+            String id = arnOrId;
+            int idx = arnOrId.lastIndexOf("certificate/");
+            if (idx >= 0) {
+                id = arnOrId.substring(idx + "certificate/".length());
+            }
+            http.postJsonNoContent(
+                    "/_fakecloud/acm/certificates/" + encodePath(id) + "/status",
+                    new SetCertificateStatusRequest(status, reason));
         }
     }
 }

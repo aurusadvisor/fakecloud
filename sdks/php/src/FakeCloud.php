@@ -37,6 +37,7 @@ final class FakeCloud
     private EcsClient $ecs;
     private Elbv2Client $elbv2;
     private Route53Client $route53;
+    private AcmClient $acm;
 
     public function __construct(string $baseUrl = self::DEFAULT_BASE_URL)
     {
@@ -60,6 +61,7 @@ final class FakeCloud
         $this->ecs = new EcsClient($this->http);
         $this->elbv2 = new Elbv2Client($this->http);
         $this->route53 = new Route53Client($this->http);
+        $this->acm = new AcmClient($this->http);
     }
 
     public function baseUrl(): string
@@ -120,6 +122,7 @@ final class FakeCloud
     public function ecs(): EcsClient { return $this->ecs; }
     public function elbv2(): Elbv2Client { return $this->elbv2; }
     public function route53(): Route53Client { return $this->route53; }
+    public function acm(): AcmClient { return $this->acm; }
 }
 
 // ── Sub-clients ────────────────────────────────────────────────
@@ -592,6 +595,32 @@ final class Route53Client
         }
         $this->http->postJsonNoContent(
             '/_fakecloud/route53/health-checks/' . HttpTransport::encodePath($healthCheckId) . '/status',
+            $body
+        );
+    }
+}
+
+final class AcmClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    /**
+     * Flip an ACM certificate's status synchronously. $status is one of
+     * "ISSUED", "FAILED", "VALIDATION_TIMED_OUT"; $reason is recorded
+     * as FailureReason on DescribeCertificate for non-ISSUED statuses
+     * (pass null to omit). $arnOrId accepts the full ACM ARN or just
+     * the trailing UUID.
+     */
+    public function setCertificateStatus(string $arnOrId, string $status, ?string $reason = null): void
+    {
+        $idx = strrpos($arnOrId, 'certificate/');
+        $id = $idx === false ? $arnOrId : substr($arnOrId, $idx + strlen('certificate/'));
+        $body = ['status' => $status];
+        if ($reason !== null) {
+            $body['reason'] = $reason;
+        }
+        $this->http->postJsonNoContent(
+            '/_fakecloud/acm/certificates/' . HttpTransport::encodePath($id) . '/status',
             $body
         );
     }

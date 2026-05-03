@@ -56,6 +56,11 @@ pub struct StoredCertificate {
     pub imported_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub revocation_reason: Option<String>,
+    /// Last reason recorded by the admin status mutator when the cert
+    /// is flipped to `FAILED` / `VALIDATION_TIMED_OUT`. Surfaced in
+    /// `DescribeCertificate` as `FailureReason` to match real ACM.
+    #[serde(default)]
+    pub failure_reason: Option<String>,
     pub not_before: DateTime<Utc>,
     pub not_after: DateTime<Utc>,
     pub validation_method: Option<String>,

@@ -121,6 +121,9 @@ func (fc *FakeCloud) ELBv2() *ELBv2Client { return &ELBv2Client{fc: fc} }
 // Route53 returns the Route 53 admin sub-client.
 func (fc *FakeCloud) Route53() *Route53Client { return &Route53Client{fc: fc} }
 
+// ACM returns the ACM admin sub-client.
+func (fc *FakeCloud) ACM() *ACMClient { return &ACMClient{fc: fc} }
+
 // ── Error type ─────────────────────────────────────────────────────
 
 // APIError is returned when the server responds with a non-2xx status.
