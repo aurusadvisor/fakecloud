@@ -1228,6 +1228,70 @@ impl EventBridgeService {
                 .unwrap_or("default")
                 .to_string();
             let event_bus_name = state.resolve_bus_name(&raw_bus);
+
+            // Bus resource-policy gate. AWS evaluates the bus's
+            // resource policy against cross-account callers; same-account
+            // callers always have access. The policy itself is JSON
+            // stored as serde_json::Value so the IAM evaluator parses
+            // it the same way it parses an S3 bucket policy.
+            let caller_account = req
+                .principal
+                .as_ref()
+                .map(|p| p.account_id.as_str())
+                .unwrap_or(req.account_id.as_str());
+            if caller_account != req.account_id {
+                let bus_policy_value = state
+                    .buses
+                    .get(&event_bus_name)
+                    .and_then(|b| b.policy.clone());
+                if let Some(policy_value) = bus_policy_value {
+                    let policy_json = serde_json::to_string(&policy_value).unwrap_or_default();
+                    let policy_doc = fakecloud_iam::evaluator::PolicyDocument::parse(&policy_json);
+                    let bus_arn = state
+                        .buses
+                        .get(&event_bus_name)
+                        .map(|b| b.arn.clone())
+                        .unwrap_or_default();
+                    let principal =
+                        req.principal
+                            .clone()
+                            .unwrap_or_else(|| fakecloud_core::auth::Principal {
+                                arn: format!("arn:aws:iam::{caller_account}:root"),
+                                user_id: caller_account.to_string(),
+                                account_id: caller_account.to_string(),
+                                principal_type: fakecloud_core::auth::PrincipalType::Root,
+                                source_identity: None,
+                                tags: None,
+                            });
+                    let context = fakecloud_iam::evaluator::RequestContext {
+                        aws_principal_arn: Some(principal.arn.clone()),
+                        aws_principal_account: Some(principal.account_id.clone()),
+                        ..Default::default()
+                    };
+                    let eval_req = fakecloud_iam::evaluator::EvalRequest {
+                        principal: &principal,
+                        action: "events:PutEvents".to_string(),
+                        resource: bus_arn,
+                        context,
+                    };
+                    let decision = fakecloud_iam::evaluator::evaluate_resource_policy_only(
+                        &policy_doc,
+                        &eval_req,
+                    );
+                    if !matches!(decision, fakecloud_iam::evaluator::Decision::Allow) {
+                        failed_count += 1;
+                        result_entries.push(json!({
+                            "ErrorCode": "AccessDeniedException",
+                            "ErrorMessage": format!(
+                                "User '{}' is not authorized to put events on event bus '{}'",
+                                principal.arn, event_bus_name
+                            ),
+                        }));
+                        continue;
+                    }
+                }
+            }
+
             let time = parse_put_events_time(&entry["Time"]);
             let resources: Vec<String> = entry["Resources"]
                 .as_array()

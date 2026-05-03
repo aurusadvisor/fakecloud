@@ -3074,6 +3074,7 @@ dependencies = [
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",
+ "fakecloud-iam",
  "fakecloud-lambda",
  "fakecloud-logs",
  "fakecloud-persistence",
