@@ -3853,6 +3853,8 @@ dependencies = [
  "fakecloud-core",
  "http 1.4.0",
  "parking_lot",
+ "percent-encoding",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
