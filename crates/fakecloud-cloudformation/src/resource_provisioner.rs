@@ -6777,6 +6777,7 @@ impl ResourceProvisioner {
             db_parameter_group_name,
             backup_retention_period,
             preferred_backup_window: "03:00-04:00".to_string(),
+            preferred_maintenance_window: None,
             latest_restorable_time: None,
             option_group_name,
             multi_az,

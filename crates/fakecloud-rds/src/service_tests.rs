@@ -170,6 +170,7 @@ fn db_instance_xml_renders_endpoint_and_status() {
         db_parameter_group_name: Some("default.postgres16".to_string()),
         backup_retention_period: 1,
         preferred_backup_window: "03:00-04:00".to_string(),
+        preferred_maintenance_window: None,
         latest_restorable_time: Some(created_at),
         option_group_name: None,
         multi_az: false,
@@ -337,6 +338,7 @@ fn make_instance_with_defaults(id: &str) -> DbInstance {
         db_parameter_group_name: None,
         backup_retention_period: 0,
         preferred_backup_window: String::new(),
+        preferred_maintenance_window: None,
         latest_restorable_time: None,
         option_group_name: None,
         multi_az: false,
@@ -600,6 +602,7 @@ fn seed_instance(svc: &RdsService, identifier: &str) -> String {
             db_parameter_group_name: Some("default.postgres16".to_string()),
             backup_retention_period: 1,
             preferred_backup_window: "03:00-04:00".to_string(),
+            preferred_maintenance_window: None,
             latest_restorable_time: None,
             option_group_name: None,
             multi_az: false,
@@ -1125,6 +1128,144 @@ fn modify_db_instance_pending_when_not_apply_immediately() {
     );
 }
 
+#[test]
+fn modify_db_instance_apply_immediately_updates_engine_and_storage() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("EngineVersion", "16.4"),
+            ("AllocatedStorage", "100"),
+            ("Iops", "3000"),
+            ("StorageType", "io2"),
+            ("PreferredMaintenanceWindow", "Mon:00:00-Mon:01:00"),
+            ("MultiAZ", "true"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    svc.modify_db_instance(&req).unwrap();
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    let inst = state.instances.get("db1").unwrap();
+    assert_eq!(inst.engine_version, "16.4");
+    assert_eq!(inst.allocated_storage, 100);
+    assert_eq!(inst.iops, Some(3000));
+    assert_eq!(inst.storage_type.as_deref(), Some("io2"));
+    assert_eq!(
+        inst.preferred_maintenance_window.as_deref(),
+        Some("Mon:00:00-Mon:01:00")
+    );
+    assert!(inst.multi_az);
+    assert!(inst.pending_modified_values.is_none());
+}
+
+#[test]
+fn modify_db_instance_pending_stages_extended_fields() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("EngineVersion", "16.4"),
+            ("AllocatedStorage", "100"),
+            ("PreferredBackupWindow", "04:00-05:00"),
+            ("DBParameterGroupName", "custom-pg"),
+            ("MultiAZ", "true"),
+            ("ApplyImmediately", "false"),
+        ],
+    );
+    svc.modify_db_instance(&req).unwrap();
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    let inst = state.instances.get("db1").unwrap();
+    let pending = inst.pending_modified_values.as_ref().unwrap();
+    assert_eq!(pending.engine_version.as_deref(), Some("16.4"));
+    assert_eq!(pending.allocated_storage, Some(100));
+    assert_eq!(
+        pending.preferred_backup_window.as_deref(),
+        Some("04:00-05:00")
+    );
+    assert_eq!(
+        pending.db_parameter_group_name.as_deref(),
+        Some("custom-pg")
+    );
+    assert_eq!(pending.multi_az, Some(true));
+    // Live values unchanged.
+    assert_eq!(inst.engine_version, "16.3");
+    assert_eq!(inst.allocated_storage, 20);
+}
+
+#[test]
+fn modify_db_instance_immediate_only_fields_apply_with_apply_immediately_false() {
+    // CACertificateIdentifier, MasterUserSecretKmsKeyId, and the
+    // CloudwatchLogsExportConfiguration are AWS-immediate fields:
+    // ApplyImmediately=false must not stage them.
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("CACertificateIdentifier", "rds-ca-2024"),
+            ("MasterUserSecretKmsKeyId", "alias/aws/rds"),
+            (
+                "CloudwatchLogsExportConfiguration.EnableLogTypes.member.1",
+                "postgresql",
+            ),
+            ("ApplyImmediately", "false"),
+        ],
+    );
+    svc.modify_db_instance(&req).unwrap();
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    let inst = state.instances.get("db1").unwrap();
+    assert_eq!(
+        inst.ca_certificate_identifier.as_deref(),
+        Some("rds-ca-2024")
+    );
+    assert_eq!(
+        inst.master_user_secret_kms_key_id.as_deref(),
+        Some("alias/aws/rds")
+    );
+    assert!(inst
+        .enabled_cloudwatch_logs_exports
+        .iter()
+        .any(|t| t == "postgresql"));
+    // No pending values for these — they were applied directly.
+    assert!(inst.pending_modified_values.is_none());
+}
+
+#[test]
+fn modify_db_instance_cloudwatch_disable_log_types_removes_existing() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    {
+        let mut __a = svc.state.write();
+        let state = __a.default_mut();
+        let inst = state.instances.get_mut("db1").unwrap();
+        inst.enabled_cloudwatch_logs_exports =
+            vec!["postgresql".to_string(), "upgrade".to_string()];
+    }
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            (
+                "CloudwatchLogsExportConfiguration.DisableLogTypes.member.1",
+                "upgrade",
+            ),
+        ],
+    );
+    svc.modify_db_instance(&req).unwrap();
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    let inst = state.instances.get("db1").unwrap();
+    assert_eq!(inst.enabled_cloudwatch_logs_exports, vec!["postgresql"]);
+}
+
 // ── Snapshots (sync ops only) ────────────────────────────────────
 
 fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
@@ -1257,7 +1398,15 @@ fn modify_db_instance_not_found() {
             ("AllocatedStorage", "20"),
         ],
     );
-    // Validation fires before existence check
+    // AllocatedStorage is a valid mutable field — validation passes
+    // and the existence check fires next.
+    assert_code(svc.modify_db_instance(&req), "DBInstanceNotFound");
+}
+
+#[test]
+fn modify_db_instance_no_fields_returns_invalid_combination() {
+    let svc = make_service();
+    let req = request("ModifyDBInstance", &[("DBInstanceIdentifier", "anyone")]);
     assert_code(svc.modify_db_instance(&req), "InvalidParameterCombination");
 }
 
@@ -1762,6 +1911,7 @@ async fn save_snapshot_static_persists_status_flip_from_bg_task() {
             db_parameter_group_name: None,
             backup_retention_period: 1,
             preferred_backup_window: "03:00-04:00".to_string(),
+            preferred_maintenance_window: None,
             latest_restorable_time: Some(now),
             option_group_name: None,
             multi_az: false,
