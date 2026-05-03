@@ -383,6 +383,13 @@ pub async fn dispatch(
                             &aws_request.region,
                             is_secure_transport(&aws_request.headers),
                         );
+                        // MFA flag rides on the resolved credential — STS
+                        // mints it true when AssumeRole supplied
+                        // SerialNumber + TokenCode. IAM user access keys
+                        // never have it, matching AWS.
+                        if let Some(rc) = resolved.as_ref() {
+                            condition_context.aws_mfa_present = Some(rc.mfa_present);
+                        }
                         condition_context.service_keys =
                             service.iam_condition_keys_for(&aws_request, &iam_action);
 

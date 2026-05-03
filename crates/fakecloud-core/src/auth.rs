@@ -119,6 +119,10 @@ pub struct ResolvedCredential {
     /// Session policies passed to the STS call that minted this credential.
     /// Empty for IAM user access keys.
     pub session_policies: Vec<String>,
+    /// True iff the underlying STS credential was minted with MFA. Drives
+    /// `aws:MultiFactorAuthPresent` for downstream IAM evaluation. Always
+    /// false for raw IAM user access keys.
+    pub mfa_present: bool,
 }
 
 impl ResolvedCredential {
@@ -815,6 +819,7 @@ mod tests {
                 tags: None,
             },
             session_policies: Vec::new(),
+            mfa_present: false,
         };
         assert_eq!(rc.principal_arn(), "arn:aws:iam::123456789012:user/alice");
         assert_eq!(rc.user_id(), "AIDAALICE");

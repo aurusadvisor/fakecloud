@@ -511,6 +511,8 @@ impl StsService {
                 account_id: account_id.clone(),
             },
         );
+        let mfa_present_for_session = req.query_params.contains_key("SerialNumber")
+            && req.query_params.contains_key("TokenCode");
         target_state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
@@ -522,6 +524,7 @@ impl StsService {
                 account_id: account_id.clone(),
                 expiration: expiration_at,
                 session_policies,
+                mfa_present: mfa_present_for_session,
             },
         );
 
@@ -644,6 +647,7 @@ impl StsService {
                 account_id: account_id.clone(),
                 expiration: expiration_at,
                 session_policies,
+                mfa_present: false,
             },
         );
 
@@ -762,6 +766,7 @@ impl StsService {
                 account_id: account_id.clone(),
                 expiration: expiration_at,
                 session_policies,
+                mfa_present: false,
             },
         );
 
@@ -855,6 +860,8 @@ impl StsService {
         );
         // GetSessionToken does not accept a Policy parameter per AWS
         // docs, so session_policies is always empty for this operation.
+        let mfa_present_for_session = req.query_params.contains_key("SerialNumber")
+            && req.query_params.contains_key("TokenCode");
         state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
@@ -866,6 +873,7 @@ impl StsService {
                 account_id,
                 expiration: expiration_at,
                 session_policies: Vec::new(),
+                mfa_present: mfa_present_for_session,
             },
         );
 
@@ -944,6 +952,7 @@ impl StsService {
                 account_id: account_id.clone(),
                 expiration: expiration_at,
                 session_policies,
+                mfa_present: false,
             },
         );
 
@@ -1116,6 +1125,7 @@ impl StsService {
                 account_id: target_account.clone(),
                 expiration: expiration_at,
                 session_policies: Vec::new(),
+                mfa_present: false,
             },
         );
 
@@ -1710,7 +1720,171 @@ mod tests {
         assert_eq!(err.status(), StatusCode::FORBIDDEN);
     }
 
+    #[tokio::test]
+    async fn assume_role_allowed_by_trust_policy_with_principal_match() {
+        // Trust policy names the caller's account explicitly. Per AWS,
+        // `"Principal": { "AWS": "123456789012" }` is shorthand for the
+        // account root and matches any IAM principal in that account.
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"123456789012"},"Action":"sts:AssumeRole"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "named", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "sess")],
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(body.contains("<AccessKeyId>"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn assume_role_blocked_when_principal_not_in_trust_policy() {
+        // Trust policy lists a different account — caller's account
+        // (123456789012) doesn't match, so AssumeRole must 403.
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::999999999999:root"},"Action":"sts:AssumeRole"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "other-account", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "sess")],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected AccessDenied when caller account not in trust policy"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── Trust policy: ExternalId aliases (rename of existing tests for plan) ──
+
+    #[tokio::test]
+    async fn assume_role_blocked_when_external_id_required_but_missing() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole","Condition":{"StringEquals":{"sts:ExternalId":"hello"}}}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "ext-required", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "sess")],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected AccessDenied when ExternalId required but missing"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn assume_role_succeeds_with_correct_external_id() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole","Condition":{"StringEquals":{"sts:ExternalId":"hello"}}}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "ext-ok", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("ExternalId", "hello"),
+            ],
+        );
+        svc.handle(req).await.unwrap();
+    }
+
+    // ── Trust policy: MFA enforcement ──
+
+    #[tokio::test]
+    async fn assume_role_blocked_when_mfa_required_but_not_present() {
+        // Trust policy requires `aws:MultiFactorAuthPresent: true`; the
+        // request didn't supply SerialNumber+TokenCode, so the condition
+        // evaluates false and AssumeRole must 403.
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole","Condition":{"Bool":{"aws:MultiFactorAuthPresent":"true"}}}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "mfa-required", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "sess")],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected AccessDenied when MFA required but not supplied"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn assume_role_succeeds_with_mfa_supplied() {
+        // Same trust policy as above, but the caller supplied MFA —
+        // condition evaluates true and AssumeRole succeeds. The minted
+        // session credential carries `mfa_present: true` so downstream
+        // Authorize evaluations see `aws:MultiFactorAuthPresent`.
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole","Condition":{"Bool":{"aws:MultiFactorAuthPresent":"true"}}}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "mfa-ok", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("SerialNumber", "arn:aws:iam::123456789012:mfa/alice"),
+                ("TokenCode", "123456"),
+            ],
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(body.contains("<AccessKeyId>"), "{body}");
+        // The session credential the resolver hands out must record
+        // mfa_present=true so Authorize sees aws:MultiFactorAuthPresent.
+        let states = state.read();
+        let s = states.get("123456789012").unwrap();
+        let any_mfa = s.sts_temp_credentials.values().any(|c| c.mfa_present);
+        assert!(
+            any_mfa,
+            "expected at least one minted credential with mfa_present=true"
+        );
+    }
+
     // ── Service-linked roles ──
+
+    #[tokio::test]
+    async fn assume_service_linked_role_blocked_when_caller_not_matching_service() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+        let arn = fakecloud_aws::arn::Arn::global(
+            "iam",
+            "123456789012",
+            "role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS",
+        )
+        .to_string();
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create("123456789012");
+            s.roles.insert(
+                "AWSServiceRoleForECS".to_string(),
+                crate::state::IamRole {
+                    role_name: "AWSServiceRoleForECS".to_string(),
+                    role_id: "AROASLRECS".to_string(),
+                    arn: arn.clone(),
+                    path: "/aws-service-role/ecs.amazonaws.com/".to_string(),
+                    assume_role_policy_document: trust.to_string(),
+                    created_at: Utc::now(),
+                    description: None,
+                    max_session_duration: 3600,
+                    tags: Vec::new(),
+                    permissions_boundary: None,
+                },
+            );
+        }
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &arn), ("RoleSessionName", "sess")],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => {
+                panic!("expected AccessDenied for service-linked role with non-service caller")
+            }
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
 
     #[tokio::test]
     async fn service_linked_role_rejects_non_service_caller() {
