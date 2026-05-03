@@ -586,14 +586,147 @@ impl RdsService {
             // ── Blue/Green deployments ──
             "CreateBlueGreenDeployment" => {
                 let id = format!("bgd-{}", rand_id());
-                let entry = json!({"BlueGreenDeploymentIdentifier": id, "BlueGreenDeploymentName": get_param(req, "BlueGreenDeploymentName").unwrap_or_else(|| "blue-green".to_string()), "Status": "AVAILABLE"});
+                let arn = Arn::new("rds", region, &aid, &format!("blue-green-deployment:{id}"))
+                    .to_string();
+                let source_arn = get_param(req, "Source")
+                    .ok_or_else(|| missing("Source"))?;
+                let source_id = source_arn
+                    .rsplit(':')
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let target_id = get_param(req, "TargetDBInstanceName")
+                    .unwrap_or_else(|| format!("{source_id}-green-{}", rand_id()));
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
+                let source_arn_full = if source_arn.starts_with("arn:") {
+                    source_arn.clone()
+                } else {
+                    state.db_instance_arn(&source_id)
+                };
+                let target_arn = state.db_instance_arn(&target_id);
+                let exists = state.instances.contains_key(&source_id);
+                if !exists {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBInstanceNotFound",
+                        format!("DBInstance {source_id} not found."),
+                    ));
+                }
+                if let Some(source) = state.instances.get(&source_id).cloned() {
+                    let mut green = source.clone();
+                    green.db_instance_identifier = target_id.clone();
+                    green.db_instance_arn = target_arn.clone();
+                    green.read_replica_db_instance_identifiers = Vec::new();
+                    green.read_replica_source_db_instance_identifier = Some(source_id.clone());
+                    green.dbi_resource_id = format!("db-{}", uuid::Uuid::new_v4().simple());
+                    state.instances.insert(target_id.clone(), green);
+                }
+                let entry = json!({
+                    "BlueGreenDeploymentIdentifier": id,
+                    "BlueGreenDeploymentName": get_param(req, "BlueGreenDeploymentName").unwrap_or_else(|| "blue-green".to_string()),
+                    "Status": "AVAILABLE",
+                    "Source": source_arn_full,
+                    "Target": target_arn,
+                    "SourceDBInstanceIdentifier": source_id,
+                    "TargetDBInstanceIdentifier": target_id,
+                    "BlueGreenDeploymentArn": arn,
+                });
                 store(&mut state.extras, "blue_green").insert(id.clone(), entry.clone());
                 Ok(xml_response("CreateBlueGreenDeployment", blue_green_xml(&entry), &rid))
             }
-            "SwitchoverBlueGreenDeployment" => Ok(xml_response("SwitchoverBlueGreenDeployment", "    <BlueGreenDeployment/>".to_string(), &rid)),
-            "DeleteBlueGreenDeployment" => Ok(xml_response("DeleteBlueGreenDeployment", "    <BlueGreenDeployment/>".to_string(), &rid)),
+            "SwitchoverBlueGreenDeployment" => {
+                let id = get_param(req, "BlueGreenDeploymentIdentifier")
+                    .ok_or_else(|| missing("BlueGreenDeploymentIdentifier"))?;
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let entry = state
+                    .extras
+                    .get("blue_green")
+                    .and_then(|m| m.get(&id))
+                    .cloned()
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "BlueGreenDeploymentNotFoundFault",
+                            format!("BlueGreenDeployment {id} not found."),
+                        )
+                    })?;
+                let source_id = entry["SourceDBInstanceIdentifier"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let target_id = entry["TargetDBInstanceIdentifier"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                if !source_id.is_empty() && !target_id.is_empty() {
+                    let blue = state.instances.get(&source_id).cloned();
+                    let green = state.instances.get(&target_id).cloned();
+                    if let (Some(mut b), Some(mut g)) = (blue, green) {
+                        // Swap endpoints (and host_port) so callers
+                        // pointing at the blue address now reach the
+                        // green container, mirroring AWS BG cutover.
+                        std::mem::swap(&mut b.endpoint_address, &mut g.endpoint_address);
+                        std::mem::swap(&mut b.port, &mut g.port);
+                        std::mem::swap(&mut b.host_port, &mut g.host_port);
+                        std::mem::swap(&mut b.container_id, &mut g.container_id);
+                        // Green is now the writer; clear its replica
+                        // pointer back at the old blue.
+                        g.read_replica_source_db_instance_identifier = None;
+                        state.instances.insert(source_id.clone(), b);
+                        state.instances.insert(target_id.clone(), g);
+                    }
+                }
+                if let Some(map) = state.extras.get_mut("blue_green") {
+                    if let Some(e) = map.get_mut(&id) {
+                        if let Some(obj) = e.as_object_mut() {
+                            obj.insert("Status".to_string(), json!("SWITCHOVER_COMPLETED"));
+                        }
+                    }
+                }
+                let updated = state
+                    .extras
+                    .get("blue_green")
+                    .and_then(|m| m.get(&id))
+                    .cloned()
+                    .unwrap_or(entry);
+                Ok(xml_response(
+                    "SwitchoverBlueGreenDeployment",
+                    blue_green_xml(&updated),
+                    &rid,
+                ))
+            }
+            "DeleteBlueGreenDeployment" => {
+                let id = get_param(req, "BlueGreenDeploymentIdentifier")
+                    .ok_or_else(|| missing("BlueGreenDeploymentIdentifier"))?;
+                let delete_target = get_param(req, "DeleteTarget")
+                    .map(|v| v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let entry = state
+                    .extras
+                    .get_mut("blue_green")
+                    .and_then(|m| m.remove(&id))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "BlueGreenDeploymentNotFoundFault",
+                            format!("BlueGreenDeployment {id} not found."),
+                        )
+                    })?;
+                if delete_target {
+                    if let Some(target_id) = entry["TargetDBInstanceIdentifier"].as_str() {
+                        state.instances.remove(target_id);
+                    }
+                }
+                Ok(xml_response(
+                    "DeleteBlueGreenDeployment",
+                    blue_green_xml(&entry),
+                    &rid,
+                ))
+            }
             "DescribeBlueGreenDeployments" => list_extras_xml(self, &aid, "blue_green", "BlueGreenDeployments", "DescribeBlueGreenDeployments", blue_green_xml, &rid),
 
             // ── Shard groups ──
@@ -1597,9 +1730,6 @@ mod tests {
         ok("ModifyIntegration", &[]);
         ok("DescribeIntegrations", &[]);
         ok("DeleteIntegration", &[("IntegrationIdentifier", "i1")]);
-        ok("CreateBlueGreenDeployment", &[]);
-        ok("SwitchoverBlueGreenDeployment", &[]);
-        ok("DeleteBlueGreenDeployment", &[]);
         ok("DescribeBlueGreenDeployments", &[]);
         ok("CreateDBShardGroup", &[("DBShardGroupIdentifier", "sg1")]);
         ok("ModifyDBShardGroup", &[]);
@@ -2120,5 +2250,200 @@ mod tests {
             .err()
             .expect("missing source should error");
         assert_eq!(err.code(), "DBClusterNotFoundFault");
+    }
+
+    fn seed_blue_instance(svc: &RdsService, id: &str, addr: &str, port: i32) {
+        use crate::state::DbInstance;
+        use chrono::Utc;
+        let now = Utc::now();
+        let mut accounts = svc.state_handle().write();
+        let state = accounts.get_or_create("000000000000");
+        let arn = state.db_instance_arn(id);
+        state.instances.insert(
+            id.to_string(),
+            DbInstance {
+                db_instance_identifier: id.to_string(),
+                db_instance_arn: arn,
+                db_instance_class: "db.t3.micro".to_string(),
+                engine: "postgres".to_string(),
+                engine_version: "16.3".to_string(),
+                db_instance_status: "available".to_string(),
+                master_username: "admin".to_string(),
+                db_name: None,
+                endpoint_address: addr.to_string(),
+                port,
+                allocated_storage: 20,
+                publicly_accessible: false,
+                deletion_protection: false,
+                created_at: now,
+                dbi_resource_id: format!("db-{}", uuid::Uuid::new_v4().simple()),
+                master_user_password: "secret".to_string(),
+                container_id: format!("c-{id}"),
+                host_port: port as u16,
+                tags: Vec::new(),
+                read_replica_source_db_instance_identifier: None,
+                read_replica_db_instance_identifiers: Vec::new(),
+                vpc_security_group_ids: Vec::new(),
+                db_parameter_group_name: None,
+                backup_retention_period: 1,
+                preferred_backup_window: "03:00-04:00".to_string(),
+                preferred_maintenance_window: None,
+                latest_restorable_time: Some(now),
+                option_group_name: None,
+                multi_az: false,
+                pending_modified_values: None,
+                availability_zone: None,
+                storage_type: None,
+                storage_encrypted: false,
+                kms_key_id: None,
+                iam_database_authentication_enabled: false,
+                iops: None,
+                monitoring_interval: None,
+                monitoring_role_arn: None,
+                performance_insights_enabled: false,
+                performance_insights_kms_key_id: None,
+                performance_insights_retention_period: None,
+                enabled_cloudwatch_logs_exports: Vec::new(),
+                ca_certificate_identifier: None,
+                network_type: None,
+                character_set_name: None,
+                auto_minor_version_upgrade: None,
+                copy_tags_to_snapshot: None,
+                master_user_secret_arn: None,
+                master_user_secret_kms_key_id: None,
+            },
+        );
+    }
+
+    fn create_bg_deployment(svc: &RdsService, source_id: &str, target_id: &str) -> String {
+        let resp = svc
+            .handle_extra_action(&req(
+                "CreateBlueGreenDeployment",
+                &[
+                    (
+                        "Source",
+                        &format!("arn:aws:rds:us-east-1:000000000000:db:{source_id}"),
+                    ),
+                    ("TargetDBInstanceName", target_id),
+                ],
+            ))
+            .expect("CreateBlueGreenDeployment");
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        // Extract bgd id from body.
+        let needle = "<BlueGreenDeploymentIdentifier>";
+        let start = body.find(needle).expect("bgd id present") + needle.len();
+        let end = body[start..]
+            .find("</BlueGreenDeploymentIdentifier>")
+            .expect("close tag");
+        body[start..start + end].to_string()
+    }
+
+    #[test]
+    fn create_blue_green_deployment_clones_source_into_green() {
+        let svc = svc();
+        seed_blue_instance(&svc, "blue", "10.0.0.1", 5432);
+        let bgd_id = create_bg_deployment(&svc, "blue", "green");
+        let accounts = svc.state_handle().read();
+        let state = accounts.get("000000000000").unwrap();
+        assert!(state.instances.contains_key("green"));
+        let green = state.instances.get("green").unwrap();
+        assert_eq!(green.engine, "postgres");
+        assert_eq!(
+            green.read_replica_source_db_instance_identifier.as_deref(),
+            Some("blue")
+        );
+        let entry = state
+            .extras
+            .get("blue_green")
+            .unwrap()
+            .get(&bgd_id)
+            .unwrap();
+        assert_eq!(entry["Status"].as_str(), Some("AVAILABLE"));
+        assert_eq!(entry["SourceDBInstanceIdentifier"].as_str(), Some("blue"));
+        assert_eq!(entry["TargetDBInstanceIdentifier"].as_str(), Some("green"));
+    }
+
+    #[test]
+    fn create_blue_green_deployment_unknown_source_errors() {
+        let svc = svc();
+        let err = svc
+            .handle_extra_action(&req(
+                "CreateBlueGreenDeployment",
+                &[("Source", "arn:aws:rds:us-east-1:000000000000:db:ghost")],
+            ))
+            .err()
+            .expect("missing source should error");
+        assert_eq!(err.code(), "DBInstanceNotFound");
+    }
+
+    #[test]
+    fn switchover_blue_green_swaps_endpoints() {
+        let svc = svc();
+        seed_blue_instance(&svc, "blue", "10.0.0.1", 5432);
+        let bgd_id = create_bg_deployment(&svc, "blue", "green");
+        // Before swap: blue is the cloned source endpoint, green inherited the same.
+        // Mutate green endpoint to make swap observable.
+        {
+            let mut accounts = svc.state_handle().write();
+            let state = accounts.get_or_create("000000000000");
+            let green = state.instances.get_mut("green").unwrap();
+            green.endpoint_address = "10.0.0.2".to_string();
+            green.port = 5433;
+        }
+        svc.handle_extra_action(&req(
+            "SwitchoverBlueGreenDeployment",
+            &[("BlueGreenDeploymentIdentifier", &bgd_id)],
+        ))
+        .expect("SwitchoverBlueGreenDeployment");
+        let accounts = svc.state_handle().read();
+        let state = accounts.get("000000000000").unwrap();
+        let blue = state.instances.get("blue").unwrap();
+        let green = state.instances.get("green").unwrap();
+        assert_eq!(blue.endpoint_address, "10.0.0.2");
+        assert_eq!(blue.port, 5433);
+        assert_eq!(green.endpoint_address, "10.0.0.1");
+        assert_eq!(green.port, 5432);
+        // Green is now writer.
+        assert!(green.read_replica_source_db_instance_identifier.is_none());
+        let entry = state
+            .extras
+            .get("blue_green")
+            .unwrap()
+            .get(&bgd_id)
+            .unwrap();
+        assert_eq!(entry["Status"].as_str(), Some("SWITCHOVER_COMPLETED"));
+    }
+
+    #[test]
+    fn switchover_blue_green_unknown_id_errors() {
+        let svc = svc();
+        let err = svc
+            .handle_extra_action(&req(
+                "SwitchoverBlueGreenDeployment",
+                &[("BlueGreenDeploymentIdentifier", "bgd-ghost")],
+            ))
+            .err()
+            .expect("unknown bgd should error");
+        assert_eq!(err.code(), "BlueGreenDeploymentNotFoundFault");
+    }
+
+    #[test]
+    fn delete_blue_green_with_target_drops_green_instance() {
+        let svc = svc();
+        seed_blue_instance(&svc, "blue", "10.0.0.1", 5432);
+        let bgd_id = create_bg_deployment(&svc, "blue", "green");
+        svc.handle_extra_action(&req(
+            "DeleteBlueGreenDeployment",
+            &[
+                ("BlueGreenDeploymentIdentifier", &bgd_id),
+                ("DeleteTarget", "true"),
+            ],
+        ))
+        .expect("DeleteBlueGreenDeployment");
+        let accounts = svc.state_handle().read();
+        let state = accounts.get("000000000000").unwrap();
+        assert!(!state.instances.contains_key("green"));
+        let map = state.extras.get("blue_green").cloned().unwrap_or_default();
+        assert!(!map.contains_key(&bgd_id));
     }
 }
