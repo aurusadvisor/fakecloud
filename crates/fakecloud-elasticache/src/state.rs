@@ -187,6 +187,28 @@ pub struct ReplicationGroup {
     pub configuration_endpoint_port: Option<u16>,
     #[serde(default)]
     pub replicas_per_node_group: Option<i32>,
+    /// Raw AUTH token. Stored verbatim so a future `ModifyReplicationGroup`
+    /// can compare/rotate it; never echoed back in describe XML.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    /// Configured `Port` from the create request. AWS returns this on
+    /// `<NodeGroups>.<PrimaryEndpoint>.<Port>` once the cluster is real;
+    /// fakecloud uses the real container host port for connectivity but
+    /// echoes the requested value through pending modifications.
+    #[serde(default)]
+    pub port: u16,
+    /// SNS topic ARN for replication-group events.
+    #[serde(default)]
+    pub notification_topic_arn: Option<String>,
+    /// `ClusterMode` input — distinct from the derived `cluster_enabled`
+    /// flag. Valid values: `enabled` / `disabled` / `compatible`.
+    #[serde(default)]
+    pub cluster_mode: Option<String>,
+    /// `DataTieringEnabled` boolean as supplied by the request. The
+    /// existing `data_tiering` string field is the response-shape
+    /// `enabled`/`disabled` projection.
+    #[serde(default)]
+    pub data_tiering_enabled: Option<bool>,
 }
 
 /// AWS's LogDeliveryConfiguration shape, retained verbatim so we can
@@ -1156,6 +1178,11 @@ mod tests {
                 configuration_endpoint_address: None,
                 configuration_endpoint_port: None,
                 replicas_per_node_group: None,
+                auth_token: None,
+                port: 6379,
+                notification_topic_arn: None,
+                cluster_mode: None,
+                data_tiering_enabled: None,
             },
         );
         assert_eq!(state.replication_groups.len(), 1);

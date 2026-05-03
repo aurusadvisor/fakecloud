@@ -7973,6 +7973,21 @@ impl ResourceProvisioner {
             configuration_endpoint_address: configuration_endpoint.clone(),
             configuration_endpoint_port: configuration_endpoint.as_ref().map(|_| port),
             replicas_per_node_group,
+            auth_token: props
+                .get("AuthToken")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+            port,
+            notification_topic_arn: props
+                .get("NotificationTopicArn")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            cluster_mode: props
+                .get("ClusterMode")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            data_tiering_enabled: props.get("DataTieringEnabled").and_then(|v| v.as_bool()),
         };
         state.replication_groups.insert(id.clone(), group);
 

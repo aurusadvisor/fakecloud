@@ -829,6 +829,21 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
         "<ReplicationGroupCreateTime>{}</ReplicationGroupCreateTime>",
         xml_escape(&g.created_at)
     );
+    let notification_topic_xml = g
+        .notification_topic_arn
+        .as_ref()
+        .map(|t| {
+            format!(
+                "<NotificationConfiguration><TopicArn>{}</TopicArn><TopicStatus>active</TopicStatus></NotificationConfiguration>",
+                xml_escape(t)
+            )
+        })
+        .unwrap_or_default();
+    let cluster_mode_xml = g
+        .cluster_mode
+        .as_ref()
+        .map(|m| format!("<ClusterMode>{}</ClusterMode>", xml_escape(m)))
+        .unwrap_or_default();
 
     let id = xml_escape(&g.replication_group_id);
     let description = xml_escape(&g.description);
@@ -914,6 +929,8 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
          {network_type_xml}\
          {transit_encryption_mode_xml}\
          {configuration_endpoint_xml}\
+         {notification_topic_xml}\
+         {cluster_mode_xml}\
          <PendingModifiedValues/>\
          <ARN>{arn}</ARN>",
     )
