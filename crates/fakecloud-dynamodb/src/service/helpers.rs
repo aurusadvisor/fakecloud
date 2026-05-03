@@ -2179,6 +2179,201 @@ pub(crate) fn execute_partiql_statement(
     }
 }
 
+/// In-place PartiQL executor used by ExecuteTransaction, which must
+/// hold a single write lock across the whole batch so a mid-batch error
+/// can revert. Returns the response body Value plus the touched table
+/// name and (for write ops) the keys + before/after images so the
+/// caller can emit stream + kinesis events after the transaction
+/// commits — mirroring the per-write hooks in items.rs and the
+/// TransactWriteItems path.
+pub(crate) struct PartiqlOutcome {
+    pub response: Value,
+    pub table_name: Option<String>,
+    pub event_name: Option<String>, // INSERT, MODIFY, REMOVE
+    pub keys: Option<HashMap<String, AttributeValue>>,
+    pub old_image: Option<HashMap<String, AttributeValue>>,
+    pub new_image: Option<HashMap<String, AttributeValue>>,
+}
+
+pub(crate) fn execute_partiql_in_state(
+    state: &mut crate::state::DynamoDbState,
+    statement: &str,
+    parameters: &[Value],
+) -> Result<PartiqlOutcome, AwsServiceError> {
+    let trimmed = statement.trim();
+    let upper = trimmed.to_ascii_uppercase();
+
+    if upper.starts_with("SELECT") {
+        let from_pos = upper.find("FROM").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Invalid SELECT statement: missing FROM",
+            )
+        })?;
+        let after_from = trimmed[from_pos + 4..].trim();
+        let (table_name, rest) = parse_partiql_table_name(after_from);
+        let table = get_table(&state.tables, &table_name)?;
+        let rest_upper = rest.trim().to_ascii_uppercase();
+        let items: Vec<Value> = if rest_upper.starts_with("WHERE") {
+            let where_clause = rest.trim()[5..].trim();
+            evaluate_partiql_where(table, where_clause, parameters)?
+                .iter()
+                .map(|item| json!(item))
+                .collect()
+        } else {
+            table.items.iter().map(|item| json!(item)).collect()
+        };
+        Ok(PartiqlOutcome {
+            response: json!({ "Items": items }),
+            table_name: Some(table_name),
+            event_name: None,
+            keys: None,
+            old_image: None,
+            new_image: None,
+        })
+    } else if upper.starts_with("INSERT") {
+        let into_pos = upper.find("INTO").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Invalid INSERT statement: missing INTO",
+            )
+        })?;
+        let after_into = trimmed[into_pos + 4..].trim();
+        let (table_name, rest) = parse_partiql_table_name(after_into);
+        let rest_upper = rest.trim().to_ascii_uppercase();
+        let value_pos = rest_upper.find("VALUE").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Invalid INSERT statement: missing VALUE",
+            )
+        })?;
+        let value_str = rest.trim()[value_pos + 5..].trim();
+        let item = parse_partiql_value_object(value_str, parameters)?;
+        let table = get_table_mut(&mut state.tables, &table_name)?;
+        let key = extract_key(table, &item);
+        if table.find_item_index(&key).is_some() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DuplicateItemException",
+                "Duplicate primary key exists in table",
+            ));
+        }
+        table.items.push(item.clone());
+        table.recalculate_stats();
+        Ok(PartiqlOutcome {
+            response: json!({}),
+            table_name: Some(table_name),
+            event_name: Some("INSERT".to_string()),
+            keys: Some(key),
+            old_image: None,
+            new_image: Some(item),
+        })
+    } else if upper.starts_with("UPDATE") {
+        let after_update = trimmed[6..].trim();
+        let (table_name, rest) = parse_partiql_table_name(after_update);
+        let rest_upper = rest.trim().to_ascii_uppercase();
+        let set_pos = rest_upper.find("SET").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Invalid UPDATE statement: missing SET",
+            )
+        })?;
+        let after_set = rest.trim()[set_pos + 3..].trim();
+        let where_pos = after_set.to_ascii_uppercase().find("WHERE");
+        let (set_clause, where_clause) = if let Some(wp) = where_pos {
+            (&after_set[..wp], after_set[wp + 5..].trim())
+        } else {
+            (after_set, "")
+        };
+        let table = get_table_mut(&mut state.tables, &table_name)?;
+        let matched_indices = if !where_clause.is_empty() {
+            find_partiql_where_indices(table, where_clause, parameters)?
+        } else {
+            (0..table.items.len()).collect()
+        };
+        let param_offset = count_params_in_str(where_clause);
+        let assignments: Vec<&str> = set_clause.split(',').collect();
+        let mut last_key: Option<HashMap<String, AttributeValue>> = None;
+        let mut last_old: Option<HashMap<String, AttributeValue>> = None;
+        let mut last_new: Option<HashMap<String, AttributeValue>> = None;
+        for idx in &matched_indices {
+            last_old = Some(table.items[*idx].clone());
+            let mut local_offset = param_offset;
+            for assignment in &assignments {
+                let assignment = assignment.trim();
+                if let Some((attr, val_str)) = assignment.split_once('=') {
+                    let attr = attr.trim().trim_matches('"');
+                    let val_str = val_str.trim();
+                    let value = parse_partiql_literal(val_str, parameters, &mut local_offset);
+                    if let Some(v) = value {
+                        table.items[*idx].insert(attr.to_string(), v);
+                    }
+                }
+            }
+            last_key = Some(extract_key(table, &table.items[*idx]));
+            last_new = Some(table.items[*idx].clone());
+        }
+        table.recalculate_stats();
+        Ok(PartiqlOutcome {
+            response: json!({}),
+            table_name: Some(table_name),
+            event_name: last_old.as_ref().map(|_| "MODIFY".to_string()),
+            keys: last_key,
+            old_image: last_old,
+            new_image: last_new,
+        })
+    } else if upper.starts_with("DELETE") {
+        let from_pos = upper.find("FROM").ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Invalid DELETE statement: missing FROM",
+            )
+        })?;
+        let after_from = trimmed[from_pos + 4..].trim();
+        let (table_name, rest) = parse_partiql_table_name(after_from);
+        let rest_upper = rest.trim().to_ascii_uppercase();
+        if !rest_upper.starts_with("WHERE") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "DELETE requires a WHERE clause",
+            ));
+        }
+        let where_clause = rest.trim()[5..].trim();
+        let table = get_table_mut(&mut state.tables, &table_name)?;
+        let mut indices = find_partiql_where_indices(table, where_clause, parameters)?;
+        indices.sort_unstable();
+        indices.reverse();
+        let mut last_old: Option<HashMap<String, AttributeValue>> = None;
+        let mut last_key: Option<HashMap<String, AttributeValue>> = None;
+        for idx in indices {
+            let removed = table.items.remove(idx);
+            last_key = Some(extract_key(table, &removed));
+            last_old = Some(removed);
+        }
+        table.recalculate_stats();
+        Ok(PartiqlOutcome {
+            response: json!({}),
+            table_name: Some(table_name),
+            event_name: last_old.as_ref().map(|_| "REMOVE".to_string()),
+            keys: last_key,
+            old_image: last_old,
+            new_image: None,
+        })
+    } else {
+        Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            format!("Unsupported PartiQL statement: {trimmed}"),
+        ))
+    }
+}
+
 /// Parse a simple `SELECT * FROM tablename WHERE pk = 'value'` or with parameters.
 pub(crate) fn execute_partiql_select(
     state: &SharedDynamoDbState,

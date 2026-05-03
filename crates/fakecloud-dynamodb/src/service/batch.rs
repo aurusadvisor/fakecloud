@@ -20,7 +20,7 @@ type PendingKinesis = (
 );
 
 use super::{
-    apply_update_expression, build_consumed_capacity, evaluate_condition,
+    apply_update_expression, build_consumed_capacity, evaluate_condition, execute_partiql_in_state,
     execute_partiql_statement, extract_key, get_table, get_table_mut,
     parse_expression_attribute_names, parse_expression_attribute_values, require_str,
     return_consumed_mode, return_icm_mode, DynamoDbService,
@@ -740,37 +740,84 @@ impl DynamoDbService {
             )
         })?;
 
-        // Collect all results; if any fail, return TransactionCanceledException
-        let mut results: Vec<Result<Value, String>> = Vec::new();
-        for stmt_obj in transact_statements {
+        // Snapshot every account state on the default account up-front
+        // so we can revert in one shot if any statement fails. Cheap
+        // because PartiQL targets the default account only (PartiQL has
+        // no per-account scoping), and atomicity is required by the
+        // spec.
+        let mut accounts = self.state.write();
+        let state = accounts.default_mut();
+        let snapshot_tables = state.tables.clone();
+
+        let region = req.region.clone();
+        let mut responses: Vec<Value> = Vec::with_capacity(transact_statements.len());
+        let mut pending_stream: Vec<(String, crate::state::StreamRecord)> = Vec::new();
+        let mut pending_kinesis: Vec<PendingKinesis> = Vec::new();
+        let mut failure: Option<(usize, String)> = None;
+
+        for (i, stmt_obj) in transact_statements.iter().enumerate() {
             let statement = stmt_obj["Statement"].as_str().unwrap_or_default();
             let parameters = stmt_obj["Parameters"]
                 .as_array()
                 .cloned()
                 .unwrap_or_default();
 
-            match execute_partiql_statement(&self.state, statement, &parameters) {
-                Ok(resp) => {
-                    let resp_body: Value =
-                        serde_json::from_slice(resp.body.expect_bytes()).unwrap_or_default();
-                    results.push(Ok(resp_body));
+            match execute_partiql_in_state(state, statement, &parameters) {
+                Ok(outcome) => {
+                    responses.push(outcome.response);
+                    let table_name = match outcome.table_name {
+                        Some(n) => n,
+                        None => continue,
+                    };
+                    let event_name = match outcome.event_name {
+                        Some(e) => e,
+                        None => continue,
+                    };
+                    let keys = outcome.keys.unwrap_or_default();
+                    if let Some(table) = state.tables.get(&table_name) {
+                        if let Some(record) = crate::streams::generate_stream_record(
+                            table,
+                            &event_name,
+                            keys.clone(),
+                            outcome.old_image.clone(),
+                            outcome.new_image.clone(),
+                            &region,
+                        ) {
+                            pending_stream.push((table_name.clone(), record));
+                        }
+                        if let Some(target) = DynamoDbService::kinesis_target(table) {
+                            pending_kinesis.push((
+                                target,
+                                event_name,
+                                keys,
+                                outcome.old_image,
+                                outcome.new_image,
+                            ));
+                        }
+                    }
                 }
                 Err(e) => {
-                    results.push(Err(e.to_string()));
+                    failure = Some((i, e.to_string()));
+                    break;
                 }
             }
         }
 
-        let any_failed = results.iter().any(|r| r.is_err());
-        if any_failed {
-            let reasons: Vec<Value> = results
-                .iter()
-                .map(|r| match r {
-                    Ok(_) => json!({ "Code": "None" }),
-                    Err(msg) => json!({
-                        "Code": "ValidationException",
-                        "Message": msg
-                    }),
+        if let Some((failed_idx, msg)) = failure {
+            // Revert: replace the tables map with the pre-transaction
+            // snapshot so all earlier statements in this transaction
+            // are undone.
+            state.tables = snapshot_tables;
+            let reasons: Vec<Value> = (0..transact_statements.len())
+                .map(|i| {
+                    if i == failed_idx {
+                        json!({
+                            "Code": "ValidationException",
+                            "Message": msg.clone(),
+                        })
+                    } else {
+                        json!({ "Code": "None" })
+                    }
                 })
                 .collect();
             let error_body = json!({
@@ -784,7 +831,24 @@ impl DynamoDbService {
             ));
         }
 
-        let responses: Vec<Value> = results.into_iter().filter_map(|r| r.ok()).collect();
+        // Append pending stream records under each table's lock.
+        for (table_name, record) in pending_stream {
+            if let Some(table) = state.tables.get_mut(&table_name) {
+                crate::streams::add_stream_record(table, record);
+            }
+        }
+
+        drop(accounts);
+        for (target, event_name, keys, old_image, new_image) in pending_kinesis {
+            self.deliver_to_kinesis_destinations(
+                &target,
+                &event_name,
+                &keys,
+                old_image.as_ref(),
+                new_image.as_ref(),
+            );
+        }
+
         Self::ok_json(json!({ "Responses": responses }))
     }
 }
@@ -922,6 +986,64 @@ mod tests {
             table.items.len(),
             0,
             "the Put on Widgets must not commit when a sibling table is missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_transaction_emits_stream_record_per_write() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        let req = req_for(
+            "ExecuteTransaction",
+            json!({
+                "TransactStatements": [
+                    {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}"},
+                    {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'b'}"},
+                ]
+            }),
+        );
+        let resp = svc.execute_transaction(&req).unwrap();
+        assert_eq!(resp.status, http::StatusCode::OK);
+
+        let accts = state.read();
+        let s = accts.get("123456789012").unwrap();
+        let table = s.tables.get("Widgets").unwrap();
+        assert_eq!(table.items.len(), 2);
+        assert_eq!(
+            table.stream_records.read().len(),
+            2,
+            "each PartiQL INSERT must emit one stream record"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_transaction_reverts_on_mid_batch_failure() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        // First INSERT succeeds, second targets a missing table.
+        let req = req_for(
+            "ExecuteTransaction",
+            json!({
+                "TransactStatements": [
+                    {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}"},
+                    {"Statement": "INSERT INTO \"Missing\" VALUE {'pk': 'b'}"},
+                ]
+            }),
+        );
+        let resp = svc.execute_transaction(&req).unwrap();
+        assert_eq!(resp.status, http::StatusCode::BAD_REQUEST);
+
+        let accts = state.read();
+        let s = accts.get("123456789012").unwrap();
+        let table = s.tables.get("Widgets").unwrap();
+        assert_eq!(
+            table.items.len(),
+            0,
+            "first INSERT must be reverted when the second statement fails"
         );
     }
 }
