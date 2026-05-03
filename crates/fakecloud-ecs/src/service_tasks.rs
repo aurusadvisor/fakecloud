@@ -10,7 +10,55 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use super::*;
 
 impl EcsService {
-    pub(super) fn run_task(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    /// Spawn a task from a cross-service caller (EventBridge Scheduler /
+    /// EventBridge Rules) without going through the AwsRequest dispatch
+    /// path. Builds the JSON body and reuses [`Self::run_task`] so all
+    /// the existing validation / runtime spawn logic runs identically.
+    /// Returns Err with a human-readable message on validation failures —
+    /// the caller decides whether to surface the failure (e.g. DLQ).
+    pub fn run_task_external(
+        &self,
+        account_id: &str,
+        cluster: &str,
+        task_definition: &str,
+        launch_type: Option<&str>,
+        count: usize,
+    ) -> Result<(), String> {
+        use bytes::Bytes;
+        use http::{HeaderMap, Method};
+        use std::collections::HashMap;
+        let body = serde_json::json!({
+            "cluster": cluster,
+            "taskDefinition": task_definition,
+            "launchType": launch_type.unwrap_or("FARGATE"),
+            "count": count.max(1) as i64,
+        });
+        let body_bytes =
+            Bytes::from(serde_json::to_vec(&body).map_err(|e| format!("encode body: {e}"))?);
+        let req = AwsRequest {
+            service: "ecs".into(),
+            action: "RunTask".into(),
+            region: "us-east-1".into(),
+            account_id: account_id.to_string(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: body_bytes,
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        };
+        self.run_task(&req)
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    pub fn run_task(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
         let td_ref = req_str(&body, "taskDefinition")?;
         let cluster_ref = opt_str(&body, "cluster");
