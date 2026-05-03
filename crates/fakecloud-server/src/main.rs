@@ -2332,9 +2332,15 @@ async fn main() {
             None
         };
     let mut apigw_v1_service = ApiGatewayService::new(apigatewayv1_state.clone());
-    if let Some(ref ld) = lambda_delivery {
-        let delivery_for_v1 = Arc::new(DeliveryBus::new().with_lambda(ld.clone()));
-        apigw_v1_service = apigw_v1_service.with_delivery(delivery_for_v1);
+    {
+        let cognito_jwt_verifier: Arc<dyn fakecloud_core::delivery::CognitoJwtVerifier> = Arc::new(
+            fakecloud_cognito::StateBackedJwtVerifier::new(cognito_state.clone()),
+        );
+        let mut bus = DeliveryBus::new().with_cognito_jwt_verifier(cognito_jwt_verifier);
+        if let Some(ref ld) = lambda_delivery {
+            bus = bus.with_lambda(ld.clone());
+        }
+        apigw_v1_service = apigw_v1_service.with_delivery(Arc::new(bus));
     }
     if let Some(store) = apigw_v1_snapshot_store {
         apigw_v1_service = apigw_v1_service.with_snapshot_store(store);

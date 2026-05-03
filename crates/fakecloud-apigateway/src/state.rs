@@ -119,6 +119,28 @@ pub struct ApiGatewayState {
     /// Introspection-only request history (not persisted).
     #[serde(default, skip_serializing)]
     pub request_history: Vec<ApiRequest>,
+    /// In-memory authorizer result cache keyed by `<authorizerId>|<token>`.
+    /// Mirrors AWS's identity caching: a hit short-circuits the
+    /// authorizer Lambda invocation and reuses the prior policy +
+    /// context for `authorizerResultTtlInSeconds`. Not persisted so a
+    /// restart forces re-evaluation.
+    #[serde(default, skip)]
+    pub authorizer_cache: BTreeMap<String, CachedAuthorizerResult>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedAuthorizerResult {
+    pub principal_id: String,
+    pub effect: AuthEffect,
+    pub context: serde_json::Value,
+    pub claims: Option<serde_json::Value>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthEffect {
+    Allow,
+    Deny,
 }
 
 impl ApiGatewayState {
@@ -151,6 +173,7 @@ impl ApiGatewayState {
             account_settings: default_account_settings(),
             tags: BTreeMap::new(),
             request_history: Vec::new(),
+            authorizer_cache: BTreeMap::new(),
         }
     }
 
@@ -180,6 +203,7 @@ impl ApiGatewayState {
         self.account_settings = default_account_settings();
         self.tags.clear();
         self.request_history.clear();
+        self.authorizer_cache.clear();
     }
 }
 

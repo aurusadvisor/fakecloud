@@ -19,9 +19,9 @@ pub mod state;
 
 pub use facade::ApiGatewayFacade;
 pub use state::{
-    make_id, ApiGatewaySnapshot, ApiGatewayState, ApiKey, Authorizer, Deployment, Integration,
-    Method, Model, Resource, RestApi, SharedApiGatewayState, Stage, UsagePlan,
-    APIGATEWAY_SNAPSHOT_SCHEMA_VERSION,
+    make_id, ApiGatewaySnapshot, ApiGatewayState, ApiKey, AuthEffect, Authorizer,
+    CachedAuthorizerResult, Deployment, Integration, Method, Model, Resource, RestApi,
+    SharedApiGatewayState, Stage, UsagePlan, APIGATEWAY_SNAPSHOT_SCHEMA_VERSION,
 };
 
 pub use service::ApiGatewayService;

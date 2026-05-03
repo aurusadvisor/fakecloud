@@ -30,6 +30,10 @@ pub struct DeliveryBus {
     /// Publish CloudWatch metric data points (CloudWatch Logs metric
     /// filters extract these on PutLogEvents).
     cloudwatch_metrics: Option<Arc<dyn CloudwatchDelivery>>,
+    /// Verify a Cognito-issued JWT against the user pool that issued it.
+    /// Used by API Gateway v1's `COGNITO_USER_POOLS` authorizer to
+    /// validate signature/expiry/audience and extract claims.
+    cognito_jwt_verifier: Option<Arc<dyn CognitoJwtVerifier>>,
 }
 
 /// Message attribute for SQS delivery from SNS.
@@ -316,6 +320,22 @@ pub trait KmsHook: Send + Sync {
     ) -> Result<Vec<u8>, String>;
 }
 
+/// Cognito-issued JWT verification hook. Implementations are wired by
+/// fakecloud-server and back the `COGNITO_USER_POOLS` authorizer in
+/// API Gateway v1. The verifier validates RS256 signature, exp/nbf,
+/// `iss`, and `aud`/`client_id` against the user pool referenced by
+/// the authorizer's `providerArns`. On success returns the decoded
+/// claims as a JSON object; on failure returns an error string the
+/// caller surfaces as `401 Unauthorized`.
+pub trait CognitoJwtVerifier: Send + Sync {
+    fn verify_token(
+        &self,
+        account_id: &str,
+        user_pool_arn: &str,
+        token: &str,
+    ) -> Result<serde_json::Value, String>;
+}
+
 impl DeliveryBus {
     pub fn new() -> Self {
         Self {
@@ -330,6 +350,26 @@ impl DeliveryBus {
             ses_dispatcher: None,
             ecs_task_runner: None,
             cloudwatch_metrics: None,
+            cognito_jwt_verifier: None,
+        }
+    }
+
+    pub fn with_cognito_jwt_verifier(mut self, verifier: Arc<dyn CognitoJwtVerifier>) -> Self {
+        self.cognito_jwt_verifier = Some(verifier);
+        self
+    }
+
+    /// Verify a Cognito JWT against a user pool. Returns `Err` when no
+    /// verifier is wired or when the token fails validation.
+    pub fn verify_cognito_jwt(
+        &self,
+        account_id: &str,
+        user_pool_arn: &str,
+        token: &str,
+    ) -> Result<serde_json::Value, String> {
+        match self.cognito_jwt_verifier {
+            Some(ref v) => v.verify_token(account_id, user_pool_arn, token),
+            None => Err("Cognito JWT verifier not configured".to_string()),
         }
     }
 

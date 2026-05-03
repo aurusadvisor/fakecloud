@@ -80,6 +80,52 @@ pub fn jwks_document(private_key_pem: &str, kid: &str) -> Value {
     })
 }
 
+/// Verify an RS256-signed compact JWT against the public half of
+/// `private_key_pem` (the pool's stored signing PEM embeds both halves).
+/// Returns the decoded `(header, payload)` pair on success, or an error
+/// string the caller can surface in a 401 response.
+///
+/// Only validates the cryptographic signature here; expiry/issuer/audience
+/// are the caller's responsibility because policy varies by use case
+/// (API Gateway v1 wants `iss` + `aud`/`client_id`; userinfo just wants
+/// not-expired).
+pub fn verify_rs256(token: &str, private_key_pem: &str) -> Result<(Value, Value), String> {
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::signature::Verifier;
+
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err("malformed JWT (expected three dot-separated parts)".to_string());
+    }
+    let header_bytes = b64
+        .decode(parts[0])
+        .map_err(|e| format!("invalid header base64url: {e}"))?;
+    let payload_bytes = b64
+        .decode(parts[1])
+        .map_err(|e| format!("invalid payload base64url: {e}"))?;
+    let sig_bytes = b64
+        .decode(parts[2])
+        .map_err(|e| format!("invalid signature base64url: {e}"))?;
+    let header: Value =
+        serde_json::from_slice(&header_bytes).map_err(|e| format!("invalid header JSON: {e}"))?;
+    let payload: Value =
+        serde_json::from_slice(&payload_bytes).map_err(|e| format!("invalid payload JSON: {e}"))?;
+
+    let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)
+        .map_err(|e| format!("invalid signing PEM: {e}"))?;
+    let public_key = RsaPublicKey::from(&private_key);
+    let verifying_key = VerifyingKey::<Sha256>::new(public_key);
+    let signature = Signature::try_from(sig_bytes.as_slice())
+        .map_err(|e| format!("invalid signature bytes: {e}"))?;
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    verifying_key
+        .verify(signing_input.as_bytes(), &signature)
+        .map_err(|e| format!("signature verification failed: {e}"))?;
+    Ok((header, payload))
+}
+
 /// SubjectPublicKeyInfo PEM for callers that want the raw public half
 /// without parsing the JWKS document.
 #[allow(dead_code)]
