@@ -1349,3 +1349,261 @@ async fn create_event_source_mapping_round_trips_advanced_fields() {
     assert_eq!(v["MaximumRetryAttempts"], 5);
     assert_eq!(v["Topics"][0], "t1");
 }
+
+// ── UpdateFunctionCode behavior tests (D1) ──
+
+#[tokio::test]
+async fn update_function_code_replaces_zip_and_recomputes_sha256() {
+    let svc = LambdaService::new(make_state());
+    // Seed with one zip payload so we can verify the hash actually changes.
+    let initial_bytes = b"initial-zip-payload";
+    let initial_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, initial_bytes);
+    let body = json!({
+        "FunctionName": "rehash",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "Code": {"ZipFile": initial_b64},
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    let resp = svc.handle(req).await.unwrap();
+    let pre: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let pre_sha = pre["CodeSha256"].as_str().unwrap().to_string();
+    let pre_size = pre["CodeSize"].as_i64().unwrap();
+    assert_eq!(pre_size, initial_bytes.len() as i64);
+
+    // Update with completely different bytes.
+    let new_bytes = b"a-much-longer-replacement-zip-payload-with-different-content";
+    let new_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, new_bytes);
+    let body = json!({ "ZipFile": new_b64 });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/rehash/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+
+    // SHA must change and the response must report the *new* hash.
+    let post_sha = post["CodeSha256"].as_str().unwrap();
+    assert_ne!(post_sha, pre_sha);
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(new_bytes);
+    let expected = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        hasher.finalize(),
+    );
+    assert_eq!(post_sha, expected);
+    assert_eq!(post["CodeSize"].as_i64().unwrap(), new_bytes.len() as i64);
+
+    // GetFunctionConfiguration must surface the same updated state.
+    let req = make_request(
+        Method::GET,
+        "/2015-03-31/functions/rehash/configuration",
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let cfg: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(cfg["CodeSha256"].as_str().unwrap(), expected);
+    assert_eq!(cfg["CodeSize"].as_i64().unwrap(), new_bytes.len() as i64);
+}
+
+#[tokio::test]
+async fn update_function_code_replaces_image_uri_and_persists() {
+    let svc = LambdaService::new(make_state());
+    let body = json!({
+        "FunctionName": "img-update",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "PackageType": "Image",
+        "Code": {"ImageUri": "old.example.com/image:1"},
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    svc.handle(req).await.unwrap();
+
+    let body = json!({ "ImageUri": "new.example.com/image:2" });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/img-update/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        post["Code"]["ImageUri"].as_str().unwrap(),
+        "new.example.com/image:2"
+    );
+
+    // GetFunctionConfiguration round-trip confirms the change persisted.
+    let req = make_request(
+        Method::GET,
+        "/2015-03-31/functions/img-update/configuration",
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let cfg: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        cfg["Code"]["ImageUri"].as_str().unwrap(),
+        "new.example.com/image:2"
+    );
+}
+
+#[tokio::test]
+async fn update_function_code_with_matching_revision_id_succeeds() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "rev-ok").await;
+
+    let req = make_request(
+        Method::GET,
+        "/2015-03-31/functions/rev-ok/configuration",
+        "",
+    );
+    let pre: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
+    let revision = pre["RevisionId"].as_str().unwrap().to_string();
+
+    let new_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"with-rev");
+    let body = json!({ "ZipFile": new_b64, "RevisionId": revision });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/rev-ok/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, http::StatusCode::OK);
+    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    // Code changed -> revision_id must rotate to a fresh value.
+    assert_ne!(post["RevisionId"].as_str().unwrap(), revision);
+}
+
+#[tokio::test]
+async fn update_function_code_with_stale_revision_id_returns_412() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "rev-stale").await;
+
+    let new_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"stale");
+    let body = json!({
+        "ZipFile": new_b64,
+        "RevisionId": "00000000-0000-0000-0000-000000000000",
+    });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/rev-stale/code",
+        &body.to_string(),
+    );
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected PreconditionFailedException"),
+    };
+    assert_eq!(err.status(), StatusCode::PRECONDITION_FAILED);
+    assert!(err.to_string().contains("PreconditionFailedException"));
+}
+
+#[tokio::test]
+async fn update_function_code_unknown_function_returns_404() {
+    let svc = LambdaService::new(make_state());
+    let new_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"x");
+    let body = json!({ "ZipFile": new_b64 });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/does-not-exist/code",
+        &body.to_string(),
+    );
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected ResourceNotFoundException"),
+    };
+    assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    assert!(err.to_string().contains("ResourceNotFoundException"));
+}
+
+#[tokio::test]
+async fn update_function_code_dry_run_does_not_mutate() {
+    let svc = LambdaService::new(make_state());
+    let initial = b"original-bytes";
+    let initial_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, initial);
+    let body = json!({
+        "FunctionName": "dryrun",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "Code": {"ZipFile": initial_b64},
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    let resp = svc.handle(req).await.unwrap();
+    let pre: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let pre_sha = pre["CodeSha256"].as_str().unwrap().to_string();
+    let pre_size = pre["CodeSize"].as_i64().unwrap();
+    let pre_rev = pre["RevisionId"].as_str().unwrap().to_string();
+
+    // DryRun=true with new bytes — must not mutate state.
+    let new_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"would-be-new-bytes",
+    );
+    let body = json!({ "ZipFile": new_b64, "DryRun": true });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/dryrun/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, http::StatusCode::OK);
+
+    // GetFunctionConfiguration confirms no fields changed.
+    let req = make_request(
+        Method::GET,
+        "/2015-03-31/functions/dryrun/configuration",
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let cfg: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(cfg["CodeSha256"].as_str().unwrap(), pre_sha);
+    assert_eq!(cfg["CodeSize"].as_i64().unwrap(), pre_size);
+    assert_eq!(cfg["RevisionId"].as_str().unwrap(), pre_rev);
+}
+
+#[tokio::test]
+async fn update_function_code_publish_creates_new_version() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "pub-fn").await;
+
+    let new_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"publish-payload",
+    );
+    let body = json!({ "ZipFile": new_b64, "Publish": true });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/pub-fn/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+
+    // Publish=true returns the snapshot version (numeric, not $LATEST).
+    let version = post["Version"].as_str().unwrap();
+    assert_ne!(version, "$LATEST");
+    let parsed: u64 = version.parse().expect("Version should be numeric");
+    assert!(parsed >= 1);
+    assert!(post["FunctionArn"]
+        .as_str()
+        .unwrap()
+        .ends_with(&format!(":{version}")));
+
+    // The new $LATEST also reflects the updated code.
+    let req = make_request(
+        Method::GET,
+        "/2015-03-31/functions/pub-fn/configuration",
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let latest: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        latest["CodeSize"].as_i64().unwrap(),
+        b"publish-payload".len() as i64
+    );
+}
