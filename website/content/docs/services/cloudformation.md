@@ -11,6 +11,8 @@ fakecloud implements **90 of 90** CloudFormation operations at 100% Smithy confo
 - **Stacks** — CreateStack, UpdateStack, DeleteStack, DescribeStacks
 - **Template parsing** — JSON and YAML, parameters, mappings, conditions, outputs
 - **Resource provisioning** — creates underlying resources in other fakecloud services (S3 buckets, SQS queues, Lambda functions, etc.) where supported
+- **Cross-stack exports / imports** — `Outputs.*.Export.Name` registers entries in an account-wide exports registry; `Fn::ImportValue` substitutes them at provision time. Unknown export names fail the create/update with a `ValidationError` ("No export named X found"), and `DeleteStack` blocks while another live stack still imports an export.
+- **`ListExports` / `ListImports`** — read directly from the exports registry / reverse-ref map; export name uniqueness is enforced across the account.
 - **Change sets** — CreateChangeSet, DescribeChangeSet, ExecuteChangeSet
 - **Stack sets** — CRUD, instance management, operation tracking
 - **Stack events** — real event generation during create/update/delete
