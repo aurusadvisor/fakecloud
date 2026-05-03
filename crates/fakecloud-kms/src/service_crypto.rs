@@ -797,8 +797,7 @@ impl KmsService {
         })?;
         require_usable_key_state(key)?;
 
-        let public_key_bytes = generate_fake_public_key(&key_pair_spec);
-        let private_key_bytes = rand_bytes(256);
+        let (private_key_bytes, public_key_bytes) = generate_data_keypair_bytes(&key_pair_spec)?;
         let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key_bytes);
         let private_plaintext_b64 =
             base64::engine::general_purpose::STANDARD.encode(&private_key_bytes);
@@ -853,8 +852,7 @@ impl KmsService {
         })?;
         require_usable_key_state(key)?;
 
-        let public_key_bytes = generate_fake_public_key(&key_pair_spec);
-        let private_key_bytes = rand_bytes(256);
+        let (private_key_bytes, public_key_bytes) = generate_data_keypair_bytes(&key_pair_spec)?;
         let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key_bytes);
 
         let blob = crate::blob::encode(&state.master_key_bytes, &key.key_id, &private_key_bytes);
@@ -950,4 +948,52 @@ impl KmsService {
             .unwrap(),
         ))
     }
+}
+
+/// Generate (private_pkcs8_der, public_spki_der) bytes for a KMS
+/// `KeyPairSpec`. Real keypair via `rsa` for RSA specs and `ecdsa` /
+/// `p256` / `p384` / `k256` for ECC specs — the resulting DER is
+/// parseable with any standard tool, matching real AWS KMS so callers
+/// can sign locally with `PrivateKeyPlaintext` and verify with
+/// `PublicKey` end-to-end.
+fn generate_data_keypair_bytes(key_pair_spec: &str) -> Result<(Vec<u8>, Vec<u8>), AwsServiceError> {
+    if key_pair_spec.starts_with("RSA_") {
+        return super::asym::generate_keypair(key_pair_spec)
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("RSA keypair generation failed: {e}"),
+                )
+            })?
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("Unsupported KeyPairSpec: {key_pair_spec}"),
+                )
+            });
+    }
+    if key_pair_spec.starts_with("ECC_") {
+        return super::asym_ecdsa::generate_keypair(key_pair_spec)
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("ECC keypair generation failed: {e}"),
+                )
+            })?
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("Unsupported KeyPairSpec: {key_pair_spec}"),
+                )
+            });
+    }
+    Err(AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ValidationException",
+        format!("Unsupported KeyPairSpec: {key_pair_spec}"),
+    ))
 }
