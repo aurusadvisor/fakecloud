@@ -402,3 +402,188 @@ fn repository_policy_allows_empty_policy_denies() {
         "ecr:PutImage"
     ));
 }
+
+// ── Replication: PutImage trigger + DescribeImageReplicationStatus ──
+
+#[cfg(test)]
+mod replication_tests {
+    use super::super::EcrService;
+    use crate::state::{
+        EcrState, Image, ReplicationConfiguration, ReplicationDestination, ReplicationRule,
+        Repository, RepositoryFilter, SharedEcrState,
+    };
+    use bytes::Bytes;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::service::AwsRequest;
+    use http::{HeaderMap, Method};
+    use parking_lot::RwLock;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_request(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "ecr".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "111111111111".into(),
+            request_id: "req-1".into(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn fixture(rules: Vec<ReplicationRule>) -> (EcrService, SharedEcrState) {
+        const SOURCE: &str = "111111111111";
+        let mut mas: MultiAccountState<EcrState> =
+            MultiAccountState::new(SOURCE, "us-east-1", "http://fakecloud:4566");
+        let source = mas.get_or_create(SOURCE);
+        if !rules.is_empty() {
+            source.replication_configuration = Some(ReplicationConfiguration { rules });
+        }
+        let arn = source.repository_arn("app");
+        let repo = Repository::new("app", arn, SOURCE, "fakecloud:4566");
+        source.repositories.insert("app".to_string(), repo);
+        let state: SharedEcrState = Arc::new(RwLock::new(mas));
+        let svc = EcrService::new(state.clone());
+        (svc, state)
+    }
+
+    fn seed_image(state: &SharedEcrState, account: &str, repo_name: &str, digest: &str) {
+        let mut accounts = state.write();
+        let s = accounts.get_mut(account).expect("source account");
+        let repo = s.repositories.get_mut(repo_name).expect("source repo");
+        repo.images.insert(
+            digest.to_string(),
+            Image {
+                image_digest: digest.to_string(),
+                image_manifest: "{\"mediaType\":\"x\"}".to_string(),
+                image_manifest_media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                artifact_media_type: None,
+                image_size_in_bytes: 0,
+                image_pushed_at: chrono::Utc::now(),
+                last_recorded_pull_time: None,
+            },
+        );
+    }
+
+    #[test]
+    fn put_image_triggers_replication_to_configured_destination() {
+        const SOURCE: &str = "111111111111";
+        const TARGET: &str = "222222222222";
+        let rules = vec![ReplicationRule {
+            destinations: vec![ReplicationDestination {
+                region: "us-west-2".to_string(),
+                registry_id: TARGET.to_string(),
+            }],
+            repository_filters: Vec::new(),
+        }];
+        let (svc, state) = fixture(rules);
+        seed_image(&state, SOURCE, "app", "sha256:trig");
+
+        svc.replicate_image(SOURCE, "app", "sha256:trig");
+
+        let accounts = state.read();
+        let target_state = accounts.get(TARGET).expect("target account materialised");
+        let target_repo = target_state
+            .repositories
+            .get("app")
+            .expect("target repo provisioned by replication");
+        assert!(target_repo.images.contains_key("sha256:trig"));
+    }
+
+    #[test]
+    fn put_image_records_replication_status_complete() {
+        const SOURCE: &str = "111111111111";
+        const TARGET: &str = "222222222222";
+        let rules = vec![ReplicationRule {
+            destinations: vec![ReplicationDestination {
+                region: "us-west-2".to_string(),
+                registry_id: TARGET.to_string(),
+            }],
+            repository_filters: Vec::new(),
+        }];
+        let (svc, state) = fixture(rules);
+        seed_image(&state, SOURCE, "app", "sha256:complete");
+        svc.replicate_image(SOURCE, "app", "sha256:complete");
+
+        let req = make_request(
+            "DescribeImageReplicationStatus",
+            json!({
+                "repositoryName": "app",
+                "imageId": {"imageDigest": "sha256:complete"},
+            }),
+        );
+        let resp = svc.describe_image_replication_status(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let entries = body["replicationStatuses"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["status"], "COMPLETE");
+        assert_eq!(entries[0]["registryId"], TARGET);
+        assert_eq!(entries[0]["region"], "us-west-2");
+    }
+
+    #[test]
+    fn put_image_skips_replication_when_no_rules_configured() {
+        const SOURCE: &str = "111111111111";
+        let (svc, state) = fixture(Vec::new());
+        seed_image(&state, SOURCE, "app", "sha256:none");
+        svc.replicate_image(SOURCE, "app", "sha256:none");
+
+        let accounts = state.read();
+        // No mirror account materialised.
+        assert!(accounts.get("222222222222").is_none());
+        let source_repo = accounts
+            .get(SOURCE)
+            .unwrap()
+            .repositories
+            .get("app")
+            .unwrap();
+        assert!(!source_repo.replication_statuses.contains_key("sha256:none"));
+    }
+
+    #[test]
+    fn describe_image_replication_status_returns_empty_for_unreplicated_image() {
+        const SOURCE: &str = "111111111111";
+        const TARGET: &str = "222222222222";
+        // Rule only fires for repos prefixed `prod/`; our image is in `app`.
+        let rules = vec![ReplicationRule {
+            destinations: vec![ReplicationDestination {
+                region: "us-west-2".to_string(),
+                registry_id: TARGET.to_string(),
+            }],
+            repository_filters: vec![RepositoryFilter {
+                filter: "prod/".to_string(),
+                filter_type: "PREFIX_MATCH".to_string(),
+            }],
+        }];
+        let (svc, state) = fixture(rules);
+        seed_image(&state, SOURCE, "app", "sha256:nofilter");
+        svc.replicate_image(SOURCE, "app", "sha256:nofilter");
+
+        let req = make_request(
+            "DescribeImageReplicationStatus",
+            json!({
+                "repositoryName": "app",
+                "imageId": {"imageDigest": "sha256:nofilter"},
+            }),
+        );
+        let resp = svc.describe_image_replication_status(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let entries = body["replicationStatuses"].as_array().unwrap();
+        assert!(entries.is_empty());
+
+        // And the target account was never created.
+        let accounts = state.read();
+        assert!(accounts.get(TARGET).is_none());
+    }
+}
