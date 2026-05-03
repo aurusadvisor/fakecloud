@@ -50,6 +50,7 @@ impl CredentialResolver for IamCredentialResolver {
                         tags: lookup.principal_tags.map(|m| m.into_iter().collect()),
                     },
                     session_policies: lookup.session_policies,
+                    mfa_present: lookup.mfa_present,
                 });
             }
         }
@@ -138,6 +139,7 @@ mod tests {
                 account_id: "123456789012".into(),
                 expiration: Utc::now() + chrono::Duration::minutes(30),
                 session_policies: Vec::new(),
+                mfa_present: false,
             },
         );
         let resolver = IamCredentialResolver::new(shared(state));
@@ -296,6 +298,7 @@ mod tests {
                 account_id: "123456789012".into(),
                 expiration: Utc::now() + chrono::Duration::minutes(30),
                 session_policies: Vec::new(),
+                mfa_present: false,
             },
         );
         let resolver = IamCredentialResolver::new(shared(state));

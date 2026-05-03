@@ -225,6 +225,11 @@ pub struct StsTempCredential {
     /// session policies.
     #[serde(default)]
     pub session_policies: Vec<String>,
+    /// True iff the AssumeRole / GetSessionToken call that minted this
+    /// credential supplied MFA (`SerialNumber` + `TokenCode`). Surfaces
+    /// to downstream IAM evaluation as `aws:MultiFactorAuthPresent`.
+    #[serde(default)]
+    pub mfa_present: bool,
 }
 
 /// Result of looking up a set of credentials by access key ID.
@@ -246,6 +251,10 @@ pub struct SecretLookup {
     /// Tags on the principal (IAM user or assumed role) for
     /// `aws:PrincipalTag/<key>` condition evaluation.
     pub principal_tags: Option<BTreeMap<String, String>>,
+    /// True when the underlying STS credential was minted with MFA;
+    /// surfaces as `aws:MultiFactorAuthPresent` to downstream IAM
+    /// evaluation. Always false for raw IAM user access keys.
+    pub mfa_present: bool,
 }
 
 /// Convert a `Vec<Tag>` to a `BTreeMap<String, String>`.
@@ -432,6 +441,7 @@ impl IamState {
                             account_id: self.account_id.clone(),
                             session_policies: Vec::new(),
                             principal_tags: tags_to_hashmap(&user.tags),
+                            mfa_present: false,
                         });
                     }
                 }
@@ -452,6 +462,7 @@ impl IamState {
                     account_id: temp.account_id.clone(),
                     session_policies: temp.session_policies.clone(),
                     principal_tags,
+                    mfa_present: temp.mfa_present,
                 });
             }
             self.sts_temp_credentials.remove(access_key_id);
@@ -475,6 +486,7 @@ impl IamState {
                             account_id: self.account_id.clone(),
                             session_policies: Vec::new(),
                             principal_tags: tags_to_hashmap(&user.tags),
+                            mfa_present: false,
                         });
                     }
                 }
@@ -495,6 +507,7 @@ impl IamState {
             account_id: temp.account_id.clone(),
             session_policies: temp.session_policies.clone(),
             principal_tags,
+            mfa_present: temp.mfa_present,
         })
     }
 
@@ -601,6 +614,7 @@ mod tests {
                 account_id: "123456789012".to_string(),
                 expiration: Utc::now() + chrono::Duration::minutes(30),
                 session_policies: Vec::new(),
+                mfa_present: false,
             },
         );
         let lookup = state.credential_secret("FSIATEMPKEY").unwrap();
@@ -626,6 +640,7 @@ mod tests {
                 account_id: "123456789012".to_string(),
                 expiration: Utc::now() - chrono::Duration::seconds(1),
                 session_policies: Vec::new(),
+                mfa_present: false,
             },
         );
         assert!(state.credential_secret("FSIAOLD").is_none());
@@ -646,6 +661,7 @@ mod tests {
                 account_id: "123456789012".to_string(),
                 expiration: Utc::now() - chrono::Duration::seconds(1),
                 session_policies: Vec::new(),
+                mfa_present: false,
             },
         );
         assert!(state.credential_secret_readonly("FSIAOLD").is_none());
