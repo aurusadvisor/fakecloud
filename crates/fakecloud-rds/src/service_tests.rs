@@ -699,7 +699,181 @@ fn list_tags_unknown_arn_errors() {
         "ListTagsForResource",
         &[("ResourceName", "arn:aws:rds:us-east-1:123456789012:db:nope")],
     );
-    assert_code(svc.list_tags_for_resource(&req), "DBInstanceNotFound");
+    assert_code(svc.list_tags_for_resource(&req), "InvalidParameterValue");
+}
+
+#[test]
+fn add_tags_to_snapshot_arn_persists() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap-1", "db1");
+    let arn = {
+        let __a = svc.state.read();
+        __a.default_ref()
+            .snapshots
+            .get("snap-1")
+            .unwrap()
+            .db_snapshot_arn
+            .clone()
+    };
+    let req = request(
+        "AddTagsToResource",
+        &[
+            ("ResourceName", arn.as_str()),
+            ("Tags.Tag.1.Key", "team"),
+            ("Tags.Tag.1.Value", "platform"),
+        ],
+    );
+    svc.add_tags_to_resource(&req).unwrap();
+    let __a = svc.state.read();
+    let snap = __a.default_ref().snapshots.get("snap-1").unwrap();
+    assert_eq!(snap.tags.len(), 1);
+    assert_eq!(snap.tags[0].key, "team");
+    assert_eq!(snap.tags[0].value, "platform");
+}
+
+#[test]
+fn add_tags_to_parameter_group_arn_persists_and_lists() {
+    let svc = make_service();
+    create_param_group(&svc, "pg1");
+    let arn = {
+        let __a = svc.state.read();
+        __a.default_ref()
+            .parameter_groups
+            .get("pg1")
+            .unwrap()
+            .db_parameter_group_arn
+            .clone()
+    };
+    let req = request(
+        "AddTagsToResource",
+        &[
+            ("ResourceName", arn.as_str()),
+            ("Tags.Tag.1.Key", "env"),
+            ("Tags.Tag.1.Value", "prod"),
+        ],
+    );
+    svc.add_tags_to_resource(&req).unwrap();
+
+    let req = request("ListTagsForResource", &[("ResourceName", arn.as_str())]);
+    let resp = svc.list_tags_for_resource(&req).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<Key>env</Key>"));
+    assert!(body.contains("<Value>prod</Value>"));
+}
+
+#[test]
+fn add_tags_to_subnet_group_arn_persists() {
+    let svc = make_service();
+    let arn = {
+        let mut __a = svc.state.write();
+        let state = __a.default_mut();
+        let arn = state.db_subnet_group_arn("sg1");
+        state.subnet_groups.insert(
+            "sg1".to_string(),
+            crate::state::DbSubnetGroup {
+                db_subnet_group_name: "sg1".to_string(),
+                db_subnet_group_arn: arn.clone(),
+                db_subnet_group_description: "desc".to_string(),
+                vpc_id: "vpc-1".to_string(),
+                subnet_ids: Vec::new(),
+                subnet_availability_zones: Vec::new(),
+                tags: Vec::new(),
+            },
+        );
+        arn
+    };
+    let req = request(
+        "AddTagsToResource",
+        &[
+            ("ResourceName", arn.as_str()),
+            ("Tags.Tag.1.Key", "owner"),
+            ("Tags.Tag.1.Value", "team-a"),
+        ],
+    );
+    svc.add_tags_to_resource(&req).unwrap();
+    let __a = svc.state.read();
+    let g = __a.default_ref().subnet_groups.get("sg1").unwrap();
+    assert_eq!(g.tags.len(), 1);
+    assert_eq!(g.tags[0].key, "owner");
+}
+
+#[test]
+fn remove_tags_from_parameter_group_only_listed_keys() {
+    let svc = make_service();
+    create_param_group(&svc, "pg1");
+    let arn = {
+        let __a = svc.state.read();
+        __a.default_ref()
+            .parameter_groups
+            .get("pg1")
+            .unwrap()
+            .db_parameter_group_arn
+            .clone()
+    };
+    let add = request(
+        "AddTagsToResource",
+        &[
+            ("ResourceName", arn.as_str()),
+            ("Tags.Tag.1.Key", "k1"),
+            ("Tags.Tag.1.Value", "v1"),
+            ("Tags.Tag.2.Key", "k2"),
+            ("Tags.Tag.2.Value", "v2"),
+        ],
+    );
+    svc.add_tags_to_resource(&add).unwrap();
+    let remove = request(
+        "RemoveTagsFromResource",
+        &[("ResourceName", arn.as_str()), ("TagKeys.member.1", "k1")],
+    );
+    svc.remove_tags_from_resource(&remove).unwrap();
+    let __a = svc.state.read();
+    let pg = __a.default_ref().parameter_groups.get("pg1").unwrap();
+    assert_eq!(pg.tags.len(), 1);
+    assert_eq!(pg.tags[0].key, "k2");
+}
+
+#[test]
+fn add_tags_to_extras_resource_arn_stores_on_json() {
+    // Cluster ARNs are extras-stored; tags land in a `Tags` array on
+    // the JSON entry so they survive serde round-trips.
+    let svc = make_service();
+    let cluster_arn = {
+        let mut __a = svc.state.write();
+        let state = __a.default_mut();
+        let arn = format!(
+            "arn:aws:rds:us-east-1:{}:cluster:my-cluster",
+            state.account_id
+        );
+        state
+            .extras
+            .entry("clusters".to_string())
+            .or_default()
+            .insert(
+                "my-cluster".to_string(),
+                serde_json::json!({"DBClusterIdentifier": "my-cluster"}),
+            );
+        arn
+    };
+    let req = request(
+        "AddTagsToResource",
+        &[
+            ("ResourceName", cluster_arn.as_str()),
+            ("Tags.Tag.1.Key", "team"),
+            ("Tags.Tag.1.Value", "data"),
+        ],
+    );
+    svc.add_tags_to_resource(&req).unwrap();
+    let __a = svc.state.read();
+    let entry = __a
+        .default_ref()
+        .extras
+        .get("clusters")
+        .unwrap()
+        .get("my-cluster")
+        .unwrap();
+    let tags = entry.get("Tags").and_then(|t| t.as_array()).unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].get("Key").and_then(|k| k.as_str()), Some("team"));
 }
 
 #[test]
@@ -1635,7 +1809,7 @@ fn list_tags_resource_not_found() {
         "ListTagsForResource",
         &[("ResourceName", "arn:aws:rds:us-east-1:123:db:ghost")],
     );
-    assert_code(svc.list_tags_for_resource(&req), "DBInstanceNotFound");
+    assert_code(svc.list_tags_for_resource(&req), "InvalidParameterValue");
 }
 
 // ── snapshot operations ──
