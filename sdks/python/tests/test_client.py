@@ -598,3 +598,44 @@ def test_scheduler_fire_schedule(fc: FakeCloudSync, fakecloud_url: str) -> None:
     resp = fc.scheduler.fire_schedule("default", "py-sdk-sched-fire")
     assert "schedule/default/py-sdk-sched-fire" in resp.schedule_arn
     assert resp.target_arn == q_arn
+
+
+# ── Route 53 admin ────────────────────────────────────────────────────
+
+
+def test_route53_set_health_check_status(
+    fc: FakeCloudSync, fakecloud_url: str
+) -> None:
+    r53 = boto3.client("route53", **_boto_kwargs(fakecloud_url))
+    created = r53.create_health_check(
+        CallerReference="py-sdk-route53-flip",
+        HealthCheckConfig={
+            "Type": "TCP",
+            "IPAddress": "203.0.113.50",
+            "Port": 80,
+            "RequestInterval": 30,
+            "FailureThreshold": 3,
+        },
+    )
+    hc_id = created["HealthCheck"]["Id"]
+
+    fc.route53.set_health_check_status(hc_id, "Failure", reason="endpoint timed out")
+
+    after = r53.get_health_check_status(HealthCheckId=hc_id)
+    for obs in after["HealthCheckObservations"]:
+        assert obs["StatusReport"]["Status"] == "Failure: endpoint timed out"
+
+    fc.route53.set_health_check_status(hc_id, "Success")
+    after = r53.get_health_check_status(HealthCheckId=hc_id)
+    for obs in after["HealthCheckObservations"]:
+        assert obs["StatusReport"]["Status"] == "Success"
+
+
+def test_route53_set_health_check_status_unknown_id(fc: FakeCloudSync) -> None:
+    import pytest as _pytest
+
+    from fakecloud.client import FakeCloudError
+
+    with _pytest.raises(FakeCloudError) as exc:
+        fc.route53.set_health_check_status("ghost-hc", "Failure", reason="x")
+    assert exc.value.status == 404

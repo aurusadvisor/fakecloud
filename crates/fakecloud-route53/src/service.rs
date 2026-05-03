@@ -26,9 +26,10 @@ use crate::model::{
 };
 use crate::router::{route, Route};
 use crate::state::{
-    AccountState, Route53Accounts, SharedRoute53State, StoredChange, StoredCidrCollection,
-    StoredHealthCheck, StoredHostedZone, StoredKeySigningKey, StoredQueryLoggingConfig,
-    StoredReusableDelegationSet, StoredTrafficPolicy, StoredTrafficPolicyInstance,
+    AccountState, HealthCheckStatus, Route53Accounts, SharedRoute53State, StoredChange,
+    StoredCidrCollection, StoredHealthCheck, StoredHostedZone, StoredKeySigningKey,
+    StoredQueryLoggingConfig, StoredReusableDelegationSet, StoredTrafficPolicy,
+    StoredTrafficPolicyInstance,
 };
 use crate::xml_io;
 
@@ -884,7 +885,7 @@ impl Route53Service {
             version: 1,
             config: cfg.health_check_config,
             created_time: Utc::now(),
-            status_line: "Success: HTTP Status Code 200, OK.".to_string(),
+            status: HealthCheckStatus::Success,
             last_failure_reason: None,
         };
         account.health_checks.insert(id.clone(), stored.clone());
@@ -1126,6 +1127,7 @@ impl Route53Service {
             .and_then(|a| a.health_checks.get(&id).cloned())
             .ok_or_else(|| no_such_health_check(&id))?;
         drop(state);
+        let status_text = render_status_line(hc.status, hc.last_failure_reason.as_deref());
         let now = rfc3339(&Utc::now());
         let mut body = String::with_capacity(512);
         body.push_str(XML_DECL);
@@ -1139,7 +1141,7 @@ impl Route53Service {
                 esc(&checker_ip_for_region(region))
             ));
             body.push_str("<StatusReport>");
-            body.push_str(&format!("<Status>{}</Status>", esc(&hc.status_line)));
+            body.push_str(&format!("<Status>{}</Status>", esc(&status_text)));
             body.push_str(&format!("<CheckedTime>{}</CheckedTime>", now));
             body.push_str("</StatusReport>");
             body.push_str("</HealthCheckObservation>");
@@ -1149,14 +1151,20 @@ impl Route53Service {
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }
 
-    /// Admin: flip a health check's status + optional last-failure
+    /// Admin: flip a health check's status and optional last-failure
     /// reason. Powers the
-    /// `PUT /_fakecloud/route53/health-checks/{id}/status` endpoint
+    /// `POST /_fakecloud/route53/health-checks/{id}/status` endpoint
     /// in fakecloud-server. Returns `false` if the id doesn't exist.
+    /// When `status = Success`, `last_failure_reason` is ignored and
+    /// any prior reason is preserved so a later read of
+    /// `GetHealthCheckLastFailureReason` still surfaces the historical
+    /// observation. When `status = Failure` and `last_failure_reason`
+    /// is `Some`, the stored reason is overwritten; `None` leaves the
+    /// prior reason untouched.
     pub fn set_health_check_status(
         &self,
         id: &str,
-        status_line: String,
+        status: HealthCheckStatus,
         last_failure_reason: Option<String>,
     ) -> bool {
         let mut state = self.state.write();
@@ -1166,8 +1174,8 @@ impl Route53Service {
         let Some(hc) = account.health_checks.get_mut(id) else {
             return false;
         };
-        hc.status_line = status_line;
-        if last_failure_reason.is_some() {
+        hc.status = status;
+        if status == HealthCheckStatus::Failure && last_failure_reason.is_some() {
             hc.last_failure_reason = last_failure_reason;
         }
         true
@@ -2676,7 +2684,7 @@ fn resolve_routing_policy(
             None => true,
             Some(id) => health_checks
                 .get(id)
-                .map(|hc| hc.status_line.starts_with("Success"))
+                .map(|hc| matches!(hc.status, crate::state::HealthCheckStatus::Success))
                 .unwrap_or(true),
         }
     }
@@ -2770,7 +2778,7 @@ fn resolve_routing_policy(
 mod tests {
     use super::*;
     use crate::model::HealthCheckConfig;
-    use crate::state::{Route53Accounts, StoredHealthCheck};
+    use crate::state::{HealthCheckStatus, Route53Accounts, StoredHealthCheck};
 
     fn svc_with_health_check(id: &str) -> Route53Service {
         let state = Arc::new(RwLock::new(Route53Accounts::default()));
@@ -2785,7 +2793,7 @@ mod tests {
                     version: 1,
                     config: HealthCheckConfig::default(),
                     created_time: Utc::now(),
-                    status_line: "Success: HTTP Status Code 200, OK.".to_string(),
+                    status: HealthCheckStatus::Success,
                     last_failure_reason: None,
                 },
             );
@@ -2798,26 +2806,22 @@ mod tests {
         let svc = svc_with_health_check("hc-1");
         assert!(svc.set_health_check_status(
             "hc-1",
-            "Failure: Connection refused.".to_string(),
-            Some("Failure: connect() returned ECONNREFUSED".to_string()),
+            HealthCheckStatus::Failure,
+            Some("Endpoint timed out".to_string()),
         ));
         let st = svc.state.read();
         let hc = &st.accounts.get(DEFAULT_ACCOUNT).unwrap().health_checks["hc-1"];
-        assert_eq!(hc.status_line, "Failure: Connection refused.");
+        assert_eq!(hc.status, HealthCheckStatus::Failure);
         assert_eq!(
             hc.last_failure_reason.as_deref().unwrap(),
-            "Failure: connect() returned ECONNREFUSED"
+            "Endpoint timed out"
         );
     }
 
     #[test]
     fn set_health_check_status_returns_false_for_unknown_id() {
         let svc = svc_with_health_check("hc-1");
-        assert!(!svc.set_health_check_status(
-            "ghost",
-            "Failure: connection refused.".to_string(),
-            None,
-        ));
+        assert!(!svc.set_health_check_status("ghost", HealthCheckStatus::Failure, None,));
     }
 
     fn rrset(value: &str) -> crate::model::ResourceRecordSet {
@@ -2850,8 +2854,8 @@ mod tests {
                 version: 1,
                 config: HealthCheckConfig::default(),
                 created_time: Utc::now(),
-                status_line: "Failure: connection refused".to_string(),
-                last_failure_reason: None,
+                status: HealthCheckStatus::Failure,
+                last_failure_reason: Some("connection refused".to_string()),
             },
         );
         let answers = resolve_routing_policy(&[&p, &s], &hcs, None);
@@ -2876,7 +2880,7 @@ mod tests {
                 version: 1,
                 config: HealthCheckConfig::default(),
                 created_time: Utc::now(),
-                status_line: "Failure".to_string(),
+                status: HealthCheckStatus::Failure,
                 last_failure_reason: None,
             },
         );
@@ -2951,17 +2955,94 @@ mod tests {
         let svc = svc_with_health_check("hc-1");
         svc.set_health_check_status(
             "hc-1",
-            "Failure: timeout".to_string(),
-            Some("Failure: connect() timed out".to_string()),
+            HealthCheckStatus::Failure,
+            Some("connect() timed out".to_string()),
         );
-        // Subsequent flip with None for reason should not clobber.
-        svc.set_health_check_status("hc-1", "Success: HTTP 200".to_string(), None);
+        // Flipping back to Success must not clobber the historical
+        // failure reason — GetHealthCheckLastFailureReason still returns
+        // it after recovery, mirroring real Route 53.
+        svc.set_health_check_status("hc-1", HealthCheckStatus::Success, None);
         let st = svc.state.read();
         let hc = &st.accounts.get(DEFAULT_ACCOUNT).unwrap().health_checks["hc-1"];
-        assert_eq!(hc.status_line, "Success: HTTP 200");
+        assert_eq!(hc.status, HealthCheckStatus::Success);
         assert_eq!(
             hc.last_failure_reason.as_deref().unwrap(),
-            "Failure: connect() timed out"
+            "connect() timed out"
         );
+    }
+
+    #[test]
+    fn get_health_check_status_returns_success_by_default() {
+        let svc = svc_with_health_check("hc-default");
+        let route = crate::router::route(
+            &http::Method::GET,
+            "/2013-04-01/healthcheck/hc-default/status",
+            "",
+        )
+        .unwrap();
+        let resp = svc.get_health_check_status(&route).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert!(body.contains("<Status>Success</Status>"), "body: {body}");
+    }
+
+    #[test]
+    fn get_health_check_status_reflects_state_failure() {
+        let svc = svc_with_health_check("hc-down");
+        {
+            let mut state = svc.state.write();
+            let hc = state
+                .accounts
+                .get_mut(DEFAULT_ACCOUNT)
+                .unwrap()
+                .health_checks
+                .get_mut("hc-down")
+                .unwrap();
+            hc.status = HealthCheckStatus::Failure;
+            hc.last_failure_reason = Some("test".to_string());
+        }
+        let route = crate::router::route(
+            &http::Method::GET,
+            "/2013-04-01/healthcheck/hc-down/status",
+            "",
+        )
+        .unwrap();
+        let resp = svc.get_health_check_status(&route).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert!(
+            body.contains("<Status>Failure: test</Status>"),
+            "body: {body}"
+        );
+    }
+
+    #[test]
+    fn get_health_check_status_failure_without_reason_renders_bare_failure() {
+        let svc = svc_with_health_check("hc-bare");
+        {
+            let mut state = svc.state.write();
+            let hc = state
+                .accounts
+                .get_mut(DEFAULT_ACCOUNT)
+                .unwrap()
+                .health_checks
+                .get_mut("hc-bare")
+                .unwrap();
+            hc.status = HealthCheckStatus::Failure;
+            hc.last_failure_reason = None;
+        }
+        let route = crate::router::route(
+            &http::Method::GET,
+            "/2013-04-01/healthcheck/hc-bare/status",
+            "",
+        )
+        .unwrap();
+        let resp = svc.get_health_check_status(&route).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert!(body.contains("<Status>Failure</Status>"), "body: {body}");
     }
 }

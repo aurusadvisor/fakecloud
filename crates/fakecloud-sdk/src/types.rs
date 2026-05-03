@@ -1074,20 +1074,29 @@ pub struct CreateAdminResponse {
     pub arn: String,
 }
 
-/// Body for `PUT /_fakecloud/route53/health-checks/{id}/status`. The
+/// Body for `POST /_fakecloud/route53/health-checks/{id}/status`. The
 /// admin endpoint flips a stored Route 53 health check's reported
 /// status (and optionally the last-failure-reason observation) so
 /// tests can simulate failover scenarios without a live checker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Route53HealthCheckStatusRequest {
-    /// New `Status` line returned by `GetHealthCheckStatus`. Use
-    /// AWS's canonical phrases like `Success: HTTP Status Code 200, OK.`
-    /// for healthy or `Failure: Connection refused.` for unhealthy.
-    pub status: String,
+    /// New status reported by `GetHealthCheckStatus`. `"Success"` or
+    /// `"Failure"`.
+    pub status: Route53HealthCheckStatusValue,
     /// Optional last-failure observation surfaced by
-    /// `GetHealthCheckLastFailureReason`. `None` leaves the prior
-    /// value intact.
+    /// `GetHealthCheckLastFailureReason` and appended to the
+    /// `<Status>` element when `status = Failure`. Ignored when
+    /// `status = Success`. `None` leaves the prior value intact.
     #[serde(default)]
-    pub last_failure_reason: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// Discriminator for the admin `status` field. Mirrors the variants of
+/// `fakecloud_route53::HealthCheckStatus` without forcing the SDK crate
+/// to depend on the route53 crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Route53HealthCheckStatusValue {
+    Success,
+    Failure,
 }

@@ -489,6 +489,7 @@ export class FakeCloud {
   private readonly _bedrock: BedrockClient;
   private readonly _ecs: EcsClient;
   private readonly _elbv2: Elbv2Client;
+  private readonly _route53: Route53Client;
 
   constructor(baseUrl: string = "http://localhost:4566") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -511,6 +512,7 @@ export class FakeCloud {
     this._bedrock = new BedrockClient(this.baseUrl);
     this._ecs = new EcsClient(this.baseUrl);
     this._elbv2 = new Elbv2Client(this.baseUrl);
+    this._route53 = new Route53Client(this.baseUrl);
   }
 
   // ── Health & Reset ─────────────────────────────────────────────
@@ -620,6 +622,10 @@ export class FakeCloud {
   get elbv2(): Elbv2Client {
     return this._elbv2;
   }
+
+  get route53(): Route53Client {
+    return this._route53;
+  }
 }
 
 export class EcsClient {
@@ -654,5 +660,44 @@ export class Elbv2Client {
   async getRules(): Promise<Elbv2RulesResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/elbv2/rules`);
     return parse(resp);
+  }
+}
+
+/** Body for `route53.setHealthCheckStatus`. */
+export interface SetHealthCheckStatusRequest {
+  /** "Success" or "Failure". */
+  status: "Success" | "Failure";
+  /** Optional reason appended to the `<Status>` element on Failure. */
+  reason?: string;
+}
+
+/**
+ * Route 53 admin client.
+ *
+ * Wraps the per-health-check status admin endpoint that lets tests flip a
+ * stored health check between healthy and unhealthy without a live prober,
+ * so failover and multi-value routing can be exercised end-to-end.
+ */
+export class Route53Client {
+  constructor(private baseUrl: string) {}
+
+  async setHealthCheckStatus(
+    healthCheckId: string,
+    req: SetHealthCheckStatusRequest,
+  ): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/route53/health-checks/${encodeURIComponent(
+        healthCheckId,
+      )}/status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new FakeCloudError(resp.status, body);
+    }
   }
 }

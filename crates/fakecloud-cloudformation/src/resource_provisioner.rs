@@ -8374,7 +8374,7 @@ impl ResourceProvisioner {
             version: 1,
             config: cfg,
             created_time: Utc::now(),
-            status_line: "Success: HTTP Status Code 200, OK.".to_string(),
+            status: fakecloud_route53::HealthCheckStatus::Success,
             last_failure_reason: None,
         };
 

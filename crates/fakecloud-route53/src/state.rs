@@ -100,6 +100,14 @@ impl StoredChange {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum HealthCheckStatus {
+    #[default]
+    Success,
+    Failure,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredHealthCheck {
     pub id: String,
@@ -107,20 +115,17 @@ pub struct StoredHealthCheck {
     pub version: i64,
     pub config: HealthCheckConfig,
     pub created_time: DateTime<Utc>,
-    /// Reported `Status` line for `GetHealthCheckStatus`. Defaults to
-    /// the canonical Route 53 healthy phrase. Flipped via the admin
-    /// endpoint at `PUT /_fakecloud/route53/health-checks/{id}/status`
-    /// so callers can simulate failover scenarios in tests.
-    #[serde(default = "default_health_status")]
-    pub status_line: String,
-    /// Last failure reason returned by `GetHealthCheckLastFailureReason`.
+    /// Status reported by `GetHealthCheckStatus`. Defaults to `Success`;
+    /// flipped via the admin endpoint at
+    /// `POST /_fakecloud/route53/health-checks/{id}/status` so callers
+    /// can simulate failover scenarios in tests.
+    #[serde(default)]
+    pub status: HealthCheckStatus,
+    /// Last failure reason returned by `GetHealthCheckLastFailureReason`
+    /// and appended to the `Status` element when `status = Failure`.
     /// `None` when the check has never reported a failure.
     #[serde(default)]
     pub last_failure_reason: Option<String>,
-}
-
-fn default_health_status() -> String {
-    "Success: HTTP Status Code 200, OK.".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

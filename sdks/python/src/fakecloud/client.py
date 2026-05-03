@@ -340,6 +340,63 @@ class _SyncElbv2Client:
         return Elbv2RulesResponse.from_dict(resp.json())
 
 
+class Route53Client:
+    """Async Route 53 admin client.
+
+    Wraps the per-health-check status admin endpoint that lets tests flip a
+    stored health check between healthy and unhealthy without a live prober,
+    so failover and multi-value routing can be exercised end-to-end.
+    """
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def set_health_check_status(
+        self,
+        health_check_id: str,
+        status: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Flip a health check's reported status.
+
+        ``status`` is ``"Success"`` or ``"Failure"``. ``reason`` is appended to
+        the ``<Status>`` element returned by ``GetHealthCheckStatus`` when the
+        new status is ``Failure``; ignored when ``Success``.
+        """
+        body: Dict[str, str] = {"status": status}
+        if reason is not None:
+            body["reason"] = reason
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/route53/health-checks/{health_check_id}/status",
+            json=body,
+        )
+        _check(resp)
+
+
+class _SyncRoute53Client:
+    """Sync Route 53 admin client."""
+
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def set_health_check_status(
+        self,
+        health_check_id: str,
+        status: str,
+        reason: Optional[str] = None,
+    ) -> None:
+        body: Dict[str, str] = {"status": status}
+        if reason is not None:
+            body["reason"] = reason
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/route53/health-checks/{health_check_id}/status",
+            json=body,
+        )
+        _check(resp)
+
+
 class SesClient:
     """Async SES introspection client."""
 
@@ -1107,6 +1164,10 @@ class FakeCloud:
     def elbv2(self) -> Elbv2Client:
         return Elbv2Client(self._client, self._base)
 
+    @property
+    def route53(self) -> Route53Client:
+        return Route53Client(self._client, self._base)
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def aclose(self) -> None:
@@ -1228,6 +1289,10 @@ class FakeCloudSync:
     @property
     def elbv2(self) -> _SyncElbv2Client:
         return _SyncElbv2Client(self._client, self._base)
+
+    @property
+    def route53(self) -> _SyncRoute53Client:
+        return _SyncRoute53Client(self._client, self._base)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 

@@ -172,6 +172,12 @@ func main() {
 | `GetFaults(ctx)` | List currently queued fault rules |
 | `ClearFaults(ctx)` | Clear all queued fault rules |
 
+### Route 53 - `fc.Route53()`
+
+| Method | Description |
+|--------|-------------|
+| `SetHealthCheckStatus(ctx, id, req)` | Flip a health check between `Success` / `Failure` to drive failover routing in tests; reason is appended to the `<Status>` element on failure |
+
 #### Testing Bedrock-calling code end-to-end
 
 ```go

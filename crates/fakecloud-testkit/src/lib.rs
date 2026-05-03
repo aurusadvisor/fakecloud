@@ -253,6 +253,34 @@ impl TestServer {
             body["secretAccessKey"].as_str().unwrap().to_string(),
         )
     }
+
+    /// Flip a Route 53 health check's reported status via
+    /// `POST /_fakecloud/route53/health-checks/{id}/status`. `status`
+    /// is `"Success"` or `"Failure"`. `reason` (optional) is appended
+    /// to the `<Status>` element when `status = Failure`. Returns the
+    /// HTTP status code so tests can assert 204 vs 404.
+    pub async fn set_route53_health_check_status(
+        &self,
+        id: &str,
+        status: &str,
+        reason: Option<&str>,
+    ) -> u16 {
+        let client = reqwest::Client::new();
+        let mut body = serde_json::json!({"status": status});
+        if let Some(reason) = reason {
+            body["reason"] = serde_json::Value::String(reason.to_string());
+        }
+        let resp = client
+            .post(format!(
+                "{}/_fakecloud/route53/health-checks/{}/status",
+                self.endpoint, id
+            ))
+            .json(&body)
+            .send()
+            .await
+            .expect("set-health-check-status request failed");
+        resp.status().as_u16()
+    }
 }
 
 impl Drop for TestServer {

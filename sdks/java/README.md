@@ -180,6 +180,12 @@ FakeCloud fc = new FakeCloud("http://localhost:4566"); // explicit base URL
 | `getFaults()`                       | List currently queued fault rules                                    |
 | `clearFaults()`                     | Clear all queued fault rules                                         |
 
+### `fc.route53()`
+
+| Method                                              | Description                                                                                                                          |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `setHealthCheckStatus(id, status, reason)`          | Flip a health check between `Success` / `Failure` to drive failover routing in tests; reason is appended to the `<Status>` element on failure (pass `null` to omit) |
+
 #### Full test loop — asserting on Bedrock calls
 
 ```java

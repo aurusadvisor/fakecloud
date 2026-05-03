@@ -404,6 +404,19 @@ pub(crate) fn rfc3339(t: &chrono::DateTime<chrono::Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+pub(crate) fn render_status_line(
+    status: crate::state::HealthCheckStatus,
+    last_failure_reason: Option<&str>,
+) -> String {
+    match status {
+        crate::state::HealthCheckStatus::Success => "Success".to_string(),
+        crate::state::HealthCheckStatus::Failure => match last_failure_reason {
+            Some(reason) if !reason.is_empty() => format!("Failure: {reason}"),
+            _ => "Failure".to_string(),
+        },
+    }
+}
+
 pub(crate) fn invalid_argument(msg: impl Into<String>) -> AwsServiceError {
     aws_error(StatusCode::BAD_REQUEST, "InvalidInput", msg)
 }
