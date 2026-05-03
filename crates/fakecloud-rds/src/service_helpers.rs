@@ -1225,36 +1225,6 @@ pub(crate) fn db_snapshot_not_found(identifier: &str) -> AwsServiceError {
     )
 }
 
-pub(crate) fn db_instance_not_found_by_arn(resource_name: &str) -> AwsServiceError {
-    AwsServiceError::aws_error(
-        StatusCode::NOT_FOUND,
-        "DBInstanceNotFound",
-        format!("DBInstance {resource_name} not found."),
-    )
-}
-
-pub(crate) fn find_instance_by_arn<'a>(
-    state: &'a crate::state::RdsState,
-    resource_name: &str,
-) -> Result<&'a DbInstance, AwsServiceError> {
-    state
-        .instances
-        .values()
-        .find(|instance| instance.db_instance_arn == resource_name)
-        .ok_or_else(|| db_instance_not_found_by_arn(resource_name))
-}
-
-pub(crate) fn find_instance_by_arn_mut<'a>(
-    state: &'a mut crate::state::RdsState,
-    resource_name: &str,
-) -> Result<&'a mut DbInstance, AwsServiceError> {
-    state
-        .instances
-        .values_mut()
-        .find(|instance| instance.db_instance_arn == resource_name)
-        .ok_or_else(|| db_instance_not_found_by_arn(resource_name))
-}
-
 pub(crate) fn merge_tags(existing: &mut Vec<RdsTag>, incoming: &[RdsTag]) {
     for tag in incoming {
         if let Some(existing_tag) = existing
@@ -1265,6 +1235,197 @@ pub(crate) fn merge_tags(existing: &mut Vec<RdsTag>, incoming: &[RdsTag]) {
         } else {
             existing.push(tag.clone());
         }
+    }
+}
+
+/// Construct the not-found error for tag operations. AWS returns
+/// `InvalidParameterValue` on a malformed/unknown resource ARN for
+/// AddTags/ListTags/RemoveTags — use that instead of the per-resource
+/// not-found code so the caller's error handling matches.
+pub(crate) fn tag_resource_not_found(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidParameterValue",
+        format!("The specified resource name does not match an RDS resource in this region: {arn}"),
+    )
+}
+
+/// Parse an RDS ARN's resource-type segment + name. Returns
+/// `(resource_type, name)` where `resource_type` is the segment AWS
+/// uses to discriminate (`db`, `snapshot`, `cluster`, `pg`, `subgrp`,
+/// `og`, `cluster-pg`, `cluster-snapshot`, `secgrp`, etc.). Returns
+/// `None` on malformed ARNs.
+pub(crate) fn parse_rds_arn(arn: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = arn.split(':').collect();
+    if parts.len() < 7 || parts[0] != "arn" || parts[2] != "rds" {
+        return None;
+    }
+    let kind = parts.get(5)?;
+    let name = parts.get(6)?;
+    if kind.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((kind.to_string(), name.to_string()))
+}
+
+pub(crate) enum TagTargetMut<'a> {
+    Vec(&'a mut Vec<RdsTag>),
+    Json(&'a mut serde_json::Value),
+}
+
+pub(crate) enum TagTargetRef<'a> {
+    Vec(&'a Vec<RdsTag>),
+    Json(&'a serde_json::Value),
+}
+
+impl TagTargetMut<'_> {
+    pub fn merge(&mut self, incoming: &[RdsTag]) {
+        match self {
+            TagTargetMut::Vec(v) => merge_tags(v, incoming),
+            TagTargetMut::Json(entry) => {
+                let obj = match entry.as_object_mut() {
+                    Some(o) => o,
+                    None => return,
+                };
+                if !obj.contains_key("Tags") {
+                    obj.insert("Tags".to_string(), serde_json::json!([]));
+                }
+                let arr = match obj.get_mut("Tags").and_then(|t| t.as_array_mut()) {
+                    Some(a) => a,
+                    None => return,
+                };
+                for t in incoming {
+                    if let Some(existing) = arr
+                        .iter_mut()
+                        .find(|v| v.get("Key").and_then(|k| k.as_str()) == Some(t.key.as_str()))
+                    {
+                        if let Some(o) = existing.as_object_mut() {
+                            o.insert("Value".to_string(), serde_json::json!(t.value));
+                        }
+                    } else {
+                        arr.push(serde_json::json!({"Key": t.key, "Value": t.value}));
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn remove_keys(&mut self, keys: &[String]) {
+        match self {
+            TagTargetMut::Vec(v) => v.retain(|t| !keys.iter().any(|k| k == &t.key)),
+            TagTargetMut::Json(entry) => {
+                if let Some(obj) = entry.as_object_mut() {
+                    if let Some(arr) = obj.get_mut("Tags").and_then(|t| t.as_array_mut()) {
+                        arr.retain(|v| {
+                            v.get("Key")
+                                .and_then(|k| k.as_str())
+                                .is_none_or(|k| !keys.iter().any(|key| key == k))
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl TagTargetRef<'_> {
+    pub fn to_xml(&self) -> String {
+        match self {
+            TagTargetRef::Vec(v) => v.iter().map(tag_xml).collect(),
+            TagTargetRef::Json(entry) => entry
+                .get("Tags")
+                .and_then(|t| t.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            let k = v.get("Key").and_then(|k| k.as_str())?;
+                            let val = v.get("Value").and_then(|v| v.as_str()).unwrap_or("");
+                            Some(tag_xml(&RdsTag {
+                                key: k.to_string(),
+                                value: val.to_string(),
+                            }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
+fn extras_bucket_for_resource_type(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "cluster" => "clusters",
+        "cluster-snapshot" => "cluster_snapshots",
+        "cluster-pg" => "cluster_param_groups",
+        "og" => "option_groups",
+        "secgrp" => "security_groups",
+        "es" => "event_subscriptions",
+        "proxy" => "db_proxies",
+        _ => return None,
+    })
+}
+
+/// Locate tag storage on whichever RDS resource the ARN points at.
+/// Supports the four state-backed types (db, snapshot, subgrp, pg)
+/// and extras-backed cluster types (cluster, cluster-snapshot,
+/// cluster-pg, og, secgrp, es, proxy) — for those we mutate a `Tags`
+/// array on the stored JSON entry so it survives serde round-trips.
+/// Returns `None` if the ARN doesn't match any known resource.
+pub(crate) fn resolve_tag_target_mut<'a>(
+    state: &'a mut crate::state::RdsState,
+    arn: &str,
+) -> Option<TagTargetMut<'a>> {
+    let (kind, name) = parse_rds_arn(arn)?;
+    match kind.as_str() {
+        "db" => state
+            .instances
+            .get_mut(&name)
+            .map(|i| TagTargetMut::Vec(&mut i.tags)),
+        "snapshot" => state
+            .snapshots
+            .get_mut(&name)
+            .map(|s| TagTargetMut::Vec(&mut s.tags)),
+        "subgrp" => state
+            .subnet_groups
+            .get_mut(&name)
+            .map(|g| TagTargetMut::Vec(&mut g.tags)),
+        "pg" => state
+            .parameter_groups
+            .get_mut(&name)
+            .map(|g| TagTargetMut::Vec(&mut g.tags)),
+        other => extras_bucket_for_resource_type(other)
+            .and_then(|bucket| state.extras.get_mut(bucket))
+            .and_then(|map| map.get_mut(&name))
+            .map(TagTargetMut::Json),
+    }
+}
+
+pub(crate) fn resolve_tag_target<'a>(
+    state: &'a crate::state::RdsState,
+    arn: &str,
+) -> Option<TagTargetRef<'a>> {
+    let (kind, name) = parse_rds_arn(arn)?;
+    match kind.as_str() {
+        "db" => state
+            .instances
+            .get(&name)
+            .map(|i| TagTargetRef::Vec(&i.tags)),
+        "snapshot" => state
+            .snapshots
+            .get(&name)
+            .map(|s| TagTargetRef::Vec(&s.tags)),
+        "subgrp" => state
+            .subnet_groups
+            .get(&name)
+            .map(|g| TagTargetRef::Vec(&g.tags)),
+        "pg" => state
+            .parameter_groups
+            .get(&name)
+            .map(|g| TagTargetRef::Vec(&g.tags)),
+        other => extras_bucket_for_resource_type(other)
+            .and_then(|bucket| state.extras.get(bucket))
+            .and_then(|map| map.get(&name))
+            .map(TagTargetRef::Json),
     }
 }
 
