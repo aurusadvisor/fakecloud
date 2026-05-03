@@ -42,13 +42,7 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
-        if !key.enabled {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "DisabledException",
-                format!("Key '{}' is disabled", key.arn),
-            ));
-        }
+        require_usable_key_state(key)?;
 
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
         let ciphertext_b64 =
@@ -80,6 +74,14 @@ impl KmsService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
         let decoded = decode_ciphertext_envelope(state, ciphertext_b64, &ec_aad)?;
+
+        // Gate Decrypt on the source key's lifecycle state. AWS rejects
+        // Decrypt against a key in any state other than `Enabled`.
+        if let Some(key_id_only) = decoded.source_arn.rsplit('/').next() {
+            if let Some(source_key) = state.keys.get(key_id_only) {
+                require_usable_key_state(source_key)?;
+            }
+        }
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -132,6 +134,15 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        require_usable_key_state(dest_key)?;
+
+        // Source key gate too — AWS rejects ReEncrypt when either side
+        // is in a non-Enabled state.
+        if let Some(src_key_id) = decoded.source_arn.rsplit('/').next() {
+            if let Some(source_key) = state.keys.get(src_key_id) {
+                require_usable_key_state(source_key)?;
+            }
+        }
 
         let plaintext_bytes = base64::engine::general_purpose::STANDARD
             .decode(&decoded.plaintext_b64)
@@ -200,13 +211,7 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
-        if !key.enabled {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "DisabledException",
-                format!("Key '{}' is disabled", key.arn),
-            ));
-        }
+        require_usable_key_state(key)?;
 
         let num_bytes = data_key_size_from_body(&body)?;
 
@@ -255,13 +260,7 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
-        if !key.enabled {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "DisabledException",
-                format!("Key '{}' is disabled", key.arn),
-            ));
-        }
+        require_usable_key_state(key)?;
 
         let num_bytes = data_key_size_from_body(&body)?;
         let data_key_bytes: Vec<u8> = rand_bytes(num_bytes);
@@ -346,6 +345,7 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        require_usable_key_state(key)?;
 
         // Validate key usage
         if key.key_usage != "SIGN_VERIFY" {
@@ -469,6 +469,7 @@ impl KmsService {
             )
         })?;
 
+        require_usable_key_state(key)?;
         validate_key_usage_signing(key, &resolved)?;
         validate_signing_algorithm(key, signing_algorithm)?;
 
@@ -617,6 +618,8 @@ impl KmsService {
             )
         })?;
 
+        require_usable_key_state(key)?;
+
         // Validate key usage
         if key.key_usage != "GENERATE_VERIFY_MAC" {
             return Err(AwsServiceError::aws_error(
@@ -695,6 +698,8 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+
+        require_usable_key_state(key)?;
 
         // Validate key usage
         if key.key_usage != "GENERATE_VERIFY_MAC" {
@@ -790,13 +795,7 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
-        if !key.enabled {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "DisabledException",
-                format!("Key '{}' is disabled", key.arn),
-            ));
-        }
+        require_usable_key_state(key)?;
 
         let public_key_bytes = generate_fake_public_key(&key_pair_spec);
         let private_key_bytes = rand_bytes(256);
@@ -852,13 +851,7 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
-        if !key.enabled {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "DisabledException",
-                format!("Key '{}' is disabled", key.arn),
-            ));
-        }
+        require_usable_key_state(key)?;
 
         let public_key_bytes = generate_fake_public_key(&key_pair_spec);
         let private_key_bytes = rand_bytes(256);
@@ -918,13 +911,7 @@ impl KmsService {
             )
         })?;
 
-        if !key.enabled {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "DisabledException",
-                format!("Key '{}' is disabled", key.arn),
-            ));
-        }
+        require_usable_key_state(key)?;
 
         // Key must be asymmetric (KEY_AGREEMENT usage)
         if key.key_usage != "KEY_AGREEMENT" {

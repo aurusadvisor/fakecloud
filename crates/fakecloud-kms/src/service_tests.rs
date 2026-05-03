@@ -2373,3 +2373,94 @@ fn tag_resource_on_known_key_succeeds() {
     );
     svc.tag_resource(&req).unwrap();
 }
+
+// ── G5: key_state enforcement on crypto ops ──
+
+fn force_key_state(svc: &KmsService, key_id: &str, new_state: &str) {
+    let mut accounts = svc.state.write();
+    let s = accounts.get_or_create("123456789012");
+    if let Some(key) = s.keys.get_mut(key_id) {
+        key.key_state = new_state.to_string();
+        if new_state == "Disabled" {
+            key.enabled = false;
+        }
+    }
+}
+
+fn b64(s: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
+}
+
+#[test]
+fn encrypt_rejects_pending_deletion_with_invalid_state() {
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    force_key_state(&svc, &key_id, "PendingDeletion");
+    let req = make_request(
+        "Encrypt",
+        json!({"KeyId": key_id, "Plaintext": b64("hello")}),
+    );
+    let err = match svc.encrypt(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected KMSInvalidStateException"),
+    };
+    let msg = format!("{:?}", err);
+    assert!(msg.contains("KMSInvalidStateException"), "got: {msg}");
+}
+
+#[test]
+fn encrypt_disabled_still_returns_disabled_exception() {
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    force_key_state(&svc, &key_id, "Disabled");
+    let req = make_request(
+        "Encrypt",
+        json!({"KeyId": key_id, "Plaintext": b64("hello")}),
+    );
+    let err = match svc.encrypt(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected DisabledException"),
+    };
+    let msg = format!("{:?}", err);
+    assert!(msg.contains("DisabledException"), "got: {msg}");
+}
+
+#[test]
+fn generate_data_key_rejects_unavailable_state() {
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    force_key_state(&svc, &key_id, "Unavailable");
+    let req = make_request(
+        "GenerateDataKey",
+        json!({"KeyId": key_id, "KeySpec": "AES_256"}),
+    );
+    let err = match svc.generate_data_key(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected KMSInvalidStateException"),
+    };
+    let msg = format!("{:?}", err);
+    assert!(msg.contains("KMSInvalidStateException"), "got: {msg}");
+}
+
+#[test]
+fn decrypt_rejects_when_source_key_is_pending_deletion() {
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    let enc_req = make_request(
+        "Encrypt",
+        json!({"KeyId": key_id, "Plaintext": b64("hello")}),
+    );
+    let enc_resp = svc.encrypt(&enc_req).unwrap();
+    let enc_body: Value = serde_json::from_slice(enc_resp.body.expect_bytes()).unwrap();
+    let ct = enc_body["CiphertextBlob"].as_str().unwrap().to_string();
+
+    force_key_state(&svc, &key_id, "PendingDeletion");
+    let dec_req = make_request("Decrypt", json!({"CiphertextBlob": ct}));
+    let err = match svc.decrypt(&dec_req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected KMSInvalidStateException"),
+    };
+    let msg = format!("{:?}", err);
+    assert!(msg.contains("KMSInvalidStateException"), "got: {msg}");
+}
