@@ -363,6 +363,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         "AmazonSQS" => "sqs",
         "AmazonSNS" => "sns",
         "DynamoDB_20120810" => "dynamodb",
+        "DynamoDBStreams_20120810" => "dynamodbstreams",
         "Logs_20140328" => "logs",
         s if s.starts_with("secretsmanager") => "secretsmanager",
         s if s.starts_with("TrentService") => "kms",
