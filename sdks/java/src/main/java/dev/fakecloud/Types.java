@@ -564,4 +564,15 @@ public final class Types {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Elbv2RulesResponse(List<Elbv2Rule> rules) {}
+
+    // ── Route 53 ─────────────────────────────────────────────────
+
+    /**
+     * Body for the Route 53 admin endpoint
+     * {@code POST /_fakecloud/route53/health-checks/{id}/status}.
+     * {@code status} is {@code "Success"} or {@code "Failure"};
+     * {@code reason} is omitted from the JSON when null.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SetHealthCheckStatusRequest(String status, String reason) {}
 }

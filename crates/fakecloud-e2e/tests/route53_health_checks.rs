@@ -345,3 +345,102 @@ async fn delete_rejects_health_check_in_use() {
         "expected delete to be rejected while record set still references the health check"
     );
 }
+
+#[tokio::test]
+async fn admin_endpoint_flips_health_check_status_and_reason() {
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+
+    let id = r53
+        .create_health_check()
+        .caller_reference("hc-admin-flip")
+        .health_check_config(
+            HealthCheckConfig::builder()
+                .r#type(HealthCheckType::Tcp)
+                .ip_address("203.0.113.50")
+                .port(80)
+                .request_interval(30)
+                .failure_threshold(3)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create")
+        .health_check()
+        .unwrap()
+        .id()
+        .to_string();
+
+    let initial = r53
+        .get_health_check_status()
+        .health_check_id(&id)
+        .send()
+        .await
+        .expect("status before flip");
+    let observations = initial.health_check_observations();
+    assert!(!observations.is_empty());
+    for obs in observations {
+        let status = obs.status_report().unwrap().status().unwrap();
+        assert_eq!(status, "Success", "expected Success before admin flip");
+    }
+
+    let code = server
+        .set_route53_health_check_status(&id, "Failure", Some("Endpoint timed out"))
+        .await;
+    assert_eq!(code, 204, "expected 204 No Content from admin flip");
+
+    let after = r53
+        .get_health_check_status()
+        .health_check_id(&id)
+        .send()
+        .await
+        .expect("status after flip");
+    for obs in after.health_check_observations() {
+        let status = obs.status_report().unwrap().status().unwrap();
+        assert_eq!(status, "Failure: Endpoint timed out");
+    }
+
+    // GetHealthCheckLastFailureReason should now surface the same reason.
+    let last = r53
+        .get_health_check_last_failure_reason()
+        .health_check_id(&id)
+        .send()
+        .await
+        .expect("last failure after flip");
+    let last_obs = last.health_check_observations();
+    assert!(!last_obs.is_empty(), "expected last-failure observations");
+    for obs in last_obs {
+        let s = obs.status_report().unwrap().status().unwrap();
+        assert!(
+            s.contains("Endpoint timed out"),
+            "expected stored reason in observation, got {s}"
+        );
+    }
+
+    // Flipping back to Success clears the reported status but leaves the
+    // historical reason intact.
+    let code = server
+        .set_route53_health_check_status(&id, "Success", None)
+        .await;
+    assert_eq!(code, 204);
+    let recovered = r53
+        .get_health_check_status()
+        .health_check_id(&id)
+        .send()
+        .await
+        .expect("status after recovery");
+    for obs in recovered.health_check_observations() {
+        let status = obs.status_report().unwrap().status().unwrap();
+        assert_eq!(status, "Success");
+    }
+}
+
+#[tokio::test]
+async fn admin_endpoint_returns_404_for_unknown_health_check() {
+    let server = TestServer::start().await;
+    let code = server
+        .set_route53_health_check_status("ghost-hc", "Failure", Some("missing"))
+        .await;
+    assert_eq!(code, 404);
+}

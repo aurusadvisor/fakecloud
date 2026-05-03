@@ -36,6 +36,7 @@ final class FakeCloud
     private BedrockClient $bedrock;
     private EcsClient $ecs;
     private Elbv2Client $elbv2;
+    private Route53Client $route53;
 
     public function __construct(string $baseUrl = self::DEFAULT_BASE_URL)
     {
@@ -58,6 +59,7 @@ final class FakeCloud
         $this->bedrock = new BedrockClient($this->http);
         $this->ecs = new EcsClient($this->http);
         $this->elbv2 = new Elbv2Client($this->http);
+        $this->route53 = new Route53Client($this->http);
     }
 
     public function baseUrl(): string
@@ -117,6 +119,7 @@ final class FakeCloud
     public function bedrock(): BedrockClient { return $this->bedrock; }
     public function ecs(): EcsClient { return $this->ecs; }
     public function elbv2(): Elbv2Client { return $this->elbv2; }
+    public function route53(): Route53Client { return $this->route53; }
 }
 
 // ── Sub-clients ────────────────────────────────────────────────
@@ -560,6 +563,36 @@ final class Elbv2Client
     {
         return Elbv2RulesResponse::fromArray(
             $this->http->get('/_fakecloud/elbv2/rules')
+        );
+    }
+}
+
+/**
+ * Route 53 admin client.
+ *
+ * Wraps the per-health-check status admin endpoint that lets tests flip
+ * a stored health check between healthy and unhealthy without a live
+ * prober, so failover and multi-value routing can be exercised
+ * end-to-end.
+ */
+final class Route53Client
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    /**
+     * Flip a Route 53 health check's reported status. $status is
+     * "Success" or "Failure"; $reason is appended to the <Status>
+     * element when status is "Failure" (pass null to omit).
+     */
+    public function setHealthCheckStatus(string $healthCheckId, string $status, ?string $reason = null): void
+    {
+        $body = ['status' => $status];
+        if ($reason !== null) {
+            $body['reason'] = $reason;
+        }
+        $this->http->postJsonNoContent(
+            '/_fakecloud/route53/health-checks/' . HttpTransport::encodePath($healthCheckId) . '/status',
+            $body
         );
     }
 }

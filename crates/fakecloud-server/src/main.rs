@@ -5016,21 +5016,24 @@ async fn main() {
         )
         .route(
             "/_fakecloud/route53/health-checks/{id}/status",
-            axum::routing::put({
+            axum::routing::post({
                 let svc = route53_service.clone();
                 move |axum::extract::Path(id): axum::extract::Path<String>,
                       axum::Json(body): axum::Json<types::Route53HealthCheckStatusRequest>| {
                     let svc = svc.clone();
                     async move {
-                        let ok = svc.set_health_check_status(
-                            &id,
-                            body.status,
-                            body.last_failure_reason,
-                        );
-                        if ok {
-                            axum::Json(serde_json::json!({"status": "ok"}))
+                        let status = match body.status {
+                            types::Route53HealthCheckStatusValue::Success => {
+                                fakecloud_route53::HealthCheckStatus::Success
+                            }
+                            types::Route53HealthCheckStatusValue::Failure => {
+                                fakecloud_route53::HealthCheckStatus::Failure
+                            }
+                        };
+                        if svc.set_health_check_status(&id, status, body.reason) {
+                            axum::http::StatusCode::NO_CONTENT
                         } else {
-                            axum::Json(serde_json::json!({"status": "not_found"}))
+                            axum::http::StatusCode::NOT_FOUND
                         }
                     }
                 }

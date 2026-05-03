@@ -44,6 +44,21 @@ final class HttpTransport
         return $this->send('POST', $path, $payload, 'application/json');
     }
 
+    /**
+     * POST a JSON body where the server replies with no content (204) on
+     * success. Throws {@see FakeCloudError} on non-2xx; on success returns
+     * the HTTP status code.
+     */
+    public function postJsonNoContent(string $path, array $body): int
+    {
+        $payload = json_encode($body, JSON_THROW_ON_ERROR);
+        $response = $this->execute('POST', $path, $payload, 'application/json');
+        if ($response['status'] < 200 || $response['status'] >= 300) {
+            throw new FakeCloudError($response['status'], $response['body']);
+        }
+        return $response['status'];
+    }
+
     public function postText(string $path, string $body): array
     {
         return $this->send('POST', $path, $body, 'text/plain');

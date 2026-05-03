@@ -58,6 +58,25 @@ final class HttpTransport {
         return send(req, type);
     }
 
+    /**
+     * POST a JSON body where the server replies with no content (204) on
+     * success. Throws {@link FakeCloudError} on non-2xx; on success, returns
+     * the HTTP status code so callers can distinguish 200/201/204 if they
+     * care.
+     */
+    int postJsonNoContent(String path, Object body) {
+        byte[] payload = serialize(body);
+        HttpRequest.Builder req = HttpRequest.newBuilder(uri(path))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(payload));
+        HttpResponse<byte[]> resp = execute(req);
+        int status = resp.statusCode();
+        if (status < 200 || status >= 300) {
+            throw new FakeCloudError(status, new String(resp.body(), StandardCharsets.UTF_8));
+        }
+        return status;
+    }
+
     <T> T postText(String path, String body, Class<T> type) {
         HttpRequest.Builder req = HttpRequest.newBuilder(uri(path))
                 .header("Content-Type", "text/plain")

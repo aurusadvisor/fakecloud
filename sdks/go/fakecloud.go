@@ -118,6 +118,9 @@ func (fc *FakeCloud) ECS() *ECSClient { return &ECSClient{fc: fc} }
 // ELBv2 returns the Elastic Load Balancing v2 sub-client.
 func (fc *FakeCloud) ELBv2() *ELBv2Client { return &ELBv2Client{fc: fc} }
 
+// Route53 returns the Route 53 admin sub-client.
+func (fc *FakeCloud) Route53() *Route53Client { return &Route53Client{fc: fc} }
+
 // ── Error type ─────────────────────────────────────────────────────
 
 // APIError is returned when the server responds with a non-2xx status.

@@ -48,6 +48,7 @@ import dev.fakecloud.Types.ResetServiceResponse;
 import dev.fakecloud.Types.RotationTickResponse;
 import dev.fakecloud.Types.S3NotificationsResponse;
 import dev.fakecloud.Types.SesEmailsResponse;
+import dev.fakecloud.Types.SetHealthCheckStatusRequest;
 import dev.fakecloud.Types.SnsMessagesResponse;
 import dev.fakecloud.Types.SqsMessagesResponse;
 import dev.fakecloud.Types.StepFunctionsExecutionsResponse;
@@ -93,6 +94,7 @@ public final class FakeCloud {
     private final BedrockClient bedrock;
     private final EcsClient ecs;
     private final Elbv2Client elbv2;
+    private final Route53Client route53;
 
     public FakeCloud() {
         this(DEFAULT_BASE_URL);
@@ -118,6 +120,7 @@ public final class FakeCloud {
         this.bedrock = new BedrockClient(http);
         this.ecs = new EcsClient(http);
         this.elbv2 = new Elbv2Client(http);
+        this.route53 = new Route53Client(http);
     }
 
     static String trimTrailingSlashes(String url) {
@@ -175,6 +178,7 @@ public final class FakeCloud {
     public BedrockClient bedrock() { return bedrock; }
     public EcsClient ecs() { return ecs; }
     public Elbv2Client elbv2() { return elbv2; }
+    public Route53Client route53() { return route53; }
 
     // ── Sub-clients ────────────────────────────────────────────────
 
@@ -529,6 +533,31 @@ public final class FakeCloud {
 
         public Elbv2RulesResponse getRules() {
             return http.get("/_fakecloud/elbv2/rules", Elbv2RulesResponse.class);
+        }
+    }
+
+    /**
+     * Route 53 admin client.
+     *
+     * Wraps the per-health-check status admin endpoint that lets tests
+     * flip a stored health check between healthy and unhealthy without a
+     * live prober, so failover and multi-value routing can be exercised
+     * end-to-end.
+     */
+    public static final class Route53Client {
+        private final HttpTransport http;
+        Route53Client(HttpTransport http) { this.http = http; }
+
+        /**
+         * Flip a Route 53 health check's reported status. {@code status}
+         * is {@code "Success"} or {@code "Failure"}; {@code reason} is
+         * appended to the {@code <Status>} element when status is
+         * Failure (pass {@code null} to omit).
+         */
+        public void setHealthCheckStatus(String healthCheckId, String status, String reason) {
+            http.postJsonNoContent(
+                    "/_fakecloud/route53/health-checks/" + encodePath(healthCheckId) + "/status",
+                    new SetHealthCheckStatusRequest(status, reason));
         }
     }
 }
