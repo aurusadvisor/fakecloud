@@ -203,6 +203,7 @@ pub(crate) enum RdsSourceType {
     DbInstance,
     DbSnapshot,
     DbParameterGroup,
+    DbCluster,
 }
 
 impl RdsSourceType {
@@ -211,6 +212,7 @@ impl RdsSourceType {
             Self::DbInstance => "DB_INSTANCE",
             Self::DbSnapshot => "DB_SNAPSHOT",
             Self::DbParameterGroup => "DB_PARAMETER_GROUP",
+            Self::DbCluster => "DB_CLUSTER",
         }
     }
 
@@ -219,6 +221,7 @@ impl RdsSourceType {
             Self::DbInstance => "RDS DB Instance Event",
             Self::DbSnapshot => "RDS DB Snapshot Event",
             Self::DbParameterGroup => "RDS DB Parameter Group Event",
+            Self::DbCluster => "RDS DB Cluster Event",
         }
     }
 }
