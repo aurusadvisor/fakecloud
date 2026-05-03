@@ -54,6 +54,14 @@ fn enable_production_access(state: &SharedSesState) {
     st.account_settings.production_access_enabled = true;
 }
 
+/// Flip into sandbox mode for tests that explicitly verify the sandbox
+/// recipient gate. Default is production access.
+fn disable_production_access(state: &SharedSesState) {
+    let mut accounts = state.write();
+    let st = accounts.get_or_create("123456789012");
+    st.account_settings.production_access_enabled = false;
+}
+
 fn make_v1_request(action: &str, params: Vec<(&str, &str)>) -> AwsRequest {
     let mut query_params: HashMap<String, String> = HashMap::new();
     query_params.insert("Action".to_string(), action.to_string());
@@ -1097,6 +1105,7 @@ fn send_email_v1_same_path() {
 #[test]
 fn send_email_v1_rejects_unverified_recipient_in_sandbox() {
     let state = make_state();
+    disable_production_access(&state);
     seed_identity(&state, "sender@example.com");
     let req = make_v1_request(
         "SendEmail",
