@@ -42,15 +42,87 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 
 pub struct AcmService {
     state: SharedAcmState,
+    /// How long the auto-issue tick sleeps before flipping a freshly
+    /// requested DNS / EMAIL cert from `PENDING_VALIDATION` to `ISSUED`.
+    /// Real ACM takes minutes; the default of 2s keeps SDK-driven
+    /// integration tests fast while still simulating the async
+    /// transition. Tests can shrink it via
+    /// [`AcmService::with_pending_validation_delay`].
+    pending_validation_delay: std::time::Duration,
 }
 
 impl AcmService {
     pub fn new(state: SharedAcmState) -> Self {
-        Self { state }
+        Self {
+            state,
+            pending_validation_delay: std::time::Duration::from_secs(2),
+        }
     }
 
     pub fn shared_state(&self) -> SharedAcmState {
         Arc::clone(&self.state)
+    }
+
+    /// Override the auto-issue delay. Used by unit tests so they don't
+    /// have to wait wall-clock seconds for the tick to flip
+    /// `PENDING_VALIDATION` -> `ISSUED`.
+    pub fn with_pending_validation_delay(mut self, delay: std::time::Duration) -> Self {
+        self.pending_validation_delay = delay;
+        self
+    }
+
+    /// Flip a stored certificate's status (and optionally a failure
+    /// reason). Returns `false` if no certificate matches `arn_or_id`
+    /// across any account. The admin endpoint `POST
+    /// /_fakecloud/acm/certificates/{arn-or-id}/status` calls this so
+    /// tests can synchronously force a cert into `ISSUED`, `FAILED`, or
+    /// `VALIDATION_TIMED_OUT` without waiting on the auto-issue tick.
+    ///
+    /// `arn_or_id` accepts either a full ACM ARN or just the
+    /// trailing UUID portion (everything after `certificate/`).
+    pub fn set_certificate_status(
+        &self,
+        arn_or_id: &str,
+        status: &str,
+        reason: Option<String>,
+    ) -> bool {
+        let mut state = self.state.write();
+        for account in state.accounts.values_mut() {
+            let key = account
+                .certificates
+                .keys()
+                .find(|k| k.as_str() == arn_or_id || cert_id_from_arn(k) == arn_or_id)
+                .cloned();
+            if let Some(key) = key {
+                if let Some(cert) = account.certificates.get_mut(&key) {
+                    cert.status = status.to_string();
+                    match status {
+                        "ISSUED" => {
+                            cert.issued_at = Some(Utc::now());
+                            for dv in cert.domain_validation.iter_mut() {
+                                dv.validation_status = "SUCCESS".to_string();
+                            }
+                            cert.failure_reason = None;
+                        }
+                        "FAILED" | "VALIDATION_TIMED_OUT" => {
+                            for dv in cert.domain_validation.iter_mut() {
+                                dv.validation_status = status.to_string();
+                            }
+                            if reason.is_some() {
+                                cert.failure_reason = reason;
+                            }
+                        }
+                        _ => {
+                            if reason.is_some() {
+                                cert.failure_reason = reason;
+                            }
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -194,8 +266,39 @@ impl AcmService {
             tags,
             in_use_by: Vec::new(),
             describe_read_count: 0,
+            failure_reason: None,
         };
         account.certificates.insert(arn.clone(), cert);
+        drop(state);
+
+        // Auto-issue tick: real ACM transitions DNS / EMAIL certs from
+        // PENDING_VALIDATION to ISSUED asynchronously over minutes once
+        // the validation record / approval lands. fakecloud fires the
+        // same flip after `pending_validation_delay` so SDK-driven tests
+        // can observe the transition without waiting on a control plane.
+        // EMAIL certs would normally need manual approval, but for test
+        // ergonomics we treat them the same. ImportCertificate stays
+        // ISSUED-on-arrival (its own code path never enters this branch).
+        let state_for_tick = Arc::clone(&self.state);
+        let arn_for_tick = arn.clone();
+        let account_for_tick = req.account_id.clone();
+        let delay = self.pending_validation_delay;
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let mut state = state_for_tick.write();
+            if let Some(account) = state.accounts.get_mut(&account_for_tick) {
+                if let Some(cert) = account.certificates.get_mut(&arn_for_tick) {
+                    if cert.status == "PENDING_VALIDATION" && cert.cert_type == "AMAZON_ISSUED" {
+                        cert.status = "ISSUED".to_string();
+                        cert.issued_at = Some(Utc::now());
+                        for dv in cert.domain_validation.iter_mut() {
+                            dv.validation_status = "SUCCESS".to_string();
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(AwsResponse::ok_json(json!({ "CertificateArn": arn })))
     }
 
@@ -403,6 +506,7 @@ impl AcmService {
                     tags,
                     in_use_by: Vec::new(),
                     describe_read_count: 0,
+                    failure_reason: None,
                 };
                 account.certificates.insert(arn.clone(), cert);
                 arn
@@ -814,6 +918,18 @@ fn synth_certificate_arn(account_id: &str, region: &str) -> String {
     Arn::new("acm", region, account_id, &format!("certificate/{id}")).to_string()
 }
 
+/// Extract the trailing UUID portion of a certificate ARN
+/// (`arn:aws:acm:region:account:certificate/<id>` -> `<id>`). Returns
+/// the input unchanged if it doesn't match the ACM ARN shape — callers
+/// only use this to compare against shorthand identifiers passed to the
+/// admin endpoint, where a partial match against the full ARN is also
+/// acceptable.
+fn cert_id_from_arn(arn: &str) -> &str {
+    arn.rsplit_once("certificate/")
+        .map(|(_, id)| id)
+        .unwrap_or(arn)
+}
+
 fn synth_serial(arn: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(arn.as_bytes());
@@ -1092,6 +1208,11 @@ fn certificate_detail_json(c: &StoredCertificate) -> Value {
         d.as_object_mut()
             .unwrap()
             .insert("CertificateAuthorityArn".to_string(), json!(ca));
+    }
+    if let Some(fr) = &c.failure_reason {
+        d.as_object_mut()
+            .unwrap()
+            .insert("FailureReason".to_string(), json!(fr));
     }
     d
 }
@@ -1554,6 +1675,118 @@ mod tests {
                 "expected SAN {san} embedded in DER"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn request_certificate_starts_in_pending_validation() {
+        let svc = AcmService::default();
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({"DomainName": "example.com", "ValidationMethod": "DNS"}),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+        let st = svc.state.read();
+        let cert = st
+            .accounts
+            .get("123456789012")
+            .unwrap()
+            .certificates
+            .get(&arn)
+            .unwrap();
+        assert_eq!(cert.status, "PENDING_VALIDATION");
+        assert!(cert.issued_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_certificate_status_to_issued_via_admin() {
+        let svc = AcmService::default();
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({"DomainName": "admin.example.com"}),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+
+        assert!(svc.set_certificate_status(&arn, "ISSUED", None));
+        let st = svc.state.read();
+        let cert = st
+            .accounts
+            .get("123456789012")
+            .unwrap()
+            .certificates
+            .get(&arn)
+            .unwrap();
+        assert_eq!(cert.status, "ISSUED");
+        assert!(cert.issued_at.is_some());
+        for dv in &cert.domain_validation {
+            assert_eq!(dv.validation_status, "SUCCESS");
+        }
+    }
+
+    #[tokio::test]
+    async fn set_certificate_status_unknown_arn_returns_false() {
+        let svc = AcmService::default();
+        assert!(!svc.set_certificate_status("does-not-exist", "ISSUED", None));
+    }
+
+    #[tokio::test]
+    async fn auto_issue_tick_transitions_to_issued() {
+        let svc = AcmService::default()
+            .with_pending_validation_delay(std::time::Duration::from_millis(50));
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({"DomainName": "auto.example.com", "ValidationMethod": "DNS"}),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let st = svc.state.read();
+        let cert = st
+            .accounts
+            .get("123456789012")
+            .unwrap()
+            .certificates
+            .get(&arn)
+            .unwrap();
+        assert_eq!(cert.status, "ISSUED");
+        assert!(cert.issued_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn set_certificate_status_failed_records_reason() {
+        let svc = AcmService::default();
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({"DomainName": "fail.example.com"}),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+        assert!(svc.set_certificate_status(&arn, "FAILED", Some("DNS lookup error".to_string())));
+        let st = svc.state.read();
+        let cert = st
+            .accounts
+            .get("123456789012")
+            .unwrap()
+            .certificates
+            .get(&arn)
+            .unwrap();
+        assert_eq!(cert.status, "FAILED");
+        assert_eq!(cert.failure_reason.as_deref(), Some("DNS lookup error"));
     }
 
     #[tokio::test]

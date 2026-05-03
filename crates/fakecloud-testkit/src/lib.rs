@@ -281,6 +281,42 @@ impl TestServer {
             .expect("set-health-check-status request failed");
         resp.status().as_u16()
     }
+
+    /// Flip an ACM certificate's status via
+    /// `POST /_fakecloud/acm/certificates/{arn-or-id}/status`. `status`
+    /// is `"ISSUED"`, `"FAILED"`, or `"VALIDATION_TIMED_OUT"`. `reason`
+    /// (optional) records a `FailureReason` for non-ISSUED states.
+    /// Returns the HTTP status code so tests can assert 204 vs 404.
+    /// `arn_or_id` accepts either the full ACM ARN or the trailing
+    /// UUID portion; full ARNs are reduced to their UUID before being
+    /// embedded in the URL since axum's path matcher won't match
+    /// across `/`.
+    pub async fn set_acm_certificate_status(
+        &self,
+        arn_or_id: &str,
+        status: &str,
+        reason: Option<&str>,
+    ) -> u16 {
+        let id = arn_or_id
+            .rsplit_once("certificate/")
+            .map(|(_, id)| id)
+            .unwrap_or(arn_or_id);
+        let client = reqwest::Client::new();
+        let mut body = serde_json::json!({"status": status});
+        if let Some(reason) = reason {
+            body["reason"] = serde_json::Value::String(reason.to_string());
+        }
+        let resp = client
+            .post(format!(
+                "{}/_fakecloud/acm/certificates/{}/status",
+                self.endpoint, id
+            ))
+            .json(&body)
+            .send()
+            .await
+            .expect("set-acm-certificate-status request failed");
+        resp.status().as_u16()
+    }
 }
 
 impl Drop for TestServer {

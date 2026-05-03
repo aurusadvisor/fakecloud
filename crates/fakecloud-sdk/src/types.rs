@@ -1100,3 +1100,22 @@ pub enum Route53HealthCheckStatusValue {
     Success,
     Failure,
 }
+
+/// Body for `POST /_fakecloud/acm/certificates/{arn-or-id}/status`. The
+/// admin endpoint flips a stored ACM certificate's status (and
+/// optionally records a failure reason) so tests can synchronously
+/// drive a cert to `ISSUED`, `FAILED`, or `VALIDATION_TIMED_OUT`
+/// without waiting on the auto-issue tick.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcmCertificateStatusRequest {
+    /// New certificate status. One of `"ISSUED"`, `"FAILED"`,
+    /// `"VALIDATION_TIMED_OUT"`. Other ACM statuses are accepted as
+    /// raw strings in case callers want to simulate a niche state.
+    pub status: String,
+    /// Optional failure reason surfaced as `FailureReason` in
+    /// `DescribeCertificate`. Ignored when `status = ISSUED`. `None`
+    /// leaves the prior value intact.
+    #[serde(default)]
+    pub reason: Option<String>,
+}

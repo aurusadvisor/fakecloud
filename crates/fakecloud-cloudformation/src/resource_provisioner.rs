@@ -7411,6 +7411,7 @@ impl ResourceProvisioner {
             tags,
             in_use_by: Vec::new(),
             describe_read_count: 0,
+            failure_reason: None,
         };
 
         let mut accounts = self.acm_state.write();

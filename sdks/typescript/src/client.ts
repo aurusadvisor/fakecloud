@@ -490,6 +490,7 @@ export class FakeCloud {
   private readonly _ecs: EcsClient;
   private readonly _elbv2: Elbv2Client;
   private readonly _route53: Route53Client;
+  private readonly _acm: AcmClient;
 
   constructor(baseUrl: string = "http://localhost:4566") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -513,6 +514,7 @@ export class FakeCloud {
     this._ecs = new EcsClient(this.baseUrl);
     this._elbv2 = new Elbv2Client(this.baseUrl);
     this._route53 = new Route53Client(this.baseUrl);
+    this._acm = new AcmClient(this.baseUrl);
   }
 
   // ── Health & Reset ─────────────────────────────────────────────
@@ -626,6 +628,10 @@ export class FakeCloud {
   get route53(): Route53Client {
     return this._route53;
   }
+
+  get acm(): AcmClient {
+    return this._acm;
+  }
 }
 
 export class EcsClient {
@@ -689,6 +695,51 @@ export class Route53Client {
       `${this.baseUrl}/_fakecloud/route53/health-checks/${encodeURIComponent(
         healthCheckId,
       )}/status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new FakeCloudError(resp.status, body);
+    }
+  }
+}
+
+/** Body for `acm.setCertificateStatus`. */
+export interface SetCertificateStatusRequest {
+  /** New certificate status. */
+  status: "ISSUED" | "FAILED" | "VALIDATION_TIMED_OUT" | string;
+  /** Optional reason recorded as `FailureReason` for non-ISSUED states. */
+  reason?: string;
+}
+
+/**
+ * ACM admin client.
+ *
+ * Wraps the per-certificate status admin endpoint that lets tests flip
+ * a stored certificate between PENDING_VALIDATION, ISSUED, FAILED, and
+ * VALIDATION_TIMED_OUT without waiting on the auto-issue tick, so
+ * validation-failure flows can be exercised end-to-end.
+ */
+export class AcmClient {
+  constructor(private baseUrl: string) {}
+
+  /**
+   * Flip an ACM certificate's status synchronously. `arnOrId` accepts
+   * either the full ACM ARN or the trailing UUID portion; full ARNs
+   * are reduced to their UUID before being embedded in the URL.
+   */
+  async setCertificateStatus(
+    arnOrId: string,
+    req: SetCertificateStatusRequest,
+  ): Promise<void> {
+    const idx = arnOrId.lastIndexOf("certificate/");
+    const id = idx >= 0 ? arnOrId.substring(idx + "certificate/".length) : arnOrId;
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/acm/certificates/${encodeURIComponent(id)}/status`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },

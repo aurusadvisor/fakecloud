@@ -482,3 +482,66 @@ async fn resend_validation_email_only_for_email_validation() {
         .await
         .expect("resend ok");
 }
+
+#[tokio::test]
+async fn acm_admin_endpoint_flips_certificate_status() {
+    let server = TestServer::start().await;
+    let acm = server.acm_client().await;
+
+    let arn = acm
+        .request_certificate()
+        .domain_name("admin-flip.example.com")
+        .validation_method(ValidationMethod::Dns)
+        .send()
+        .await
+        .expect("request")
+        .certificate_arn()
+        .unwrap()
+        .to_string();
+
+    let code = server
+        .set_acm_certificate_status(&arn, "ISSUED", None)
+        .await;
+    assert_eq!(code, 204, "expected 204 No Content from admin flip");
+
+    let after = acm
+        .describe_certificate()
+        .certificate_arn(&arn)
+        .send()
+        .await
+        .expect("describe")
+        .certificate()
+        .unwrap()
+        .clone();
+    assert_eq!(after.status(), Some(&CertificateStatus::Issued));
+    assert!(after.issued_at().is_some());
+
+    // Flip to FAILED with a reason and assert it surfaces.
+    let code = server
+        .set_acm_certificate_status(&arn, "FAILED", Some("validation declined"))
+        .await;
+    assert_eq!(code, 204);
+    let failed = acm
+        .describe_certificate()
+        .certificate_arn(&arn)
+        .send()
+        .await
+        .expect("describe")
+        .certificate()
+        .unwrap()
+        .clone();
+    assert_eq!(failed.status(), Some(&CertificateStatus::Failed));
+    assert_eq!(
+        failed.failure_reason().map(|r| r.as_str()),
+        Some("validation declined")
+    );
+}
+
+#[tokio::test]
+async fn acm_admin_endpoint_returns_404_for_unknown() {
+    let server = TestServer::start().await;
+    let code = server
+        .set_acm_certificate_status("ghost-cert-id", "ISSUED", None)
+        .await;
+    assert_eq!(code, 404);
+}

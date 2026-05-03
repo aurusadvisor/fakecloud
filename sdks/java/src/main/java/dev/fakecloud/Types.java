@@ -575,4 +575,18 @@ public final class Types {
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record SetHealthCheckStatusRequest(String status, String reason) {}
+
+    // ── ACM ──────────────────────────────────────────────────────
+
+    /**
+     * Body for the ACM admin endpoint
+     * {@code POST /_fakecloud/acm/certificates/{arn-or-id}/status}.
+     * {@code status} is one of {@code "ISSUED"}, {@code "FAILED"},
+     * or {@code "VALIDATION_TIMED_OUT"}; {@code reason} is recorded
+     * as {@code FailureReason} on subsequent {@code DescribeCertificate}
+     * calls when status is non-ISSUED, and is omitted from the JSON
+     * when null.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SetCertificateStatusRequest(String status, String reason) {}
 }

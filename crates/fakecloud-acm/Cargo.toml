@@ -28,7 +28,7 @@ cbc = { version = "0.1", features = ["alloc"] }
 cipher = { version = "0.4", features = ["alloc", "block-padding"] }
 md-5 = { workspace = true }
 rand = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
