@@ -407,6 +407,35 @@ pub(crate) fn require_non_empty_b64(field: &str, b64: &str) -> Result<(), AwsSer
     Ok(())
 }
 
+/// Reject the request when the key isn't usable for crypto operations.
+/// AWS surfaces `KMSInvalidStateException` for every state other than
+/// `Enabled`; `Disabled` keeps its dedicated `DisabledException` for
+/// backwards compatibility with the old enabled-flag check that the
+/// existing tests assert on. All other lifecycle states
+/// (`PendingDeletion`, `PendingImport`, `Unavailable`, `Updating`,
+/// `Creating`) collapse into `KMSInvalidStateException` so callers
+/// don't see a misleading success when the key is mid-transition.
+pub(crate) fn require_usable_key_state(key: &KmsKey) -> Result<(), AwsServiceError> {
+    if key.key_state == "Enabled" {
+        return Ok(());
+    }
+    if key.key_state == "Disabled" || !key.enabled {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "DisabledException",
+            format!("Key '{}' is disabled", key.arn),
+        ));
+    }
+    Err(AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "KMSInvalidStateException",
+        format!(
+            "Key '{}' is not in a state that allows this operation (current state: {})",
+            key.arn, key.key_state
+        ),
+    ))
+}
+
 pub(crate) fn validate_key_usage_signing(
     key: &KmsKey,
     resolved: &str,
