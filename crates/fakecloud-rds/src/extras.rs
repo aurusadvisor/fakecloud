@@ -529,7 +529,7 @@ impl RdsService {
             "ModifyActivityStream" => Ok(xml_response("ModifyActivityStream", "    <Status>started</Status>".to_string(), &rid)),
 
             // ── Database read replicas ──
-            "PromoteReadReplica" => Ok(xml_response("PromoteReadReplica", "    <DBInstance/>".to_string(), &rid)),
+            "PromoteReadReplica" => promote_read_replica_action(self, &aid, req, &rid),
             "StartDBInstance" | "StopDBInstance" => {
                 if let Some(id) = get_param(req, "DBInstanceIdentifier") {
                     let (event_id, categories, msg) = if action == "StartDBInstance" {
@@ -615,11 +615,75 @@ impl RdsService {
             "EnableHttpEndpoint" => Ok(xml_response("EnableHttpEndpoint", "    <HttpEndpointEnabled>true</HttpEndpointEnabled>".to_string(), &rid)),
 
             // ── Read replicas ──
-            "SwitchoverReadReplica" => Ok(xml_response("SwitchoverReadReplica", "    <DBInstance/>".to_string(), &rid)),
+            "SwitchoverReadReplica" => promote_read_replica_action(self, &aid, req, &rid),
 
             _ => Err(AwsServiceError::action_not_implemented("rds", &action)),
         }
     }
+}
+
+/// PromoteReadReplica + SwitchoverReadReplica share the same shape:
+/// resolve the named instance, ensure it's actually a replica, clear
+/// the source pointer, optionally update backup config, and trim the
+/// instance from its source's replica list. AWS distinguishes the two
+/// (Switchover keeps the source as a new replica of the new primary
+/// while Promote standalone-promotes), but both produce a promoted
+/// replica with no upstream — we model the standalone path for both.
+fn promote_read_replica_action(
+    svc: &RdsService,
+    account_id: &str,
+    req: &AwsRequest,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id =
+        get_param(req, "DBInstanceIdentifier").ok_or_else(|| missing("DBInstanceIdentifier"))?;
+    let backup_retention =
+        get_param(req, "BackupRetentionPeriod").and_then(|v| v.parse::<i32>().ok());
+    let preferred_window = get_param(req, "PreferredBackupWindow");
+
+    let mut accounts = svc.state_handle().write();
+    let state = accounts.get_or_create(account_id);
+    let source_id = state
+        .instances
+        .get(&id)
+        .and_then(|i| i.read_replica_source_db_instance_identifier.clone());
+    let instance = state.instances.get_mut(&id).ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "DBInstanceNotFound",
+            format!("DBInstance {id} not found."),
+        )
+    })?;
+    if instance
+        .read_replica_source_db_instance_identifier
+        .is_none()
+    {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidDBInstanceState",
+            format!("DB instance {id} is not a read replica."),
+        ));
+    }
+    instance.read_replica_source_db_instance_identifier = None;
+    if let Some(retention) = backup_retention {
+        instance.backup_retention_period = retention;
+    }
+    if let Some(window) = preferred_window {
+        instance.preferred_backup_window = window;
+    }
+    let xml = crate::service::db_instance_xml(instance, Some("modifying"));
+    if let Some(source_id) = source_id {
+        if let Some(src) = state.instances.get_mut(&source_id) {
+            src.read_replica_db_instance_identifiers
+                .retain(|r| r != &id);
+        }
+    }
+    drop(accounts);
+    Ok(xml_response(
+        "PromoteReadReplica",
+        format!("    <DBInstance>\n{xml}    </DBInstance>"),
+        rid,
+    ))
 }
 
 // ── XML helpers per resource ──
@@ -1282,14 +1346,14 @@ mod tests {
         ok("PurchaseReservedDBInstancesOffering", &[]);
         ok("DescribeReservedDBInstances", &[]);
         ok("DescribeReservedDBInstancesOfferings", &[]);
-        ok("PromoteReadReplica", &[]);
+        // PromoteReadReplica + SwitchoverReadReplica need a real
+        // replica instance; covered by the dedicated tests below.
         ok("StartDBInstance", &[]);
         ok("StopDBInstance", &[]);
         ok("StartDBInstanceAutomatedBackupsReplication", &[]);
         ok("StopDBInstanceAutomatedBackupsReplication", &[]);
         ok("DeleteDBInstanceAutomatedBackup", &[]);
         ok("DescribeDBInstanceAutomatedBackups", &[]);
-        ok("SwitchoverReadReplica", &[]);
         ok("DescribeDBRecommendations", &[]);
         ok("ModifyDBRecommendation", &[]);
         ok("DescribeCertificates", &[]);
@@ -1325,5 +1389,199 @@ mod tests {
         ok("ModifyCurrentDBClusterCapacity", &[]);
         ok("DisableHttpEndpoint", &[]);
         ok("EnableHttpEndpoint", &[]);
+    }
+
+    fn seed_replica(svc: &RdsService, replica_id: &str, source_id: &str) {
+        use crate::state::DbInstance;
+        use chrono::Utc;
+        let now = Utc::now();
+        let mut accounts = svc.state_handle().write();
+        let state = accounts.get_or_create("000000000000");
+        let arn = state.db_instance_arn(replica_id);
+        let source_arn = state.db_instance_arn(source_id);
+        // Source first.
+        state.instances.insert(
+            source_id.to_string(),
+            DbInstance {
+                db_instance_identifier: source_id.to_string(),
+                db_instance_arn: source_arn,
+                db_instance_class: "db.t3.micro".to_string(),
+                engine: "postgres".to_string(),
+                engine_version: "16.3".to_string(),
+                db_instance_status: "available".to_string(),
+                master_username: "admin".to_string(),
+                db_name: None,
+                endpoint_address: "127.0.0.1".to_string(),
+                port: 5432,
+                allocated_storage: 20,
+                publicly_accessible: false,
+                deletion_protection: false,
+                created_at: now,
+                dbi_resource_id: format!("db-{}", uuid::Uuid::new_v4().simple()),
+                master_user_password: "".to_string(),
+                container_id: String::new(),
+                host_port: 0,
+                tags: Vec::new(),
+                read_replica_source_db_instance_identifier: None,
+                read_replica_db_instance_identifiers: vec![replica_id.to_string()],
+                vpc_security_group_ids: Vec::new(),
+                db_parameter_group_name: None,
+                backup_retention_period: 1,
+                preferred_backup_window: "03:00-04:00".to_string(),
+                preferred_maintenance_window: None,
+                latest_restorable_time: Some(now),
+                option_group_name: None,
+                multi_az: false,
+                pending_modified_values: None,
+                availability_zone: None,
+                storage_type: None,
+                storage_encrypted: false,
+                kms_key_id: None,
+                iam_database_authentication_enabled: false,
+                iops: None,
+                monitoring_interval: None,
+                monitoring_role_arn: None,
+                performance_insights_enabled: false,
+                performance_insights_kms_key_id: None,
+                performance_insights_retention_period: None,
+                enabled_cloudwatch_logs_exports: Vec::new(),
+                ca_certificate_identifier: None,
+                network_type: None,
+                character_set_name: None,
+                auto_minor_version_upgrade: None,
+                copy_tags_to_snapshot: None,
+                master_user_secret_arn: None,
+                master_user_secret_kms_key_id: None,
+            },
+        );
+        // Replica points at source.
+        state.instances.insert(
+            replica_id.to_string(),
+            DbInstance {
+                db_instance_identifier: replica_id.to_string(),
+                db_instance_arn: arn,
+                db_instance_class: "db.t3.micro".to_string(),
+                engine: "postgres".to_string(),
+                engine_version: "16.3".to_string(),
+                db_instance_status: "available".to_string(),
+                master_username: "admin".to_string(),
+                db_name: None,
+                endpoint_address: "127.0.0.1".to_string(),
+                port: 5432,
+                allocated_storage: 20,
+                publicly_accessible: false,
+                deletion_protection: false,
+                created_at: now,
+                dbi_resource_id: format!("db-{}", uuid::Uuid::new_v4().simple()),
+                master_user_password: "".to_string(),
+                container_id: String::new(),
+                host_port: 0,
+                tags: Vec::new(),
+                read_replica_source_db_instance_identifier: Some(source_id.to_string()),
+                read_replica_db_instance_identifiers: Vec::new(),
+                vpc_security_group_ids: Vec::new(),
+                db_parameter_group_name: None,
+                backup_retention_period: 1,
+                preferred_backup_window: "03:00-04:00".to_string(),
+                preferred_maintenance_window: None,
+                latest_restorable_time: Some(now),
+                option_group_name: None,
+                multi_az: false,
+                pending_modified_values: None,
+                availability_zone: None,
+                storage_type: None,
+                storage_encrypted: false,
+                kms_key_id: None,
+                iam_database_authentication_enabled: false,
+                iops: None,
+                monitoring_interval: None,
+                monitoring_role_arn: None,
+                performance_insights_enabled: false,
+                performance_insights_kms_key_id: None,
+                performance_insights_retention_period: None,
+                enabled_cloudwatch_logs_exports: Vec::new(),
+                ca_certificate_identifier: None,
+                network_type: None,
+                character_set_name: None,
+                auto_minor_version_upgrade: None,
+                copy_tags_to_snapshot: None,
+                master_user_secret_arn: None,
+                master_user_secret_kms_key_id: None,
+            },
+        );
+    }
+
+    #[test]
+    fn promote_read_replica_clears_source_pointer_and_trims_source_list() {
+        let svc = svc();
+        seed_replica(&svc, "replica-1", "source-1");
+        let resp = svc
+            .handle_extra_action(&req(
+                "PromoteReadReplica",
+                &[
+                    ("DBInstanceIdentifier", "replica-1"),
+                    ("BackupRetentionPeriod", "7"),
+                    ("PreferredBackupWindow", "04:00-05:00"),
+                ],
+            ))
+            .expect("PromoteReadReplica");
+        assert!(resp.status.is_success());
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("<DBInstanceIdentifier>replica-1</DBInstanceIdentifier>"));
+
+        let accounts = svc.state_handle().read();
+        let state = accounts.get("000000000000").unwrap();
+        let replica = state.instances.get("replica-1").unwrap();
+        assert!(replica.read_replica_source_db_instance_identifier.is_none());
+        assert_eq!(replica.backup_retention_period, 7);
+        assert_eq!(replica.preferred_backup_window, "04:00-05:00");
+        let source = state.instances.get("source-1").unwrap();
+        assert!(source.read_replica_db_instance_identifiers.is_empty());
+    }
+
+    #[test]
+    fn promote_read_replica_rejects_non_replica() {
+        let svc = svc();
+        seed_replica(&svc, "replica-1", "source-1");
+        let err = svc
+            .handle_extra_action(&req(
+                "PromoteReadReplica",
+                &[("DBInstanceIdentifier", "source-1")],
+            ))
+            .err()
+            .expect("non-replica should be rejected");
+        assert_eq!(err.code(), "InvalidDBInstanceState");
+    }
+
+    #[test]
+    fn switchover_read_replica_uses_promote_path() {
+        let svc = svc();
+        seed_replica(&svc, "replica-1", "source-1");
+        svc.handle_extra_action(&req(
+            "SwitchoverReadReplica",
+            &[("DBInstanceIdentifier", "replica-1")],
+        ))
+        .expect("SwitchoverReadReplica");
+        let accounts = svc.state_handle().read();
+        let replica = accounts
+            .get("000000000000")
+            .unwrap()
+            .instances
+            .get("replica-1")
+            .unwrap();
+        assert!(replica.read_replica_source_db_instance_identifier.is_none());
+    }
+
+    #[test]
+    fn promote_read_replica_unknown_instance_returns_not_found() {
+        let svc = svc();
+        let err = svc
+            .handle_extra_action(&req(
+                "PromoteReadReplica",
+                &[("DBInstanceIdentifier", "ghost")],
+            ))
+            .err()
+            .expect("unknown instance should be rejected");
+        assert_eq!(err.code(), "DBInstanceNotFound");
     }
 }
