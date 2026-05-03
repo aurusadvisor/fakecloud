@@ -6092,10 +6092,10 @@ impl ResourceProvisioner {
             sms_mfa_configuration: None,
             user_pool_tier,
             verification_message_template: None,
-            // Lazy-generate the RSA-2048 keypair on the first JWKS / sign
-            // request — same path the runtime CreateUserPool handler uses
-            // (avoids ~100ms keygen during stack creation).
-            signing_key_pem: None,
+            // Generate the RSA-2048 keypair eagerly so CloudFormation-
+            // created pools sign RS256 JWTs out of the box, matching the
+            // runtime CreateUserPool handler.
+            signing_key_pem: Some(fakecloud_cognito::jwt::generate_pool_signing_key()),
             signing_kid: Some(signing_kid),
         };
 
