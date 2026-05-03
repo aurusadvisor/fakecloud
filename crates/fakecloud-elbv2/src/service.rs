@@ -370,11 +370,12 @@ impl Elbv2Service {
                 .map(|v| v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
             {
+                let name = lb.name.clone();
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "OperationNotPermitted",
                     format!(
-                        "Load balancer '{arn}' cannot be deleted because deletion protection is enabled"
+                        "Operation not permitted because the load balancer named '{name}' has deletion protection enabled."
                     ),
                 ));
             }
