@@ -664,3 +664,178 @@ async fn cloudformation_stack_sends_sns_notification() {
         "notification should contain stack name"
     );
 }
+
+#[tokio::test]
+async fn cloudformation_outputs_exports_and_import_value_lifecycle() {
+    let server = TestServer::start().await;
+    let cf_client = server.cloudformation_client().await;
+
+    // Producer stack: queue + Outputs.QueueArn with Export.Name = "shared-q-arn".
+    let producer_tpl = r#"{
+        "Resources": {
+            "Q": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"QueueName": "exports-prod-q"}
+            }
+        },
+        "Outputs": {
+            "QueueArn": {
+                "Description": "Producer queue ARN",
+                "Value": {"Fn::GetAtt": ["Q", "Arn"]},
+                "Export": {"Name": "shared-q-arn"}
+            }
+        }
+    }"#;
+    cf_client
+        .create_stack()
+        .stack_name("outputs-producer")
+        .template_body(producer_tpl)
+        .send()
+        .await
+        .unwrap();
+
+    // DescribeStacks must include the resolved output.
+    let described = cf_client
+        .describe_stacks()
+        .stack_name("outputs-producer")
+        .send()
+        .await
+        .unwrap();
+    let producer_stack = &described.stacks()[0];
+    let outputs = producer_stack.outputs();
+    assert_eq!(outputs.len(), 1);
+    let output = &outputs[0];
+    assert_eq!(output.output_key(), Some("QueueArn"));
+    assert_eq!(output.export_name(), Some("shared-q-arn"));
+    let exported_value = output.output_value().unwrap().to_string();
+    assert!(exported_value.contains("exports-prod-q"));
+
+    // ListExports must surface the export.
+    let exports = cf_client.list_exports().send().await.unwrap();
+    let export_names: Vec<&str> = exports
+        .exports()
+        .iter()
+        .filter_map(|e| e.name())
+        .collect();
+    assert!(
+        export_names.contains(&"shared-q-arn"),
+        "ListExports should include shared-q-arn, got {export_names:?}"
+    );
+
+    // Consumer stack: imports the producer's export into a tag value.
+    let consumer_tpl = r#"{
+        "Resources": {
+            "Q2": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {
+                    "QueueName": "exports-cons-q",
+                    "Tags": [
+                        {"Key": "ProducerArn", "Value": {"Fn::ImportValue": "shared-q-arn"}}
+                    ]
+                }
+            }
+        },
+        "Outputs": {
+            "ImportedValue": {
+                "Value": {"Fn::ImportValue": "shared-q-arn"}
+            }
+        }
+    }"#;
+    cf_client
+        .create_stack()
+        .stack_name("outputs-consumer")
+        .template_body(consumer_tpl)
+        .send()
+        .await
+        .unwrap();
+
+    // Consumer's Outputs[ImportedValue] must equal the producer's exported value.
+    let described = cf_client
+        .describe_stacks()
+        .stack_name("outputs-consumer")
+        .send()
+        .await
+        .unwrap();
+    let imported = described.stacks()[0]
+        .outputs()
+        .iter()
+        .find(|o| o.output_key() == Some("ImportedValue"))
+        .and_then(|o| o.output_value())
+        .unwrap()
+        .to_string();
+    assert_eq!(imported, exported_value);
+
+    // DeleteStack on the producer must fail while the consumer holds the import.
+    let err = cf_client
+        .delete_stack()
+        .stack_name("outputs-producer")
+        .send()
+        .await
+        .err()
+        .expect("producer delete should fail while consumer imports");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("shared-q-arn") && msg.contains("cannot be deleted"),
+        "expected ValidationError mentioning the export, got {msg}"
+    );
+
+    // Delete consumer first, producer should now delete cleanly.
+    cf_client
+        .delete_stack()
+        .stack_name("outputs-consumer")
+        .send()
+        .await
+        .unwrap();
+    cf_client
+        .delete_stack()
+        .stack_name("outputs-producer")
+        .send()
+        .await
+        .unwrap();
+
+    // Export should be gone.
+    let exports = cf_client.list_exports().send().await.unwrap();
+    let export_names: Vec<&str> = exports
+        .exports()
+        .iter()
+        .filter_map(|e| e.name())
+        .collect();
+    assert!(
+        !export_names.contains(&"shared-q-arn"),
+        "export should be removed after producer delete, got {export_names:?}"
+    );
+}
+
+#[tokio::test]
+async fn cloudformation_import_value_unknown_export_errors() {
+    let server = TestServer::start().await;
+    let cf_client = server.cloudformation_client().await;
+
+    let consumer_tpl = r#"{
+        "Resources": {
+            "Q": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {
+                    "QueueName": "bad-import-q",
+                    "Tags": [
+                        {"Key": "x", "Value": {"Fn::ImportValue": "no-such-export"}}
+                    ]
+                }
+            }
+        }
+    }"#;
+
+    let err = cf_client
+        .create_stack()
+        .stack_name("bad-import-stack")
+        .template_body(consumer_tpl)
+        .send()
+        .await
+        .err()
+        .expect("create stack should fail with unknown ImportValue");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("no-such-export"),
+        "expected error mentioning the missing export, got {msg}"
+    );
+}
