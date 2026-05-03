@@ -242,57 +242,109 @@ async fn elbv2_dataplane_emits_access_log_to_s3_after_flush() {
         "target should reach healthy state"
     );
 
-    // 6. Drive one request through the dataplane.
-    let resp = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{port}/log/me/please"))
-        .header("user-agent", "elbv2-access-log-test/1.0")
-        .send()
+    // 6. Drive one request through the dataplane via a raw TCP
+    //    socket so we can deterministically close it after reading
+    //    the response. This is what triggers the LB's `accept_loop`
+    //    to emit the post-connection log line.
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 200);
-
-    // 7. Drop the client so its TCP connection closes — that's what
-    //    the dataplane's accept_loop watches for to emit the
-    //    connection-log entry. Then sleep briefly so the spawn task
-    //    has a chance to record into the buffer before we flush.
-    drop(resp);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    // Trigger the periodic flusher synchronously via the
-    // introspection endpoint so the test doesn't have to wait for
-    // the 60s tick.
-    let flush_url = format!("{}/_fakecloud/elbv2/access-logs/flush", server.endpoint());
-    let flush_resp = reqwest::Client::new()
-        .post(&flush_url)
-        .send()
-        .await
-        .unwrap();
+    let req = "GET /log/me/please HTTP/1.1\r\n\
+               Host: 127.0.0.1\r\n\
+               Connection: close\r\n\
+               User-Agent: elbv2-access-log-test/1.0\r\n\r\n";
+    sock.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    sock.read_to_end(&mut buf).await.unwrap();
+    let resp_str = String::from_utf8_lossy(&buf);
     assert!(
-        flush_resp.status().is_success(),
-        "flush endpoint should succeed, got {}",
-        flush_resp.status()
+        resp_str.starts_with("HTTP/1.1 200"),
+        "expected 200 response, got: {resp_str}"
     );
+    drop(sock);
 
-    // 8. The destination bucket should now contain at least one
-    //    `*.log.gz` object whose body, when decoded, contains the
-    //    request line we just sent.
-    let listed = s3
-        .list_objects_v2()
-        .bucket("alb-access-logs")
-        .send()
-        .await
-        .unwrap();
-    let access_obj = listed
-        .contents()
-        .iter()
-        .find(|o| {
-            o.key()
-                .map(|k| {
-                    k.starts_with("alb/AWSLogs/") && k.ends_with(".log.gz") && !k.contains("_conn_")
+    // 7. Connection-log emission is asynchronous (a tokio spawn
+    //    fires after `serve_connection` returns), so we don't block
+    //    on a fixed sleep. Instead poll: flush + list, retrying
+    //    until both an access-log and connection-log object show
+    //    up in the bucket. Bounded by an overall deadline so the
+    //    test still fails fast if logs never appear.
+    let flush_url = format!("{}/_fakecloud/elbv2/access-logs/flush", server.endpoint());
+    let http = reqwest::Client::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut access_key: Option<String> = None;
+    let mut conn_key: Option<String> = None;
+    while std::time::Instant::now() < deadline {
+        // Flush is the dataplane -> S3 bridge — call every iteration
+        // so any newly-buffered lines also get shipped.
+        let flush_resp = http.post(&flush_url).send().await.unwrap();
+        assert!(
+            flush_resp.status().is_success(),
+            "flush endpoint should succeed, got {}",
+            flush_resp.status()
+        );
+        let listed = s3
+            .list_objects_v2()
+            .bucket("alb-access-logs")
+            .send()
+            .await
+            .unwrap();
+        for obj in listed.contents() {
+            let Some(k) = obj.key() else { continue };
+            if !k.ends_with(".log.gz") {
+                continue;
+            }
+            if k.contains("_conn_") {
+                // Connection logs land under AWSLogs/... (no prefix
+                // — the test only set the access-log prefix attr).
+                conn_key.get_or_insert_with(|| k.to_string());
+            } else if k.starts_with("alb/AWSLogs/") {
+                access_key.get_or_insert_with(|| k.to_string());
+            }
+        }
+        if access_key.is_some() && conn_key.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // If the polling deadline expired without populating both keys
+    // we re-list the bucket once and surface every object name in
+    // the panic — easier than hunting through CI logs to find which
+    // key shape was wrong.
+    let snapshot_keys = || {
+        let s3 = s3.clone();
+        async move {
+            s3.list_objects_v2()
+                .bucket("alb-access-logs")
+                .send()
+                .await
+                .map(|r| {
+                    r.contents()
+                        .iter()
+                        .filter_map(|o| o.key().map(str::to_string))
+                        .collect::<Vec<_>>()
                 })
-                .unwrap_or(false)
-        })
-        .expect("expected one access-log object under alb/AWSLogs/...");
-    let key = access_obj.key().unwrap().to_string();
+                .unwrap_or_default()
+        }
+    };
+    let key = match access_key {
+        Some(k) => k,
+        None => {
+            let keys = snapshot_keys().await;
+            panic!("expected an access-log object under alb/AWSLogs/...; bucket has: {keys:?}");
+        }
+    };
+    let conn_key = match conn_key {
+        Some(k) => k,
+        None => {
+            let keys = snapshot_keys().await;
+            panic!("expected a connection-log object (key with _conn_); bucket has: {keys:?}");
+        }
+    };
+
+    // 8. Decode the access-log object and assert it contains the
+    //    request URL + user-agent.
     let body_resp = s3
         .get_object()
         .bucket("alb-access-logs")
@@ -311,20 +363,10 @@ async fn elbv2_dataplane_emits_access_log_to_s3_after_flush() {
         decoded_str.contains("\"elbv2-access-log-test/1.0\""),
         "decoded body should contain user-agent, got: {decoded_str}"
     );
-    // Connection log should also have shipped.
-    let conn_obj = listed
-        .contents()
-        .iter()
-        .find(|o| o.key().map(|k| k.contains("_conn_")).unwrap_or(false));
-    assert!(
-        conn_obj.is_some(),
-        "expected at least one connection-log object (key with _conn_)"
-    );
-    // Decode the connection log and assert exactly one record was
-    // emitted for the request. This guards against the regression
-    // where keep-alive connections double-counted by emitting one
-    // connection-log record per request instead of per connection.
-    let conn_key = conn_obj.unwrap().key().unwrap().to_string();
+    // 9. Decode the connection log and assert exactly one record was
+    //    emitted for the request. This guards against the regression
+    //    where keep-alive connections double-counted by emitting one
+    //    connection-log record per request instead of per connection.
     let conn_body = s3
         .get_object()
         .bucket("alb-access-logs")
