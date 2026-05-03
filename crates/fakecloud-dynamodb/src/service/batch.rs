@@ -8,6 +8,17 @@ use fakecloud_core::validation::*;
 
 use crate::state::AttributeValue;
 
+/// A queued Kinesis delivery for a single transact write — fired after
+/// the apply phase succeeds and the write lock is dropped. Tuple shape:
+/// (target, event_name, keys, old_image, new_image).
+type PendingKinesis = (
+    super::KinesisDeliveryTarget,
+    String,
+    HashMap<String, AttributeValue>,
+    Option<HashMap<String, AttributeValue>>,
+    Option<HashMap<String, AttributeValue>>,
+);
+
 use super::{
     apply_update_expression, build_consumed_capacity, evaluate_condition,
     execute_partiql_statement, extract_key, get_table, get_table_mut,
@@ -302,6 +313,19 @@ impl DynamoDbService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
+        // Validate every referenced table exists up-front. Without this
+        // check a missing TableName on a Put with no condition would fail
+        // partway through the apply loop and leave earlier writes
+        // committed — TransactWriteItems must be all-or-nothing.
+        for ti in transact_items {
+            for op_key in ["Put", "Delete", "Update", "ConditionCheck"] {
+                if let Some(op) = ti.get(op_key) {
+                    let table_name = op["TableName"].as_str().unwrap_or_default();
+                    get_table(&state.tables, table_name)?;
+                }
+            }
+        }
+
         // First pass: validate all conditions
         let mut cancellation_reasons: Vec<Value> = Vec::new();
         let mut any_failed = false;
@@ -415,64 +439,182 @@ impl DynamoDbService {
             ));
         }
 
-        // Second pass: apply all writes
+        // Snapshot the items vector of every referenced table so we can
+        // revert on any apply-phase failure (e.g. an unparseable
+        // UpdateExpression). DDB transactions are all-or-nothing — without
+        // this, an UpdateExpression error after a successful Put would
+        // leave the Put committed.
+        let mut snapshots: HashMap<String, Vec<HashMap<String, AttributeValue>>> = HashMap::new();
         for ti in transact_items {
-            if let Some(put) = ti.get("Put") {
-                let table_name = put["TableName"].as_str().unwrap_or_default();
-                let item: HashMap<String, AttributeValue> =
-                    serde_json::from_value(put["Item"].clone()).unwrap_or_default();
-                let table = get_table_mut(&mut state.tables, table_name)?;
-                let key = extract_key(table, &item);
-                if let Some(idx) = table.find_item_index(&key) {
-                    table.items[idx] = item;
-                } else {
-                    table.items.push(item);
+            for op_key in ["Put", "Delete", "Update"] {
+                if let Some(op) = ti.get(op_key) {
+                    let table_name = op["TableName"].as_str().unwrap_or_default();
+                    snapshots.entry(table_name.to_string()).or_insert_with(|| {
+                        state
+                            .tables
+                            .get(table_name)
+                            .map(|t| t.items.clone())
+                            .unwrap_or_default()
+                    });
                 }
-                table.recalculate_stats();
-                *per_table_writes.entry(table_name.to_string()).or_insert(0) += 1;
-            } else if let Some(delete) = ti.get("Delete") {
-                let table_name = delete["TableName"].as_str().unwrap_or_default();
-                let key: HashMap<String, AttributeValue> =
-                    serde_json::from_value(delete["Key"].clone()).unwrap_or_default();
-                let table = get_table_mut(&mut state.tables, table_name)?;
-                if let Some(idx) = table.find_item_index(&key) {
-                    table.items.remove(idx);
-                }
-                table.recalculate_stats();
-                *per_table_writes.entry(table_name.to_string()).or_insert(0) += 1;
-            } else if let Some(update) = ti.get("Update") {
-                let table_name = update["TableName"].as_str().unwrap_or_default();
-                let key: HashMap<String, AttributeValue> =
-                    serde_json::from_value(update["Key"].clone()).unwrap_or_default();
-                let update_expression = update["UpdateExpression"].as_str();
-                let expr_attr_names = parse_expression_attribute_names(update);
-                let expr_attr_values = parse_expression_attribute_values(update);
-
-                let table = get_table_mut(&mut state.tables, table_name)?;
-                let idx = match table.find_item_index(&key) {
-                    Some(i) => i,
-                    None => {
-                        let mut new_item = HashMap::new();
-                        for (k, v) in &key {
-                            new_item.insert(k.clone(), v.clone());
-                        }
-                        table.items.push(new_item);
-                        table.items.len() - 1
-                    }
-                };
-
-                if let Some(expr) = update_expression {
-                    apply_update_expression(
-                        &mut table.items[idx],
-                        expr,
-                        &expr_attr_names,
-                        &expr_attr_values,
-                    )?;
-                }
-                table.recalculate_stats();
-                *per_table_writes.entry(table_name.to_string()).or_insert(0) += 1;
             }
-            // ConditionCheck: no write needed
+        }
+
+        // Stream records pending append + kinesis deliveries pending
+        // dispatch — collected during apply, fired after all writes
+        // succeed so a mid-batch failure leaves no observable side
+        // effects.
+        let mut pending_stream: Vec<(String, crate::state::StreamRecord)> = Vec::new();
+        let mut pending_kinesis: Vec<PendingKinesis> = Vec::new();
+        let region = req.region.clone();
+
+        // Second pass: apply all writes
+        let apply_result = (|| -> Result<(), AwsServiceError> {
+            for ti in transact_items {
+                if let Some(put) = ti.get("Put") {
+                    let table_name = put["TableName"].as_str().unwrap_or_default();
+                    let item: HashMap<String, AttributeValue> =
+                        serde_json::from_value(put["Item"].clone()).unwrap_or_default();
+                    let table = get_table_mut(&mut state.tables, table_name)?;
+                    let key = extract_key(table, &item);
+                    let old_image = table.find_item_index(&key).map(|i| table.items[i].clone());
+                    let is_modify = old_image.is_some();
+                    if let Some(idx) = table.find_item_index(&key) {
+                        table.items[idx] = item.clone();
+                    } else {
+                        table.items.push(item.clone());
+                    }
+                    table.recalculate_stats();
+                    let event_name = if is_modify { "MODIFY" } else { "INSERT" };
+                    if let Some(record) = crate::streams::generate_stream_record(
+                        table,
+                        event_name,
+                        key.clone(),
+                        old_image.clone(),
+                        Some(item.clone()),
+                        &region,
+                    ) {
+                        pending_stream.push((table_name.to_string(), record));
+                    }
+                    if let Some(target) = DynamoDbService::kinesis_target(table) {
+                        pending_kinesis.push((
+                            target,
+                            event_name.to_string(),
+                            key,
+                            old_image,
+                            Some(item),
+                        ));
+                    }
+                    *per_table_writes.entry(table_name.to_string()).or_insert(0) += 1;
+                } else if let Some(delete) = ti.get("Delete") {
+                    let table_name = delete["TableName"].as_str().unwrap_or_default();
+                    let key: HashMap<String, AttributeValue> =
+                        serde_json::from_value(delete["Key"].clone()).unwrap_or_default();
+                    let table = get_table_mut(&mut state.tables, table_name)?;
+                    let old_image = table.find_item_index(&key).map(|i| table.items[i].clone());
+                    if let Some(idx) = table.find_item_index(&key) {
+                        table.items.remove(idx);
+                    }
+                    table.recalculate_stats();
+                    if old_image.is_some() {
+                        if let Some(record) = crate::streams::generate_stream_record(
+                            table,
+                            "REMOVE",
+                            key.clone(),
+                            old_image.clone(),
+                            None,
+                            &region,
+                        ) {
+                            pending_stream.push((table_name.to_string(), record));
+                        }
+                        if let Some(target) = DynamoDbService::kinesis_target(table) {
+                            pending_kinesis.push((
+                                target,
+                                "REMOVE".to_string(),
+                                key,
+                                old_image,
+                                None,
+                            ));
+                        }
+                    }
+                    *per_table_writes.entry(table_name.to_string()).or_insert(0) += 1;
+                } else if let Some(update) = ti.get("Update") {
+                    let table_name = update["TableName"].as_str().unwrap_or_default();
+                    let key: HashMap<String, AttributeValue> =
+                        serde_json::from_value(update["Key"].clone()).unwrap_or_default();
+                    let update_expression = update["UpdateExpression"].as_str();
+                    let expr_attr_names = parse_expression_attribute_names(update);
+                    let expr_attr_values = parse_expression_attribute_values(update);
+
+                    let table = get_table_mut(&mut state.tables, table_name)?;
+                    let old_image = table.find_item_index(&key).map(|i| table.items[i].clone());
+                    let is_modify = old_image.is_some();
+                    let idx = match table.find_item_index(&key) {
+                        Some(i) => i,
+                        None => {
+                            let mut new_item = HashMap::new();
+                            for (k, v) in &key {
+                                new_item.insert(k.clone(), v.clone());
+                            }
+                            table.items.push(new_item);
+                            table.items.len() - 1
+                        }
+                    };
+
+                    if let Some(expr) = update_expression {
+                        apply_update_expression(
+                            &mut table.items[idx],
+                            expr,
+                            &expr_attr_names,
+                            &expr_attr_values,
+                        )?;
+                    }
+                    let new_image = table.items[idx].clone();
+                    table.recalculate_stats();
+                    let event_name = if is_modify { "MODIFY" } else { "INSERT" };
+                    if let Some(record) = crate::streams::generate_stream_record(
+                        table,
+                        event_name,
+                        key.clone(),
+                        old_image.clone(),
+                        Some(new_image.clone()),
+                        &region,
+                    ) {
+                        pending_stream.push((table_name.to_string(), record));
+                    }
+                    if let Some(target) = DynamoDbService::kinesis_target(table) {
+                        pending_kinesis.push((
+                            target,
+                            event_name.to_string(),
+                            key,
+                            old_image,
+                            Some(new_image),
+                        ));
+                    }
+                    *per_table_writes.entry(table_name.to_string()).or_insert(0) += 1;
+                }
+                // ConditionCheck: no write needed
+            }
+            Ok(())
+        })();
+
+        if let Err(err) = apply_result {
+            // Revert items on every touched table and bubble the error.
+            for (table_name, items) in snapshots {
+                if let Some(table) = state.tables.get_mut(&table_name) {
+                    table.items = items;
+                    table.recalculate_stats();
+                }
+            }
+            return Err(err);
+        }
+
+        // Append all pending stream records under each table's
+        // stream_records lock now that the transaction has committed.
+        for (table_name, record) in pending_stream {
+            if let Some(table) = state.tables.get_mut(&table_name) {
+                crate::streams::add_stream_record(table, record);
+            }
         }
 
         let mut result = json!({});
@@ -496,6 +638,20 @@ impl DynamoDbService {
                 .map(|t| (t.clone(), vec![]))
                 .collect();
             result["ItemCollectionMetrics"] = json!(icm);
+        }
+
+        // Drop the write lock before firing kinesis deliveries so the
+        // delivery bus (which may take a read lock to look up the target
+        // stream) doesn't deadlock against us.
+        drop(accounts);
+        for (target, event_name, keys, old_image, new_image) in pending_kinesis {
+            self.deliver_to_kinesis_destinations(
+                &target,
+                &event_name,
+                &keys,
+                old_image.as_ref(),
+                new_image.as_ref(),
+            );
         }
 
         Self::ok_json(result)
@@ -630,5 +786,142 @@ impl DynamoDbService {
 
         let responses: Vec<Value> = results.into_iter().filter_map(|r| r.ok()).collect();
         Self::ok_json(json!({ "Responses": responses }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{DynamoTable, KeySchemaElement, ProvisionedThroughput, SharedDynamoDbState};
+    use bytes::Bytes;
+    use chrono::Utc;
+    use http::{HeaderMap, Method};
+    use parking_lot::RwLock;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn req_for(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "dynamodb".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "r".into(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn make_state() -> SharedDynamoDbState {
+        Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ))
+    }
+
+    fn seed_table_with_stream(state: &SharedDynamoDbState, name: &str) {
+        let mut accts = state.write();
+        let s = accts.get_or_create("123456789012");
+        let table = DynamoTable {
+            name: name.to_string(),
+            arn: format!("arn:aws:dynamodb:us-east-1:123456789012:table/{name}"),
+            table_id: "id".to_string(),
+            key_schema: vec![KeySchemaElement {
+                attribute_name: "pk".into(),
+                key_type: "HASH".into(),
+            }],
+            attribute_definitions: vec![],
+            provisioned_throughput: ProvisionedThroughput {
+                read_capacity_units: 0,
+                write_capacity_units: 0,
+            },
+            items: vec![],
+            gsi: vec![],
+            lsi: vec![],
+            tags: BTreeMap::new(),
+            created_at: Utc::now(),
+            status: "ACTIVE".to_string(),
+            item_count: 0,
+            size_bytes: 0,
+            billing_mode: "PAY_PER_REQUEST".to_string(),
+            ttl_attribute: None,
+            ttl_enabled: false,
+            resource_policy: None,
+            pitr_enabled: false,
+            kinesis_destinations: vec![],
+            contributor_insights_status: "DISABLED".to_string(),
+            contributor_insights_counters: BTreeMap::new(),
+            stream_enabled: true,
+            stream_view_type: Some("NEW_AND_OLD_IMAGES".to_string()),
+            stream_arn: Some(format!(
+                "arn:aws:dynamodb:us-east-1:123456789012:table/{name}/stream/lbl"
+            )),
+            stream_records: Arc::new(RwLock::new(Vec::new())),
+            sse_type: None,
+            sse_kms_key_arn: None,
+            deletion_protection_enabled: false,
+            on_demand_throughput: None,
+        };
+        s.tables.insert(name.to_string(), table);
+    }
+
+    #[tokio::test]
+    async fn transact_write_emits_stream_records_per_write() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        let req = req_for(
+            "TransactWriteItems",
+            json!({
+                "TransactItems": [
+                    {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "a"}}}},
+                    {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "b"}}}},
+                ]
+            }),
+        );
+        svc.transact_write_items(&req).unwrap();
+
+        let accts = state.read();
+        let s = accts.get("123456789012").unwrap();
+        let table = s.tables.get("Widgets").unwrap();
+        let records = table.stream_records.read();
+        assert_eq!(records.len(), 2, "one stream record per Put");
+        assert!(records.iter().all(|r| r.event_name == "INSERT"));
+    }
+
+    #[tokio::test]
+    async fn transact_write_unknown_table_rejects_atomically() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        let req = req_for(
+            "TransactWriteItems",
+            json!({
+                "TransactItems": [
+                    {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "a"}}}},
+                    {"Put": {"TableName": "Missing", "Item": {"pk": {"S": "b"}}}},
+                ]
+            }),
+        );
+        let _ = svc.transact_write_items(&req);
+
+        let accts = state.read();
+        let s = accts.get("123456789012").unwrap();
+        let table = s.tables.get("Widgets").unwrap();
+        assert_eq!(
+            table.items.len(),
+            0,
+            "the Put on Widgets must not commit when a sibling table is missing"
+        );
     }
 }
