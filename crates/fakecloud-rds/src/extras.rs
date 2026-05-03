@@ -315,14 +315,62 @@ impl RdsService {
             }
 
             // ── DB Cluster snapshots ──
-            "CreateDBClusterSnapshot" | "CopyDBClusterSnapshot" => {
-                let id = get_param(req, "DBClusterSnapshotIdentifier").or_else(|| get_param(req, "TargetDBClusterSnapshotIdentifier"))
+            "CreateDBClusterSnapshot" => {
+                let id = get_param(req, "DBClusterSnapshotIdentifier")
                     .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
                 let cluster = get_param(req, "DBClusterIdentifier").unwrap_or_else(|| "default".to_string());
-                let entry = json!({"DBClusterSnapshotIdentifier": id, "DBClusterSnapshotArn": arn, "DBClusterIdentifier": cluster, "Status": "available"});
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
+                let mut entry = state
+                    .extras
+                    .get("clusters")
+                    .and_then(|m| m.get(&cluster))
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.insert("DBClusterSnapshotIdentifier".to_string(), json!(id));
+                    obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
+                    obj.insert("DBClusterIdentifier".to_string(), json!(cluster));
+                    obj.insert("Status".to_string(), json!("available"));
+                    obj.insert("SnapshotType".to_string(), json!("manual"));
+                }
+                store(&mut state.extras, "cluster_snapshots").insert(id.clone(), entry);
+                Ok(xml_response(action.as_str(), cluster_snapshot_xml(&id, &arn, &cluster), &rid))
+            }
+            "CopyDBClusterSnapshot" => {
+                let id = get_param(req, "TargetDBClusterSnapshotIdentifier")
+                    .ok_or_else(|| missing("TargetDBClusterSnapshotIdentifier"))?;
+                let source_id = get_param(req, "SourceDBClusterSnapshotIdentifier")
+                    .ok_or_else(|| missing("SourceDBClusterSnapshotIdentifier"))?;
+                let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let source_key = source_id.rsplit(':').next().unwrap_or(&source_id).to_string();
+                let mut entry = state
+                    .extras
+                    .get("cluster_snapshots")
+                    .and_then(|m| m.get(&source_key))
+                    .cloned()
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {source_id} not found."),
+                        )
+                    })?;
+                let cluster = entry
+                    .get("DBClusterIdentifier")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default")
+                    .to_string();
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.insert("DBClusterSnapshotIdentifier".to_string(), json!(id));
+                    obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
+                    obj.insert("Status".to_string(), json!("available"));
+                    obj.insert("SnapshotType".to_string(), json!("manual"));
+                    obj.insert("SourceDBClusterSnapshotArn".to_string(), json!(source_id));
+                }
                 store(&mut state.extras, "cluster_snapshots").insert(id.clone(), entry);
                 Ok(xml_response(action.as_str(), cluster_snapshot_xml(&id, &arn, &cluster), &rid))
             }
@@ -428,7 +476,37 @@ impl RdsService {
                 store(&mut state.extras, "cluster_endpoints").insert(id.clone(), entry.clone());
                 Ok(xml_response("CreateDBClusterEndpoint", cluster_endpoint_xml(&entry), &rid))
             }
-            "ModifyDBClusterEndpoint" => Ok(xml_response("ModifyDBClusterEndpoint", "    <DBClusterEndpointIdentifier>x</DBClusterEndpointIdentifier>".to_string(), &rid)),
+            "ModifyDBClusterEndpoint" => {
+                let id = get_param(req, "DBClusterEndpointIdentifier").ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
+                let static_members = parse_member_list(req, "StaticMembers");
+                let excluded_members = parse_member_list(req, "ExcludedMembers");
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let entry = state
+                    .extras
+                    .get_mut("cluster_endpoints")
+                    .and_then(|m| m.get_mut(&id))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterEndpointNotFoundFault",
+                            format!("DBClusterEndpoint {id} not found."),
+                        )
+                    })?;
+                if let Some(obj) = entry.as_object_mut() {
+                    if let Some(kind) = get_param(req, "EndpointType") {
+                        obj.insert("EndpointType".to_string(), json!(kind));
+                    }
+                    if !static_members.is_empty() {
+                        obj.insert("StaticMembers".to_string(), json!(static_members));
+                    }
+                    if !excluded_members.is_empty() {
+                        obj.insert("ExcludedMembers".to_string(), json!(excluded_members));
+                    }
+                }
+                let updated = entry.clone();
+                Ok(xml_response("ModifyDBClusterEndpoint", cluster_endpoint_xml(&updated), &rid))
+            }
             "DeleteDBClusterEndpoint" => {
                 let id = get_param(req, "DBClusterEndpointIdentifier").ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
                 let mut accounts = write_state!();
@@ -448,7 +526,42 @@ impl RdsService {
                 store(&mut state.extras, "proxies").insert(name.clone(), entry.clone());
                 Ok(xml_response("CreateDBProxy", proxy_xml(&entry), &rid))
             }
-            "ModifyDBProxy" => Ok(xml_response("ModifyDBProxy", "    <DBProxy/>".to_string(), &rid)),
+            "ModifyDBProxy" => {
+                let name = get_param(req, "DBProxyName").ok_or_else(|| missing("DBProxyName"))?;
+                let auth = parse_proxy_auth(req);
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let entry = state
+                    .extras
+                    .get_mut("proxies")
+                    .and_then(|m| m.get_mut(&name))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBProxyNotFoundFault",
+                            format!("DBProxy {name} not found."),
+                        )
+                    })?;
+                if let Some(obj) = entry.as_object_mut() {
+                    if !auth.is_empty() {
+                        obj.insert("Auth".to_string(), json!(auth));
+                    }
+                    if let Some(v) = get_param(req, "RequireTLS") {
+                        obj.insert("RequireTLS".to_string(), json!(v.eq_ignore_ascii_case("true")));
+                    }
+                    if let Some(v) = get_param(req, "IdleClientTimeout").and_then(|s| s.parse::<i64>().ok()) {
+                        obj.insert("IdleClientTimeout".to_string(), json!(v));
+                    }
+                    if let Some(v) = get_param(req, "DebugLogging") {
+                        obj.insert("DebugLogging".to_string(), json!(v.eq_ignore_ascii_case("true")));
+                    }
+                    if let Some(v) = get_param(req, "NewDBProxyName") {
+                        obj.insert("DBProxyName".to_string(), json!(v));
+                    }
+                }
+                let updated = entry.clone();
+                Ok(xml_response("ModifyDBProxy", format!("    <DBProxy>\n{}\n    </DBProxy>", proxy_xml(&updated)), &rid))
+            }
             "DeleteDBProxy" => {
                 let name = get_param(req, "DBProxyName").ok_or_else(|| missing("DBProxyName"))?;
                 let mut accounts = write_state!();
@@ -465,7 +578,32 @@ impl RdsService {
                 store(&mut state.extras, "proxy_endpoints").insert(name.clone(), entry);
                 Ok(xml_response("CreateDBProxyEndpoint", format!("    <DBProxyEndpoint>\n      <DBProxyEndpointName>{}</DBProxyEndpointName>\n    </DBProxyEndpoint>", xml_escape(&name)), &rid))
             }
-            "ModifyDBProxyEndpoint" => Ok(xml_response("ModifyDBProxyEndpoint", "    <DBProxyEndpoint/>".to_string(), &rid)),
+            "ModifyDBProxyEndpoint" => {
+                let name = get_param(req, "DBProxyEndpointName").ok_or_else(|| missing("DBProxyEndpointName"))?;
+                let vpc_sgs = parse_member_list(req, "VpcSecurityGroupIds");
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let entry = state
+                    .extras
+                    .get_mut("proxy_endpoints")
+                    .and_then(|m| m.get_mut(&name))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBProxyEndpointNotFoundFault",
+                            format!("DBProxyEndpoint {name} not found."),
+                        )
+                    })?;
+                if let Some(obj) = entry.as_object_mut() {
+                    if !vpc_sgs.is_empty() {
+                        obj.insert("VpcSecurityGroupIds".to_string(), json!(vpc_sgs));
+                    }
+                    if let Some(v) = get_param(req, "NewDBProxyEndpointName") {
+                        obj.insert("DBProxyEndpointName".to_string(), json!(v));
+                    }
+                }
+                Ok(xml_response("ModifyDBProxyEndpoint", format!("    <DBProxyEndpoint>\n      <DBProxyEndpointName>{}</DBProxyEndpointName>\n    </DBProxyEndpoint>", xml_escape(&name)), &rid))
+            }
             "DeleteDBProxyEndpoint" => {
                 let name = get_param(req, "DBProxyEndpointName").ok_or_else(|| missing("DBProxyEndpointName"))?;
                 let mut accounts = write_state!();
@@ -476,7 +614,36 @@ impl RdsService {
             "DescribeDBProxyEndpoints" => Ok(xml_response("DescribeDBProxyEndpoints", "    <DBProxyEndpoints/>".to_string(), &rid)),
             "DescribeDBProxyTargetGroups" => Ok(xml_response("DescribeDBProxyTargetGroups", "    <TargetGroups/>".to_string(), &rid)),
             "DescribeDBProxyTargets" => Ok(xml_response("DescribeDBProxyTargets", "    <Targets/>".to_string(), &rid)),
-            "ModifyDBProxyTargetGroup" => Ok(xml_response("ModifyDBProxyTargetGroup", "    <DBProxyTargetGroup/>".to_string(), &rid)),
+            "ModifyDBProxyTargetGroup" => {
+                let proxy = get_param(req, "DBProxyName").ok_or_else(|| missing("DBProxyName"))?;
+                let group = get_param(req, "TargetGroupName").unwrap_or_else(|| "default".to_string());
+                let key = format!("{proxy}/{group}");
+                let mut pool = serde_json::Map::new();
+                if let Some(v) = get_param(req, "ConnectionPoolConfig.MaxConnectionsPercent").and_then(|s| s.parse::<i64>().ok()) {
+                    pool.insert("MaxConnectionsPercent".to_string(), json!(v));
+                }
+                if let Some(v) = get_param(req, "ConnectionPoolConfig.MaxIdleConnectionsPercent").and_then(|s| s.parse::<i64>().ok()) {
+                    pool.insert("MaxIdleConnectionsPercent".to_string(), json!(v));
+                }
+                if let Some(v) = get_param(req, "ConnectionPoolConfig.ConnectionBorrowTimeout").and_then(|s| s.parse::<i64>().ok()) {
+                    pool.insert("ConnectionBorrowTimeout".to_string(), json!(v));
+                }
+                if let Some(v) = get_param(req, "ConnectionPoolConfig.SessionPinningFilters") {
+                    pool.insert("SessionPinningFilters".to_string(), json!(v));
+                }
+                if let Some(v) = get_param(req, "ConnectionPoolConfig.InitQuery") {
+                    pool.insert("InitQuery".to_string(), json!(v));
+                }
+                let entry = json!({
+                    "DBProxyName": proxy,
+                    "TargetGroupName": group,
+                    "ConnectionPoolConfig": Value::Object(pool),
+                });
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                store(&mut state.extras, "proxy_target_groups").insert(key, entry.clone());
+                Ok(xml_response("ModifyDBProxyTargetGroup", format!("    <DBProxyTargetGroup>\n      <DBProxyName>{}</DBProxyName>\n      <TargetGroupName>{}</TargetGroupName>\n    </DBProxyTargetGroup>", xml_escape(&proxy), xml_escape(&group)), &rid))
+            }
             "RegisterDBProxyTargets" => Ok(xml_response("RegisterDBProxyTargets", "    <DBProxyTargets/>".to_string(), &rid)),
             "DeregisterDBProxyTargets" => xml_empty_action(&action, &rid),
 
@@ -511,7 +678,31 @@ impl RdsService {
             }
             "ModifyOptionGroup" => {
                 let name = get_param(req, "OptionGroupName").ok_or_else(|| missing("OptionGroupName"))?;
-                Ok(xml_response("ModifyOptionGroup", format!("    <OptionGroup>\n      <OptionGroupName>{}</OptionGroupName>\n    </OptionGroup>", xml_escape(&name)), &rid))
+                let to_include = parse_options_to_include(req);
+                let to_remove = parse_member_list(req, "OptionsToRemove");
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let entry = state
+                    .extras
+                    .get_mut("option_groups")
+                    .and_then(|m| m.get_mut(&name))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "OptionGroupNotFoundFault",
+                            format!("OptionGroup {name} not found."),
+                        )
+                    })?;
+                if let Some(obj) = entry.as_object_mut() {
+                    if !to_include.is_empty() {
+                        obj.insert("OptionsToInclude".to_string(), json!(to_include));
+                    }
+                    if !to_remove.is_empty() {
+                        obj.insert("OptionsToRemove".to_string(), json!(to_remove));
+                    }
+                }
+                let updated = entry.clone();
+                Ok(xml_response("ModifyOptionGroup", format!("    <OptionGroup>\n{}\n    </OptionGroup>", option_group_xml(&updated)), &rid))
             }
             "DeleteOptionGroup" => {
                 let name = get_param(req, "OptionGroupName").ok_or_else(|| missing("OptionGroupName"))?;
@@ -532,7 +723,35 @@ impl RdsService {
                 store(&mut state.extras, "event_subscriptions").insert(name.clone(), entry.clone());
                 Ok(xml_response("CreateEventSubscription", event_sub_xml(&entry), &rid))
             }
-            "ModifyEventSubscription" => Ok(xml_response("ModifyEventSubscription", "    <EventSubscription/>".to_string(), &rid)),
+            "ModifyEventSubscription" => {
+                let name = get_param(req, "SubscriptionName").ok_or_else(|| missing("SubscriptionName"))?;
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let entry = state
+                    .extras
+                    .get_mut("event_subscriptions")
+                    .and_then(|m| m.get_mut(&name))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "SubscriptionNotFound",
+                            format!("EventSubscription {name} not found."),
+                        )
+                    })?;
+                if let Some(obj) = entry.as_object_mut() {
+                    if let Some(v) = get_param(req, "SnsTopicArn") {
+                        obj.insert("SnsTopicArn".to_string(), json!(v));
+                    }
+                    if let Some(v) = get_param(req, "SourceType") {
+                        obj.insert("SourceType".to_string(), json!(v));
+                    }
+                    if let Some(v) = get_param(req, "Enabled") {
+                        obj.insert("Enabled".to_string(), json!(v.eq_ignore_ascii_case("true")));
+                    }
+                }
+                let updated = entry.clone();
+                Ok(xml_response("ModifyEventSubscription", format!("    <EventSubscription>\n{}\n    </EventSubscription>", event_sub_xml(&updated)), &rid))
+            }
             "DeleteEventSubscription" => {
                 let name = get_param(req, "SubscriptionName").ok_or_else(|| missing("SubscriptionName"))?;
                 let mut accounts = write_state!();
@@ -769,7 +988,35 @@ impl RdsService {
                 store(&mut state.extras, "tenant_dbs").insert(name.clone(), entry.clone());
                 Ok(xml_response("CreateTenantDatabase", tenant_db_xml(&entry), &rid))
             }
-            "ModifyTenantDatabase" => Ok(xml_response("ModifyTenantDatabase", "    <TenantDatabase/>".to_string(), &rid)),
+            "ModifyTenantDatabase" => {
+                let _instance = get_param(req, "DBInstanceIdentifier").ok_or_else(|| missing("DBInstanceIdentifier"))?;
+                let name = get_param(req, "TenantDBName").ok_or_else(|| missing("TenantDBName"))?;
+                let new_name = get_param(req, "NewTenantDBName");
+                let new_password = get_param(req, "MasterUserPassword");
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let entry = state
+                    .extras
+                    .get_mut("tenant_dbs")
+                    .and_then(|m| m.remove(&name))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "TenantDatabaseNotFoundFault",
+                            format!("TenantDatabase {name} not found."),
+                        )
+                    })?;
+                let mut updated = entry;
+                let final_name = new_name.clone().unwrap_or_else(|| name.clone());
+                if let Some(obj) = updated.as_object_mut() {
+                    obj.insert("TenantDBName".to_string(), json!(final_name));
+                    if let Some(p) = new_password {
+                        obj.insert("MasterUserPassword".to_string(), json!(p));
+                    }
+                }
+                store(&mut state.extras, "tenant_dbs").insert(final_name, updated.clone());
+                Ok(xml_response("ModifyTenantDatabase", format!("    <TenantDatabase>\n{}\n    </TenantDatabase>", tenant_db_xml(&updated)), &rid))
+            }
             "DeleteTenantDatabase" => {
                 let name = get_param(req, "TenantDBName").ok_or_else(|| missing("TenantDBName"))?;
                 let mut accounts = write_state!();
@@ -793,7 +1040,19 @@ impl RdsService {
             "DescribeExportTasks" => list_extras_xml(self, &aid, "export_tasks", "ExportTasks", "DescribeExportTasks", export_task_xml, &rid),
 
             // ── Activity stream ──
-            "StartActivityStream" => Ok(xml_response("StartActivityStream", "    <Status>started</Status>\n    <KmsKeyId>arn:aws:kms::us-east-1:000:key/x</KmsKeyId>\n    <KinesisStreamName>aws-rds-das-x</KinesisStreamName>".to_string(), &rid)),
+            "StartActivityStream" => {
+                let kms_input = get_param(req, "KmsKeyId").unwrap_or_default();
+                let kms_arn = format_kms_arn(&kms_input, region, &aid);
+                let mode = get_param(req, "Mode").unwrap_or_else(|| "async".to_string());
+                let resource_arn = get_param(req, "ResourceArn").unwrap_or_default();
+                let stream = if resource_arn.is_empty() {
+                    "aws-rds-das".to_string()
+                } else {
+                    let id = resource_arn.rsplit(':').next().unwrap_or("default");
+                    format!("aws-rds-das-{id}")
+                };
+                Ok(xml_response("StartActivityStream", format!("    <Status>started</Status>\n    <KmsKeyId>{}</KmsKeyId>\n    <KinesisStreamName>{}</KinesisStreamName>\n    <Mode>{}</Mode>\n    <ApplyImmediately>true</ApplyImmediately>", xml_escape(&kms_arn), xml_escape(&stream), xml_escape(&mode)), &rid))
+            }
             "StopActivityStream" => Ok(xml_response("StopActivityStream", "    <Status>stopped</Status>".to_string(), &rid)),
             "ModifyActivityStream" => Ok(xml_response("ModifyActivityStream", "    <Status>started</Status>".to_string(), &rid)),
 
@@ -834,7 +1093,32 @@ impl RdsService {
             "AddRoleToDBCluster" | "RemoveRoleFromDBCluster" | "AddRoleToDBInstance" | "RemoveRoleFromDBInstance" => xml_empty_action(&action, &rid),
 
             // ── Pending maintenance ──
-            "ApplyPendingMaintenanceAction" => Ok(xml_response("ApplyPendingMaintenanceAction", "    <ResourcePendingMaintenanceActions/>".to_string(), &rid)),
+            "ApplyPendingMaintenanceAction" => {
+                let resource = get_param(req, "ResourceIdentifier").ok_or_else(|| missing("ResourceIdentifier"))?;
+                let _action_kind = get_param(req, "ApplyAction").ok_or_else(|| missing("ApplyAction"))?;
+                let _opt_in = get_param(req, "OptInType").ok_or_else(|| missing("OptInType"))?;
+                let (kind, id) = parse_rds_resource_arn(&resource);
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                match kind {
+                    Some("db") => {
+                        if let Some(inst) = state.instances.get_mut(&id) {
+                            inst.pending_modified_values = None;
+                        }
+                    }
+                    Some("cluster") => {
+                        if let Some(map) = state.extras.get_mut("clusters") {
+                            if let Some(entry) = map.get_mut(&id) {
+                                if let Some(obj) = entry.as_object_mut() {
+                                    obj.remove("PendingModifiedValues");
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(xml_response("ApplyPendingMaintenanceAction", format!("    <ResourcePendingMaintenanceActions>\n      <ResourceIdentifier>{}</ResourceIdentifier>\n      <PendingMaintenanceActionDetails/>\n    </ResourcePendingMaintenanceActions>", xml_escape(&resource)), &rid))
+            }
             "DescribePendingMaintenanceActions" => Ok(xml_response("DescribePendingMaintenanceActions", "    <PendingMaintenanceActions/>".to_string(), &rid)),
 
             // ── Reserved instances ──
@@ -1003,7 +1287,24 @@ impl RdsService {
 
             // ── Certificates ──
             "DescribeCertificates" => Ok(xml_response("DescribeCertificates", "    <Certificates/>".to_string(), &rid)),
-            "ModifyCertificates" => Ok(xml_response("ModifyCertificates", "    <Certificate/>".to_string(), &rid)),
+            "ModifyCertificates" => {
+                let cert_id = get_param(req, "CertificateIdentifier");
+                let remove_override = get_param(req, "RemoveCustomerOverride")
+                    .map(|v| v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                if remove_override {
+                    state.default_certificate_identifier = None;
+                } else if let Some(id) = cert_id.clone() {
+                    state.default_certificate_identifier = Some(id);
+                }
+                let echoed = state
+                    .default_certificate_identifier
+                    .clone()
+                    .unwrap_or_default();
+                Ok(xml_response("ModifyCertificates", format!("    <Certificate>\n      <CertificateIdentifier>{}</CertificateIdentifier>\n      <CustomerOverride>{}</CustomerOverride>\n    </Certificate>", xml_escape(&echoed), !remove_override && cert_id.is_some()), &rid))
+            }
 
             // ── Account / events / regions / log files / capacity ──
             "DescribeAccountAttributes" => Ok(xml_response("DescribeAccountAttributes", "    <AccountQuotas/>".to_string(), &rid)),
@@ -1441,6 +1742,112 @@ fn xml_empty_action(action: &str, request_id: &str) -> Result<AwsResponse, AwsSe
     Ok(xml_response_no_result(action, request_id))
 }
 
+/// Read a `<Name>.member.<N>` repeated query param into a Vec.
+fn parse_member_list(req: &AwsRequest, prefix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 1.. {
+        match get_param(req, &format!("{prefix}.member.{i}")) {
+            Some(v) => out.push(v),
+            None => break,
+        }
+    }
+    out
+}
+
+/// Read repeated `Auth.member.<N>.{AuthScheme,SecretArn,IAMAuth,Description,ClientPasswordAuthType}`
+/// proxy auth descriptors into a JSON array.
+fn parse_proxy_auth(req: &AwsRequest) -> Vec<Value> {
+    let mut out = Vec::new();
+    for i in 1.. {
+        let scheme = get_param(req, &format!("Auth.member.{i}.AuthScheme"));
+        let secret = get_param(req, &format!("Auth.member.{i}.SecretArn"));
+        let iam = get_param(req, &format!("Auth.member.{i}.IAMAuth"));
+        let desc = get_param(req, &format!("Auth.member.{i}.Description"));
+        let pw = get_param(req, &format!("Auth.member.{i}.ClientPasswordAuthType"));
+        if scheme.is_none() && secret.is_none() && iam.is_none() && desc.is_none() && pw.is_none() {
+            break;
+        }
+        let mut entry = serde_json::Map::new();
+        if let Some(v) = scheme {
+            entry.insert("AuthScheme".to_string(), json!(v));
+        }
+        if let Some(v) = secret {
+            entry.insert("SecretArn".to_string(), json!(v));
+        }
+        if let Some(v) = iam {
+            entry.insert("IAMAuth".to_string(), json!(v));
+        }
+        if let Some(v) = desc {
+            entry.insert("Description".to_string(), json!(v));
+        }
+        if let Some(v) = pw {
+            entry.insert("ClientPasswordAuthType".to_string(), json!(v));
+        }
+        out.push(Value::Object(entry));
+    }
+    out
+}
+
+/// Read `OptionsToInclude.member.<N>.{OptionName,Port,OptionVersion}` plus
+/// nested `DBSecurityGroupMemberships`/`VpcSecurityGroupMemberships` member
+/// lists into a JSON array.
+fn parse_options_to_include(req: &AwsRequest) -> Vec<Value> {
+    let mut out = Vec::new();
+    for i in 1.. {
+        let name = get_param(req, &format!("OptionsToInclude.member.{i}.OptionName"));
+        let port = get_param(req, &format!("OptionsToInclude.member.{i}.Port"));
+        let version = get_param(req, &format!("OptionsToInclude.member.{i}.OptionVersion"));
+        if name.is_none() && port.is_none() && version.is_none() {
+            break;
+        }
+        let mut entry = serde_json::Map::new();
+        if let Some(v) = name {
+            entry.insert("OptionName".to_string(), json!(v));
+        }
+        if let Some(v) = port {
+            entry.insert("Port".to_string(), json!(v));
+        }
+        if let Some(v) = version {
+            entry.insert("OptionVersion".to_string(), json!(v));
+        }
+        out.push(Value::Object(entry));
+    }
+    out
+}
+
+/// Pull resource type ("db", "cluster", "snapshot", ...) and id out of an
+/// RDS ARN (`arn:aws:rds:region:account:type:id`). Bare ids fall back to
+/// `("db", id)` so callers can pass instance identifiers directly.
+fn parse_rds_resource_arn(s: &str) -> (Option<&'static str>, String) {
+    let parts: Vec<&str> = s.splitn(7, ':').collect();
+    if parts.len() == 7 && parts[0] == "arn" && parts[2] == "rds" {
+        let kind = match parts[5] {
+            "db" => Some("db"),
+            "cluster" => Some("cluster"),
+            "snapshot" => Some("snapshot"),
+            "cluster-snapshot" => Some("cluster-snapshot"),
+            _ => None,
+        };
+        return (kind, parts[6].to_string());
+    }
+    (Some("db"), s.to_string())
+}
+
+/// Echo `KmsKeyId` as a full KMS ARN. Accepts a raw key id, an
+/// `alias/<name>` reference, or an existing ARN (passed through).
+fn format_kms_arn(input: &str, region: &str, account_id: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+    if input.starts_with("arn:") {
+        return input.to_string();
+    }
+    if input.starts_with("alias/") {
+        return Arn::new("kms", region, account_id, input).to_string();
+    }
+    Arn::new("kms", region, account_id, &format!("key/{input}")).to_string()
+}
+
 fn list_extras_xml(
     svc: &RdsService,
     aid: &str,
@@ -1511,7 +1918,11 @@ mod tests {
     }
 
     fn ok(action: &str, params: &[(&str, &str)]) {
-        let r = svc().handle_extra_action(&req(action, params));
+        ok_on(&svc(), action, params);
+    }
+
+    fn ok_on(svc: &RdsService, action: &str, params: &[(&str, &str)]) {
+        let r = svc.handle_extra_action(&req(action, params));
         let resp = match r {
             Ok(r) => r,
             Err(e) => panic!("{action} failed: {e:?}"),
@@ -1602,30 +2013,39 @@ mod tests {
 
     #[test]
     fn cluster_snapshot_lifecycle() {
-        ok(
+        let svc = svc();
+        ok_on(
+            &svc,
             "CreateDBClusterSnapshot",
             &[
                 ("DBClusterSnapshotIdentifier", "cs1"),
                 ("DBClusterIdentifier", "c1"),
             ],
         );
-        ok(
+        ok_on(
+            &svc,
             "CopyDBClusterSnapshot",
-            &[("TargetDBClusterSnapshotIdentifier", "cs2")],
+            &[
+                ("TargetDBClusterSnapshotIdentifier", "cs2"),
+                ("SourceDBClusterSnapshotIdentifier", "cs1"),
+            ],
         );
-        ok("DescribeDBClusterSnapshots", &[]);
-        ok(
+        ok_on(&svc, "DescribeDBClusterSnapshots", &[]);
+        ok_on(
+            &svc,
             "DescribeDBClusterSnapshotAttributes",
             &[("DBClusterSnapshotIdentifier", "cs1")],
         );
-        ok(
+        ok_on(
+            &svc,
             "ModifyDBClusterSnapshotAttribute",
             &[("DBClusterSnapshotIdentifier", "cs1")],
         );
-        ok("DescribeDBClusterAutomatedBackups", &[]);
-        ok("DeleteDBClusterAutomatedBackup", &[]);
-        ok("DescribeDBClusterBacktracks", &[]);
-        ok(
+        ok_on(&svc, "DescribeDBClusterAutomatedBackups", &[]);
+        ok_on(&svc, "DeleteDBClusterAutomatedBackup", &[]);
+        ok_on(&svc, "DescribeDBClusterBacktracks", &[]);
+        ok_on(
+            &svc,
             "DeleteDBClusterSnapshot",
             &[("DBClusterSnapshotIdentifier", "cs1")],
         );
@@ -1663,85 +2083,156 @@ mod tests {
 
     #[test]
     fn endpoints_proxies_secgroups() {
-        ok(
+        let svc = svc();
+        ok_on(
+            &svc,
             "CreateDBClusterEndpoint",
             &[("DBClusterEndpointIdentifier", "ce1")],
         );
-        ok("ModifyDBClusterEndpoint", &[]);
-        ok("DescribeDBClusterEndpoints", &[]);
-        ok(
+        ok_on(
+            &svc,
+            "ModifyDBClusterEndpoint",
+            &[("DBClusterEndpointIdentifier", "ce1")],
+        );
+        ok_on(&svc, "DescribeDBClusterEndpoints", &[]);
+        ok_on(
+            &svc,
             "DeleteDBClusterEndpoint",
             &[("DBClusterEndpointIdentifier", "ce1")],
         );
-        ok("CreateDBProxy", &[("DBProxyName", "p1")]);
-        ok("DescribeDBProxies", &[]);
-        ok("CreateDBProxyEndpoint", &[("DBProxyEndpointName", "pe1")]);
-        ok("ModifyDBProxyEndpoint", &[]);
-        ok("DescribeDBProxyEndpoints", &[]);
-        ok("DescribeDBProxyTargetGroups", &[]);
-        ok("DescribeDBProxyTargets", &[]);
-        ok("ModifyDBProxyTargetGroup", &[]);
-        ok("RegisterDBProxyTargets", &[]);
-        ok("DeregisterDBProxyTargets", &[]);
-        ok("DeleteDBProxyEndpoint", &[("DBProxyEndpointName", "pe1")]);
-        ok("ModifyDBProxy", &[]);
-        ok("DeleteDBProxy", &[("DBProxyName", "p1")]);
-        ok("CreateDBSecurityGroup", &[("DBSecurityGroupName", "sg1")]);
-        ok(
+        ok_on(&svc, "CreateDBProxy", &[("DBProxyName", "p1")]);
+        ok_on(&svc, "DescribeDBProxies", &[]);
+        ok_on(
+            &svc,
+            "CreateDBProxyEndpoint",
+            &[("DBProxyEndpointName", "pe1")],
+        );
+        ok_on(
+            &svc,
+            "ModifyDBProxyEndpoint",
+            &[("DBProxyEndpointName", "pe1")],
+        );
+        ok_on(&svc, "DescribeDBProxyEndpoints", &[]);
+        ok_on(&svc, "DescribeDBProxyTargetGroups", &[]);
+        ok_on(&svc, "DescribeDBProxyTargets", &[]);
+        ok_on(&svc, "ModifyDBProxyTargetGroup", &[("DBProxyName", "p1")]);
+        ok_on(&svc, "RegisterDBProxyTargets", &[]);
+        ok_on(&svc, "DeregisterDBProxyTargets", &[]);
+        ok_on(
+            &svc,
+            "DeleteDBProxyEndpoint",
+            &[("DBProxyEndpointName", "pe1")],
+        );
+        ok_on(&svc, "ModifyDBProxy", &[("DBProxyName", "p1")]);
+        ok_on(&svc, "DeleteDBProxy", &[("DBProxyName", "p1")]);
+        ok_on(
+            &svc,
+            "CreateDBSecurityGroup",
+            &[("DBSecurityGroupName", "sg1")],
+        );
+        ok_on(
+            &svc,
             "AuthorizeDBSecurityGroupIngress",
             &[("DBSecurityGroupName", "sg1")],
         );
-        ok(
+        ok_on(
+            &svc,
             "RevokeDBSecurityGroupIngress",
             &[("DBSecurityGroupName", "sg1")],
         );
-        ok("DescribeDBSecurityGroups", &[]);
-        ok("DeleteDBSecurityGroup", &[("DBSecurityGroupName", "sg1")]);
+        ok_on(&svc, "DescribeDBSecurityGroups", &[]);
+        ok_on(
+            &svc,
+            "DeleteDBSecurityGroup",
+            &[("DBSecurityGroupName", "sg1")],
+        );
     }
 
     #[test]
     fn option_groups_event_subs_global_clusters() {
-        ok("CreateOptionGroup", &[("OptionGroupName", "og1")]);
-        ok("ModifyOptionGroup", &[("OptionGroupName", "og1")]);
-        ok("CopyOptionGroup", &[("TargetOptionGroupIdentifier", "og2")]);
-        ok("DescribeOptionGroups", &[]);
-        ok("DescribeOptionGroupOptions", &[]);
-        ok("DeleteOptionGroup", &[("OptionGroupName", "og1")]);
-        ok("CreateEventSubscription", &[("SubscriptionName", "es1")]);
-        ok("ModifyEventSubscription", &[]);
-        ok("AddSourceIdentifierToSubscription", &[]);
-        ok("RemoveSourceIdentifierFromSubscription", &[]);
-        ok("DescribeEventSubscriptions", &[]);
-        ok("DeleteEventSubscription", &[("SubscriptionName", "es1")]);
-        ok("CreateGlobalCluster", &[("GlobalClusterIdentifier", "gc1")]);
-        ok("ModifyGlobalCluster", &[]);
-        ok("FailoverGlobalCluster", &[]);
-        ok("SwitchoverGlobalCluster", &[]);
-        ok("RemoveFromGlobalCluster", &[]);
-        ok("DescribeGlobalClusters", &[]);
-        ok("DeleteGlobalCluster", &[("GlobalClusterIdentifier", "gc1")]);
+        let svc = svc();
+        ok_on(&svc, "CreateOptionGroup", &[("OptionGroupName", "og1")]);
+        ok_on(&svc, "ModifyOptionGroup", &[("OptionGroupName", "og1")]);
+        ok_on(
+            &svc,
+            "CopyOptionGroup",
+            &[("TargetOptionGroupIdentifier", "og2")],
+        );
+        ok_on(&svc, "DescribeOptionGroups", &[]);
+        ok_on(&svc, "DescribeOptionGroupOptions", &[]);
+        ok_on(&svc, "DeleteOptionGroup", &[("OptionGroupName", "og1")]);
+        ok_on(
+            &svc,
+            "CreateEventSubscription",
+            &[("SubscriptionName", "es1")],
+        );
+        ok_on(
+            &svc,
+            "ModifyEventSubscription",
+            &[("SubscriptionName", "es1")],
+        );
+        ok_on(&svc, "AddSourceIdentifierToSubscription", &[]);
+        ok_on(&svc, "RemoveSourceIdentifierFromSubscription", &[]);
+        ok_on(&svc, "DescribeEventSubscriptions", &[]);
+        ok_on(
+            &svc,
+            "DeleteEventSubscription",
+            &[("SubscriptionName", "es1")],
+        );
+        ok_on(
+            &svc,
+            "CreateGlobalCluster",
+            &[("GlobalClusterIdentifier", "gc1")],
+        );
+        ok_on(&svc, "ModifyGlobalCluster", &[]);
+        ok_on(&svc, "FailoverGlobalCluster", &[]);
+        ok_on(&svc, "SwitchoverGlobalCluster", &[]);
+        ok_on(&svc, "RemoveFromGlobalCluster", &[]);
+        ok_on(&svc, "DescribeGlobalClusters", &[]);
+        ok_on(
+            &svc,
+            "DeleteGlobalCluster",
+            &[("GlobalClusterIdentifier", "gc1")],
+        );
     }
 
     #[test]
     fn integrations_blue_green_shard_groups_tenant_dbs() {
-        ok("CreateIntegration", &[("IntegrationName", "i1")]);
-        ok("ModifyIntegration", &[]);
-        ok("DescribeIntegrations", &[]);
-        ok("DeleteIntegration", &[("IntegrationIdentifier", "i1")]);
-        ok("DescribeBlueGreenDeployments", &[]);
-        ok("CreateDBShardGroup", &[("DBShardGroupIdentifier", "sg1")]);
-        ok("ModifyDBShardGroup", &[]);
-        ok("RebootDBShardGroup", &[]);
-        ok("DescribeDBShardGroups", &[]);
-        ok("DeleteDBShardGroup", &[("DBShardGroupIdentifier", "sg1")]);
-        ok("CreateCustomDBEngineVersion", &[]);
-        ok("ModifyCustomDBEngineVersion", &[]);
-        ok("DeleteCustomDBEngineVersion", &[]);
-        ok("CreateTenantDatabase", &[("TenantDBName", "t1")]);
-        ok("ModifyTenantDatabase", &[]);
-        ok("DescribeTenantDatabases", &[]);
-        ok("DescribeDBSnapshotTenantDatabases", &[]);
-        ok("DeleteTenantDatabase", &[("TenantDBName", "t1")]);
+        let svc = svc();
+        ok_on(&svc, "CreateIntegration", &[("IntegrationName", "i1")]);
+        ok_on(&svc, "ModifyIntegration", &[]);
+        ok_on(&svc, "DescribeIntegrations", &[]);
+        ok_on(
+            &svc,
+            "DeleteIntegration",
+            &[("IntegrationIdentifier", "i1")],
+        );
+        ok_on(&svc, "DescribeBlueGreenDeployments", &[]);
+        ok_on(
+            &svc,
+            "CreateDBShardGroup",
+            &[("DBShardGroupIdentifier", "sg1")],
+        );
+        ok_on(&svc, "ModifyDBShardGroup", &[]);
+        ok_on(&svc, "RebootDBShardGroup", &[]);
+        ok_on(&svc, "DescribeDBShardGroups", &[]);
+        ok_on(
+            &svc,
+            "DeleteDBShardGroup",
+            &[("DBShardGroupIdentifier", "sg1")],
+        );
+        ok_on(&svc, "CreateCustomDBEngineVersion", &[]);
+        ok_on(&svc, "ModifyCustomDBEngineVersion", &[]);
+        ok_on(&svc, "DeleteCustomDBEngineVersion", &[]);
+        ok_on(&svc, "CreateTenantDatabase", &[("TenantDBName", "t1")]);
+        ok_on(
+            &svc,
+            "ModifyTenantDatabase",
+            &[("DBInstanceIdentifier", "db1"), ("TenantDBName", "t1")],
+        );
+        ok_on(&svc, "DescribeTenantDatabases", &[]);
+        ok_on(&svc, "DescribeDBSnapshotTenantDatabases", &[]);
+        ok_on(&svc, "DeleteTenantDatabase", &[("TenantDBName", "t1")]);
     }
 
     #[test]
@@ -1756,7 +2247,17 @@ mod tests {
         ok("RemoveRoleFromDBCluster", &[]);
         ok("AddRoleToDBInstance", &[]);
         ok("RemoveRoleFromDBInstance", &[]);
-        ok("ApplyPendingMaintenanceAction", &[]);
+        ok(
+            "ApplyPendingMaintenanceAction",
+            &[
+                (
+                    "ResourceIdentifier",
+                    "arn:aws:rds:us-east-1:000000000000:db:any",
+                ),
+                ("ApplyAction", "system-update"),
+                ("OptInType", "immediate"),
+            ],
+        );
         ok("DescribePendingMaintenanceActions", &[]);
         ok("PurchaseReservedDBInstancesOffering", &[]);
         ok("DescribeReservedDBInstances", &[]);
@@ -2441,5 +2942,407 @@ mod tests {
         assert!(!state.instances.contains_key("green"));
         let map = state.extras.get("blue_green").cloned().unwrap_or_default();
         assert!(!map.contains_key(&bgd_id));
+    }
+
+    fn extras_value(svc: &RdsService, category: &str, key: &str) -> serde_json::Value {
+        let accounts = svc.state_handle().read();
+        accounts
+            .get("000000000000")
+            .and_then(|s| s.extras.get(category))
+            .and_then(|m| m.get(key))
+            .cloned()
+            .unwrap_or_else(|| panic!("{category}/{key} present"))
+    }
+
+    #[test]
+    fn modify_event_subscription_persists_topic_and_enabled_flag() {
+        let svc = svc();
+        ok_on(
+            &svc,
+            "CreateEventSubscription",
+            &[
+                ("SubscriptionName", "es1"),
+                ("SnsTopicArn", "arn:aws:sns:us-east-1:000:original"),
+            ],
+        );
+        ok_on(
+            &svc,
+            "ModifyEventSubscription",
+            &[
+                ("SubscriptionName", "es1"),
+                ("SnsTopicArn", "arn:aws:sns:us-east-1:000:updated"),
+                ("SourceType", "db-instance"),
+                ("Enabled", "false"),
+            ],
+        );
+        let v = extras_value(&svc, "event_subscriptions", "es1");
+        assert_eq!(
+            v["SnsTopicArn"].as_str(),
+            Some("arn:aws:sns:us-east-1:000:updated")
+        );
+        assert_eq!(v["SourceType"].as_str(), Some("db-instance"));
+        assert_eq!(v["Enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn modify_event_subscription_unknown_subscription_errors() {
+        let svc = svc();
+        let err = svc
+            .handle_extra_action(&req(
+                "ModifyEventSubscription",
+                &[("SubscriptionName", "ghost")],
+            ))
+            .err()
+            .expect("missing subscription should error");
+        assert_eq!(err.code(), "SubscriptionNotFound");
+    }
+
+    #[test]
+    fn modify_db_cluster_endpoint_persists_endpoint_type() {
+        let svc = svc();
+        ok_on(
+            &svc,
+            "CreateDBClusterEndpoint",
+            &[
+                ("DBClusterEndpointIdentifier", "ce1"),
+                ("DBClusterIdentifier", "c1"),
+                ("EndpointType", "READER"),
+            ],
+        );
+        ok_on(
+            &svc,
+            "ModifyDBClusterEndpoint",
+            &[
+                ("DBClusterEndpointIdentifier", "ce1"),
+                ("EndpointType", "ANY"),
+                ("StaticMembers.member.1", "writer-1"),
+                ("ExcludedMembers.member.1", "replica-1"),
+            ],
+        );
+        let v = extras_value(&svc, "cluster_endpoints", "ce1");
+        assert_eq!(v["EndpointType"].as_str(), Some("ANY"));
+        assert_eq!(
+            v["StaticMembers"].as_array().unwrap()[0].as_str(),
+            Some("writer-1")
+        );
+        assert_eq!(
+            v["ExcludedMembers"].as_array().unwrap()[0].as_str(),
+            Some("replica-1")
+        );
+    }
+
+    #[test]
+    fn modify_db_proxy_persists_auth_and_tls() {
+        let svc = svc();
+        ok_on(&svc, "CreateDBProxy", &[("DBProxyName", "p1")]);
+        ok_on(
+            &svc,
+            "ModifyDBProxy",
+            &[
+                ("DBProxyName", "p1"),
+                ("RequireTLS", "true"),
+                ("IdleClientTimeout", "120"),
+                ("DebugLogging", "true"),
+                ("Auth.member.1.AuthScheme", "SECRETS"),
+                (
+                    "Auth.member.1.SecretArn",
+                    "arn:aws:secretsmanager:us-east-1:000:secret:rds!sec",
+                ),
+                ("Auth.member.1.IAMAuth", "DISABLED"),
+            ],
+        );
+        let v = extras_value(&svc, "proxies", "p1");
+        assert_eq!(v["RequireTLS"].as_bool(), Some(true));
+        assert_eq!(v["IdleClientTimeout"].as_i64(), Some(120));
+        assert_eq!(v["DebugLogging"].as_bool(), Some(true));
+        let auth = v["Auth"].as_array().expect("auth array");
+        assert_eq!(auth.len(), 1);
+        assert_eq!(auth[0]["AuthScheme"].as_str(), Some("SECRETS"));
+    }
+
+    #[test]
+    fn modify_db_proxy_endpoint_persists_security_groups() {
+        let svc = svc();
+        ok_on(
+            &svc,
+            "CreateDBProxyEndpoint",
+            &[("DBProxyEndpointName", "pe1")],
+        );
+        ok_on(
+            &svc,
+            "ModifyDBProxyEndpoint",
+            &[
+                ("DBProxyEndpointName", "pe1"),
+                ("VpcSecurityGroupIds.member.1", "sg-1"),
+                ("VpcSecurityGroupIds.member.2", "sg-2"),
+            ],
+        );
+        let v = extras_value(&svc, "proxy_endpoints", "pe1");
+        let sgs: Vec<&str> = v["VpcSecurityGroupIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(sgs, vec!["sg-1", "sg-2"]);
+    }
+
+    #[test]
+    fn modify_db_proxy_target_group_persists_pool_config() {
+        let svc = svc();
+        ok_on(
+            &svc,
+            "ModifyDBProxyTargetGroup",
+            &[
+                ("DBProxyName", "p1"),
+                ("TargetGroupName", "default"),
+                ("ConnectionPoolConfig.MaxConnectionsPercent", "75"),
+                ("ConnectionPoolConfig.MaxIdleConnectionsPercent", "30"),
+                ("ConnectionPoolConfig.ConnectionBorrowTimeout", "10"),
+            ],
+        );
+        let v = extras_value(&svc, "proxy_target_groups", "p1/default");
+        assert_eq!(
+            v["ConnectionPoolConfig"]["MaxConnectionsPercent"].as_i64(),
+            Some(75)
+        );
+        assert_eq!(
+            v["ConnectionPoolConfig"]["MaxIdleConnectionsPercent"].as_i64(),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn modify_tenant_database_renames() {
+        let svc = svc();
+        ok_on(&svc, "CreateTenantDatabase", &[("TenantDBName", "tdb1")]);
+        ok_on(
+            &svc,
+            "ModifyTenantDatabase",
+            &[
+                ("DBInstanceIdentifier", "db1"),
+                ("TenantDBName", "tdb1"),
+                ("NewTenantDBName", "tdb2"),
+                ("MasterUserPassword", "newpw"),
+            ],
+        );
+        let accounts = svc.state_handle().read();
+        let map = accounts
+            .get("000000000000")
+            .unwrap()
+            .extras
+            .get("tenant_dbs")
+            .cloned()
+            .unwrap_or_default();
+        assert!(!map.contains_key("tdb1"));
+        let v = map.get("tdb2").expect("renamed entry");
+        assert_eq!(v["TenantDBName"].as_str(), Some("tdb2"));
+        assert_eq!(v["MasterUserPassword"].as_str(), Some("newpw"));
+    }
+
+    #[test]
+    fn modify_option_group_persists_options_to_include_and_remove() {
+        let svc = svc();
+        ok_on(&svc, "CreateOptionGroup", &[("OptionGroupName", "og1")]);
+        ok_on(
+            &svc,
+            "ModifyOptionGroup",
+            &[
+                ("OptionGroupName", "og1"),
+                ("OptionsToInclude.member.1.OptionName", "OEM"),
+                ("OptionsToInclude.member.1.Port", "1158"),
+                ("OptionsToRemove.member.1", "Native Network Encryption"),
+            ],
+        );
+        let v = extras_value(&svc, "option_groups", "og1");
+        assert_eq!(v["OptionsToInclude"][0]["OptionName"].as_str(), Some("OEM"));
+        assert_eq!(v["OptionsToInclude"][0]["Port"].as_str(), Some("1158"));
+        assert_eq!(
+            v["OptionsToRemove"][0].as_str(),
+            Some("Native Network Encryption")
+        );
+    }
+
+    #[test]
+    fn modify_certificates_records_default() {
+        let svc = svc();
+        ok_on(
+            &svc,
+            "ModifyCertificates",
+            &[("CertificateIdentifier", "rds-ca-rsa2048-g1")],
+        );
+        let accounts = svc.state_handle().read();
+        let state = accounts.get("000000000000").unwrap();
+        assert_eq!(
+            state.default_certificate_identifier.as_deref(),
+            Some("rds-ca-rsa2048-g1"),
+        );
+        drop(accounts);
+        ok_on(
+            &svc,
+            "ModifyCertificates",
+            &[("RemoveCustomerOverride", "true")],
+        );
+        let accounts = svc.state_handle().read();
+        let state = accounts.get("000000000000").unwrap();
+        assert!(state.default_certificate_identifier.is_none());
+    }
+
+    #[test]
+    fn apply_pending_maintenance_action_clears_pending() {
+        let svc = svc();
+        seed_replica(&svc, "replica-1", "source-1");
+        {
+            let mut accounts = svc.state_handle().write();
+            let state = accounts.get_or_create("000000000000");
+            let inst = state.instances.get_mut("source-1").unwrap();
+            inst.pending_modified_values = Some(crate::state::PendingModifiedValues {
+                engine_version: Some("16.4".to_string()),
+                ..Default::default()
+            });
+        }
+        let arn = "arn:aws:rds:us-east-1:000000000000:db:source-1";
+        let resp = svc
+            .handle_extra_action(&req(
+                "ApplyPendingMaintenanceAction",
+                &[
+                    ("ResourceIdentifier", arn),
+                    ("ApplyAction", "system-update"),
+                    ("OptInType", "immediate"),
+                ],
+            ))
+            .expect("ApplyPendingMaintenanceAction");
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("<ResourceIdentifier>"));
+        assert!(body.contains("<PendingMaintenanceActionDetails/>"));
+        let accounts = svc.state_handle().read();
+        let inst = accounts
+            .get("000000000000")
+            .unwrap()
+            .instances
+            .get("source-1")
+            .unwrap();
+        assert!(inst.pending_modified_values.is_none());
+    }
+
+    #[test]
+    fn apply_pending_maintenance_action_missing_action_errors() {
+        let svc = svc();
+        let err = svc
+            .handle_extra_action(&req(
+                "ApplyPendingMaintenanceAction",
+                &[(
+                    "ResourceIdentifier",
+                    "arn:aws:rds:us-east-1:000000000000:db:any",
+                )],
+            ))
+            .err()
+            .expect("missing ApplyAction should error");
+        assert_eq!(err.code(), "InvalidParameterValue");
+    }
+
+    #[test]
+    fn copy_db_cluster_snapshot_carries_source_engine() {
+        let svc = svc();
+        // Seed source cluster with an engine and snapshot it.
+        ok_on(
+            &svc,
+            "CreateDBCluster",
+            &[
+                ("DBClusterIdentifier", "src"),
+                ("Engine", "aurora-mysql"),
+                ("EngineVersion", "8.0.32"),
+            ],
+        );
+        ok_on(
+            &svc,
+            "CreateDBClusterSnapshot",
+            &[
+                ("DBClusterSnapshotIdentifier", "snap-src"),
+                ("DBClusterIdentifier", "src"),
+            ],
+        );
+        ok_on(
+            &svc,
+            "CopyDBClusterSnapshot",
+            &[
+                ("SourceDBClusterSnapshotIdentifier", "snap-src"),
+                ("TargetDBClusterSnapshotIdentifier", "snap-copy"),
+            ],
+        );
+        let v = extras_value(&svc, "cluster_snapshots", "snap-copy");
+        assert_eq!(v["Engine"].as_str(), Some("aurora-mysql"));
+        assert_eq!(v["EngineVersion"].as_str(), Some("8.0.32"));
+        assert_eq!(v["DBClusterIdentifier"].as_str(), Some("src"));
+        assert_eq!(v["SnapshotType"].as_str(), Some("manual"));
+    }
+
+    #[test]
+    fn copy_db_cluster_snapshot_unknown_source_errors() {
+        let svc = svc();
+        let err = svc
+            .handle_extra_action(&req(
+                "CopyDBClusterSnapshot",
+                &[
+                    ("SourceDBClusterSnapshotIdentifier", "ghost"),
+                    ("TargetDBClusterSnapshotIdentifier", "snap-copy"),
+                ],
+            ))
+            .err()
+            .expect("missing source should error");
+        assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault");
+    }
+
+    #[test]
+    fn start_activity_stream_returns_full_kms_arn() {
+        let svc = svc();
+        let resp = svc
+            .handle_extra_action(&req(
+                "StartActivityStream",
+                &[
+                    (
+                        "ResourceArn",
+                        "arn:aws:rds:us-east-1:000000000000:cluster:c1",
+                    ),
+                    ("KmsKeyId", "1234abcd-12ab-34cd-56ef-1234567890ab"),
+                    ("Mode", "sync"),
+                ],
+            ))
+            .expect("StartActivityStream");
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(
+            body.contains("<KmsKeyId>arn:aws:kms:us-east-1:000000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab</KmsKeyId>"),
+            "missing kms arn in {body}"
+        );
+        assert!(body.contains("<KinesisStreamName>aws-rds-das-c1</KinesisStreamName>"));
+        assert!(body.contains("<Mode>sync</Mode>"));
+    }
+
+    #[test]
+    fn start_activity_stream_passes_through_existing_arn() {
+        let svc = svc();
+        let resp = svc
+            .handle_extra_action(&req(
+                "StartActivityStream",
+                &[("KmsKeyId", "arn:aws:kms:eu-west-1:222:key/abcd")],
+            ))
+            .expect("StartActivityStream");
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("<KmsKeyId>arn:aws:kms:eu-west-1:222:key/abcd</KmsKeyId>"));
+    }
+
+    #[test]
+    fn start_activity_stream_accepts_alias() {
+        let svc = svc();
+        let resp = svc
+            .handle_extra_action(&req(
+                "StartActivityStream",
+                &[("KmsKeyId", "alias/aws/rds")],
+            ))
+            .expect("StartActivityStream");
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(
+            body.contains("<KmsKeyId>arn:aws:kms:us-east-1:000000000000:alias/aws/rds</KmsKeyId>")
+        );
     }
 }

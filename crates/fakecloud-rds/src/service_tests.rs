@@ -8,10 +8,10 @@ use parking_lot::RwLock;
 use uuid::Uuid;
 
 use super::{
-    db_instance_xml, default_db_name, default_parameter_group, default_port_for_engine,
-    filter_engine_versions, filter_orderable_options, license_model_for_engine, merge_tags,
-    optional_i32_param, parse_tag_keys, parse_tags, save_snapshot_static, validate_create_request,
-    RdsService, RdsSourceType,
+    build_restored_instance, db_instance_xml, default_db_name, default_parameter_group,
+    default_port_for_engine, filter_engine_versions, filter_orderable_options,
+    license_model_for_engine, merge_tags, optional_i32_param, parse_tag_keys, parse_tags,
+    save_snapshot_static, validate_create_request, RdsService, RdsSourceType,
 };
 use crate::state::{
     default_engine_versions, default_orderable_options, DbInstance, RdsSnapshot, RdsTag,
@@ -1916,6 +1916,86 @@ async fn restore_db_instance_unknown_snapshot_errors() {
         .restore_db_instance_from_db_snapshot(&req)
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn restore_db_instance_from_db_snapshot_persists_tags() {
+    // Real round-trip: the handler parses `Tags.Tag.N.{Key,Value}` via
+    // `parse_tags` then forwards them to `build_restored_instance`,
+    // which writes them onto the new `DbInstance.tags`. The runtime
+    // call between those two steps doesn't touch tags, so we can stub
+    // out the running container struct and assert end-state.
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored"),
+            ("DBSnapshotIdentifier", "snap"),
+            ("Tags.Tag.1.Key", "env"),
+            ("Tags.Tag.1.Value", "prod"),
+            ("Tags.Tag.2.Key", "owner"),
+            ("Tags.Tag.2.Value", "platform"),
+        ],
+    );
+    let tags = parse_tags(&req).expect("tags parse");
+
+    let snapshot = crate::state::DbSnapshot {
+        db_snapshot_identifier: "snap".to_string(),
+        db_snapshot_arn: "arn:aws:rds:us-east-1:123456789012:snapshot:snap".to_string(),
+        db_instance_identifier: "src".to_string(),
+        snapshot_create_time: Utc::now(),
+        engine: "postgres".to_string(),
+        engine_version: "16.3".to_string(),
+        allocated_storage: 20,
+        status: "available".to_string(),
+        port: 5432,
+        master_username: "admin".to_string(),
+        db_name: Some("appdb".to_string()),
+        dbi_resource_id: "db-rid".to_string(),
+        snapshot_type: "manual".to_string(),
+        master_user_password: "secret".to_string(),
+        tags: Vec::new(),
+        dump_data: Vec::new(),
+        availability_zone: None,
+        vpc_id: None,
+        instance_create_time: None,
+        license_model: None,
+        iops: None,
+        option_group_name: None,
+        percent_progress: None,
+        storage_type: None,
+        encrypted: false,
+        kms_key_id: None,
+        iam_database_authentication_enabled: false,
+        timezone: None,
+        storage_throughput: None,
+    };
+    let running = crate::runtime::RunningDbContainer {
+        container_id: "c-restored".to_string(),
+        host_port: 15432,
+    };
+    let instance = build_restored_instance(
+        "restored",
+        "arn:aws:rds:us-east-1:123456789012:db:restored".to_string(),
+        "db-restored".to_string(),
+        Utc::now(),
+        Vec::new(),
+        &snapshot,
+        &running,
+        tags,
+    );
+    assert_eq!(
+        instance.tags,
+        vec![
+            RdsTag {
+                key: "env".to_string(),
+                value: "prod".to_string()
+            },
+            RdsTag {
+                key: "owner".to_string(),
+                value: "platform".to_string()
+            },
+        ]
+    );
 }
 
 #[tokio::test]
