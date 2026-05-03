@@ -2073,7 +2073,9 @@ async fn main() {
     registry.register(ecs_service);
 
     let elbv2_introspection_state = elbv2_state.clone();
-    let elbv2_service = Elbv2Service::new(elbv2_state.clone());
+    let elbv2_service = Elbv2Service::new_without_dataplane(elbv2_state.clone())
+        .with_waf_state(wafv2_state.clone());
+    elbv2_service.start_dataplane();
     registry.register(Arc::new(elbv2_service));
 
     let cloudfront_service = Arc::new(CloudFrontService::new(cloudfront_state.clone()));

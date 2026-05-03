@@ -18,6 +18,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use fakecloud_wafv2::evaluator::{
+    evaluate_detailed as waf_evaluate_detailed, WafAction, WafRequest,
+};
+use fakecloud_wafv2::state::{IpSet, RegexPatternSet, SharedWafv2State, WebAcl};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -59,6 +63,13 @@ impl Drop for BoundListener {
 #[derive(Clone)]
 struct DataPlane {
     state: SharedElbv2State,
+    /// Optional WAFv2 state. When set, every ALB request is evaluated
+    /// against the WebACL associated with the load balancer (if any)
+    /// before the listener-rule router runs.
+    waf_state: Option<SharedWafv2State>,
+    /// Count of WAF Count-action matches, keyed by `WebACL ARN | rule
+    /// name`. Exposed for tests and future metrics scraping.
+    waf_count_metrics: Arc<Mutex<BTreeMap<String, u64>>>,
     /// Round-robin index per target group ARN (mod target count).
     rr_counters: Arc<Mutex<BTreeMap<String, usize>>>,
     /// Sticky-session map: `AWSALB` cookie value -> `tg_arn|target_id|target_port`.
@@ -66,7 +77,7 @@ struct DataPlane {
     upstream: reqwest::Client,
 }
 
-pub fn spawn_dataplane(state: SharedElbv2State) {
+pub fn spawn_dataplane(state: SharedElbv2State, waf_state: Option<SharedWafv2State>) {
     if !dataplane_enabled() {
         debug!("ELBv2 data plane disabled via {ENV_DISABLE}");
         return;
@@ -87,6 +98,8 @@ pub fn spawn_dataplane(state: SharedElbv2State) {
     };
     let dp = DataPlane {
         state,
+        waf_state,
+        waf_count_metrics: Arc::new(Mutex::new(BTreeMap::new())),
         rr_counters: Arc::new(Mutex::new(BTreeMap::new())),
         sticky_targets: Arc::new(Mutex::new(BTreeMap::new())),
         upstream,
@@ -256,6 +269,22 @@ async fn handle_request(
         .and_then(|p| u16::try_from(p).ok())
         .unwrap_or(80);
 
+    // WAF v2 evaluation: if a WebACL is associated with this LB, run
+    // each request through the evaluator before the listener-rule
+    // router. Block / Captcha / Challenge short-circuit; Count is
+    // recorded but lets the request through.
+    if let Some(waf_resp) = evaluate_waf_for_request(
+        dp,
+        lb_arn,
+        &parts.method,
+        &parts.uri,
+        &parts.headers,
+        &body_bytes,
+        peer_addr,
+    ) {
+        return waf_resp;
+    }
+
     let rules: Vec<&Rule> = snap.rules_for_listener(&listener.arn);
     let actions = select_actions(
         &rules,
@@ -361,6 +390,187 @@ fn snapshot(dp: &DataPlane, lb_arn: &str) -> Option<LbSnapshot> {
                 target_groups,
             });
         }
+    }
+    None
+}
+
+/// Outcome of running the WAFv2 evaluator for one ALB request.
+/// `Allow` means fall through to the listener-rule router; the other
+/// variants short-circuit with a synthetic response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WafEvalOutcome {
+    NoAcl,
+    Allow,
+    Count,
+    Block,
+    Captcha,
+    Challenge,
+}
+
+/// Run the WebACL associated with `lb_arn` (if any) against the
+/// incoming request. Returns `Some(response)` when the resolved
+/// [`WafAction`] is terminal (`Block`, `Captcha`, `Challenge`); returns
+/// `None` when the request should fall through to the listener-rule
+/// router. Count-action matches are recorded in
+/// `dp.waf_count_metrics` and do not short-circuit.
+fn evaluate_waf_for_request(
+    dp: &DataPlane,
+    lb_arn: &str,
+    method: &Method,
+    uri: &http::Uri,
+    headers: &HeaderMap,
+    body: &Bytes,
+    peer_addr: SocketAddr,
+) -> Option<Response<Full<Bytes>>> {
+    let waf_state = dp.waf_state.as_ref()?;
+    let outcome = evaluate_waf_outcome(
+        waf_state,
+        lb_arn,
+        method.as_str(),
+        uri,
+        headers,
+        body.as_ref(),
+        peer_addr,
+        Some(&dp.waf_count_metrics),
+    );
+    waf_outcome_to_response(outcome)
+}
+
+/// Pure-function form of [`evaluate_waf_for_request`] that resolves
+/// the WAF state for one ALB and returns the resolved
+/// [`WafEvalOutcome`]. Split out so unit tests can drive it without
+/// constructing a full hyper data plane.
+pub(crate) fn evaluate_waf_outcome(
+    waf_state: &SharedWafv2State,
+    lb_arn: &str,
+    method: &str,
+    uri: &http::Uri,
+    headers: &HeaderMap,
+    body: &[u8],
+    peer_addr: SocketAddr,
+    count_metrics: Option<&Arc<Mutex<BTreeMap<String, u64>>>>,
+) -> WafEvalOutcome {
+    let Some(snap) = waf_snapshot_for_lb(waf_state, lb_arn) else {
+        return WafEvalOutcome::NoAcl;
+    };
+    let header_pairs: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_lowercase(), s.to_string()))
+        })
+        .collect();
+    let path = uri.path();
+    let query = uri.query().unwrap_or("");
+    let req = WafRequest {
+        method,
+        uri: path,
+        headers: &header_pairs,
+        body,
+        query,
+        source_ip: peer_addr.ip(),
+        country: None,
+    };
+    let detailed = waf_evaluate_detailed(&req, &snap.web_acl, &snap.ipsets, &snap.regex_sets);
+    if !detailed.count_rules.is_empty() {
+        if let Some(metrics) = count_metrics {
+            let mut m = metrics.lock();
+            for rule_name in &detailed.count_rules {
+                let key = format!("{}|{}", snap.web_acl.arn, rule_name);
+                *m.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+    match detailed.action {
+        WafAction::Allow => {
+            if !detailed.count_rules.is_empty() {
+                WafEvalOutcome::Count
+            } else {
+                WafEvalOutcome::Allow
+            }
+        }
+        WafAction::Count => WafEvalOutcome::Count,
+        WafAction::Block => WafEvalOutcome::Block,
+        WafAction::Captcha => WafEvalOutcome::Captcha,
+        WafAction::Challenge => WafEvalOutcome::Challenge,
+    }
+}
+
+fn waf_outcome_to_response(outcome: WafEvalOutcome) -> Option<Response<Full<Bytes>>> {
+    match outcome {
+        WafEvalOutcome::NoAcl | WafEvalOutcome::Allow | WafEvalOutcome::Count => None,
+        WafEvalOutcome::Block => {
+            let body = Bytes::from_static(br#"{"message":"Forbidden"}"#);
+            let mut resp = Response::new(Full::new(body));
+            *resp.status_mut() = StatusCode::FORBIDDEN;
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            Some(resp)
+        }
+        WafEvalOutcome::Captcha => {
+            // AWS WAF emits a 405 Method Not Allowed pseudo-response
+            // when a CAPTCHA challenge fires for an unsupported
+            // request method. The body content is not stable across
+            // versions; an empty JSON object matches the wire
+            // observation.
+            let body = Bytes::from_static(br#"{"message":"Captcha"}"#);
+            let mut resp = Response::new(Full::new(body));
+            *resp.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            Some(resp)
+        }
+        WafEvalOutcome::Challenge => {
+            let body = Bytes::from_static(br#"{"message":"Challenge"}"#);
+            let mut resp = Response::new(Full::new(body));
+            *resp.status_mut() = StatusCode::ACCEPTED;
+            resp.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            Some(resp)
+        }
+    }
+}
+
+/// Snapshot of the WAFv2 state needed to evaluate the WebACL
+/// associated with one load balancer. Cloning under the read lock
+/// keeps the per-request handler from re-locking.
+struct WafSnapshot {
+    web_acl: WebAcl,
+    ipsets: std::collections::HashMap<String, IpSet>,
+    regex_sets: std::collections::HashMap<String, RegexPatternSet>,
+}
+
+fn waf_snapshot_for_lb(waf_state: &SharedWafv2State, lb_arn: &str) -> Option<WafSnapshot> {
+    let st = waf_state.read();
+    for account in st.accounts.values() {
+        let Some(acl_arn) = account.associations.get(lb_arn) else {
+            continue;
+        };
+        let Some(web_acl) = account.web_acls.values().find(|a| &a.arn == acl_arn) else {
+            continue;
+        };
+        let ipsets: std::collections::HashMap<String, IpSet> = account
+            .ip_sets
+            .values()
+            .map(|s| (s.arn.clone(), s.clone()))
+            .collect();
+        let regex_sets: std::collections::HashMap<String, RegexPatternSet> = account
+            .regex_pattern_sets
+            .values()
+            .map(|s| (s.arn.clone(), s.clone()))
+            .collect();
+        return Some(WafSnapshot {
+            web_acl: web_acl.clone(),
+            ipsets,
+            regex_sets,
+        });
     }
     None
 }
@@ -758,4 +968,197 @@ fn extract_cookie<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
 fn short_id() -> String {
     let id = Uuid::new_v4();
     id.simple().to_string()[0..16].to_string()
+}
+
+#[cfg(test)]
+mod waf_tests {
+    use super::*;
+    use chrono::Utc;
+    use fakecloud_wafv2::state::{AccountState, Wafv2Accounts, WebAcl};
+    use http::Uri;
+    use parking_lot::RwLock;
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    const ACCOUNT: &str = "123456789012";
+    const LB_ARN: &str =
+        "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/test/abc";
+    const ACL_ARN: &str = "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/test/xyz";
+
+    fn web_acl_with(default: Value, rules: Vec<Value>) -> WebAcl {
+        WebAcl {
+            id: "xyz".into(),
+            name: "test".into(),
+            arn: ACL_ARN.into(),
+            scope: "REGIONAL".into(),
+            default_action: default,
+            description: None,
+            rules,
+            visibility_config: json!({}),
+            capacity: 0,
+            lock_token: "lt".into(),
+            label_namespace: "awswaf:123456789012:webacl:test:".into(),
+            custom_response_bodies: BTreeMap::new(),
+            captcha_config: None,
+            challenge_config: None,
+            token_domains: Vec::new(),
+            association_config: None,
+            data_protection_config: None,
+            on_source_d_do_s_protection_config: None,
+            application_config: None,
+            retrofitted_by_firewall_manager: false,
+            pre_process_firewall_manager_rule_groups: Vec::new(),
+            post_process_firewall_manager_rule_groups: Vec::new(),
+            managed_by_firewall_manager: false,
+            created_time: Utc::now(),
+        }
+    }
+
+    fn waf_state_with(acl: WebAcl, association: Option<&str>) -> SharedWafv2State {
+        let mut accounts = Wafv2Accounts::new();
+        let mut acct = AccountState::default();
+        acct.web_acls
+            .insert(("REGIONAL".into(), acl.name.clone()), acl);
+        if let Some(resource) = association {
+            acct.associations.insert(resource.into(), ACL_ARN.into());
+        }
+        accounts.accounts.insert(ACCOUNT.into(), acct);
+        Arc::new(RwLock::new(accounts))
+    }
+
+    fn block_path_rule(needle: &str) -> Value {
+        json!({
+            "Name": "block-admin",
+            "Priority": 0,
+            "Action": {"Block": {}},
+            "VisibilityConfig": {},
+            "Statement": {
+                "ByteMatchStatement": {
+                    "SearchString": needle,
+                    "FieldToMatch": {"UriPath": {}},
+                    "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+                    "PositionalConstraint": "STARTS_WITH",
+                }
+            }
+        })
+    }
+
+    fn count_path_rule(needle: &str) -> Value {
+        json!({
+            "Name": "count-admin",
+            "Priority": 0,
+            "Action": {"Count": {}},
+            "VisibilityConfig": {},
+            "Statement": {
+                "ByteMatchStatement": {
+                    "SearchString": needle,
+                    "FieldToMatch": {"UriPath": {}},
+                    "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+                    "PositionalConstraint": "STARTS_WITH",
+                }
+            }
+        })
+    }
+
+    fn ip() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)
+    }
+
+    #[test]
+    fn request_blocked_by_associated_webacl() {
+        let acl = web_acl_with(json!({"Allow": {}}), vec![block_path_rule("/admin")]);
+        let waf = waf_state_with(acl, Some(LB_ARN));
+        let outcome = evaluate_waf_outcome(
+            &waf,
+            LB_ARN,
+            "GET",
+            &"/admin/x".parse::<Uri>().unwrap(),
+            &HeaderMap::new(),
+            b"",
+            ip(),
+            None,
+        );
+        assert_eq!(outcome, WafEvalOutcome::Block);
+        let resp = waf_outcome_to_response(outcome).expect("expected synthetic response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn request_allowed_when_no_rules_match() {
+        let acl = web_acl_with(json!({"Allow": {}}), vec![block_path_rule("/admin")]);
+        let waf = waf_state_with(acl, Some(LB_ARN));
+        let outcome = evaluate_waf_outcome(
+            &waf,
+            LB_ARN,
+            "GET",
+            &"/public".parse::<Uri>().unwrap(),
+            &HeaderMap::new(),
+            b"",
+            ip(),
+            None,
+        );
+        assert_eq!(outcome, WafEvalOutcome::Allow);
+        assert!(waf_outcome_to_response(outcome).is_none());
+    }
+
+    #[test]
+    fn request_allowed_when_no_webacl_associated() {
+        let acl = web_acl_with(json!({"Block": {}}), vec![]);
+        // Note: we deliberately do NOT associate the ACL with the LB.
+        let waf = waf_state_with(acl, None);
+        let outcome = evaluate_waf_outcome(
+            &waf,
+            LB_ARN,
+            "GET",
+            &"/anything".parse::<Uri>().unwrap(),
+            &HeaderMap::new(),
+            b"",
+            ip(),
+            None,
+        );
+        assert_eq!(outcome, WafEvalOutcome::NoAcl);
+        assert!(waf_outcome_to_response(outcome).is_none());
+    }
+
+    #[test]
+    fn count_action_does_not_block() {
+        let acl = web_acl_with(json!({"Allow": {}}), vec![count_path_rule("/admin")]);
+        let waf = waf_state_with(acl, Some(LB_ARN));
+        let metrics = Arc::new(Mutex::new(BTreeMap::new()));
+        let outcome = evaluate_waf_outcome(
+            &waf,
+            LB_ARN,
+            "GET",
+            &"/admin/x".parse::<Uri>().unwrap(),
+            &HeaderMap::new(),
+            b"",
+            ip(),
+            Some(&metrics),
+        );
+        assert_eq!(outcome, WafEvalOutcome::Count);
+        assert!(waf_outcome_to_response(outcome).is_none());
+        let snap = metrics.lock();
+        let key = format!("{ACL_ARN}|count-admin");
+        assert_eq!(snap.get(&key).copied(), Some(1));
+    }
+
+    #[test]
+    fn webacl_default_block_returns_403() {
+        let acl = web_acl_with(json!({"Block": {}}), vec![]);
+        let waf = waf_state_with(acl, Some(LB_ARN));
+        let outcome = evaluate_waf_outcome(
+            &waf,
+            LB_ARN,
+            "GET",
+            &"/anything".parse::<Uri>().unwrap(),
+            &HeaderMap::new(),
+            b"",
+            ip(),
+            None,
+        );
+        assert_eq!(outcome, WafEvalOutcome::Block);
+        let resp = waf_outcome_to_response(outcome).expect("expected synthetic response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
 }

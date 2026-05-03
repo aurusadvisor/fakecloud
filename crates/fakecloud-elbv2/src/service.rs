@@ -15,6 +15,8 @@ use fakecloud_core::query::{
 };
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
+use fakecloud_wafv2::SharedWafv2State;
+
 use crate::state::{AvailabilityZone, LoadBalancer, LoadBalancerAddress, SharedElbv2State, Tag};
 use crate::ELBV2_NAMESPACE;
 
@@ -76,17 +78,52 @@ const ELBV2_SUPPORTED_ACTIONS: &[&str] = &[
 
 pub struct Elbv2Service {
     state: SharedElbv2State,
+    waf_state: Option<SharedWafv2State>,
     pub region: String,
 }
 
 impl Elbv2Service {
+    /// Build a service and immediately spin up the prober + dataplane
+    /// supervisor. The dataplane will not perform WAF evaluation unless
+    /// the service is constructed via [`Elbv2Service::with_waf_state`]
+    /// before the dataplane spawns.
     pub fn new(state: SharedElbv2State) -> Self {
         crate::prober::spawn_prober(Arc::clone(&state));
-        crate::dataplane::spawn_dataplane(Arc::clone(&state));
+        crate::dataplane::spawn_dataplane(Arc::clone(&state), None);
         Self {
             state,
+            waf_state: None,
             region: "us-east-1".to_string(),
         }
+    }
+
+    /// Build a service without spawning the dataplane yet. Pair with
+    /// [`Elbv2Service::with_waf_state`] and [`Elbv2Service::start_dataplane`]
+    /// when WAF v2 evaluation should run inside the ALB request path.
+    pub fn new_without_dataplane(state: SharedElbv2State) -> Self {
+        crate::prober::spawn_prober(Arc::clone(&state));
+        Self {
+            state,
+            waf_state: None,
+            region: "us-east-1".to_string(),
+        }
+    }
+
+    /// Plug in the WAFv2 shared state so the ALB dataplane can resolve
+    /// the WebACL associated with each load balancer and evaluate
+    /// incoming requests before the listener-rule router runs.
+    pub fn with_waf_state(mut self, waf_state: SharedWafv2State) -> Self {
+        self.waf_state = Some(waf_state);
+        self
+    }
+
+    /// Spawn the dataplane supervisor. Only needed when the service
+    /// was built with [`Elbv2Service::new_without_dataplane`].
+    pub fn start_dataplane(&self) {
+        crate::dataplane::spawn_dataplane(
+            Arc::clone(&self.state),
+            self.waf_state.as_ref().map(Arc::clone),
+        );
     }
 
     pub fn shared_state(&self) -> SharedElbv2State {
