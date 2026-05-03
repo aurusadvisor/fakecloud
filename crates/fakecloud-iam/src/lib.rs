@@ -1,3 +1,4 @@
+pub mod auth_message;
 pub mod condition;
 pub mod credential_resolver;
 pub mod evaluator;
