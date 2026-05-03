@@ -4670,6 +4670,10 @@ async fn main() {
                       axum::extract::Path(api_id): axum::extract::Path<String>,
                       axum::extract::Query(params): axum::extract::Query<
                     std::collections::HashMap<String, String>,
+                >,
+                      headers: axum::http::HeaderMap,
+                      axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<
+                    std::net::SocketAddr,
                 >| {
                     let reg = reg.clone();
                     async move {
@@ -4677,13 +4681,20 @@ async fn main() {
                             .get("stage")
                             .cloned()
                             .unwrap_or_else(|| "$default".to_string());
+                        let user_agent = headers
+                            .get(axum::http::header::USER_AGENT)
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_string());
+                        let source_ip = addr.ip().to_string();
                         ws.on_upgrade(move |socket| async move {
                             let (conn_id, rx) = fakecloud_apigatewayv2::websocket::register(
                                 reg.clone(),
                                 api_id,
                                 stage,
-                                "127.0.0.1".to_string(),
+                                source_ip,
+                                user_agent,
                             );
+                            let conn_id_for_lifecycle = conn_id.clone();
                             // Echo dispatcher stub — real Lambda dispatch for
                             // `$default` is wired up in a follow-up; for now
                             // we just log. `@connections` POST exercises the
@@ -4700,8 +4711,12 @@ async fn main() {
                                     );
                                 }
                             };
-                            fakecloud_apigatewayv2::websocket::run_lifecycle(
-                                socket, rx, on_message,
+                            fakecloud_apigatewayv2::websocket::run_lifecycle_tracked(
+                                socket,
+                                rx,
+                                on_message,
+                                reg.clone(),
+                                conn_id_for_lifecycle,
                             )
                             .await;
                             fakecloud_apigatewayv2::websocket::deregister(&reg, &conn_id);
@@ -4710,90 +4725,9 @@ async fn main() {
                 }
             }),
         )
-        .route(
-            "/@connections/{connection_id}",
-            axum::routing::post({
-                let reg = apigatewayv2_ws_registry.clone();
-                move |axum::extract::Path(connection_id): axum::extract::Path<String>,
-                      body: axum::body::Bytes| {
-                    let reg = reg.clone();
-                    async move {
-                        let sender = {
-                            let r = reg.read();
-                            r.get(&connection_id).map(|c| c.sender.clone())
-                        };
-                        let Some(sender) = sender else {
-                            return (
-                                axum::http::StatusCode::GONE,
-                                axum::Json(serde_json::json!({
-                                    "Message": "GoneException",
-                                })),
-                            );
-                        };
-                        let msg = match std::str::from_utf8(&body) {
-                            Ok(s) => axum::extract::ws::Message::Text(s.to_string().into()),
-                            Err(_) => axum::extract::ws::Message::Binary(body.clone()),
-                        };
-                        if sender.send(msg).is_err() {
-                            // Receiver dropped between read and send: treat as
-                            // gone too. Clean up the stale entry while we're
-                            // here so retries don't keep hitting this branch.
-                            reg.write().remove(&connection_id);
-                            return (
-                                axum::http::StatusCode::GONE,
-                                axum::Json(serde_json::json!({
-                                    "Message": "GoneException",
-                                })),
-                            );
-                        }
-                        (
-                            axum::http::StatusCode::OK,
-                            axum::Json(serde_json::json!({})),
-                        )
-                    }
-                }
-            })
-            .get({
-                let reg = apigatewayv2_ws_registry.clone();
-                move |axum::extract::Path(connection_id): axum::extract::Path<String>| {
-                    let reg = reg.clone();
-                    async move {
-                        let r = reg.read();
-                        let Some(c) = r.get(&connection_id) else {
-                            return (
-                                axum::http::StatusCode::GONE,
-                                axum::Json(serde_json::json!({
-                                    "Message": "GoneException",
-                                })),
-                            );
-                        };
-                        (
-                            axum::http::StatusCode::OK,
-                            axum::Json(serde_json::json!({
-                                "ConnectedAt": c.connected_at.to_rfc3339(),
-                                "Identity": { "SourceIp": c.source_ip },
-                                "LastActiveAt": c.last_active_at.to_rfc3339(),
-                            })),
-                        )
-                    }
-                }
-            })
-            .delete({
-                let reg = apigatewayv2_ws_registry.clone();
-                move |axum::extract::Path(connection_id): axum::extract::Path<String>| {
-                    let reg = reg.clone();
-                    async move {
-                        let removed = reg.write().remove(&connection_id);
-                        let Some(info) = removed else {
-                            return axum::http::StatusCode::GONE;
-                        };
-                        // Trigger lifecycle exit on the connection task.
-                        let _ = info.sender.send(axum::extract::ws::Message::Close(None));
-                        axum::http::StatusCode::NO_CONTENT
-                    }
-                }
-            }),
-        )
+        .merge(fakecloud_apigatewayv2::management::router_with_stage_prefix(
+            apigatewayv2_ws_registry.clone(),
+        ))
         .route(
             // Direct injection of an activity task (skipping a state-machine
             // execution). Used by tests that want to exercise the worker

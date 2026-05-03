@@ -9,6 +9,7 @@ fakecloud implements **103 of 103** API Gateway v2 operations at 100% conformanc
 ## Supported features
 
 - **HTTP APIs** — CreateApi, UpdateApi, DeleteApi, GetApis
+- **WebSocket APIs** — CreateApi with `protocolType=WEBSOCKET`, live data plane upgrade endpoint
 - **Routes** — path parameters, wildcards, HTTP method routing
 - **Integrations** — Lambda proxy (v2.0 format), HTTP proxy, Mock integration
 - **Stages** — CRUD, deployments, default stage
@@ -16,14 +17,16 @@ fakecloud implements **103 of 103** API Gateway v2 operations at 100% conformanc
 - **CORS** — configuration on routes and globally
 - **Request history** — every request served is recorded for introspection
 - **Deployments** — CreateDeployment, GetDeployments
+- **Management API** — `apigatewaymanagementapi` ops (PostToConnection, GetConnection, DeleteConnection) at `/@connections/{id}` and `/{stage}/@connections/{id}`
 
 ## Protocol
 
-REST for management, path-based routing for the executed API.
+REST for management, path-based routing for the executed API. WebSocket APIs upgrade at `/_fakecloud/apigatewayv2/ws/{api_id}` and the management API is served on the same host:port — point the AWS SDK's `apigatewaymanagementapi` client at the fakecloud endpoint URL.
 
 ## Introspection
 
 - `GET /_fakecloud/apigatewayv2/requests` — list all HTTP API requests received (method, path, headers, query params, status code, integration response)
+- `GET /_fakecloud/apigatewayv2/connections` — list live WebSocket connections with `connectionId`, `apiId`, `stage`, `connectedAt`, `lastActiveAt`, `sourceIp`
 
 ## Cross-service delivery
 
