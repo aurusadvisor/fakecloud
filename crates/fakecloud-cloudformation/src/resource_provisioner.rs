@@ -8099,6 +8099,7 @@ impl ResourceProvisioner {
                 .and_then(|v| v.as_str())
                 .map(String::from),
             data_tiering_enabled: props.get("DataTieringEnabled").and_then(|v| v.as_bool()),
+            notification_topic_status: None,
         };
         state.replication_groups.insert(id.clone(), group);
 

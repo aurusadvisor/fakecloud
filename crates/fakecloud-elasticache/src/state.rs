@@ -259,6 +259,10 @@ pub struct ReplicationGroup {
     /// `enabled`/`disabled` projection.
     #[serde(default)]
     pub data_tiering_enabled: Option<bool>,
+    /// `NotificationTopicStatus` from the most recent ModifyReplicationGroup
+    /// call. Defaults to `active` when emitting describe XML if unset.
+    #[serde(default)]
+    pub notification_topic_status: Option<String>,
 }
 
 /// AWS's LogDeliveryConfiguration shape, retained verbatim so we can
@@ -1233,6 +1237,7 @@ mod tests {
                 notification_topic_arn: None,
                 cluster_mode: None,
                 data_tiering_enabled: None,
+                notification_topic_status: None,
             },
         );
         assert_eq!(state.replication_groups.len(), 1);
