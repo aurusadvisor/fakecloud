@@ -190,6 +190,13 @@ async fn ses_send_email_simple() {
         .send()
         .await
         .unwrap();
+    // Sandbox accounts must verify recipients too.
+    client
+        .create_email_identity()
+        .email_identity("recipient@example.com")
+        .send()
+        .await
+        .unwrap();
 
     // Send email with simple content
     let resp = client
@@ -237,6 +244,12 @@ async fn ses_send_email_template() {
     client
         .create_email_identity()
         .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_email_identity()
+        .email_identity("recipient@example.com")
         .send()
         .await
         .unwrap();
@@ -290,6 +303,12 @@ async fn ses_send_email_raw() {
     client
         .create_email_identity()
         .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_email_identity()
+        .email_identity("recipient@example.com")
         .send()
         .await
         .unwrap();
@@ -623,6 +642,12 @@ async fn ses_introspection_endpoint() {
     client
         .create_email_identity()
         .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_email_identity()
+        .email_identity("recipient@example.com")
         .send()
         .await
         .unwrap();
@@ -2338,6 +2363,11 @@ async fn ses_event_fanout_sns_destination() {
         .send()
         .await
         .unwrap();
+    ses.create_email_identity()
+        .email_identity("recipient@example.com")
+        .send()
+        .await
+        .unwrap();
 
     ses.send_email()
         .from_email_address("sender@example.com")
@@ -2470,6 +2500,11 @@ async fn ses_event_fanout_bounce_simulator() {
         .send()
         .await
         .unwrap();
+    ses.create_email_identity()
+        .email_identity("simulator.amazonses.com")
+        .send()
+        .await
+        .unwrap();
 
     // Send to bounce simulator address
     ses.send_email()
@@ -2538,6 +2573,11 @@ async fn ses_event_fanout_suppression_list_simulator() {
 
     ses.create_email_identity()
         .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+    ses.create_email_identity()
+        .email_identity("simulator.amazonses.com")
         .send()
         .await
         .unwrap();
@@ -2672,6 +2712,11 @@ async fn ses_event_fanout_eventbridge_destination() {
 
     ses.create_email_identity()
         .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+    ses.create_email_identity()
+        .email_identity("recipient@example.com")
         .send()
         .await
         .unwrap();

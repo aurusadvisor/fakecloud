@@ -46,6 +46,14 @@ fn seed_identity(state: &SharedSesState, name: &str) {
     );
 }
 
+/// Flip the account out of sandbox so tests focused on send mechanics
+/// don't trip the recipient-verification gate.
+fn enable_production_access(state: &SharedSesState) {
+    let mut accounts = state.write();
+    let st = accounts.get_or_create("123456789012");
+    st.account_settings.production_access_enabled = true;
+}
+
 fn make_v1_request(action: &str, params: Vec<(&str, &str)>) -> AwsRequest {
     let mut query_params: HashMap<String, String> = HashMap::new();
     query_params.insert("Action".to_string(), action.to_string());
@@ -1035,6 +1043,7 @@ fn test_get_identity_mail_from_domain_attributes() {
 fn test_send_email_v1() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
     let req = make_v1_request(
         "SendEmail",
         vec![
@@ -1065,9 +1074,77 @@ fn test_send_email_v1() {
 }
 
 #[test]
+fn send_email_v1_same_path() {
+    // Mirror of `send_email_v2_rejects_unverified_from_in_sandbox` for
+    // SES v1: fresh account, no identities verified, expect the v1
+    // `MessageRejected` error code.
+    let state = make_state();
+    let req = make_v1_request(
+        "SendEmail",
+        vec![
+            ("Source", "noreply@example.com"),
+            ("Destination.ToAddresses.member.1", "to@example.com"),
+            ("Message.Subject.Data", "Hi"),
+            ("Message.Body.Text.Data", "Hello"),
+        ],
+    );
+    match handle_v1_action(&state, &req) {
+        Err(e) => assert_eq!(e.code(), "MessageRejected"),
+        Ok(_) => panic!("expected MessageRejected"),
+    }
+}
+
+#[test]
+fn send_email_v1_rejects_unverified_recipient_in_sandbox() {
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    let req = make_v1_request(
+        "SendEmail",
+        vec![
+            ("Source", "sender@example.com"),
+            (
+                "Destination.ToAddresses.member.1",
+                "unverified@elsewhere.com",
+            ),
+            ("Message.Subject.Data", "Hi"),
+            ("Message.Body.Text.Data", "Hello"),
+        ],
+    );
+    match handle_v1_action(&state, &req) {
+        Err(e) => {
+            assert_eq!(e.code(), "MessageRejected");
+            assert!(e.message().contains("unverified@elsewhere.com"));
+        }
+        Ok(_) => panic!("expected MessageRejected"),
+    }
+}
+
+#[test]
+fn send_email_v1_skips_recipient_check_in_production() {
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
+    let req = make_v1_request(
+        "SendEmail",
+        vec![
+            ("Source", "sender@example.com"),
+            (
+                "Destination.ToAddresses.member.1",
+                "unverified@elsewhere.com",
+            ),
+            ("Message.Subject.Data", "Hi"),
+            ("Message.Body.Text.Data", "Hello"),
+        ],
+    );
+    let resp = handle_v1_action(&state, &req).unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[test]
 fn test_send_raw_email() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
     let req = make_v1_request(
         "SendRawEmail",
         vec![
@@ -1094,6 +1171,7 @@ fn test_send_raw_email() {
 fn test_send_templated_email() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
     // Create template first
     handle_v1_action(
         &state,
@@ -1154,6 +1232,7 @@ fn test_send_templated_email_missing_template() {
 fn test_send_bulk_templated_email() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
     handle_v1_action(
         &state,
         &make_v1_request(
@@ -1433,6 +1512,7 @@ fn test_get_send_quota() {
 fn test_get_send_statistics() {
     let state = make_state();
     seed_identity(&state, "a@b.com");
+    enable_production_access(&state);
     // Send an email first
     handle_v1_action(
         &state,

@@ -195,6 +195,11 @@ pub struct AccountSettings {
     pub suppressed_reasons: Vec<String>,
     pub vdm_attributes: Option<serde_json::Value>,
     pub details: Option<AccountDetails>,
+    /// Sandbox vs production. New SES accounts default to sandbox
+    /// (`false`), which gates SendEmail on having every recipient also
+    /// verified. Flipped via PutAccountDetails or the admin endpoint.
+    #[serde(default)]
+    pub production_access_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,6 +463,7 @@ impl SesState {
                 suppressed_reasons: Vec::new(),
                 vdm_attributes: None,
                 details: None,
+                production_access_enabled: false,
             },
             import_jobs: BTreeMap::new(),
             export_jobs: BTreeMap::new(),

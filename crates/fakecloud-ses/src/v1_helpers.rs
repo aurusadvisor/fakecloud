@@ -98,28 +98,53 @@ pub(crate) fn required_param<'a>(
     })
 }
 
+/// Strip display-name wrappers like `Foo <foo@example.com>`.
+fn extract_email_address(from: &str) -> &str {
+    if let Some(start) = from.rfind('<') {
+        if let Some(end) = from.rfind('>') {
+            if end > start {
+                return from[start + 1..end].trim();
+            }
+        }
+    }
+    from.trim()
+}
+
+/// Match an email against verified identities (exact email or verified
+/// domain match).
+fn identity_is_verified(st: &SesState, email: &str) -> bool {
+    if st
+        .identities
+        .get(email)
+        .map(|id| id.verified)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if let Some((_, domain)) = email.split_once('@') {
+        if !domain.is_empty()
+            && st
+                .identities
+                .get(domain)
+                .map(|id| id.verified)
+                .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Gate every SES v1 send path on a verified sender. Mirrors the v2
-/// `reject_unverified_sender` rule: the From address must match a
-/// verified email identity exactly, or its domain must match a verified
-/// domain identity. Real SES surfaces this as `MessageRejected`.
+/// rule: the From address must match a verified email identity exactly,
+/// or its domain must match a verified domain identity. Real SES v1
+/// surfaces this as `MessageRejected`.
 pub(crate) fn check_v1_verified_sender(
     state: &SharedSesState,
     account_id: &str,
     from: &str,
 ) -> Result<(), AwsServiceError> {
-    let email = if let Some(start) = from.rfind('<') {
-        if let Some(end) = from.rfind('>') {
-            if end > start {
-                from[start + 1..end].trim()
-            } else {
-                from.trim()
-            }
-        } else {
-            from.trim()
-        }
-    } else {
-        from.trim()
-    };
+    let email = extract_email_address(from);
     if email.is_empty() {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
@@ -127,25 +152,11 @@ pub(crate) fn check_v1_verified_sender(
             "Email address is not verified.".to_string(),
         ));
     }
-    let domain = email.split_once('@').map(|(_, d)| d).unwrap_or("");
 
     let accounts = state.read();
     let verified = accounts
         .get(account_id)
-        .map(|st| {
-            let email_ok = st
-                .identities
-                .get(email)
-                .map(|id| id.verified)
-                .unwrap_or(false);
-            let domain_ok = !domain.is_empty()
-                && st
-                    .identities
-                    .get(domain)
-                    .map(|id| id.verified)
-                    .unwrap_or(false);
-            email_ok || domain_ok
-        })
+        .map(|st| identity_is_verified(st, email))
         .unwrap_or(false);
 
     if verified {
@@ -155,6 +166,45 @@ pub(crate) fn check_v1_verified_sender(
             StatusCode::BAD_REQUEST,
             "MessageRejected",
             format!("Email address is not verified. The following identities failed the check in region us-east-1: {email}"),
+        ))
+    }
+}
+
+/// In sandbox accounts, every recipient must also be a verified
+/// identity. Real SES v1 surfaces failures as `MessageRejected` listing
+/// the offending addresses.
+pub(crate) fn check_v1_verified_recipients(
+    state: &SharedSesState,
+    account_id: &str,
+    recipients: &[String],
+) -> Result<(), AwsServiceError> {
+    let accounts = state.read();
+    let Some(st) = accounts.get(account_id) else {
+        return Ok(());
+    };
+    if st.account_settings.production_access_enabled {
+        return Ok(());
+    }
+    let mut failing: Vec<String> = Vec::new();
+    for raw in recipients {
+        let addr = extract_email_address(raw);
+        if addr.is_empty() {
+            continue;
+        }
+        if !identity_is_verified(st, addr) {
+            failing.push(addr.to_string());
+        }
+    }
+    if failing.is_empty() {
+        Ok(())
+    } else {
+        Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "MessageRejected",
+            format!(
+                "Email address is not verified. The following identities failed the check: {}",
+                failing.join(", ")
+            ),
         ))
     }
 }
@@ -1024,6 +1074,13 @@ pub(crate) fn send_email(
     let to = parse_member_list(&req.query_params, "Destination.ToAddresses");
     let cc = parse_member_list(&req.query_params, "Destination.CcAddresses");
     let bcc = parse_member_list(&req.query_params, "Destination.BccAddresses");
+    let recipients: Vec<String> = to
+        .iter()
+        .chain(cc.iter())
+        .chain(bcc.iter())
+        .cloned()
+        .collect();
+    check_v1_verified_recipients(state, &req.account_id, &recipients)?;
 
     let subject = req.query_params.get("Message.Subject.Data").cloned();
     let html_body = req.query_params.get("Message.Body.Html.Data").cloned();
@@ -1097,6 +1154,7 @@ pub(crate) fn send_raw_email(
         check_v1_verified_sender(state, &req.account_id, &from)?;
     }
     let to = parse_member_list(&req.query_params, "Destinations");
+    check_v1_verified_recipients(state, &req.account_id, &to)?;
 
     let message_id = format!(
         "{:016x}{:016x}-{:08x}-{:04x}",
@@ -1161,6 +1219,14 @@ pub(crate) fn send_templated_email(
             ));
         }
     }
+
+    let recipients: Vec<String> = to
+        .iter()
+        .chain(cc.iter())
+        .chain(bcc.iter())
+        .cloned()
+        .collect();
+    check_v1_verified_recipients(state, &req.account_id, &recipients)?;
 
     let message_id = format!(
         "{:016x}{:016x}-{:08x}-{:04x}",
@@ -1234,6 +1300,34 @@ pub(crate) fn send_bulk_templated_email(
             .contains_key(&format!("{dest_prefix}.Destination.ToAddresses.member.1"))
         {
             break;
+        }
+        let to = parse_member_list(
+            &req.query_params,
+            &format!("{dest_prefix}.Destination.ToAddresses"),
+        );
+        let cc = parse_member_list(
+            &req.query_params,
+            &format!("{dest_prefix}.Destination.CcAddresses"),
+        );
+        let bcc = parse_member_list(
+            &req.query_params,
+            &format!("{dest_prefix}.Destination.BccAddresses"),
+        );
+        let recipients: Vec<String> = to
+            .iter()
+            .chain(cc.iter())
+            .chain(bcc.iter())
+            .cloned()
+            .collect();
+        if let Err(err) = check_v1_verified_recipients(state, &req.account_id, &recipients) {
+            // Real SES surfaces unverified recipients per-destination
+            // rather than aborting the whole batch. (From-domain gate is
+            // enforced up-front by `check_v1_verified_sender`.)
+            inner.push_str(&format!(
+                "<member><Status>MessageRejected</Status><Error>{}</Error></member>",
+                xml_escape(&err.message()),
+            ));
+            continue;
         }
         let message_id = send_bulk_destination(
             state,

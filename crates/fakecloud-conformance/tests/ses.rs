@@ -209,6 +209,13 @@ async fn ses_send_email() {
         .send()
         .await
         .unwrap();
+    // Sandbox accounts gate recipients too.
+    client
+        .create_email_identity()
+        .email_identity("recipient@example.com")
+        .send()
+        .await
+        .unwrap();
 
     let resp = client
         .send_email()
@@ -249,6 +256,12 @@ async fn ses_send_email_with_template() {
     client
         .create_email_identity()
         .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_email_identity()
+        .email_identity("recipient@example.com")
         .send()
         .await
         .unwrap();
@@ -305,6 +318,14 @@ async fn ses_send_bulk_email() {
         .send()
         .await
         .unwrap();
+    for addr in ["a@example.com", "b@example.com"] {
+        client
+            .create_email_identity()
+            .email_identity(addr)
+            .send()
+            .await
+            .unwrap();
+    }
 
     client
         .create_email_template()

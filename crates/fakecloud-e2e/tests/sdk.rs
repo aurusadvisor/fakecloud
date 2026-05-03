@@ -315,9 +315,15 @@ async fn sdk_ses_get_emails() {
     let fc = FakeCloud::new(server.endpoint());
     let ses = server.sesv2_client().await;
 
-    // Create identity first
+    // Create identity first (sender + recipient — sandbox accounts gate
+    // both).
     ses.create_email_identity()
         .email_identity("sdk-sender@example.com")
+        .send()
+        .await
+        .unwrap();
+    ses.create_email_identity()
+        .email_identity("recipient@example.com")
         .send()
         .await
         .unwrap();
