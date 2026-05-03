@@ -972,10 +972,20 @@ impl StsService {
         })?;
         validate_string_length("encodedMessage", encoded_message, 1, 10240)?;
 
+        // Round-trip the deflated/base64'd token produced by
+        // `auth_message::encode_deny`. Tokens that don't decode are
+        // rejected with `InvalidAuthorizationMessageException`,
+        // matching how AWS reports a corrupted blob.
         let decoded_message =
-            r#"{"allowed":true,"explicitDeny":false,"matchedStatements":{"items":[]}}"#;
+            crate::auth_message::decode_message(encoded_message).map_err(|why| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidAuthorizationMessageException",
+                    why,
+                )
+            })?;
         let xml =
-            xml_responses::decode_authorization_message_response(decoded_message, &req.request_id);
+            xml_responses::decode_authorization_message_response(&decoded_message, &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 
@@ -1247,18 +1257,48 @@ mod tests {
         ));
         let service = StsService::new(state);
 
-        let mut params = HashMap::new();
-        params.insert(
-            "EncodedMessage".to_string(),
-            "some-encoded-message".to_string(),
+        // Encode a real deny payload, then verify the decode op
+        // round-trips it back through the response body.
+        let token = crate::auth_message::encode_deny(
+            true,
+            Some("s3:GetObject"),
+            Some("arn:aws:iam::123456789012:user/alice"),
+            vec![serde_json::json!({"sourcePolicyId": "deny-bucket-foo"})],
+            None,
         );
+        let mut params = HashMap::new();
+        params.insert("EncodedMessage".to_string(), token);
 
         let req = make_test_request(params);
         let resp = service.decode_authorization_message(&req).unwrap();
         let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
         assert!(body.contains("DecodedMessage"));
-        assert!(body.contains("allowed"));
-        assert!(body.contains("matchedStatements"));
+        assert!(body.contains("explicitDeny"));
+        assert!(body.contains("s3:GetObject"));
+        assert!(body.contains("deny-bucket-foo"));
+    }
+
+    #[test]
+    fn test_decode_authorization_message_rejects_invalid_token() {
+        use parking_lot::RwLock;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let state: SharedIamState = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let service = StsService::new(state);
+
+        let mut params = HashMap::new();
+        params.insert("EncodedMessage".to_string(), "not-a-real-token".to_string());
+        let req = make_test_request(params);
+        let err = match service.decode_authorization_message(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected InvalidAuthorizationMessageException"),
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("InvalidAuthorizationMessageException"));
     }
 
     #[test]

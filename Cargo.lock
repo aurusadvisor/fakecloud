@@ -3138,6 +3138,7 @@ dependencies = [
  "fakecloud-aws",
  "fakecloud-core",
  "fakecloud-persistence",
+ "flate2",
  "http 1.4.0",
  "parking_lot",
  "serde",
