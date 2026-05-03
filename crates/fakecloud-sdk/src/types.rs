@@ -1119,3 +1119,14 @@ pub struct AcmCertificateStatusRequest {
     #[serde(default)]
     pub reason: Option<String>,
 }
+
+/// Body for `POST /_fakecloud/cloudfront/distributions/{id}/status`. The
+/// admin endpoint flips a stored CloudFront Distribution's status so
+/// tests can synchronously force it into `Deployed` or `InProgress`
+/// without waiting on the propagation tick.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudFrontDistributionStatusRequest {
+    /// New distribution status. Typically `"Deployed"` or `"InProgress"`.
+    pub status: String,
+}
