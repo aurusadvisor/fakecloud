@@ -27,6 +27,9 @@ pub struct DeliveryBus {
     ses_dispatcher: Option<Arc<dyn SesSendEmailDispatcher>>,
     /// Run an ECS task on a cluster (cross-service universal target).
     ecs_task_runner: Option<Arc<dyn EcsTaskRunner>>,
+    /// Publish CloudWatch metric data points (CloudWatch Logs metric
+    /// filters extract these on PutLogEvents).
+    cloudwatch_metrics: Option<Arc<dyn CloudwatchDelivery>>,
 }
 
 /// Message attribute for SQS delivery from SNS.
@@ -245,6 +248,24 @@ pub trait EcsTaskRunner: Send + Sync {
     ) -> Result<(), String>;
 }
 
+/// Publish CloudWatch metric data points from outside the cloudwatch
+/// crate. Used by CloudWatch Logs metric filters when an incoming log
+/// event matches their pattern.
+pub trait CloudwatchDelivery: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
+    fn put_metric(
+        &self,
+        account_id: &str,
+        region: &str,
+        namespace: &str,
+        metric_name: &str,
+        value: f64,
+        unit: Option<&str>,
+        dimensions: std::collections::BTreeMap<String, String>,
+        timestamp_ms: i64,
+    );
+}
+
 /// Outbound email dispatch used by services that emulate AWS flows that
 /// route through SES (Cognito verification, etc.) without taking a direct
 /// dependency on the SES crate.
@@ -308,6 +329,41 @@ impl DeliveryBus {
             firehose_sender: None,
             ses_dispatcher: None,
             ecs_task_runner: None,
+            cloudwatch_metrics: None,
+        }
+    }
+
+    pub fn with_cloudwatch_metrics(mut self, sender: Arc<dyn CloudwatchDelivery>) -> Self {
+        self.cloudwatch_metrics = Some(sender);
+        self
+    }
+
+    /// Publish a CloudWatch metric data point. Silently no-ops when no
+    /// CloudWatch sender is wired (in-process tests not exercising the
+    /// metrics path).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_cloudwatch_metric(
+        &self,
+        account_id: &str,
+        region: &str,
+        namespace: &str,
+        metric_name: &str,
+        value: f64,
+        unit: Option<&str>,
+        dimensions: std::collections::BTreeMap<String, String>,
+        timestamp_ms: i64,
+    ) {
+        if let Some(ref sender) = self.cloudwatch_metrics {
+            sender.put_metric(
+                account_id,
+                region,
+                namespace,
+                metric_name,
+                value,
+                unit,
+                dimensions,
+                timestamp_ms,
+            );
         }
     }
 
