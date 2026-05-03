@@ -1439,3 +1439,110 @@ fn stop_stream_encryption_unknown_stream_errors() {
     );
     assert!(svc.stop_stream_encryption(&req).is_err());
 }
+
+// ── K13: StreamModeDetails + retention pruning ──
+
+#[test]
+fn create_stream_honors_on_demand_mode() {
+    let (svc, state) = make_service();
+    svc.create_stream(&request(
+        "CreateStream",
+        json!({
+            "StreamName": "demand",
+            "StreamModeDetails": {"StreamMode": "ON_DEMAND"}
+        }),
+    ))
+    .unwrap();
+    let _accts = state.read();
+    let st = _accts.default_ref();
+    let stream = st.streams.get("demand").unwrap();
+    assert_eq!(stream.stream_mode, "ON_DEMAND");
+    // ON_DEMAND ignores ShardCount; we seed a small fixed count.
+    assert!(stream.shard_count >= 1);
+}
+
+#[test]
+fn create_stream_rejects_unknown_stream_mode() {
+    let (svc, _) = make_service();
+    let err = svc
+        .create_stream(&request(
+            "CreateStream",
+            json!({
+                "StreamName": "bogus",
+                "StreamModeDetails": {"StreamMode": "TURBO"}
+            }),
+        ))
+        .err()
+        .expect("expected invalid argument");
+    assert!(format!("{:?}", err).contains("StreamMode"));
+}
+
+#[test]
+fn create_stream_defaults_to_provisioned_mode() {
+    let (svc, state) = make_service();
+    svc.create_stream(&request(
+        "CreateStream",
+        json!({"StreamName": "default-mode", "ShardCount": 1}),
+    ))
+    .unwrap();
+    let _accts = state.read();
+    let st = _accts.default_ref();
+    let stream = st.streams.get("default-mode").unwrap();
+    assert_eq!(stream.stream_mode, "PROVISIONED");
+}
+
+#[test]
+fn get_records_skips_records_past_retention() {
+    let (svc, state) = make_service();
+    svc.create_stream(&request(
+        "CreateStream",
+        json!({"StreamName": "ret", "ShardCount": 1}),
+    ))
+    .unwrap();
+
+    // Push two records: one stale (well past retention), one fresh.
+    {
+        let mut accts = state.write();
+        let st = accts.default_mut();
+        let stream = st.streams.get_mut("ret").unwrap();
+        let shard = &mut stream.shards[0];
+        let stale_ts = chrono::Utc::now() - chrono::Duration::hours(48);
+        shard.records.push(KinesisRecord {
+            sequence_number: "1".to_string(),
+            partition_key: "p".to_string(),
+            data: b"stale".to_vec(),
+            approximate_arrival_timestamp: stale_ts,
+        });
+        shard.records.push(KinesisRecord {
+            sequence_number: "2".to_string(),
+            partition_key: "p".to_string(),
+            data: b"fresh".to_vec(),
+            approximate_arrival_timestamp: chrono::Utc::now(),
+        });
+    }
+
+    let it_resp = svc
+        .get_shard_iterator(&request(
+            "GetShardIterator",
+            json!({
+                "StreamName": "ret",
+                "ShardId": "shardId-000000000000",
+                "ShardIteratorType": "TRIM_HORIZON"
+            }),
+        ))
+        .unwrap();
+    let it_body: Value = serde_json::from_slice(it_resp.body.expect_bytes()).unwrap();
+    let iterator = it_body["ShardIterator"].as_str().unwrap().to_string();
+
+    let resp = svc
+        .get_records(&request("GetRecords", json!({"ShardIterator": iterator})))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let records = body["Records"].as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    let data_b64 = records[0]["Data"].as_str().unwrap();
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data_b64)
+        .unwrap();
+    assert_eq!(data, b"fresh");
+}

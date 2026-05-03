@@ -185,6 +185,27 @@ impl KinesisService {
         let shard_count = i32::try_from(shard_count)
             .map_err(|_| invalid_argument("ShardCount must be less than or equal to 2147483647"))?;
 
+        // Honor StreamModeDetails.StreamMode if supplied. AWS accepts
+        // PROVISIONED (default) and ON_DEMAND; ON_DEMAND streams ignore
+        // ShardCount entirely. Anything unrecognized is a 400.
+        let stream_mode = body["StreamModeDetails"]["StreamMode"]
+            .as_str()
+            .unwrap_or("PROVISIONED")
+            .to_string();
+        if stream_mode != "PROVISIONED" && stream_mode != "ON_DEMAND" {
+            return Err(invalid_argument(
+                "StreamMode must be PROVISIONED or ON_DEMAND",
+            ));
+        }
+        // ON_DEMAND seeds a small fixed shard count; the surface still
+        // exposes shards through GetShardIterator/GetRecords so callers
+        // can read/write while we no-op the per-shard provisioning.
+        let effective_shard_count = if stream_mode == "ON_DEMAND" {
+            4
+        } else {
+            shard_count
+        };
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         if state.streams.contains_key(stream_name) {
@@ -204,14 +225,14 @@ impl KinesisService {
             stream_status: "ACTIVE".to_string(),
             stream_creation_timestamp: Utc::now(),
             retention_period_hours: 24,
-            stream_mode: "PROVISIONED".to_string(),
+            stream_mode,
             encryption_type: "NONE".to_string(),
             key_id: None,
-            shard_count,
-            open_shard_count: shard_count,
+            shard_count: effective_shard_count,
+            open_shard_count: effective_shard_count,
             tags: std::collections::BTreeMap::new(),
-            shards: build_stream_shards(shard_count),
-            next_shard_index: shard_count,
+            shards: build_stream_shards(effective_shard_count),
+            next_shard_index: effective_shard_count,
             enhanced_metrics: Vec::new(),
             warm_throughput_mibps: None,
             max_record_size_kib: None,
@@ -433,11 +454,20 @@ impl KinesisService {
             .find(|candidate| candidate.shard_id == lease.shard_id)
             .ok_or_else(|| invalid_argument("ShardId is invalid"))?;
 
-        let end_index = shard
-            .records
-            .len()
-            .min(lease.next_record_index.saturating_add(limit));
-        let records: Vec<Value> = shard.records[lease.next_record_index..end_index]
+        // Drop records past retention. Records are stored in arrival
+        // order so we can stop scanning at the first one within window
+        // — but the iterator slot might point into the expired prefix,
+        // so advance past it before reading.
+        let retention_cutoff =
+            Utc::now() - chrono::Duration::hours(stream.retention_period_hours as i64);
+        let mut start_index = lease.next_record_index;
+        while start_index < shard.records.len()
+            && shard.records[start_index].approximate_arrival_timestamp < retention_cutoff
+        {
+            start_index += 1;
+        }
+        let end_index = shard.records.len().min(start_index.saturating_add(limit));
+        let records: Vec<Value> = shard.records[start_index..end_index]
             .iter()
             .map(|record| {
                 json!({
