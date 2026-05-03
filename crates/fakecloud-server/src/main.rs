@@ -502,6 +502,7 @@ async fn main() {
     let s3_delivery_for_logs = Arc::new(fakecloud_s3::delivery::S3DeliveryImpl::new(
         s3_state.clone(),
     ));
+    let s3_delivery_for_rds = s3_delivery_for_logs.clone();
     // Firehose state is constructed once and shared between the public
     // FirehoseService (registered later) and the cross-service delivery
     // hook the Logs subscription dispatch uses for `arn:aws:firehose:`
@@ -1872,7 +1873,9 @@ async fn main() {
             ),
         ),
     );
-    let mut rds_bus = DeliveryBus::new().with_eventbridge(eb_delivery_for_rds);
+    let mut rds_bus = DeliveryBus::new()
+        .with_eventbridge(eb_delivery_for_rds)
+        .with_s3(s3_delivery_for_rds);
     if let Some(ref ld) = lambda_delivery {
         rds_bus = rds_bus.with_lambda(ld.clone());
     }

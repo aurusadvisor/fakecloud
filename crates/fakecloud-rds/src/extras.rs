@@ -863,11 +863,6 @@ impl RdsService {
                 "    <DBCluster/>".to_string(),
                 &rid,
             )),
-            "RestoreDBInstanceFromS3" => Ok(xml_response(
-                action.as_str(),
-                "    <DBInstance/>".to_string(),
-                &rid,
-            )),
 
             // ── Recommendations ──
             "DescribeDBRecommendations" => Ok(xml_response("DescribeDBRecommendations", "    <DBRecommendations/>".to_string(), &rid)),
@@ -1666,7 +1661,6 @@ mod tests {
         ok("ModifyDBSnapshot", &[]);
         ok("ModifyDBSnapshotAttribute", &[]);
         ok("RestoreDBClusterFromS3", &[]);
-        ok("RestoreDBInstanceFromS3", &[]);
         ok("DescribeAccountAttributes", &[]);
         ok("DescribeEventCategories", &[]);
         ok("DescribeEvents", &[]);

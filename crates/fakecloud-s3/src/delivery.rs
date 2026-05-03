@@ -52,6 +52,25 @@ impl S3Delivery for S3DeliveryImpl {
         bucket_ref.objects.insert(key.to_string(), obj);
         Ok(())
     }
+
+    fn get_object(&self, account_id: &str, bucket: &str, key: &str) -> Result<Vec<u8>, String> {
+        let accounts = self.state.read();
+        let state = accounts
+            .get(account_id)
+            .ok_or_else(|| format!("account {account_id} has no S3 state"))?;
+        let bucket_ref = state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| format!("bucket {bucket} not found in account {account_id}"))?;
+        let object = bucket_ref
+            .objects
+            .get(key)
+            .ok_or_else(|| format!("key {key} not found in bucket {bucket}"))?;
+        let body = state
+            .read_body(&object.body)
+            .map_err(|e| format!("failed to read body: {e}"))?;
+        Ok(body.to_vec())
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +123,35 @@ mod tests {
         let err = delivery
             .put_object(ACCOUNT, "ghost", "k", b"x".to_vec(), None)
             .expect_err("missing bucket");
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn get_object_round_trips_put_object() {
+        let state = shared_state();
+        let delivery = S3DeliveryImpl::new(state);
+        delivery
+            .put_object(
+                ACCOUNT,
+                "logs-bucket",
+                "dump.sql",
+                b"-- pg dump --".to_vec(),
+                Some("application/sql"),
+            )
+            .expect("put");
+        let body = delivery
+            .get_object(ACCOUNT, "logs-bucket", "dump.sql")
+            .expect("get");
+        assert_eq!(body, b"-- pg dump --".to_vec());
+    }
+
+    #[test]
+    fn get_object_rejects_missing_key() {
+        let state = shared_state();
+        let delivery = S3DeliveryImpl::new(state);
+        let err = delivery
+            .get_object(ACCOUNT, "logs-bucket", "ghost")
+            .expect_err("missing key");
         assert!(err.contains("not found"));
     }
 }

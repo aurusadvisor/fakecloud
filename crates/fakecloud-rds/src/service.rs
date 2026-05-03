@@ -389,6 +389,7 @@ impl AwsService for RdsService {
             "RestoreDBInstanceToPointInTime" => {
                 self.restore_db_instance_to_point_in_time(&request).await
             }
+            "RestoreDBInstanceFromS3" => self.restore_db_instance_from_s3(&request).await,
             _ => self.handle_extra_action(&request),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
@@ -2180,6 +2181,161 @@ impl RdsService {
             StatusCode::OK,
             query_response_xml(
                 "RestoreDBInstanceToPointInTime",
+                RDS_NS,
+                &format!(
+                    "<DBInstance>{}</DBInstance>",
+                    db_instance_xml(&instance, None)
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    async fn restore_db_instance_from_s3(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
+        let s3_bucket = required_query_param(request, "S3BucketName")?;
+        let s3_prefix = optional_query_param(request, "S3Prefix").unwrap_or_default();
+        let master_username = required_query_param(request, "MasterUsername")?;
+        let master_user_password = required_query_param(request, "MasterUserPassword")?;
+        let engine = required_query_param(request, "Engine")?;
+        let engine_version = optional_query_param(request, "EngineVersion")
+            .or_else(|| optional_query_param(request, "SourceEngineVersion"))
+            .unwrap_or_else(|| match engine.as_str() {
+                "postgres" => "16.3".to_string(),
+                "mysql" => "8.0".to_string(),
+                "mariadb" => "10.6".to_string(),
+                _ => "0".to_string(),
+            });
+        let allocated_storage = optional_query_param(request, "AllocatedStorage")
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(20);
+        let db_instance_class = optional_query_param(request, "DBInstanceClass")
+            .unwrap_or_else(|| "db.t3.micro".to_string());
+        let db_name_opt = optional_query_param(request, "DBName");
+        let vpc_security_group_ids = parse_vpc_security_group_ids(request);
+        let tags = parse_tags(request)?;
+
+        let bus = self.delivery_bus.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "InvalidParameterValue",
+                "S3 client not wired into RDS service",
+            )
+        })?;
+
+        let dump_data = bus
+            .get_object_from_s3(&request.account_id, &s3_bucket, &s3_prefix)
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidS3BucketFault",
+                    format!("S3 backup at {s3_bucket}/{s3_prefix} unavailable: {e}"),
+                )
+            })?;
+
+        let runtime = self.require_runtime()?;
+
+        let (dbi_resource_id, db_instance_arn) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+
+            if !state.begin_instance_creation(&db_instance_identifier) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::CONFLICT,
+                    "DBInstanceAlreadyExists",
+                    format!("DBInstance {db_instance_identifier} already exists."),
+                ));
+            }
+
+            (
+                state.next_dbi_resource_id(),
+                state.db_instance_arn(&db_instance_identifier),
+            )
+        };
+
+        let db_name = db_name_opt.unwrap_or_else(|| default_db_name(&engine).to_string());
+        let created_at = Utc::now();
+
+        let running = match runtime
+            .ensure_postgres(
+                &db_instance_identifier,
+                &engine,
+                &engine_version,
+                &master_username,
+                &master_user_password,
+                &db_name,
+                &request.account_id,
+                &request.region,
+            )
+            .await
+        {
+            Ok(running) => running,
+            Err(e) => {
+                self.state
+                    .write()
+                    .get_or_create(&request.account_id)
+                    .cancel_instance_creation(&db_instance_identifier);
+                return Err(runtime_error_to_service_error(e));
+            }
+        };
+
+        if let Err(e) = runtime
+            .restore_database(
+                &db_instance_identifier,
+                &engine,
+                &master_username,
+                &master_user_password,
+                &db_name,
+                &dump_data,
+            )
+            .await
+        {
+            self.state
+                .write()
+                .get_or_create(&request.account_id)
+                .cancel_instance_creation(&db_instance_identifier);
+            runtime.stop_container(&db_instance_identifier).await;
+            return Err(runtime_error_to_service_error(e));
+        }
+
+        let instance = build_s3_restored_instance(
+            &db_instance_identifier,
+            db_instance_arn,
+            dbi_resource_id,
+            created_at,
+            allocated_storage,
+            db_instance_class,
+            engine.clone(),
+            engine_version,
+            master_username,
+            master_user_password,
+            db_name,
+            vpc_security_group_ids,
+            &running,
+            tags,
+        );
+
+        self.state
+            .write()
+            .get_or_create(&request.account_id)
+            .finish_instance_creation(instance.clone());
+
+        self.emit_event(
+            RdsSourceType::DbInstance,
+            &db_instance_identifier,
+            &instance.db_instance_arn,
+            "RDS-EVENT-0043",
+            &["creation"],
+            "DB instance restored from S3 backup",
+        );
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            query_response_xml(
+                "RestoreDBInstanceFromS3",
                 RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
