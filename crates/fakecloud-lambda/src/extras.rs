@@ -156,7 +156,7 @@ impl LambdaService {
         let res = resource.unwrap_or("");
         match action {
             // Function lifecycle extras
-            "GetFunctionConfiguration" => self.get_function_configuration(res, aid),
+            "GetFunctionConfiguration" => self.get_function_configuration(res, aid, req),
             "UpdateFunctionConfiguration" => self.update_function_configuration(res, req),
             "UpdateFunctionCode" => self.update_function_code(res, req),
             "UpdateEventSourceMapping" => self.update_event_source_mapping_handler(res, req),
@@ -165,7 +165,7 @@ impl LambdaService {
             "InvokeWithResponseStream" => Ok(AwsResponse::json(StatusCode::OK, "{}".to_string())),
 
             // Versions
-            "ListVersionsByFunction" => self.list_versions_by_function(res, aid),
+            "ListVersionsByFunction" => self.list_versions_by_function(res, aid, req),
 
             // Aliases
             "CreateAlias" => self.create_alias(res, req),
@@ -257,14 +257,41 @@ impl LambdaService {
         &self,
         function_name: &str,
         account_id: &str,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let region = self.region_for(account_id);
+        let qualifier = req.query_params.get("Qualifier").cloned();
         self.with_state_read(account_id, &region, |state| {
-            state
+            let live = state
                 .functions
                 .get(function_name)
-                .map(|f| ok(self.function_config_json(f)))
-                .unwrap_or_else(|| Err(not_found("Function", function_name)))
+                .ok_or_else(|| not_found("Function", function_name))?;
+            // Qualifier resolution mirrors GetFunction: $LATEST or omitted
+            // returns the live config; numeric / alias qualifiers resolve
+            // to a numbered snapshot.
+            let resolved = crate::service::resolve_qualifier_to_version(
+                state,
+                function_name,
+                qualifier.as_deref(),
+            );
+            let (func, version_label) = match resolved {
+                None => (live, "$LATEST".to_string()),
+                Some(v) => {
+                    let snap = state
+                        .function_version_snapshots
+                        .get(function_name)
+                        .and_then(|m| m.get(&v))
+                        .ok_or_else(|| not_found("Function", function_name))?;
+                    (snap, v)
+                }
+            };
+            let mut config = self.function_config_json(func);
+            config["Version"] = json!(version_label);
+            if version_label != "$LATEST" {
+                config["FunctionArn"] = json!(format!("{}:{version_label}", live.function_arn));
+                config["MasterArn"] = json!(live.function_arn);
+            }
+            ok(config)
         })
     }
 
@@ -511,7 +538,7 @@ impl LambdaService {
         // freshly updated $LATEST and returns that version's config.
         if publish {
             drop(accounts);
-            return self.publish_version(function_name, &req.account_id);
+            return self.publish_version(function_name, &req.account_id, req);
         }
 
         ok(self.function_config_json(func))
@@ -554,8 +581,16 @@ impl LambdaService {
         &self,
         function_name: &str,
         account_id: &str,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let region = self.region_for(account_id);
+        let max_items: usize = req
+            .query_params
+            .get("MaxItems")
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|n| n.clamp(1, 50))
+            .unwrap_or(50);
+        let marker = req.query_params.get("Marker").cloned();
         self.with_state_read(account_id, &region, |state| {
             let func = state
                 .functions
@@ -564,10 +599,10 @@ impl LambdaService {
             // AWS returns $LATEST first, then numbered versions in
             // ascending order. Each numbered version is an immutable
             // snapshot of the function at publish time.
-            let mut versions: Vec<serde_json::Value> = Vec::new();
+            let mut all: Vec<serde_json::Value> = Vec::new();
             let mut latest = self.function_config_json(func);
             latest["Version"] = json!("$LATEST");
-            versions.push(latest);
+            all.push(latest);
             let snapshots = state.function_version_snapshots.get(function_name);
             if let Some(numbered) = state.function_versions.get(function_name) {
                 for v in numbered {
@@ -576,10 +611,29 @@ impl LambdaService {
                     cfg["Version"] = json!(v);
                     cfg["FunctionArn"] = json!(format!("{}:{v}", func.function_arn));
                     cfg["MasterArn"] = json!(func.function_arn);
-                    versions.push(cfg);
+                    all.push(cfg);
                 }
             }
-            ok(json!({ "Versions": versions }))
+            // Pagination: skip past Marker if supplied (Marker is the
+            // Version string of the entry to start *after*), then take
+            // up to MaxItems. Emit a NextMarker when truncated.
+            let start = match marker.as_deref() {
+                Some(m) => all
+                    .iter()
+                    .position(|v| v["Version"].as_str() == Some(m))
+                    .map(|i| i + 1)
+                    .unwrap_or(0),
+                None => 0,
+            };
+            let end = (start + max_items).min(all.len());
+            let page: Vec<serde_json::Value> = all[start..end].to_vec();
+            let mut body = json!({ "Versions": page });
+            if end < all.len() {
+                if let Some(last) = all[end - 1]["Version"].as_str() {
+                    body["NextMarker"] = json!(last);
+                }
+            }
+            ok(body)
         })
     }
 
