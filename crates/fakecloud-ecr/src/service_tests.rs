@@ -769,3 +769,183 @@ mod repo_policy_enforcement_tests {
         assert_eq!(err.code(), "AccessDeniedException");
     }
 }
+
+// ── Scan-on-push auto-trigger from PutImage ────────────────────
+
+#[cfg(test)]
+mod scan_on_push_tests {
+    use super::super::EcrService;
+    use crate::state::{
+        EcrState, ImageScanningConfiguration, RegistryScanningConfiguration, RegistryScanningRule,
+        Repository, RepositoryFilter, SharedEcrState,
+    };
+    use bytes::Bytes;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::service::AwsRequest;
+    use http::{HeaderMap, Method};
+    use parking_lot::RwLock;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const ACCOUNT: &str = "111111111111";
+
+    fn make_request(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "ecr".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: ACCOUNT.into(),
+            request_id: "req-1".into(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    /// Build a service with a single repo `repo_name`, the supplied
+    /// repo-level scan-on-push flag, and the supplied registry-level
+    /// scanning configuration.
+    fn fixture(
+        repo_name: &str,
+        repo_scan_on_push: bool,
+        registry_cfg: RegistryScanningConfiguration,
+    ) -> (EcrService, SharedEcrState) {
+        let mut mas: MultiAccountState<EcrState> =
+            MultiAccountState::new(ACCOUNT, "us-east-1", "http://fakecloud:4566");
+        let state = mas.get_or_create(ACCOUNT);
+        state.registry_scanning_configuration = registry_cfg;
+        let arn = state.repository_arn(repo_name);
+        let mut repo = Repository::new(repo_name, arn, ACCOUNT, "fakecloud:4566");
+        repo.image_scanning_configuration = ImageScanningConfiguration {
+            scan_on_push: repo_scan_on_push,
+        };
+        state.repositories.insert(repo_name.to_string(), repo);
+        let shared: SharedEcrState = Arc::new(RwLock::new(mas));
+        let svc = EcrService::new(shared.clone());
+        (svc, shared)
+    }
+
+    fn put_image(svc: &EcrService, repo_name: &str, manifest: &str, tag: &str) -> String {
+        let req = make_request(
+            "PutImage",
+            json!({
+                "repositoryName": repo_name,
+                "imageManifest": manifest,
+                "imageTag": tag,
+            }),
+        );
+        let resp = svc.put_image(&req).expect("PutImage should succeed");
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        body["image"]["imageId"]["imageDigest"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn scan_findings_present(state: &SharedEcrState, repo_name: &str, digest: &str) -> bool {
+        let accounts = state.read();
+        accounts
+            .get(ACCOUNT)
+            .and_then(|s| s.repositories.get(repo_name))
+            .map(|r| r.scan_findings.contains_key(digest))
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn put_image_triggers_scan_when_repo_scan_on_push_enabled() {
+        let (svc, state) = fixture("app", true, RegistryScanningConfiguration::default());
+        let digest = put_image(&svc, "app", "{\"mediaType\":\"x\"}", "v1");
+
+        // trigger_scan synchronously inserts an IN_PROGRESS findings
+        // entry before the async scanner runs. That entry is the
+        // observable signal that scan-on-push fired.
+        assert!(
+            scan_findings_present(&state, "app", &digest),
+            "expected scan_findings entry for {digest} after PutImage with repo scan-on-push"
+        );
+
+        // DescribeImageScanFindings reflects the scan having occurred:
+        // status is IN_PROGRESS or COMPLETE depending on scheduler
+        // timing, never absent.
+        let req = make_request(
+            "DescribeImageScanFindings",
+            json!({
+                "repositoryName": "app",
+                "imageId": {"imageDigest": digest},
+            }),
+        );
+        let resp = svc.describe_image_scan_findings(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let status = body["imageScanStatus"]["status"].as_str().unwrap();
+        assert!(
+            status == "IN_PROGRESS" || status == "COMPLETE",
+            "expected scan status IN_PROGRESS or COMPLETE, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_image_skips_scan_when_repo_scan_on_push_disabled() {
+        let (svc, state) = fixture("app", false, RegistryScanningConfiguration::default());
+        let digest = put_image(&svc, "app", "{\"mediaType\":\"x\"}", "v1");
+
+        assert!(
+            !scan_findings_present(&state, "app", &digest),
+            "expected no scan_findings entry when scan-on-push is disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_image_triggers_scan_via_registry_level_rule() {
+        // Repo-level disabled, but registry rule says SCAN_ON_PUSH for
+        // any repo whose name matches the wildcard.
+        let registry_cfg = RegistryScanningConfiguration {
+            scan_type: "BASIC".to_string(),
+            rules: vec![RegistryScanningRule {
+                scan_frequency: "SCAN_ON_PUSH".to_string(),
+                repository_filters: vec![RepositoryFilter {
+                    filter: "app*".to_string(),
+                    filter_type: "WILDCARD".to_string(),
+                }],
+            }],
+        };
+        let (svc, state) = fixture("app", false, registry_cfg);
+        let digest = put_image(&svc, "app", "{\"mediaType\":\"x\"}", "v1");
+
+        assert!(
+            scan_findings_present(&state, "app", &digest),
+            "expected registry-level rule to trigger scan even with repo flag off"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_image_skips_scan_when_registry_rule_filter_does_not_match() {
+        // Registry rule scoped to a different prefix; pushed repo
+        // should not trigger any scan path.
+        let registry_cfg = RegistryScanningConfiguration {
+            scan_type: "BASIC".to_string(),
+            rules: vec![RegistryScanningRule {
+                scan_frequency: "SCAN_ON_PUSH".to_string(),
+                repository_filters: vec![RepositoryFilter {
+                    filter: "other-*".to_string(),
+                    filter_type: "WILDCARD".to_string(),
+                }],
+            }],
+        };
+        let (svc, state) = fixture("app", false, registry_cfg);
+        let digest = put_image(&svc, "app", "{\"mediaType\":\"x\"}", "v1");
+
+        assert!(
+            !scan_findings_present(&state, "app", &digest),
+            "expected non-matching registry rule to skip scan"
+        );
+    }
+}
