@@ -172,39 +172,49 @@ impl DynamoDbService {
             }
         }
 
+        // AWS semantics: `Limit` caps the number of items *examined*
+        // (post-key-condition, pre-FilterExpression). FilterExpression
+        // then runs on the limited slice, and `LastEvaluatedKey`
+        // points at the last item examined — even if the filter
+        // dropped it. Without this ordering a paginating client never
+        // converges: the filter would shrink the set before the
+        // truncation tracked progress.
+        let has_more;
+        let last_examined_idx;
+        if let Some(lim) = limit {
+            has_more = matched.len() > lim;
+            last_examined_idx = if has_more { Some(lim - 1) } else { None };
+            matched.truncate(lim);
+        } else {
+            has_more = false;
+            last_examined_idx = None;
+        }
+
+        // Snapshot the key of the last examined item before the filter
+        // can drop it.
+        let last_examined_key =
+            last_examined_idx
+                .and_then(|i| matched.get(i).copied())
+                .map(|item| {
+                    let mut key =
+                        extract_key_for_schema(item, &hash_key_name, range_key_name.as_deref());
+                    if is_gsi_query {
+                        let table_key =
+                            extract_key_for_schema(item, &table_pk_hash, table_pk_range.as_deref());
+                        key.extend(table_key);
+                    }
+                    key
+                });
+
+        let scanned_count = matched.len();
+
         if let Some(filter) = filter_expression {
             matched.retain(|item| {
                 evaluate_filter_expression(filter, item, &expr_attr_names, &expr_attr_values)
             });
         }
 
-        let scanned_count = matched.len();
-
-        let has_more = if let Some(lim) = limit {
-            let more = matched.len() > lim;
-            matched.truncate(lim);
-            more
-        } else {
-            false
-        };
-
-        // Build LastEvaluatedKey from the last returned item if there are more results.
-        // For GSI queries, include both the index keys and the table's primary key
-        // so the item can be uniquely identified on resume.
-        let last_evaluated_key = if has_more {
-            matched.last().map(|item| {
-                let mut key =
-                    extract_key_for_schema(item, &hash_key_name, range_key_name.as_deref());
-                if is_gsi_query {
-                    let table_key =
-                        extract_key_for_schema(item, &table_pk_hash, table_pk_range.as_deref());
-                    key.extend(table_key);
-                }
-                key
-            })
-        } else {
-            None
-        };
+        let last_evaluated_key = if has_more { last_examined_key } else { None };
 
         // Collect partition key values for contributor insights
         let insights_enabled = table.contributor_insights_status == "ENABLED";
@@ -343,7 +353,48 @@ impl DynamoDbService {
         let hash_key_name = table.hash_key_name().to_string();
         let range_key_name = table.range_key_name().map(|s| s.to_string());
 
-        let mut matched: Vec<&HashMap<String, AttributeValue>> = table.items.iter().collect();
+        // Parallel Scan: Segment / TotalSegments split the table into
+        // disjoint shards by hashing the partition key. Real DDB
+        // doesn't document the hash function, so we use stdlib
+        // `DefaultHasher` over the rendered hash-key value — stable
+        // across a single fakecloud run, which is enough for the
+        // disjoint-shard contract clients depend on.
+        let total_segments = body["TotalSegments"].as_i64().map(|v| v as usize);
+        let segment = body["Segment"].as_i64().map(|v| v as usize);
+        if total_segments.is_some() != segment.is_some() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Both Segment and TotalSegments must be supplied together",
+            ));
+        }
+        if let (Some(seg), Some(total)) = (segment, total_segments) {
+            if total == 0 || seg >= total {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Segment must be less than TotalSegments and TotalSegments must be > 0",
+                ));
+            }
+        }
+
+        let mut matched: Vec<&HashMap<String, AttributeValue>> = table
+            .items
+            .iter()
+            .filter(|item| match (segment, total_segments) {
+                (Some(seg), Some(total)) => {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut h = DefaultHasher::new();
+                    item.get(hash_key_name.as_str())
+                        .map(|v| v.to_string())
+                        .unwrap_or_default()
+                        .hash(&mut h);
+                    (h.finish() as usize) % total == seg
+                }
+                _ => true,
+            })
+            .collect();
 
         // Apply ExclusiveStartKey: skip items up to and including the start key
         if let Some(ref start_key) = exclusive_start_key {
@@ -354,6 +405,23 @@ impl DynamoDbService {
             }
         }
 
+        // Same Limit-before-Filter ordering as Query (see comment
+        // there): pagination only converges if `LastEvaluatedKey`
+        // tracks examined items, not surviving items.
+        let has_more;
+        let last_examined_idx;
+        if let Some(lim) = limit {
+            has_more = matched.len() > lim;
+            last_examined_idx = if has_more { Some(lim - 1) } else { None };
+            matched.truncate(lim);
+        } else {
+            has_more = false;
+            last_examined_idx = None;
+        }
+        let last_examined_key = last_examined_idx
+            .and_then(|i| matched.get(i).copied())
+            .map(|item| extract_key_for_schema(item, &hash_key_name, range_key_name.as_deref()));
+
         let scanned_count = matched.len();
 
         if let Some(filter) = filter_expression {
@@ -362,22 +430,7 @@ impl DynamoDbService {
             });
         }
 
-        let has_more = if let Some(lim) = limit {
-            let more = matched.len() > lim;
-            matched.truncate(lim);
-            more
-        } else {
-            false
-        };
-
-        // Build LastEvaluatedKey from the last returned item if there are more results
-        let last_evaluated_key = if has_more {
-            matched
-                .last()
-                .map(|item| extract_key_for_schema(item, &hash_key_name, range_key_name.as_deref()))
-        } else {
-            None
-        };
+        let last_evaluated_key = if has_more { last_examined_key } else { None };
 
         // Collect partition key values for contributor insights
         let insights_enabled = table.contributor_insights_status == "ENABLED";
@@ -502,4 +555,190 @@ fn apply_index_projection(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{DynamoTable, KeySchemaElement, ProvisionedThroughput, SharedDynamoDbState};
+    use bytes::Bytes;
+    use chrono::Utc;
+    use http::{HeaderMap, Method};
+    use parking_lot::RwLock;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn req_for(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "dynamodb".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "r".into(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn make_state() -> SharedDynamoDbState {
+        Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ))
+    }
+
+    fn seed_table(
+        state: &SharedDynamoDbState,
+        name: &str,
+        items: Vec<HashMap<String, AttributeValue>>,
+    ) {
+        let mut accts = state.write();
+        let s = accts.get_or_create("123456789012");
+        let table = DynamoTable {
+            name: name.to_string(),
+            arn: format!("arn:aws:dynamodb:us-east-1:123456789012:table/{name}"),
+            table_id: "id".to_string(),
+            key_schema: vec![KeySchemaElement {
+                attribute_name: "pk".into(),
+                key_type: "HASH".into(),
+            }],
+            attribute_definitions: vec![],
+            provisioned_throughput: ProvisionedThroughput {
+                read_capacity_units: 0,
+                write_capacity_units: 0,
+            },
+            items,
+            gsi: vec![],
+            lsi: vec![],
+            tags: BTreeMap::new(),
+            created_at: Utc::now(),
+            status: "ACTIVE".to_string(),
+            item_count: 0,
+            size_bytes: 0,
+            billing_mode: "PAY_PER_REQUEST".to_string(),
+            ttl_attribute: None,
+            ttl_enabled: false,
+            resource_policy: None,
+            pitr_enabled: false,
+            kinesis_destinations: vec![],
+            contributor_insights_status: "DISABLED".to_string(),
+            contributor_insights_counters: BTreeMap::new(),
+            stream_enabled: false,
+            stream_view_type: None,
+            stream_arn: None,
+            stream_records: Arc::new(RwLock::new(Vec::new())),
+            sse_type: None,
+            sse_kms_key_arn: None,
+            deletion_protection_enabled: false,
+            on_demand_throughput: None,
+        };
+        s.tables.insert(name.to_string(), table);
+    }
+
+    fn item(pk: &str) -> HashMap<String, AttributeValue> {
+        let mut m = HashMap::new();
+        m.insert("pk".to_string(), json!({"S": pk}));
+        m
+    }
+
+    fn item_with(pk: &str, attr: &str, val: &str) -> HashMap<String, AttributeValue> {
+        let mut m = HashMap::new();
+        m.insert("pk".to_string(), json!({"S": pk}));
+        m.insert(attr.to_string(), json!({"S": val}));
+        m
+    }
+
+    #[tokio::test]
+    async fn scan_limit_caps_examined_not_filtered() {
+        // 4 items: 2 match the filter, 2 don't. Limit=2 must examine
+        // the first 2 only (one of which matches), so Items.len() = 1
+        // and ScannedCount = 2.
+        let state = make_state();
+        seed_table(
+            &state,
+            "T",
+            vec![
+                item_with("a", "color", "red"),
+                item_with("b", "color", "blue"),
+                item_with("c", "color", "red"),
+                item_with("d", "color", "red"),
+            ],
+        );
+        let svc = DynamoDbService::new(state);
+        let resp = svc
+            .scan(&req_for(
+                "Scan",
+                json!({
+                    "TableName": "T",
+                    "Limit": 2,
+                    "FilterExpression": "color = :v",
+                    "ExpressionAttributeValues": {":v": {"S": "red"}},
+                }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["ScannedCount"].as_i64().unwrap(), 2);
+        assert_eq!(body["Count"].as_i64().unwrap(), 1);
+        assert!(
+            body["LastEvaluatedKey"].is_object(),
+            "LastEvaluatedKey must point at the last examined item, not the last surviving"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_parallel_segments_partition_table() {
+        let state = make_state();
+        seed_table(
+            &state,
+            "T",
+            (0..16).map(|i| item(&format!("k{i}"))).collect(),
+        );
+        let svc = DynamoDbService::new(state);
+        let mut union = std::collections::HashSet::new();
+        for seg in 0..4 {
+            let resp = svc
+                .scan(&req_for(
+                    "Scan",
+                    json!({
+                        "TableName": "T",
+                        "TotalSegments": 4,
+                        "Segment": seg,
+                    }),
+                ))
+                .unwrap();
+            let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            for it in body["Items"].as_array().unwrap() {
+                let pk = it["pk"]["S"].as_str().unwrap().to_string();
+                assert!(
+                    union.insert(pk.clone()),
+                    "key {pk} appeared in two segments — shards must be disjoint"
+                );
+            }
+        }
+        assert_eq!(
+            union.len(),
+            16,
+            "every item must land in exactly one segment"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_segment_without_total_segments_rejected() {
+        let state = make_state();
+        seed_table(&state, "T", vec![item("a")]);
+        let svc = DynamoDbService::new(state);
+        let err = svc
+            .scan(&req_for("Scan", json!({"TableName": "T", "Segment": 0})))
+            .err()
+            .expect("should reject Segment without TotalSegments");
+        assert!(format!("{err:?}").contains("Segment and TotalSegments"));
+    }
 }
