@@ -258,9 +258,6 @@ pub struct LambdaState {
     /// Recursion configs keyed by function name.
     #[serde(default)]
     pub recursion_configs: BTreeMap<String, String>,
-    /// Tags keyed by resource ARN.
-    #[serde(default)]
-    pub tags: BTreeMap<String, Vec<(String, String)>>,
     /// Account settings (single per-account record).
     #[serde(default)]
     pub account_settings: Option<AccountSettings>,
@@ -380,7 +377,6 @@ impl LambdaState {
             runtime_management: BTreeMap::new(),
             scaling_configs: BTreeMap::new(),
             recursion_configs: BTreeMap::new(),
-            tags: BTreeMap::new(),
             account_settings: None,
         }
     }
@@ -402,7 +398,6 @@ impl LambdaState {
         self.runtime_management.clear();
         self.scaling_configs.clear();
         self.recursion_configs.clear();
-        self.tags.clear();
         self.account_settings = None;
     }
 }

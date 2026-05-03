@@ -72,8 +72,9 @@ fn body(req: &AwsRequest) -> Value {
 /// Extract the function name from a Lambda function ARN, ignoring any
 /// trailing `:version` / `:alias` qualifier. Returns `None` for ARNs
 /// that name a different resource type (event-source mapping,
-/// code-signing config, layer, …) so the caller can fall through to
-/// the keyed tag bag.
+/// code-signing config, layer, …) — Lambda only supports tags on
+/// function ARNs in this implementation, so non-function ARNs are
+/// rejected by callers as `InvalidParameterValueException`.
 fn function_name_from_arn(arn: &str) -> Option<String> {
     let rest = arn.strip_prefix("arn:aws:lambda:")?;
     let mut parts = rest.splitn(5, ':');
@@ -91,6 +92,34 @@ fn function_name_from_arn(arn: &str) -> Option<String> {
             .unwrap_or(name_with_qualifier)
             .to_string(),
     )
+}
+
+/// Parse a raw query string into key/value pairs preserving repeats.
+/// `req.query_params` is a `HashMap<String, String>` and so collapses
+/// `tagKeys=A&tagKeys=B` to a single entry; this lets the
+/// `UntagResource` handler see every value the caller actually sent.
+/// Percent-decodes both key and value with the same lossy fallback the
+/// rest of the dispatch path uses.
+fn parse_query_pairs(raw_query: &str) -> Vec<(String, String)> {
+    raw_query
+        .split('&')
+        .filter(|s| !s.is_empty())
+        .map(|pair| {
+            let mut it = pair.splitn(2, '=');
+            let k = it.next().unwrap_or("");
+            let v = it.next().unwrap_or("");
+            (decode_query_segment(k), decode_query_segment(v))
+        })
+        .collect()
+}
+
+fn decode_query_segment(s: &str) -> String {
+    // Replace `+` with space to match `application/x-www-form-urlencoded`,
+    // then percent-decode. SDKs hit both shapes for path/query data.
+    let plus_decoded = s.replace('+', " ");
+    percent_encoding::percent_decode_str(&plus_decoded)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 /// Build a fakecloud-hosted download URL for a layer version's ZIP. The URL
@@ -1707,24 +1736,26 @@ impl LambdaService {
                     .collect()
             })
             .unwrap_or_default();
+        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!("Resource ARN is not a Lambda function: {resource_arn}"),
+            )
+        })?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        // For function ARNs, write directly onto the function's `tags`
-        // map so `GetFunction` and `ListTagsForResource` agree without
-        // a second lookup. Non-function ARNs (event source mappings,
-        // code-signing configs) fall back to the keyed bag.
-        if let Some(name) = function_name_from_arn(resource_arn) {
-            if let Some(func) = state.functions.get_mut(&name) {
-                for (k, v) in &new_tags {
-                    func.tags.insert(k.clone(), v.clone());
-                }
-                return empty();
-            }
-        }
-        let entry = state.tags.entry(resource_arn.to_string()).or_default();
+        let func = state.functions.get_mut(&name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Function not found: {name}"),
+            )
+        })?;
+        // Single source of truth: per-function `tags`. `GetFunction`,
+        // `ListTagsForResource`, and `UntagResource` all read here.
         for (k, v) in new_tags {
-            entry.retain(|(ek, _)| ek != &k);
-            entry.push((k, v));
+            func.tags.insert(k, v);
         }
         empty()
     }
@@ -1735,26 +1766,34 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         // AWS sends keys as repeated `tagKeys=K1&tagKeys=K2` query
-        // params. Some SDKs also serialize `tagKeys.member.1=K1` /
-        // `tagKeys.1=K1` — accept both shapes.
+        // params. The dispatcher's deduplicated `query_params` HashMap
+        // collapses repeats, so parse the raw query string for every
+        // occurrence. Also accept `tagKeys.1=K1` / `tagKeys.member.1=K1`
+        // for SDKs that serialize list params indexed-style.
         let mut keys: Vec<String> = Vec::new();
-        for (k, v) in &req.query_params {
+        for (k, v) in parse_query_pairs(&req.raw_query) {
             if k == "tagKeys" || k.starts_with("tagKeys.") {
-                keys.push(v.clone());
+                keys.push(v);
             }
         }
+        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!("Resource ARN is not a Lambda function: {resource_arn}"),
+            )
+        })?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if let Some(name) = function_name_from_arn(resource_arn) {
-            if let Some(func) = state.functions.get_mut(&name) {
-                for k in &keys {
-                    func.tags.remove(k);
-                }
-                return empty();
-            }
-        }
-        if let Some(entry) = state.tags.get_mut(resource_arn) {
-            entry.retain(|(k, _)| !keys.contains(k));
+        let func = state.functions.get_mut(&name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Function not found: {name}"),
+            )
+        })?;
+        for k in &keys {
+            func.tags.remove(k);
         }
         empty()
     }
@@ -1764,27 +1803,27 @@ impl LambdaService {
         resource_arn: &str,
         account_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                format!("Resource ARN is not a Lambda function: {resource_arn}"),
+            )
+        })?;
         let region = self.region_for(account_id);
         self.with_state_read(account_id, &region, |state| {
-            if let Some(name) = function_name_from_arn(resource_arn) {
-                if let Some(func) = state.functions.get(&name) {
-                    let tags: serde_json::Map<String, Value> = func
-                        .tags
-                        .iter()
-                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                        .collect();
-                    return ok(json!({"Tags": tags}));
-                }
-            }
-            let tags: serde_json::Map<String, Value> = state
+            let func = state.functions.get(&name).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!("Function not found: {name}"),
+                )
+            })?;
+            let tags: serde_json::Map<String, Value> = func
                 .tags
-                .get(resource_arn)
-                .map(|v| {
-                    v.iter()
-                        .map(|(k, val)| (k.clone(), Value::String(val.clone())))
-                        .collect()
-                })
-                .unwrap_or_default();
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
             ok(json!({"Tags": tags}))
         })
     }

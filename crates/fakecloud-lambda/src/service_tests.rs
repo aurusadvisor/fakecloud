@@ -769,7 +769,9 @@ async fn add_permission_builds_canonical_statement() {
     assert_eq!(statement["Sid"], "s3-invoke");
     assert_eq!(statement["Effect"], "Allow");
     assert_eq!(statement["Principal"]["Service"], "s3.amazonaws.com");
-    assert_eq!(statement["Action"], "lambda:InvokeFunction");
+    // Verbatim round-trip: caller sent `InvokeFunction`, that's what
+    // AWS keeps in the policy doc.
+    assert_eq!(statement["Action"], "InvokeFunction");
     assert_eq!(
         statement["Resource"],
         "arn:aws:lambda:us-east-1:123456789012:function:f"
@@ -1739,4 +1741,165 @@ async fn update_function_code_publish_creates_new_version() {
         latest["CodeSize"].as_i64().unwrap(),
         b"publish-payload".len() as i64
     );
+}
+
+// ── AddPermission action round-trip (D3) ──────────────────────────
+
+#[tokio::test]
+async fn add_permission_stores_action_verbatim() {
+    // AWS keeps whatever string the caller sent in the policy doc
+    // verbatim — passing `s3:PutObject` should not get re-prefixed to
+    // `lambda:s3:PutObject`.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+    let body = json!({
+        "StatementId": "s3-put",
+        "Action": "s3:PutObject",
+        "Principal": "arn:aws:iam::123456789012:user/u",
+    });
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/f/policy",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, "/2015-03-31/functions/f/policy", "");
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let doc: Value = serde_json::from_str(body["Policy"].as_str().unwrap()).unwrap();
+    let stmts = doc["Statement"].as_array().unwrap();
+    assert_eq!(stmts.len(), 1);
+    assert_eq!(stmts[0]["Action"], "s3:PutObject");
+}
+
+#[tokio::test]
+async fn add_permission_action_without_prefix() {
+    // Documented behavior: store verbatim. Caller passed
+    // `InvokeFunction` (no `lambda:` prefix), GetPolicy returns
+    // `InvokeFunction`. The cross-service evaluator path that wants a
+    // qualified `service:verb` is responsible for normalizing on read,
+    // not the storage layer.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+    let body = json!({
+        "StatementId": "raw-verb",
+        "Action": "InvokeFunction",
+        "Principal": "events.amazonaws.com",
+    });
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/f/policy",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, "/2015-03-31/functions/f/policy", "");
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let doc: Value = serde_json::from_str(body["Policy"].as_str().unwrap()).unwrap();
+    let stmts = doc["Statement"].as_array().unwrap();
+    assert_eq!(stmts.len(), 1);
+    assert_eq!(stmts[0]["Action"], "InvokeFunction");
+}
+
+// ── Tag store unification (D3) ────────────────────────────────────
+
+#[tokio::test]
+async fn tag_resource_writes_to_function_tags() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "tag-fn").await;
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:tag-fn";
+    let body = json!({"Tags": {"env": "prod", "team": "core"}});
+    let req = make_request(
+        Method::POST,
+        &format!("/2017-03-31/tags/{arn}"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert!(resp.status.is_success());
+
+    // Read func.tags directly to confirm it landed there.
+    let accounts = svc.state.read();
+    let state = accounts.get("123456789012").unwrap();
+    let func = state.functions.get("tag-fn").unwrap();
+    assert_eq!(func.tags.get("env").map(String::as_str), Some("prod"));
+    assert_eq!(func.tags.get("team").map(String::as_str), Some("core"));
+}
+
+#[tokio::test]
+async fn list_tags_for_resource_reads_from_function_tags() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "tag-fn").await;
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:tag-fn";
+
+    // Seed via TagResource.
+    let body = json!({"Tags": {"a": "1", "b": "2"}});
+    let req = make_request(
+        Method::POST,
+        &format!("/2017-03-31/tags/{arn}"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, &format!("/2017-03-31/tags/{arn}"), "");
+    let resp = svc.handle(req).await.unwrap();
+    let out: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(out["Tags"]["a"], "1");
+    assert_eq!(out["Tags"]["b"], "2");
+}
+
+#[tokio::test]
+async fn untag_resource_with_multiple_keys() {
+    // AWS sends `tagKeys=A&tagKeys=B`. The dispatcher's deduplicated
+    // `query_params` HashMap collapses repeats, so the handler must
+    // parse `req.raw_query` directly to see both values.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "tag-fn").await;
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:tag-fn";
+
+    let body = json!({"Tags": {"A": "1", "B": "2", "C": "3"}});
+    let req = make_request(
+        Method::POST,
+        &format!("/2017-03-31/tags/{arn}"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let mut req = make_request(Method::DELETE, &format!("/2017-03-31/tags/{arn}"), "");
+    req.raw_query = "tagKeys=A&tagKeys=B".to_string();
+    svc.handle(req).await.unwrap();
+
+    let accounts = svc.state.read();
+    let state = accounts.get("123456789012").unwrap();
+    let func = state.functions.get("tag-fn").unwrap();
+    assert!(!func.tags.contains_key("A"));
+    assert!(!func.tags.contains_key("B"));
+    assert_eq!(func.tags.get("C").map(String::as_str), Some("3"));
+}
+
+#[tokio::test]
+async fn tag_state_unified_no_duplicate_state_tags() {
+    // After D3, `LambdaState::tags` no longer exists — tags live only
+    // on `LambdaFunction::tags`. This test pins the unified shape: a
+    // `TagResource` write puts a single entry in `func.tags` and there
+    // is no parallel `state.tags[arn]` storage to drift out of sync.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "tag-fn").await;
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:tag-fn";
+    let body = json!({"Tags": {"only": "here"}});
+    let req = make_request(
+        Method::POST,
+        &format!("/2017-03-31/tags/{arn}"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let accounts = svc.state.read();
+    let state = accounts.get("123456789012").unwrap();
+    let func = state.functions.get("tag-fn").unwrap();
+    assert_eq!(func.tags.get("only").map(String::as_str), Some("here"));
+    // The fact that this compiles is the structural assertion: there
+    // is no `state.tags` field to read from. The runtime check on
+    // `func.tags` confirms tags actually landed in the unified slot.
 }
