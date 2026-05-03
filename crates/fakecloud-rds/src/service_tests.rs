@@ -1022,6 +1022,94 @@ fn modify_db_parameter_group_unknown_errors() {
     );
 }
 
+#[test]
+fn modify_db_parameter_group_persists_parameters() {
+    let svc = make_service();
+    create_param_group(&svc, "pg1");
+    let req = request(
+        "ModifyDBParameterGroup",
+        &[
+            ("DBParameterGroupName", "pg1"),
+            ("Parameters.member.1.ParameterName", "max_connections"),
+            ("Parameters.member.1.ParameterValue", "200"),
+            ("Parameters.member.1.ApplyMethod", "immediate"),
+            ("Parameters.member.2.ParameterName", "shared_buffers"),
+            ("Parameters.member.2.ParameterValue", "256MB"),
+            ("Parameters.member.2.ApplyMethod", "pending-reboot"),
+        ],
+    );
+    svc.modify_db_parameter_group(&req).unwrap();
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    let pg = state.parameter_groups.get("pg1").unwrap();
+    assert_eq!(
+        pg.parameters.get("max_connections").map(String::as_str),
+        Some("200")
+    );
+    assert_eq!(
+        pg.parameters.get("shared_buffers").map(String::as_str),
+        Some("256MB")
+    );
+}
+
+#[test]
+fn describe_db_parameters_returns_user_set_values() {
+    let svc = make_service();
+    create_param_group(&svc, "pg1");
+    let req = request(
+        "ModifyDBParameterGroup",
+        &[
+            ("DBParameterGroupName", "pg1"),
+            ("Parameters.member.1.ParameterName", "max_connections"),
+            ("Parameters.member.1.ParameterValue", "200"),
+        ],
+    );
+    svc.modify_db_parameter_group(&req).unwrap();
+
+    let req = request("DescribeDBParameters", &[("DBParameterGroupName", "pg1")]);
+    let resp = svc.describe_db_parameters_real(&req).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<ParameterName>max_connections</ParameterName>"));
+    assert!(body.contains("<ParameterValue>200</ParameterValue>"));
+    assert!(body.contains("<Source>user</Source>"));
+}
+
+#[test]
+fn describe_db_parameters_with_engine_default_source_omits_user_params() {
+    let svc = make_service();
+    create_param_group(&svc, "pg1");
+    let req = request(
+        "ModifyDBParameterGroup",
+        &[
+            ("DBParameterGroupName", "pg1"),
+            ("Parameters.member.1.ParameterName", "max_connections"),
+            ("Parameters.member.1.ParameterValue", "200"),
+        ],
+    );
+    svc.modify_db_parameter_group(&req).unwrap();
+
+    let req = request(
+        "DescribeDBParameters",
+        &[
+            ("DBParameterGroupName", "pg1"),
+            ("Source", "engine-default"),
+        ],
+    );
+    let resp = svc.describe_db_parameters_real(&req).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(!body.contains("max_connections"));
+}
+
+#[test]
+fn describe_db_parameters_unknown_group_returns_not_found() {
+    let svc = make_service();
+    let req = request("DescribeDBParameters", &[("DBParameterGroupName", "ghost")]);
+    assert_code(
+        svc.describe_db_parameters_real(&req),
+        "DBParameterGroupNotFound",
+    );
+}
+
 // ── DescribeDBInstances ──────────────────────────────────────────
 
 #[test]

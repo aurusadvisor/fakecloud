@@ -368,6 +368,7 @@ impl AwsService for RdsService {
             "DescribeDBEngineVersions" => self.describe_db_engine_versions(&request),
             "DescribeDBInstances" => self.describe_db_instances(&request),
             "DescribeDBParameterGroups" => self.describe_db_parameter_groups(&request),
+            "DescribeDBParameters" => self.describe_db_parameters_real(&request),
             "DescribeDBSnapshots" => self.describe_db_snapshots(&request),
             "DescribeDBSubnetGroups" => self.describe_db_subnet_groups(&request),
             "DescribeOrderableDBInstanceOptions" => {
@@ -2434,6 +2435,12 @@ impl RdsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_parameter_group_name = required_query_param(request, "DBParameterGroupName")?;
 
+        // Parse Parameters.member.N.{ParameterName,ParameterValue,ApplyMethod}
+        // before taking the lock so we can validate input independently.
+        // ApplyMethod is accepted (immediate vs pending-reboot) but the
+        // single-state model applies all changes immediately.
+        let parsed_params = parse_db_parameter_members(request);
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
 
@@ -2452,6 +2459,10 @@ impl RdsService {
             parameter_group.description = new_description;
         }
 
+        for (name, value) in parsed_params {
+            parameter_group.parameters.insert(name, value);
+        }
+
         let parameter_group_clone = parameter_group.clone();
 
         Ok(AwsResponse::xml(
@@ -2467,6 +2478,79 @@ impl RdsService {
             ),
         ))
     }
+
+    fn describe_db_parameters_real(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let db_parameter_group_name = required_query_param(request, "DBParameterGroupName")?;
+        let source_filter = optional_query_param(request, "Source");
+
+        let accounts = self.state.read();
+        let state = match accounts.get(&request.account_id) {
+            Some(s) => s,
+            None => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBParameterGroupNotFound",
+                    format!("DBParameterGroup {db_parameter_group_name} not found."),
+                ));
+            }
+        };
+        let parameter_group = state
+            .parameter_groups
+            .get(&db_parameter_group_name)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBParameterGroupNotFound",
+                    format!("DBParameterGroup {db_parameter_group_name} not found."),
+                )
+            })?;
+
+        // Modified params surface as Source=user; engine defaults
+        // surface as Source=engine-default. We only persist user-set
+        // values, so we always report `user` and skip when the caller
+        // requested only `engine-default`.
+        let want_user_source = source_filter.as_deref().is_none_or(|s| s == "user");
+        let mut members_xml = String::new();
+        if want_user_source {
+            for (name, value) in &parameter_group.parameters {
+                members_xml.push_str(&format!(
+                    "      <Parameter>\n        <ParameterName>{}</ParameterName>\n        <ParameterValue>{}</ParameterValue>\n        <Source>user</Source>\n        <ApplyType>dynamic</ApplyType>\n        <DataType>string</DataType>\n        <IsModifiable>true</IsModifiable>\n      </Parameter>\n",
+                    xml_escape(name),
+                    xml_escape(value),
+                ));
+            }
+        }
+        let body = format!("    <Parameters>\n{members_xml}    </Parameters>");
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            query_response_xml("DescribeDBParameters", RDS_NS, &body, &request.request_id),
+        ))
+    }
+}
+
+/// Parse `Parameters.member.N.{ParameterName,ParameterValue,ApplyMethod}`
+/// from a Query-protocol request. Skips members missing a name or value;
+/// ApplyMethod is accepted but ignored (single-state model).
+pub(crate) fn parse_db_parameter_members(request: &AwsRequest) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for index in 1.. {
+        let name_key = format!("Parameters.member.{index}.ParameterName");
+        let value_key = format!("Parameters.member.{index}.ParameterValue");
+        match (
+            optional_query_param(request, &name_key),
+            optional_query_param(request, &value_key),
+        ) {
+            (Some(name), Some(value)) if !name.is_empty() => {
+                out.push((name, value));
+            }
+            (None, None) => break,
+            _ => continue,
+        }
+    }
+    out
 }
 
 pub(crate) struct PaginationResult<T> {
