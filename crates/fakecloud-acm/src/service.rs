@@ -1476,4 +1476,123 @@ mod tests {
         }
         assert_eq!(last_status, "ISSUED");
     }
+
+    #[tokio::test]
+    async fn request_certificate_emits_parseable_pem() {
+        let svc = AcmService::default();
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({"DomainName": "example.com"}),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+
+        let resp = svc
+            .handle(make_req("GetCertificate", json!({"CertificateArn": arn})))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let cert_pem = body["Certificate"].as_str().unwrap();
+        assert!(
+            cert_pem.starts_with("-----BEGIN CERTIFICATE-----"),
+            "expected real PEM cert header, got {cert_pem:.80}"
+        );
+        assert!(cert_pem.trim_end().ends_with("-----END CERTIFICATE-----"));
+        // Real X.509 base64 body is much larger than the legacy
+        // base64-of-ARN placeholder (which was ~80 chars total).
+        assert!(
+            cert_pem.len() > 400,
+            "expected real X.509 PEM, got placeholder-sized blob"
+        );
+        // Sanity-check we didn't smuggle the ARN body back in via the
+        // old placeholder code path.
+        assert!(!cert_pem.contains(arn.as_str()));
+    }
+
+    #[tokio::test]
+    async fn request_certificate_includes_san() {
+        let svc = AcmService::default();
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({
+                    "DomainName": "example.com",
+                    "SubjectAlternativeNames": ["api.example.com", "www.example.com"],
+                }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+
+        let resp = svc
+            .handle(make_req("GetCertificate", json!({"CertificateArn": arn})))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let cert_pem = body["Certificate"].as_str().unwrap();
+        assert!(cert_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+        assert!(cert_pem.trim_end().ends_with("-----END CERTIFICATE-----"));
+
+        // Decode the PEM body and search the DER bytes for the SAN dNSName
+        // octets. rcgen emits SANs as IA5String entries inside the
+        // SubjectAltName extension, so the raw domain bytes are present.
+        let body_b64: String = cert_pem
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .join("");
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(&body_b64)
+            .expect("cert body is valid base64");
+        for san in ["example.com", "api.example.com", "www.example.com"] {
+            assert!(
+                der.windows(san.len()).any(|w| w == san.as_bytes()),
+                "expected SAN {san} embedded in DER"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_certificate_private_key_pem_is_valid() {
+        let svc = AcmService::default();
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({"DomainName": "key.example.com"}),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+
+        let st = svc.state.read();
+        let cert = st
+            .accounts
+            .get("123456789012")
+            .unwrap()
+            .certificates
+            .get(&arn)
+            .unwrap();
+        let key_pem = cert
+            .private_key_pem
+            .as_deref()
+            .expect("RequestCertificate should populate a real private key");
+        let starts_pkcs8 = key_pem.starts_with("-----BEGIN PRIVATE KEY-----");
+        let starts_rsa = key_pem.starts_with("-----BEGIN RSA PRIVATE KEY-----");
+        assert!(
+            starts_pkcs8 || starts_rsa,
+            "expected PKCS#8 or RSA private key header, got {key_pem:.80}"
+        );
+        assert!(
+            key_pem.trim_end().ends_with("-----END PRIVATE KEY-----")
+                || key_pem
+                    .trim_end()
+                    .ends_with("-----END RSA PRIVATE KEY-----")
+        );
+        assert!(key_pem.len() > 200);
+    }
 }
