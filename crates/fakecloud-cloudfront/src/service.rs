@@ -195,15 +195,51 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 
 pub struct CloudFrontService {
     pub(crate) state: SharedCloudFrontState,
+    /// How long the propagation tick sleeps before flipping a freshly
+    /// created or updated Distribution / DistributionTenant /
+    /// ConnectionGroup from `InProgress` to `Deployed`. Real CloudFront
+    /// takes ~15 minutes; the default of 1s keeps SDK-driven integration
+    /// tests fast while still simulating the async transition. Tests can
+    /// shrink it via [`CloudFrontService::with_propagation_delay`].
+    pub(crate) propagation_delay: std::time::Duration,
 }
 
 impl CloudFrontService {
     pub fn new(state: SharedCloudFrontState) -> Self {
-        Self { state }
+        Self {
+            state,
+            propagation_delay: std::time::Duration::from_secs(1),
+        }
     }
 
     pub fn shared_state(&self) -> SharedCloudFrontState {
         Arc::clone(&self.state)
+    }
+
+    /// Override the propagation delay used by `CreateDistribution`,
+    /// `UpdateDistribution`, and the equivalent DistributionTenant /
+    /// ConnectionGroup ops. Tests pass a small duration so they don't
+    /// have to wait wall-clock seconds for the `InProgress` -> `Deployed`
+    /// transition.
+    pub fn with_propagation_delay(mut self, delay: std::time::Duration) -> Self {
+        self.propagation_delay = delay;
+        self
+    }
+
+    /// Flip a stored Distribution's status synchronously. Returns `false`
+    /// if no distribution matches `id` across any account. The admin
+    /// endpoint `POST /_fakecloud/cloudfront/distributions/{id}/status`
+    /// calls this so tests can force `InProgress` <-> `Deployed` without
+    /// waiting on the propagation tick.
+    pub fn set_distribution_status(&self, id: &str, status: &str) -> bool {
+        let mut state = self.state.write();
+        for account in state.accounts.values_mut() {
+            if let Some(dist) = account.distributions.get_mut(id) {
+                dist.status = status.to_string();
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -509,10 +545,9 @@ impl CloudFrontService {
         let stored = StoredDistribution {
             id: id.clone(),
             arn: arn.clone(),
-            // CloudFront returns InProgress immediately after CreateDistribution
-            // and flips to Deployed once propagation completes. We flip on
-            // the first GetDistribution call so SDK polling loops observe
-            // the lifecycle without us having to spin a background task.
+            // Real CloudFront returns InProgress immediately and flips to
+            // Deployed ~15 minutes later once the edge propagation completes.
+            // The spawn below mirrors that lifecycle on a configurable delay.
             status: "InProgress".to_string(),
             last_modified_time: now,
             domain_name: domain,
@@ -526,6 +561,8 @@ impl CloudFrontService {
         }
         drop(state);
 
+        self.schedule_distribution_deploy(id.clone());
+
         let body = build_distribution_xml(&stored);
         let mut headers = HeaderMap::new();
         set_header(&mut headers, ETAG, &etag);
@@ -533,26 +570,78 @@ impl CloudFrontService {
         Ok(xml_response(StatusCode::CREATED, body, headers))
     }
 
+    /// Spawn a tokio task that flips the named distribution from
+    /// `InProgress` to `Deployed` after `propagation_delay`. Used by
+    /// `CreateDistribution` and `UpdateDistribution` to model the real
+    /// CloudFront edge propagation lifecycle.
+    fn schedule_distribution_deploy(&self, id: String) {
+        let state = Arc::clone(&self.state);
+        let delay = self.propagation_delay;
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let mut s = state.write();
+            for account in s.accounts.values_mut() {
+                if let Some(d) = account.distributions.get_mut(&id) {
+                    if d.status == "InProgress" {
+                        d.status = "Deployed".to_string();
+                    }
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Same as [`schedule_distribution_deploy`] but for DistributionTenants.
+    pub(crate) fn schedule_distribution_tenant_deploy(&self, id: String) {
+        let state = Arc::clone(&self.state);
+        let delay = self.propagation_delay;
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let mut s = state.write();
+            for account in s.accounts.values_mut() {
+                if let Some(t) = account.distribution_tenants.get_mut(&id) {
+                    if t.status == "InProgress" {
+                        t.status = "Deployed".to_string();
+                    }
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Same as [`schedule_distribution_deploy`] but for ConnectionGroups.
+    pub(crate) fn schedule_connection_group_deploy(&self, id: String) {
+        let state = Arc::clone(&self.state);
+        let delay = self.propagation_delay;
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let mut s = state.write();
+            for account in s.accounts.values_mut() {
+                if let Some(g) = account.connection_groups.get_mut(&id) {
+                    if g.status == "InProgress" {
+                        g.status = "Deployed".to_string();
+                    }
+                    return;
+                }
+            }
+        });
+    }
+
     fn get_distribution(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
         let id = route
             .id
             .as_deref()
             .ok_or_else(|| invalid_argument("missing distribution id"))?;
-        let mut state = self.state.write();
+        let state = self.state.read();
         let account = state
             .accounts
-            .get_mut(DEFAULT_ACCOUNT)
+            .get(DEFAULT_ACCOUNT)
             .ok_or_else(|| no_such_distribution(id))?;
-        let stored = account
+        let dist = account
             .distributions
-            .get_mut(id)
-            .ok_or_else(|| no_such_distribution(id))?;
-        // First read after CreateDistribution flips the status; subsequent
-        // reads keep it as Deployed.
-        if stored.status == "InProgress" {
-            stored.status = "Deployed".to_string();
-        }
-        let dist = stored.clone();
+            .get(id)
+            .ok_or_else(|| no_such_distribution(id))?
+            .clone();
         drop(state);
         let body = build_distribution_xml(&dist);
         let mut headers = HeaderMap::new();
@@ -628,8 +717,13 @@ impl CloudFrontService {
         dist.config = new_config;
         dist.etag = generate_etag();
         dist.last_modified_time = Utc::now();
+        // UpdateDistribution kicks off a fresh edge propagation; AWS flips
+        // the status back to InProgress until the new config lands.
+        dist.status = "InProgress".to_string();
         let snapshot = dist.clone();
         drop(state);
+
+        self.schedule_distribution_deploy(id.to_string());
 
         let body = build_distribution_xml(&snapshot);
         let mut headers = HeaderMap::new();
@@ -786,7 +880,7 @@ impl CloudFrontService {
         let stored = StoredDistribution {
             id: new_id.clone(),
             arn: arn.clone(),
-            status: "Deployed".into(),
+            status: "InProgress".to_string(),
             last_modified_time: now,
             domain_name: format!("{}.cloudfront.net", new_id.to_lowercase()),
             in_progress_invalidation_batches: 0,
@@ -795,6 +889,7 @@ impl CloudFrontService {
         };
         account.distributions.insert(new_id.clone(), stored.clone());
         drop(state);
+        self.schedule_distribution_deploy(new_id);
         let body = build_distribution_xml(&stored);
         let mut headers = HeaderMap::new();
         set_header(&mut headers, ETAG, &etag);
@@ -1615,9 +1710,44 @@ mod tests {
         assert_eq!(del.status, StatusCode::NO_CONTENT);
     }
 
+    async fn create_distribution_returning_id(svc: &CloudFrontService, caller_ref: &str) -> String {
+        let body = minimal_dist_config_xml(caller_ref);
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &body,
+            ))
+            .await
+            .unwrap();
+        let xml = std::str::from_utf8(create.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        xml.split("<Id>")
+            .nth(1)
+            .unwrap()
+            .split("</Id>")
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    fn distribution_status(svc: &CloudFrontService, id: &str) -> String {
+        let state = svc.state.read();
+        state
+            .accounts
+            .get(DEFAULT_ACCOUNT)
+            .and_then(|a| a.distributions.get(id))
+            .map(|d| d.status.clone())
+            .unwrap_or_default()
+    }
+
     #[tokio::test]
-    async fn distribution_status_transitions_in_progress_to_deployed() {
-        let svc = CloudFrontService::new(make_state());
+    async fn create_distribution_starts_in_progress() {
+        // Use a long delay so the auto-tick can't race the assertion.
+        let svc = CloudFrontService::new(make_state())
+            .with_propagation_delay(std::time::Duration::from_secs(60));
         let body = minimal_dist_config_xml("status-ref");
         let create = svc
             .handle(make_request(
@@ -1635,6 +1765,60 @@ mod tests {
             xml.contains("<Status>InProgress</Status>"),
             "expected initial status InProgress, got: {xml}"
         );
+    }
+
+    #[tokio::test]
+    async fn auto_transition_after_tick_marks_deployed() {
+        let svc = CloudFrontService::new(make_state())
+            .with_propagation_delay(std::time::Duration::from_millis(50));
+        let id = create_distribution_returning_id(&svc, "auto-tick-ref").await;
+        assert_eq!(distribution_status(&svc, &id), "InProgress");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(distribution_status(&svc, &id), "Deployed");
+    }
+
+    #[tokio::test]
+    async fn set_distribution_status_via_admin_flips_synchronously() {
+        let svc = CloudFrontService::new(make_state())
+            .with_propagation_delay(std::time::Duration::from_secs(60));
+        let id = create_distribution_returning_id(&svc, "admin-ref").await;
+        assert_eq!(distribution_status(&svc, &id), "InProgress");
+        assert!(svc.set_distribution_status(&id, "Deployed"));
+        assert_eq!(distribution_status(&svc, &id), "Deployed");
+        assert!(svc.set_distribution_status(&id, "InProgress"));
+        assert_eq!(distribution_status(&svc, &id), "InProgress");
+    }
+
+    #[tokio::test]
+    async fn set_distribution_status_unknown_id_returns_false() {
+        let svc = CloudFrontService::new(make_state());
+        assert!(!svc.set_distribution_status("E-DOES-NOT-EXIST", "Deployed"));
+    }
+
+    #[tokio::test]
+    async fn update_distribution_resets_to_in_progress() {
+        let svc = CloudFrontService::new(make_state())
+            .with_propagation_delay(std::time::Duration::from_secs(60));
+        let body = minimal_dist_config_xml("update-reset-ref");
+        let create = svc
+            .handle(make_request(
+                http::Method::POST,
+                "/2020-05-31/distribution",
+                "",
+                &body,
+            ))
+            .await
+            .unwrap();
+        let etag = create
+            .headers
+            .get(ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let xml = std::str::from_utf8(create.body.expect_bytes())
+            .unwrap()
+            .to_string();
         let id = xml
             .split("<Id>")
             .nth(1)
@@ -1643,23 +1827,25 @@ mod tests {
             .next()
             .unwrap()
             .to_string();
+        // Force the distribution to Deployed via the admin mutator so we can
+        // observe the UpdateDistribution flip back to InProgress.
+        assert!(svc.set_distribution_status(&id, "Deployed"));
+        assert_eq!(distribution_status(&svc, &id), "Deployed");
 
-        let get = svc
-            .handle(make_request(
-                http::Method::GET,
-                &format!("/2020-05-31/distribution/{id}"),
-                "",
-                "",
-            ))
-            .await
-            .unwrap();
-        let get_xml = std::str::from_utf8(get.body.expect_bytes())
-            .unwrap()
-            .to_string();
-        assert!(
-            get_xml.contains("<Status>Deployed</Status>"),
-            "expected Deployed after first GetDistribution, got: {get_xml}"
+        let updated_body = body.replace(
+            "<ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>",
+            "<ViewerProtocolPolicy>https-only</ViewerProtocolPolicy>",
         );
+        let mut update_req = make_request(
+            http::Method::PUT,
+            &format!("/2020-05-31/distribution/{id}/config"),
+            "",
+            &updated_body,
+        );
+        update_req.headers.insert(IF_MATCH, etag.parse().unwrap());
+        let updated = svc.handle(update_req).await.unwrap();
+        assert_eq!(updated.status, StatusCode::OK);
+        assert_eq!(distribution_status(&svc, &id), "InProgress");
     }
 
     #[tokio::test]

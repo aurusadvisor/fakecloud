@@ -2072,8 +2072,8 @@ async fn main() {
     let elbv2_service = Elbv2Service::new(elbv2_state.clone());
     registry.register(Arc::new(elbv2_service));
 
-    let cloudfront_service = CloudFrontService::new(cloudfront_state.clone());
-    registry.register(Arc::new(cloudfront_service));
+    let cloudfront_service = Arc::new(CloudFrontService::new(cloudfront_state.clone()));
+    registry.register(cloudfront_service.clone());
 
     let route53_service = Arc::new(fakecloud_route53::Route53Service::new(
         route53_state.clone(),
@@ -5055,6 +5055,25 @@ async fn main() {
                     let svc = svc.clone();
                     async move {
                         if svc.set_certificate_status(&arn_or_id, &body.status, body.reason) {
+                            axum::http::StatusCode::NO_CONTENT
+                        } else {
+                            axum::http::StatusCode::NOT_FOUND
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/cloudfront/distributions/{id}/status",
+            axum::routing::post({
+                let svc = cloudfront_service.clone();
+                move |axum::extract::Path(id): axum::extract::Path<String>,
+                      axum::Json(body): axum::Json<
+                    types::CloudFrontDistributionStatusRequest,
+                >| {
+                    let svc = svc.clone();
+                    async move {
+                        if svc.set_distribution_status(&id, &body.status) {
                             axum::http::StatusCode::NO_CONTENT
                         } else {
                             axum::http::StatusCode::NOT_FOUND

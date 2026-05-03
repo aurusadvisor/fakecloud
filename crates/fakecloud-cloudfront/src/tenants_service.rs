@@ -139,7 +139,7 @@ impl CloudFrontService {
             connection_group_id: parsed.connection_group_id,
             web_acl_arn: None,
             enabled: parsed.enabled.unwrap_or(true),
-            status: "Deployed".to_string(),
+            status: "InProgress".to_string(),
             etag: etag.clone(),
             created_time: now,
             last_modified_time: now,
@@ -148,6 +148,7 @@ impl CloudFrontService {
             .distribution_tenants
             .insert(id.clone(), stored.clone());
         drop(state);
+        self.schedule_distribution_tenant_deploy(id.clone());
         let body = render_distribution_tenant(&stored);
         Ok(xml_with_etag(StatusCode::CREATED, body, &etag, Some(&id)))
     }
@@ -231,8 +232,12 @@ impl CloudFrontService {
         }
         t.etag = generate_id_with_prefix("E");
         t.last_modified_time = Utc::now();
+        // UpdateDistributionTenant kicks off a fresh edge propagation; mirror
+        // the Distribution lifecycle by flipping back to InProgress.
+        t.status = "InProgress".to_string();
         let snap = t.clone();
         drop(state);
+        self.schedule_distribution_tenant_deploy(id.clone());
         let body = render_distribution_tenant(&snap);
         Ok(xml_with_etag(StatusCode::OK, body, &snap.etag, None))
     }

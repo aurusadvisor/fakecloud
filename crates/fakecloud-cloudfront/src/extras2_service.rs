@@ -64,7 +64,7 @@ impl CloudFrontService {
             name: cfg.name,
             arn,
             routing_endpoint,
-            status: "Deployed".to_string(),
+            status: "InProgress".to_string(),
             etag: etag.clone(),
             created_time: now,
             last_modified_time: now,
@@ -75,6 +75,7 @@ impl CloudFrontService {
         };
         account.connection_groups.insert(id.clone(), stored.clone());
         drop(state);
+        self.schedule_connection_group_deploy(id.clone());
         let body = render_connection_group(&stored);
         Ok(xml_with_etag(StatusCode::CREATED, body, &etag, Some(&id)))
     }
@@ -158,8 +159,12 @@ impl CloudFrontService {
         }
         g.etag = generate_id_with_prefix("E");
         g.last_modified_time = Utc::now();
+        // UpdateConnectionGroup re-propagates to the edge; mirror the
+        // Distribution lifecycle by flipping back to InProgress.
+        g.status = "InProgress".to_string();
         let snap = g.clone();
         drop(state);
+        self.schedule_connection_group_deploy(id.clone());
         let body = render_connection_group(&snap);
         Ok(xml_with_etag(StatusCode::OK, body, &snap.etag, None))
     }
