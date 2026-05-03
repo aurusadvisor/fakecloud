@@ -587,3 +587,185 @@ mod replication_tests {
         assert!(accounts.get(TARGET).is_none());
     }
 }
+
+// ── Cross-account repo policy enforcement on data-plane ops ────
+#[cfg(test)]
+mod repo_policy_enforcement_tests {
+    use super::super::EcrService;
+    use crate::state::{EcrState, Image, Repository, SharedEcrState};
+    use bytes::Bytes;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::service::AwsRequest;
+    use http::{HeaderMap, Method, StatusCode};
+    use parking_lot::RwLock;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const OWNER: &str = "111111111111";
+    const OTHER: &str = "222222222222";
+
+    fn make_request(action: &str, caller_account: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "ecr".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: caller_account.into(),
+            request_id: "req-1".into(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn fixture(policy: Option<&str>) -> (EcrService, SharedEcrState) {
+        let mut mas: MultiAccountState<EcrState> =
+            MultiAccountState::new(OWNER, "us-east-1", "http://fakecloud:4566");
+        let owner = mas.get_or_create(OWNER);
+        let arn = owner.repository_arn("app");
+        let mut repo = Repository::new("app", arn, OWNER, "fakecloud:4566");
+        repo.policy = policy.map(|s| s.to_string());
+        // Seed an image so BatchGetImage has something to look up after the
+        // gate passes; the action under test should reach the body, not
+        // bail early on missing data.
+        repo.images.insert(
+            "sha256:abc".to_string(),
+            Image {
+                image_digest: "sha256:abc".to_string(),
+                image_manifest: "{\"mediaType\":\"x\"}".to_string(),
+                image_manifest_media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                artifact_media_type: None,
+                image_size_in_bytes: 0,
+                image_pushed_at: chrono::Utc::now(),
+                last_recorded_pull_time: None,
+            },
+        );
+        repo.image_tags
+            .insert("v1".to_string(), "sha256:abc".to_string());
+        owner.repositories.insert("app".to_string(), repo);
+        let state: SharedEcrState = Arc::new(RwLock::new(mas));
+        let svc = EcrService::new(state.clone());
+        (svc, state)
+    }
+
+    fn cross_account_allow_policy(action: &str) -> String {
+        format!(
+            r#"{{
+                "Version": "2012-10-17",
+                "Statement": [{{
+                    "Sid": "CrossAccount",
+                    "Effect": "Allow",
+                    "Principal": {{"AWS": "arn:aws:iam::{OTHER}:root"}},
+                    "Action": ["{action}"],
+                    "Resource": "*"
+                }}]
+            }}"#
+        )
+    }
+
+    #[test]
+    fn batch_get_image_cross_account_blocked_when_no_policy() {
+        let (svc, _state) = fixture(None);
+        let req = make_request(
+            "BatchGetImage",
+            OTHER,
+            json!({
+                "registryId": OWNER,
+                "repositoryName": "app",
+                "imageIds": [{"imageTag": "v1"}],
+            }),
+        );
+        let err = match svc.batch_get_image(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected denial"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.code(), "AccessDeniedException");
+    }
+
+    #[test]
+    fn batch_get_image_cross_account_allowed_by_policy() {
+        let policy = cross_account_allow_policy("ecr:BatchGetImage");
+        let (svc, _state) = fixture(Some(&policy));
+        let req = make_request(
+            "BatchGetImage",
+            OTHER,
+            json!({
+                "registryId": OWNER,
+                "repositoryName": "app",
+                "imageIds": [{"imageTag": "v1"}],
+            }),
+        );
+        let resp = svc.batch_get_image(&req).expect("should succeed");
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["images"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn batch_get_image_same_account_skips_policy_check() {
+        let (svc, _state) = fixture(None);
+        let req = make_request(
+            "BatchGetImage",
+            OWNER,
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{"imageTag": "v1"}],
+            }),
+        );
+        let resp = svc.batch_get_image(&req).expect("same-account allowed");
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["images"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn put_image_cross_account_blocked_when_policy_denies_action() {
+        // Policy allows BatchGetImage but not PutImage.
+        let policy = cross_account_allow_policy("ecr:BatchGetImage");
+        let (svc, _state) = fixture(Some(&policy));
+        let manifest = "{\"mediaType\":\"x\"}";
+        let req = make_request(
+            "PutImage",
+            OTHER,
+            json!({
+                "registryId": OWNER,
+                "repositoryName": "app",
+                "imageManifest": manifest,
+                "imageTag": "v2",
+            }),
+        );
+        let err = match svc.put_image(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected denial"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.code(), "AccessDeniedException");
+    }
+
+    #[test]
+    fn get_download_url_for_layer_cross_account_blocked_when_no_policy() {
+        let (svc, _state) = fixture(None);
+        let req = make_request(
+            "GetDownloadUrlForLayer",
+            OTHER,
+            json!({
+                "registryId": OWNER,
+                "repositoryName": "app",
+                "layerDigest": "sha256:deadbeef",
+            }),
+        );
+        let err = match svc.get_download_url_for_layer(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected denial"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.code(), "AccessDeniedException");
+    }
+}

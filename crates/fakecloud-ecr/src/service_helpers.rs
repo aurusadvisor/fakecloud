@@ -717,6 +717,28 @@ pub(crate) fn repository_filters_match(
         .any(|f| registry_filter_matches(f, repo_name))
 }
 
+/// Enforce the cross-account repo-policy gate at a handler. Returns
+/// Ok(()) when the caller belongs to the same account as the repo
+/// (in which case ECR falls back to the caller's IAM perms — out of
+/// scope for this batch), or when an explicit Allow on `action` exists.
+/// Otherwise returns the canonical AccessDeniedException.
+pub(crate) fn check_repo_policy(
+    repo_owner_account: &str,
+    caller_account: &str,
+    repo_arn: &str,
+    repo_name: &str,
+    policy_doc: Option<&str>,
+    action: &str,
+) -> Result<(), AwsServiceError> {
+    if caller_account == repo_owner_account {
+        return Ok(());
+    }
+    if repository_policy_allows(policy_doc, caller_account, repo_arn, action) {
+        return Ok(());
+    }
+    Err(repository_policy_denied(repo_name, action))
+}
+
 /// Cross-account ECR repository policy gate. When the caller's account
 /// differs from the repository's owning account, the repo must have a
 /// resource policy that explicitly Allows the requested action — empty
