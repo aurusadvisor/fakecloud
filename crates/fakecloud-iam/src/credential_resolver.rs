@@ -51,6 +51,8 @@ impl CredentialResolver for IamCredentialResolver {
                     },
                     session_policies: lookup.session_policies,
                     mfa_present: lookup.mfa_present,
+                    token_issued_at: lookup.token_issued_at,
+                    federated_provider: lookup.federated_provider,
                 });
             }
         }
@@ -140,6 +142,8 @@ mod tests {
                 expiration: Utc::now() + chrono::Duration::minutes(30),
                 session_policies: Vec::new(),
                 mfa_present: false,
+                issued_at: Utc::now(),
+                federated_provider: None,
             },
         );
         let resolver = IamCredentialResolver::new(shared(state));
@@ -299,6 +303,8 @@ mod tests {
                 expiration: Utc::now() + chrono::Duration::minutes(30),
                 session_policies: Vec::new(),
                 mfa_present: false,
+                issued_at: Utc::now(),
+                federated_provider: None,
             },
         );
         let resolver = IamCredentialResolver::new(shared(state));

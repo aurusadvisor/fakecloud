@@ -383,12 +383,34 @@ pub async fn dispatch(
                             &aws_request.region,
                             is_secure_transport(&aws_request.headers),
                         );
-                        // MFA flag rides on the resolved credential — STS
-                        // mints it true when AssumeRole supplied
-                        // SerialNumber + TokenCode. IAM user access keys
-                        // never have it, matching AWS.
+                        // F3 keys riding on the resolved credential. STS
+                        // populates these at mint time so subsequent
+                        // requests under the credential can be evaluated
+                        // against `aws:MultiFactorAuthPresent`,
+                        // `aws:MultiFactorAuthAge`, `aws:TokenIssueTime`,
+                        // and `aws:FederatedProvider`. IAM user access
+                        // keys carry none of these, matching AWS.
                         if let Some(rc) = resolved.as_ref() {
                             condition_context.aws_mfa_present = Some(rc.mfa_present);
+                            condition_context.aws_token_issue_time = rc.token_issued_at;
+                            condition_context.aws_federated_provider =
+                                rc.federated_provider.clone();
+                            // `aws:MultiFactorAuthAge` is "seconds since
+                            // MFA was asserted" — computed at evaluation
+                            // time from the token issue moment so the
+                            // value increases monotonically as the session
+                            // ages. Only set when the session was actually
+                            // minted with MFA; otherwise the key is
+                            // absent, matching AWS.
+                            if rc.mfa_present {
+                                if let Some(issued) = rc.token_issued_at {
+                                    let age = chrono::Utc::now()
+                                        .signed_duration_since(issued)
+                                        .num_seconds()
+                                        .max(0);
+                                    condition_context.aws_mfa_age_seconds = Some(age);
+                                }
+                            }
                         }
                         condition_context.service_keys =
                             service.iam_condition_keys_for(&aws_request, &iam_action);

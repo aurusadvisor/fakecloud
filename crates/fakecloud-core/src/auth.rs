@@ -123,6 +123,16 @@ pub struct ResolvedCredential {
     /// `aws:MultiFactorAuthPresent` for downstream IAM evaluation. Always
     /// false for raw IAM user access keys.
     pub mfa_present: bool,
+    /// Wall-clock time at which the underlying STS credential was issued.
+    /// Drives `aws:TokenIssueTime` and `aws:MultiFactorAuthAge` (the latter
+    /// computed at evaluation time as `now - token_issued_at` when
+    /// [`Self::mfa_present`] is true). `None` for raw IAM user access keys
+    /// — AWS does not expose `aws:TokenIssueTime` for long-lived credentials.
+    pub token_issued_at: Option<DateTime<Utc>>,
+    /// `aws:FederatedProvider` — SAML provider ARN for AssumeRoleWithSAML,
+    /// OIDC provider ARN for AssumeRoleWithWebIdentity. `None` for raw IAM
+    /// user keys, plain AssumeRole, GetSessionToken, GetFederationToken.
+    pub federated_provider: Option<String>,
 }
 
 impl ResolvedCredential {
@@ -820,6 +830,8 @@ mod tests {
             },
             session_policies: Vec::new(),
             mfa_present: false,
+            token_issued_at: None,
+            federated_provider: None,
         };
         assert_eq!(rc.principal_arn(), "arn:aws:iam::123456789012:user/alice");
         assert_eq!(rc.user_id(), "AIDAALICE");

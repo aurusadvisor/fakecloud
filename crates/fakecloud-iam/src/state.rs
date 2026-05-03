@@ -230,6 +230,25 @@ pub struct StsTempCredential {
     /// to downstream IAM evaluation as `aws:MultiFactorAuthPresent`.
     #[serde(default)]
     pub mfa_present: bool,
+    /// Wall-clock time at which the credential was issued. Surfaces to
+    /// downstream IAM evaluation as `aws:TokenIssueTime` and feeds
+    /// `aws:MultiFactorAuthAge` (computed at evaluation time as
+    /// `now - issued_at` in seconds when MFA was asserted).
+    #[serde(default = "default_issued_at")]
+    pub issued_at: DateTime<Utc>,
+    /// `aws:FederatedProvider` — for AssumeRoleWithSAML this is the
+    /// SAML provider ARN; for AssumeRoleWithWebIdentity it is the OIDC
+    /// provider ARN (or a friendly host name like
+    /// `cognito-identity.amazonaws.com`); `None` for plain AssumeRole /
+    /// GetSessionToken / GetFederationToken.
+    #[serde(default)]
+    pub federated_provider: Option<String>,
+}
+
+/// Default for [`StsTempCredential::issued_at`] when deserializing
+/// snapshots written before the field existed.
+fn default_issued_at() -> DateTime<Utc> {
+    Utc::now()
 }
 
 /// Result of looking up a set of credentials by access key ID.
@@ -255,6 +274,17 @@ pub struct SecretLookup {
     /// surfaces as `aws:MultiFactorAuthPresent` to downstream IAM
     /// evaluation. Always false for raw IAM user access keys.
     pub mfa_present: bool,
+    /// Wall-clock time at which the underlying STS credential was
+    /// issued. Surfaces as `aws:TokenIssueTime` and drives
+    /// `aws:MultiFactorAuthAge`. `None` for raw IAM user access keys
+    /// (AWS does not expose `aws:TokenIssueTime` for long-lived
+    /// credentials).
+    pub token_issued_at: Option<DateTime<Utc>>,
+    /// `aws:FederatedProvider` for the underlying credential, when
+    /// applicable. Set by AssumeRoleWithSAML / AssumeRoleWithWebIdentity;
+    /// always `None` for IAM user keys, plain AssumeRole, GetSessionToken,
+    /// and GetFederationToken.
+    pub federated_provider: Option<String>,
 }
 
 /// Convert a `Vec<Tag>` to a `BTreeMap<String, String>`.
@@ -442,6 +472,8 @@ impl IamState {
                             session_policies: Vec::new(),
                             principal_tags: tags_to_hashmap(&user.tags),
                             mfa_present: false,
+                            token_issued_at: None,
+                            federated_provider: None,
                         });
                     }
                 }
@@ -463,6 +495,8 @@ impl IamState {
                     session_policies: temp.session_policies.clone(),
                     principal_tags,
                     mfa_present: temp.mfa_present,
+                    token_issued_at: Some(temp.issued_at),
+                    federated_provider: temp.federated_provider.clone(),
                 });
             }
             self.sts_temp_credentials.remove(access_key_id);
@@ -487,6 +521,8 @@ impl IamState {
                             session_policies: Vec::new(),
                             principal_tags: tags_to_hashmap(&user.tags),
                             mfa_present: false,
+                            token_issued_at: None,
+                            federated_provider: None,
                         });
                     }
                 }
@@ -508,6 +544,8 @@ impl IamState {
             session_policies: temp.session_policies.clone(),
             principal_tags,
             mfa_present: temp.mfa_present,
+            token_issued_at: Some(temp.issued_at),
+            federated_provider: temp.federated_provider.clone(),
         })
     }
 
@@ -615,6 +653,8 @@ mod tests {
                 expiration: Utc::now() + chrono::Duration::minutes(30),
                 session_policies: Vec::new(),
                 mfa_present: false,
+                issued_at: Utc::now(),
+                federated_provider: None,
             },
         );
         let lookup = state.credential_secret("FSIATEMPKEY").unwrap();
@@ -641,6 +681,8 @@ mod tests {
                 expiration: Utc::now() - chrono::Duration::seconds(1),
                 session_policies: Vec::new(),
                 mfa_present: false,
+                issued_at: Utc::now(),
+                federated_provider: None,
             },
         );
         assert!(state.credential_secret("FSIAOLD").is_none());
@@ -662,6 +704,8 @@ mod tests {
                 expiration: Utc::now() - chrono::Duration::seconds(1),
                 session_policies: Vec::new(),
                 mfa_present: false,
+                issued_at: Utc::now(),
+                federated_provider: None,
             },
         );
         assert!(state.credential_secret_readonly("FSIAOLD").is_none());
