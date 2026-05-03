@@ -767,6 +767,15 @@ impl DynamoDbService {
             item_count: table.item_count,
             size_bytes: table.size_bytes,
             items: table.items.clone(),
+            gsi: table.gsi.clone(),
+            lsi: table.lsi.clone(),
+            tags: table.tags.clone(),
+            ttl_attribute: table.ttl_attribute.clone(),
+            ttl_enabled: table.ttl_enabled,
+            sse_type: table.sse_type.clone(),
+            sse_kms_key_arn: table.sse_kms_key_arn.clone(),
+            stream_enabled: table.stream_enabled,
+            stream_view_type: table.stream_view_type.clone(),
         };
 
         state.backups.insert(backup_arn.clone(), backup);
@@ -951,6 +960,18 @@ impl DynamoDbService {
             state.region, state.account_id, target_table_name
         );
 
+        // Re-mint the stream ARN against the target table name so it
+        // doesn't collide with the source table's stream ARN; the
+        // view type and enabled flag come straight from the backup.
+        let stream_arn = if backup.stream_enabled {
+            Some(format!(
+                "{arn}/stream/{}",
+                now.format("%Y-%m-%dT%H:%M:%S%.3f")
+            ))
+        } else {
+            None
+        };
+
         let mut table = DynamoTable {
             name: target_table_name.to_string(),
             arn: arn.clone(),
@@ -959,27 +980,27 @@ impl DynamoDbService {
             attribute_definitions: backup.attribute_definitions.clone(),
             provisioned_throughput: backup.provisioned_throughput.clone(),
             items: backup.items.clone(),
-            gsi: Vec::new(),
-            lsi: Vec::new(),
-            tags: BTreeMap::new(),
+            gsi: backup.gsi.clone(),
+            lsi: backup.lsi.clone(),
+            tags: backup.tags.clone(),
             created_at: now,
             status: "ACTIVE".to_string(),
             item_count: 0,
             size_bytes: 0,
             billing_mode: backup.billing_mode.clone(),
-            ttl_attribute: None,
-            ttl_enabled: false,
+            ttl_attribute: backup.ttl_attribute.clone(),
+            ttl_enabled: backup.ttl_enabled,
             resource_policy: None,
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
             contributor_insights_counters: BTreeMap::new(),
-            stream_enabled: false,
-            stream_view_type: None,
-            stream_arn: None,
+            stream_enabled: backup.stream_enabled,
+            stream_view_type: backup.stream_view_type.clone(),
+            stream_arn,
             stream_records: Arc::new(RwLock::new(Vec::new())),
-            sse_type: None,
-            sse_kms_key_arn: None,
+            sse_type: backup.sse_type.clone(),
+            sse_kms_key_arn: backup.sse_kms_key_arn.clone(),
 
             deletion_protection_enabled: false,
             on_demand_throughput: None,
@@ -1033,6 +1054,15 @@ impl DynamoDbService {
             state.region, state.account_id, target_table_name
         );
 
+        let stream_arn = if source.stream_enabled {
+            Some(format!(
+                "{arn}/stream/{}",
+                now.format("%Y-%m-%dT%H:%M:%S%.3f")
+            ))
+        } else {
+            None
+        };
+
         let mut table = DynamoTable {
             name: target_table_name.to_string(),
             arn: arn.clone(),
@@ -1041,27 +1071,27 @@ impl DynamoDbService {
             attribute_definitions: source.attribute_definitions.clone(),
             provisioned_throughput: source.provisioned_throughput.clone(),
             items: source.items.clone(),
-            gsi: Vec::new(),
-            lsi: Vec::new(),
-            tags: BTreeMap::new(),
+            gsi: source.gsi.clone(),
+            lsi: source.lsi.clone(),
+            tags: source.tags.clone(),
             created_at: now,
             status: "ACTIVE".to_string(),
             item_count: 0,
             size_bytes: 0,
             billing_mode: source.billing_mode.clone(),
-            ttl_attribute: None,
-            ttl_enabled: false,
+            ttl_attribute: source.ttl_attribute.clone(),
+            ttl_enabled: source.ttl_enabled,
             resource_policy: None,
             pitr_enabled: false,
             kinesis_destinations: Vec::new(),
             contributor_insights_status: "DISABLED".to_string(),
             contributor_insights_counters: BTreeMap::new(),
-            stream_enabled: false,
-            stream_view_type: None,
-            stream_arn: None,
+            stream_enabled: source.stream_enabled,
+            stream_view_type: source.stream_view_type.clone(),
+            stream_arn,
             stream_records: Arc::new(RwLock::new(Vec::new())),
-            sse_type: None,
-            sse_kms_key_arn: None,
+            sse_type: source.sse_type.clone(),
+            sse_kms_key_arn: source.sse_kms_key_arn.clone(),
 
             deletion_protection_enabled: false,
             on_demand_throughput: None,

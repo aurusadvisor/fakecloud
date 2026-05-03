@@ -3972,6 +3972,136 @@ fn describe_backup_not_found_errors() {
 }
 
 #[test]
+fn create_backup_round_trip_preserves_gsi_lsi_tags_ttl_sse_stream() {
+    let svc = make_service();
+    // Table with GSI + tags + TTL + KMS-encrypted + streams enabled.
+    let req = make_request(
+        "CreateTable",
+        json!({
+            "TableName": "rich",
+            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+            "AttributeDefinitions": [
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "gsi_pk", "AttributeType": "S"},
+            ],
+            "BillingMode": "PAY_PER_REQUEST",
+            "GlobalSecondaryIndexes": [{
+                "IndexName": "by-gsi",
+                "KeySchema": [{"AttributeName": "gsi_pk", "KeyType": "HASH"}],
+                "Projection": {"ProjectionType": "ALL"},
+            }],
+            "Tags": [{"Key": "env", "Value": "prod"}],
+            "SSESpecification": {"Enabled": true, "SSEType": "KMS"},
+            "StreamSpecification": {
+                "StreamEnabled": true,
+                "StreamViewType": "NEW_AND_OLD_IMAGES",
+            },
+        }),
+    );
+    svc.create_table(&req).unwrap();
+
+    // Enable TTL.
+    svc.update_time_to_live(&make_request(
+        "UpdateTimeToLive",
+        json!({
+            "TableName": "rich",
+            "TimeToLiveSpecification": {"Enabled": true, "AttributeName": "expire_at"},
+        }),
+    ))
+    .unwrap();
+
+    let resp = svc
+        .create_backup(&make_request(
+            "CreateBackup",
+            json!({"TableName": "rich", "BackupName": "snap"}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let backup_arn = body["BackupDetails"]["BackupArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    svc.restore_table_from_backup(&make_request(
+        "RestoreTableFromBackup",
+        json!({"TargetTableName": "restored", "BackupArn": backup_arn}),
+    ))
+    .unwrap();
+
+    let desc = svc
+        .describe_table(&make_request(
+            "DescribeTable",
+            json!({"TableName": "restored"}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(desc.body.expect_bytes()).unwrap();
+    let table = &body["Table"];
+    assert!(
+        table["GlobalSecondaryIndexes"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "restored table must keep GSI definitions"
+    );
+    assert!(
+        table["StreamSpecification"]["StreamEnabled"]
+            .as_bool()
+            .unwrap_or(false),
+        "restored table must keep streams enabled"
+    );
+    assert_eq!(
+        table["SSEDescription"]["Status"].as_str(),
+        Some("ENABLED"),
+        "restored table must keep SSE enabled"
+    );
+
+    // Tags survive (returned by ListTagsOfResource).
+    let arn = table["TableArn"].as_str().unwrap().to_string();
+    let tags_resp = svc
+        .list_tags_of_resource(&make_request(
+            "ListTagsOfResource",
+            json!({"ResourceArn": arn}),
+        ))
+        .unwrap();
+    let tags_body: Value = serde_json::from_slice(tags_resp.body.expect_bytes()).unwrap();
+    let tags = tags_body["Tags"].as_array().unwrap();
+    assert!(tags
+        .iter()
+        .any(|t| t["Key"] == "env" && t["Value"] == "prod"));
+}
+
+#[test]
+fn scan_with_consistent_read_on_gsi_rejected() {
+    let svc = make_service();
+    svc.create_table(&make_request(
+        "CreateTable",
+        json!({
+            "TableName": "t",
+            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+            "AttributeDefinitions": [
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "gsi_pk", "AttributeType": "S"},
+            ],
+            "BillingMode": "PAY_PER_REQUEST",
+            "GlobalSecondaryIndexes": [{
+                "IndexName": "by-gsi",
+                "KeySchema": [{"AttributeName": "gsi_pk", "KeyType": "HASH"}],
+                "Projection": {"ProjectionType": "ALL"},
+            }],
+        }),
+    ))
+    .unwrap();
+    let err = svc
+        .scan(&make_request(
+            "Scan",
+            json!({"TableName": "t", "IndexName": "by-gsi", "ConsistentRead": true}),
+        ))
+        .err()
+        .expect("scan with ConsistentRead on GSI must fail");
+    assert!(format!("{err:?}").contains("Consistent reads are not supported"));
+}
+
+#[test]
 fn restore_table_from_backup_not_found_errors() {
     let svc = make_service();
     let req = make_request(
