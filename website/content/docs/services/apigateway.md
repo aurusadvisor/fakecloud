@@ -16,7 +16,7 @@ REST APIs (v1) and HTTP APIs (v2) are independent AWS services. The v2 (HTTP API
 - **Deployments & stages** — CreateDeployment auto-creates a stage when `stageName` is set; cache flush operations
 - **Models & request validators** — schema management; validator CRUD
 - **Authorizers** — TOKEN, REQUEST, COGNITO_USER_POOLS shapes
-- **API keys & usage plans** — CRUD + association via `usage_plan_keys`
+- **API keys & usage plans** — CRUD + association via `usage_plan_keys`; data plane enforces `apiKeyRequired`, plan-level `throttle` (token-bucket per key+plan), and `quota` (DAY/WEEK/MONTH counters)
 - **VPC links, domain names, base path mappings, client certificates** — full CRUD
 - **Documentation parts/versions** — full CRUD
 - **Gateway responses** — full CRUD
@@ -31,6 +31,8 @@ When a request arrives at a deployed stage URL (`/restapis/{api_id}/{stage}/{pat
 - `AWS_PROXY` — invokes the target Lambda via the same `DeliveryBus` used elsewhere; builds the v1.0 Lambda proxy event envelope (`event.version = "1.0"`, `requestContext.identity`, `multiValueHeaders`, `multiValueQueryStringParameters`, `pathParameters`, `stageVariables`, base64 body when binary).
 - `HTTP` / `HTTP_PROXY` — forwards via `reqwest` to the configured URI.
 - `MOCK` — returns an empty JSON body unless an integration response template overrides it.
+
+Before the integration runs, methods with `apiKeyRequired = true` go through the API key + usage plan gate: an `x-api-key` header is required, the value is matched against `state.api_keys` (must be enabled), and the first usage plan whose `apiStages[]` contains `(api_id, stage)` is selected. The plan's `throttle` (token-bucket on `rateLimit`/`burstLimit`) and `quota` (DAY/WEEK/MONTH counter against `limit`, with `offset` shifting the period boundary) are enforced; failures return `403 ForbiddenException` and `429 LimitExceededException` respectively, matching the AWS wire shape.
 
 ## Protocol
 

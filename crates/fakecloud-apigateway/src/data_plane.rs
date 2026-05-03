@@ -16,7 +16,8 @@
 
 use http::{Method, StatusCode};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
@@ -39,6 +40,10 @@ struct DataPlaneMatch {
     stage_vars: BTreeMap<String, String>,
     authorization_type: String,
     authorizer: Option<Authorizer>,
+    /// Whether the matched method has `apiKeyRequired = true`. When set,
+    /// the data plane enforces the `x-api-key` header + the associated
+    /// usage plan's throttle/quota before invoking the integration.
+    api_key_required: bool,
 }
 
 /// Outcome of authorizer evaluation. `claims`/`context` are merged into
@@ -71,6 +76,7 @@ pub async fn handle(
         stage_vars,
         authorization_type,
         authorizer,
+        api_key_required,
     } = {
         let accounts = service.state_handle().read();
         let state = match accounts.get(&req.account_id) {
@@ -135,6 +141,10 @@ pub async fn handle(
                             .get(&stage_name)
                             .map(|s| s.variables.clone())
                             .unwrap_or_default();
+                        let api_key_required = method_record
+                            .as_ref()
+                            .map(|m| m.api_key_required)
+                            .unwrap_or(false);
                         found = Some(DataPlaneMatch {
                             api_id: api_id.clone(),
                             integration,
@@ -143,6 +153,7 @@ pub async fn handle(
                             stage_vars,
                             authorization_type,
                             authorizer,
+                            api_key_required,
                         });
                         break;
                     }
@@ -184,6 +195,18 @@ pub async fn handle(
             return Err(err);
         }
     };
+
+    // Usage plan enforcement: the matched method opts in via
+    // `apiKeyRequired = true`. The caller must present a known + enabled
+    // `x-api-key`; if the key is associated with a usage plan that lists
+    // this `(api_id, stage_name)` in `apiStages`, throttle + quota are
+    // enforced. Plans without throttle/quota fall through unchanged.
+    if api_key_required {
+        if let Err(err) = enforce_usage_plan(service, req, &api_id, &stage_name) {
+            service.record_request(&req.account_id, &api_id, &stage_name, req, err.status());
+            return Err(err);
+        }
+    }
 
     let result: Result<AwsResponse, AwsServiceError> = match integration.integration_type.as_str() {
         "AWS_PROXY" => {
@@ -247,6 +270,22 @@ fn unauthorized(msg: impl Into<String>) -> AwsServiceError {
 
 fn forbidden(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::FORBIDDEN, "AccessDeniedException", msg.into())
+}
+
+/// `ForbiddenException` matches the wire shape AWS returns for an
+/// API-key check failure (missing key / unknown key / disabled key).
+fn api_key_forbidden() -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::FORBIDDEN, "ForbiddenException", "Forbidden")
+}
+
+/// `LimitExceededException` is the wire shape AWS uses when throttle or
+/// quota tripped at the data plane.
+fn limit_exceeded() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        "LimitExceededException",
+        "Limit Exceeded",
+    )
 }
 
 /// Resolve the header name an authorizer's `identitySource` points at.
@@ -793,6 +832,243 @@ async fn http_proxy(
     })
 }
 
+// ── Usage plan throttle + quota ──
+
+/// In-memory throttle + quota state. Keyed by
+/// `(account_id, plan_id, key_id)` for buckets and additionally by the
+/// quota's period window string for counters. Lives in
+/// `ApiGatewayService::meters`; not persisted across restarts.
+#[derive(Default)]
+pub struct UsageMeters {
+    pub buckets: HashMap<(String, String, String), TokenBucket>,
+    pub counters: HashMap<(String, String, String, String), u64>,
+}
+
+/// Hand-rolled token bucket. AWS's API Gateway throttle is documented
+/// as a refilling token bucket with `rateLimit` tokens/sec sustained
+/// rate and `burstLimit` capacity.
+#[derive(Debug, Clone)]
+pub struct TokenBucket {
+    pub rate_per_sec: f64,
+    pub burst: f64,
+    pub tokens: f64,
+    pub last_refill: Instant,
+}
+
+impl TokenBucket {
+    pub fn new(rate_per_sec: f64, burst: f64) -> Self {
+        Self {
+            rate_per_sec,
+            burst,
+            tokens: burst,
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Try to consume one token. Returns `true` on success. Refills the
+    /// bucket up to `burst` based on elapsed wall-clock time first.
+    pub fn try_acquire(&mut self, now: Instant) -> bool {
+        self.try_acquire_with(now, 1.0)
+    }
+
+    pub fn try_acquire_with(&mut self, now: Instant, cost: f64) -> bool {
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
+        if elapsed > 0.0 {
+            self.tokens = (self.tokens + elapsed * self.rate_per_sec).min(self.burst);
+            self.last_refill = now;
+        }
+        if self.tokens >= cost {
+            self.tokens -= cost;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Resolve the usage plan that matches `(api_id, stage_name)` for an
+/// API key. If no plan matches, the request is unmetered (the key is
+/// known but not associated with a plan that targets this stage).
+fn enforce_usage_plan(
+    service: &ApiGatewayService,
+    req: &AwsRequest,
+    api_id: &str,
+    stage_name: &str,
+) -> Result<(), AwsServiceError> {
+    let presented = req
+        .headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let presented = match presented {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => return Err(api_key_forbidden()),
+    };
+
+    // Resolve key + the active usage plan under a single read lock.
+    // `plan = None` when the key isn't associated with any plan that
+    // targets this stage; in that case the request is unmetered.
+    let (key_id, plan): (String, Option<UsagePlanSnapshot>) = {
+        let accounts = service.state_handle().read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(api_key_forbidden)?;
+        let key = state
+            .api_keys
+            .values()
+            .find(|k| k.value == presented)
+            .cloned();
+        let key = match key {
+            Some(k) if k.enabled => k,
+            _ => return Err(api_key_forbidden()),
+        };
+        let plan = first_matching_plan(state, &key.id, api_id, stage_name);
+        (key.id, plan)
+    };
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+
+    let mut meters = service.meters.lock();
+
+    // Throttle.
+    if let Some((rate, burst)) = plan.throttle {
+        let bucket_key = (req.account_id.clone(), plan.id.clone(), key_id.clone());
+        let bucket = meters
+            .buckets
+            .entry(bucket_key)
+            .or_insert_with(|| TokenBucket::new(rate, burst));
+        // Keep config fresh in case the plan was updated.
+        bucket.rate_per_sec = rate;
+        bucket.burst = burst;
+        if !bucket.try_acquire(Instant::now()) {
+            return Err(limit_exceeded());
+        }
+    }
+
+    // Quota.
+    if let Some((limit, period, offset)) = plan.quota {
+        let window = current_quota_window(chrono::Utc::now(), period, offset);
+        let counter_key = (
+            req.account_id.clone(),
+            plan.id.clone(),
+            key_id.clone(),
+            window,
+        );
+        let entry = meters.counters.entry(counter_key).or_insert(0);
+        if *entry >= limit {
+            return Err(limit_exceeded());
+        }
+        *entry += 1;
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct UsagePlanSnapshot {
+    id: String,
+    /// `(rateLimit_per_sec, burstLimit)` when configured.
+    throttle: Option<(f64, f64)>,
+    /// `(limit, period, offset_days)` when configured.
+    quota: Option<(u64, QuotaPeriod, i64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuotaPeriod {
+    Day,
+    Week,
+    Month,
+}
+
+fn parse_quota_period(s: &str) -> Option<QuotaPeriod> {
+    match s {
+        "DAY" => Some(QuotaPeriod::Day),
+        "WEEK" => Some(QuotaPeriod::Week),
+        "MONTH" => Some(QuotaPeriod::Month),
+        _ => None,
+    }
+}
+
+/// AWS picks any matching plan when multiple plans associate the same
+/// key; we pick the first per `BTreeMap` iteration order, which is
+/// deterministic by `usagePlanId`.
+fn first_matching_plan(
+    state: &crate::state::ApiGatewayState,
+    key_id: &str,
+    api_id: &str,
+    stage_name: &str,
+) -> Option<UsagePlanSnapshot> {
+    for (plan_id, keys) in &state.usage_plan_keys {
+        if !keys.contains_key(key_id) {
+            continue;
+        }
+        let Some(plan) = state.usage_plans.get(plan_id) else {
+            continue;
+        };
+        let stage_match = plan.api_stages.iter().any(|stage_entry| {
+            let api = stage_entry.get("apiId").and_then(|v| v.as_str());
+            let stage = stage_entry.get("stage").and_then(|v| v.as_str());
+            matches!((api, stage), (Some(a), Some(s)) if a == api_id && s == stage_name)
+        });
+        if !stage_match {
+            continue;
+        }
+        return Some(snapshot_plan(plan));
+    }
+    None
+}
+
+fn snapshot_plan(plan: &crate::state::UsagePlan) -> UsagePlanSnapshot {
+    let throttle = plan.throttle.as_ref().and_then(|t| {
+        let rate = t.get("rateLimit").and_then(|v| v.as_f64())?;
+        let burst = t
+            .get("burstLimit")
+            .and_then(|v| v.as_f64().or_else(|| v.as_i64().map(|n| n as f64)))?;
+        if rate <= 0.0 || burst <= 0.0 {
+            return None;
+        }
+        Some((rate, burst))
+    });
+    let quota = plan.quota.as_ref().and_then(|q| {
+        let limit = q.get("limit").and_then(|v| v.as_u64())?;
+        let period_str = q.get("period").and_then(|v| v.as_str())?;
+        let period = parse_quota_period(period_str)?;
+        let offset = q.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
+        Some((limit, period, offset))
+    });
+    UsagePlanSnapshot {
+        id: plan.id.clone(),
+        throttle,
+        quota,
+    }
+}
+
+/// Compute the canonical window key for a quota period. AWS resets
+/// quota counters at the start of the period (UTC midnight for DAY,
+/// Sunday for WEEK, first-of-month for MONTH); `offset` shifts the
+/// boundary by N days. The returned string is purely a counter key.
+fn current_quota_window(
+    now: chrono::DateTime<chrono::Utc>,
+    period: QuotaPeriod,
+    offset: i64,
+) -> String {
+    use chrono::Datelike;
+    let date = now.date_naive() - chrono::Duration::days(offset);
+    match period {
+        QuotaPeriod::Day => format!("D:{date}"),
+        QuotaPeriod::Week => {
+            // ISO week: Monday-based. AWS docs aren't specific about
+            // anchor day; ISO week is stable + locale-free.
+            let iso = date.iso_week();
+            format!("W:{}-{:02}", iso.year(), iso.week())
+        }
+        QuotaPeriod::Month => format!("M:{}-{:02}", date.year(), date.month()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1273,6 +1549,293 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&lambda.last_payload(BACKEND_ARN).unwrap()).unwrap();
         assert_eq!(payload["requestContext"]["authorizer"]["claims"], claims);
+    }
+
+    // ── Usage plan throttle + quota tests ──
+
+    /// Force `api_key_required = true` on the matched method and seed a
+    /// usage plan + key + plan-key association. Returns the API-key
+    /// value the caller should send in `x-api-key`.
+    fn install_api_key_plan(
+        state: &SharedApiGatewayState,
+        plan_id: &str,
+        throttle: Option<serde_json::Value>,
+        quota: Option<serde_json::Value>,
+    ) -> String {
+        use crate::state::{ApiKey, UsagePlan};
+        let mut accounts = state.write();
+        let st = accounts.get_or_create(TEST_ACCOUNT);
+        // Flip the matched method to require an API key.
+        let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+        if let Some(m) = st.methods.get_mut(&mkey) {
+            m.api_key_required = true;
+        }
+        let key_value = "test-key-value-1".to_string();
+        let key_id = "key0001".to_string();
+        st.api_keys.insert(
+            key_id.clone(),
+            ApiKey {
+                id: key_id.clone(),
+                value: key_value.clone(),
+                name: "k".to_string(),
+                description: None,
+                enabled: true,
+                created_date: Utc::now(),
+                last_updated_date: Utc::now(),
+                stage_keys: vec![],
+                tags: BTreeMap::new(),
+                customer_id: None,
+            },
+        );
+        st.usage_plans.insert(
+            plan_id.to_string(),
+            UsagePlan {
+                id: plan_id.to_string(),
+                name: "p".to_string(),
+                description: None,
+                api_stages: vec![serde_json::json!({
+                    "apiId": TEST_API_ID,
+                    "stage": "prod",
+                })],
+                throttle,
+                quota,
+                product_code: None,
+                tags: BTreeMap::new(),
+            },
+        );
+        let mut plan_keys = BTreeMap::new();
+        plan_keys.insert(
+            key_id,
+            serde_json::json!({"id": "key0001", "type": "API_KEY", "value": key_value}),
+        );
+        st.usage_plan_keys.insert(plan_id.to_string(), plan_keys);
+        key_value
+    }
+
+    #[tokio::test]
+    async fn missing_api_key_header_returns_403_forbidden() {
+        let state = build_state("NONE", None);
+        let _ = install_api_key_plan(
+            &state,
+            "plan-a",
+            Some(serde_json::json!({"rateLimit": 100.0, "burstLimit": 100})),
+            None,
+        );
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let err = match handle(&service, &make_request(HeaderMap::new())).await {
+            Err(e) => e,
+            Ok(_) => panic!("missing key must 403"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_api_key_returns_403_forbidden() {
+        let state = build_state("NONE", None);
+        let _ = install_api_key_plan(
+            &state,
+            "plan-a",
+            Some(serde_json::json!({"rateLimit": 100.0, "burstLimit": 100})),
+            None,
+        );
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "not-a-real-key".parse().unwrap());
+        let err = match handle(&service, &make_request(headers)).await {
+            Err(e) => e,
+            Ok(_) => panic!("unknown key must 403"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
+    async fn disabled_api_key_returns_403_forbidden() {
+        let state = build_state("NONE", None);
+        let key_value = install_api_key_plan(&state, "plan-a", None, None);
+        // Disable the key after installing it.
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            for k in st.api_keys.values_mut() {
+                k.enabled = false;
+            }
+        }
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", key_value.parse().unwrap());
+        let err = match handle(&service, &make_request(headers)).await {
+            Err(e) => e,
+            Ok(_) => panic!("disabled key must 403"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn key_without_matching_plan_passes_unmetered() {
+        // Key exists but no usage plan associates it with this stage —
+        // request must succeed without throttle/quota enforcement.
+        let state = build_state("NONE", None);
+        let key_value = {
+            use crate::state::ApiKey;
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.api_key_required = true;
+            }
+            let v = "loose-key".to_string();
+            st.api_keys.insert(
+                "k1".to_string(),
+                ApiKey {
+                    id: "k1".to_string(),
+                    value: v.clone(),
+                    name: "k".to_string(),
+                    description: None,
+                    enabled: true,
+                    created_date: Utc::now(),
+                    last_updated_date: Utc::now(),
+                    stage_keys: vec![],
+                    tags: BTreeMap::new(),
+                    customer_id: None,
+                },
+            );
+            v
+        };
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", key_value.parse().unwrap());
+        let resp = handle(&service, &make_request(headers))
+            .await
+            .expect("known key without plan must pass through");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 1);
+    }
+
+    #[tokio::test]
+    async fn second_request_returns_429_when_throttle_burst_is_one() {
+        // 1 RPS / burst=1: the bucket grants exactly one request per
+        // refill window. Fire two back-to-back so the second hits 429
+        // before any token has had time to drip back in.
+        let state = build_state("NONE", None);
+        let key_value = install_api_key_plan(
+            &state,
+            "plan-tight",
+            Some(serde_json::json!({"rateLimit": 1.0, "burstLimit": 1})),
+            None,
+        );
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", key_value.parse().unwrap());
+
+        let first = handle(&service, &make_request(headers.clone()))
+            .await
+            .expect("first request consumes the only token");
+        assert_eq!(first.status, StatusCode::OK);
+
+        let err = match handle(&service, &make_request(headers)).await {
+            Err(e) => e,
+            Ok(_) => panic!("second request must trip throttle"),
+        };
+        assert_eq!(err.status(), StatusCode::TOO_MANY_REQUESTS);
+        // Backend invoked exactly once — second call shorted at the
+        // throttle gate before reaching the integration.
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 1);
+    }
+
+    #[tokio::test]
+    async fn quota_blocks_second_request_when_limit_is_one() {
+        let state = build_state("NONE", None);
+        let key_value = install_api_key_plan(
+            &state,
+            "plan-quota",
+            // Generous throttle so the rate gate doesn't trip first.
+            Some(serde_json::json!({"rateLimit": 100.0, "burstLimit": 100})),
+            Some(serde_json::json!({"limit": 1, "period": "DAY", "offset": 0})),
+        );
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", key_value.parse().unwrap());
+
+        let first = handle(&service, &make_request(headers.clone()))
+            .await
+            .expect("first request consumes the only quota token");
+        assert_eq!(first.status, StatusCode::OK);
+
+        let err = match handle(&service, &make_request(headers)).await {
+            Err(e) => e,
+            Ok(_) => panic!("second request must trip quota"),
+        };
+        assert_eq!(err.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn token_bucket_grants_initial_burst_then_refills() {
+        let mut bucket = TokenBucket::new(10.0, 2.0);
+        let t0 = Instant::now();
+        // Burst of 2 -> two acquires succeed back-to-back.
+        assert!(bucket.try_acquire(t0));
+        assert!(bucket.try_acquire(t0));
+        assert!(!bucket.try_acquire(t0));
+        // After 200ms at 10 RPS, ~2 tokens have refilled.
+        let t1 = t0 + std::time::Duration::from_millis(200);
+        assert!(bucket.try_acquire(t1));
+    }
+
+    #[test]
+    fn token_bucket_caps_at_burst() {
+        let mut bucket = TokenBucket::new(1.0, 3.0);
+        let t0 = Instant::now();
+        // Long idle period — tokens must not exceed `burst`.
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        // Drain up to burst.
+        assert!(bucket.try_acquire(t1));
+        assert!(bucket.try_acquire(t1));
+        assert!(bucket.try_acquire(t1));
+        assert!(!bucket.try_acquire(t1));
+    }
+
+    #[test]
+    fn quota_window_strings_change_at_period_boundaries() {
+        use chrono::TimeZone;
+        let day1 = chrono::Utc.with_ymd_and_hms(2026, 5, 3, 23, 59, 0).unwrap();
+        let day2 = chrono::Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        assert_ne!(
+            current_quota_window(day1, QuotaPeriod::Day, 0),
+            current_quota_window(day2, QuotaPeriod::Day, 0)
+        );
+        // Same day -> same window.
+        let day1_morning = chrono::Utc.with_ymd_and_hms(2026, 5, 3, 0, 1, 0).unwrap();
+        assert_eq!(
+            current_quota_window(day1, QuotaPeriod::Day, 0),
+            current_quota_window(day1_morning, QuotaPeriod::Day, 0)
+        );
+        // Month boundary.
+        let april = chrono::Utc.with_ymd_and_hms(2026, 4, 30, 12, 0, 0).unwrap();
+        let may = chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
+        assert_ne!(
+            current_quota_window(april, QuotaPeriod::Month, 0),
+            current_quota_window(may, QuotaPeriod::Month, 0)
+        );
     }
 
     #[tokio::test]
