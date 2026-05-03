@@ -8,9 +8,13 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_core::validation::*;
 use fakecloud_persistence::SnapshotStore;
 
+use crate::evaluator::{
+    evaluate_resource_policy_only, Decision, EvalRequest, PolicyDocument, RequestContext,
+};
 use crate::persistence::{save_iam_snapshot, IamSnapshotLock};
 use crate::state::{CredentialIdentity, IamState, SharedIamState, StsTempCredential};
 use crate::xml_responses::{self, StsCredentials};
+use fakecloud_core::auth::{Principal, PrincipalType};
 
 /// Default duration for AssumeRole and similar operations (1 hour).
 const DEFAULT_ASSUME_ROLE_DURATION: i64 = 3600;
@@ -388,22 +392,96 @@ impl StsService {
         let target_state = accounts.get_or_create(&account_id);
         let role_name = role_arn.rsplit('/').next().unwrap_or("unknown");
 
-        // Enforce the role's trust policy `sts:ExternalId` Condition
-        // before minting credentials. AWS rejects with `AccessDenied`
-        // when the policy demands an ExternalId and the caller didn't
-        // supply one (or supplied a wrong one). Other Conditions
-        // (PrincipalOrgID / SourceAccount / MFA) follow in subsequent
-        // batches; this batch closes the most-cited security gap.
-        if let Some(role) = target_state.roles.get(role_name) {
-            if let Some(required) = required_external_id(&role.assume_role_policy_document) {
-                let supplied = req.query_params.get("ExternalId");
-                if supplied.map(String::as_str) != Some(required.as_str()) {
+        // Enforce the role's trust policy through the IAM evaluator.
+        // The trust policy is a resource-style policy whose Principal
+        // gate names which callers may assume the role; AWS evaluates
+        // it (and only it) when deciding `sts:AssumeRole`. Identity
+        // policies do NOT factor into trust-policy evaluation.
+        //
+        // Context keys populated for trust evaluation match what AWS
+        // exposes at AssumeRole time: sts:ExternalId,
+        // sts:RoleSessionName, aws:MultiFactorAuthPresent, plus the
+        // standard caller-identity keys.
+        if let Some(role) = target_state.roles.get(role_name).cloned() {
+            // Service-linked roles (`/aws-service-role/<service>/...`)
+            // are only assumable by the matching service principal,
+            // never by users or other roles. AWS rejects every other
+            // caller with AccessDenied and the trust policy is
+            // synthesized to allow only the named service host.
+            if role.path.starts_with("/aws-service-role/") {
+                let expected_service = role
+                    .path
+                    .trim_start_matches("/aws-service-role/")
+                    .trim_end_matches('/');
+                let caller_is_service = req
+                    .principal
+                    .as_ref()
+                    .map(|p| p.arn.contains(expected_service))
+                    .unwrap_or(false);
+                if !caller_is_service {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::FORBIDDEN,
                         "AccessDenied",
                         format!(
-                            "User: {} is not authorized to perform: sts:AssumeRole on resource: {} because the role's trust policy requires a matching ExternalId",
-                            req.account_id, role_arn
+                            "User: {} is not authorized to perform: sts:AssumeRole on resource: {} because the role is a service-linked role for {}",
+                            req.account_id, role_arn, expected_service
+                        ),
+                    ));
+                }
+            }
+
+            let trust_doc = PolicyDocument::parse(&role.assume_role_policy_document);
+            let caller_principal = match req.principal.as_ref() {
+                Some(p) => p.clone(),
+                None => Principal {
+                    arn: format!("arn:aws:iam::{}:root", req.account_id),
+                    user_id: req.account_id.clone(),
+                    account_id: req.account_id.clone(),
+                    principal_type: PrincipalType::Root,
+                    source_identity: None,
+                    tags: None,
+                },
+            };
+
+            let mfa_present = req.query_params.contains_key("SerialNumber")
+                && req.query_params.contains_key("TokenCode");
+            let mut context = RequestContext {
+                aws_principal_arn: Some(caller_principal.arn.clone()),
+                aws_principal_account: Some(caller_principal.account_id.clone()),
+                aws_principal_type: Some(caller_principal.principal_type.as_str().to_string()),
+                aws_mfa_present: Some(mfa_present),
+                ..Default::default()
+            };
+            if let Some(eid) = req.query_params.get("ExternalId") {
+                context
+                    .service_keys
+                    .insert("sts:externalid".to_string(), vec![eid.clone()]);
+            }
+            context.service_keys.insert(
+                "sts:rolesessionname".to_string(),
+                vec![role_session_name.clone()],
+            );
+            if let Some(src) = req.query_params.get("SourceIdentity") {
+                context
+                    .service_keys
+                    .insert("sts:sourceidentity".to_string(), vec![src.clone()]);
+            }
+
+            let eval_req = EvalRequest {
+                principal: &caller_principal,
+                action: "sts:AssumeRole".to_string(),
+                resource: role_arn.clone(),
+                context,
+            };
+            match evaluate_resource_policy_only(&trust_doc, &eval_req) {
+                Decision::Allow => {}
+                _ => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::FORBIDDEN,
+                        "AccessDenied",
+                        format!(
+                            "User: {} is not authorized to perform: sts:AssumeRole on resource: {}",
+                            caller_principal.arn, role_arn
                         ),
                     ));
                 }
@@ -1043,54 +1121,6 @@ impl StsService {
 }
 
 /// Extract account ID from an ARN like `arn:aws:iam::123456789012:role/name`.
-/// Extract the `sts:ExternalId` value from any Allow statement in
-/// the role's trust policy that has a `StringEquals` or
-/// `StringEqualsIgnoreCase` Condition naming `sts:ExternalId`. The
-/// caller's AssumeRole request must supply a matching ExternalId or
-/// AWS rejects with AccessDenied. Returns `None` when no statement
-/// requires an ExternalId — that's the unconditioned case where
-/// AssumeRole proceeds without further check.
-fn required_external_id(policy_doc: &str) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(policy_doc).ok()?;
-    let statements = match parsed.get("Statement") {
-        Some(serde_json::Value::Array(arr)) => arr.clone(),
-        Some(stmt) => vec![stmt.clone()],
-        None => return None,
-    };
-    for stmt in &statements {
-        if stmt
-            .get("Effect")
-            .and_then(|v| v.as_str())
-            .map(|s| !s.eq_ignore_ascii_case("Allow"))
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let Some(condition) = stmt.get("Condition") else {
-            continue;
-        };
-        for op in ["StringEquals", "StringEqualsIgnoreCase"] {
-            let Some(map) = condition.get(op).and_then(|v| v.as_object()) else {
-                continue;
-            };
-            for (key, val) in map {
-                if !key.eq_ignore_ascii_case("sts:ExternalId") {
-                    continue;
-                }
-                if let Some(s) = val.as_str() {
-                    return Some(s.to_string());
-                }
-                if let Some(arr) = val.as_array() {
-                    if let Some(first) = arr.iter().find_map(|v| v.as_str()) {
-                        return Some(first.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 fn extract_account_from_arn(arn: &str) -> Option<String> {
     let parts: Vec<&str> = arn.split(':').collect();
     if parts.len() >= 5 && !parts[4].is_empty() {
@@ -1359,7 +1389,12 @@ mod tests {
     }
 
     fn create_role_in_state(state: &SharedIamState, name: &str) -> String {
-        create_role_in_state_with_trust(state, name, "{}")
+        // Permissive default trust so the basic-path tests don't trip
+        // the new evaluator-driven trust gate. Tests that specifically
+        // exercise restricted trust policies use
+        // `create_role_in_state_with_trust` directly.
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
+        create_role_in_state_with_trust(state, name, trust)
     }
 
     fn create_role_in_state_with_trust(
@@ -1582,6 +1617,99 @@ mod tests {
             vec![("RoleArn", &role_arn), ("RoleSessionName", "sess")],
         );
         svc.handle(req).await.unwrap();
+    }
+
+    // ── Trust policy: principal gating via evaluator ──
+
+    #[tokio::test]
+    async fn assume_role_rejects_when_trust_policy_has_no_statements() {
+        let (svc, state) = make_sts_service();
+        let role_arn = create_role_in_state_with_trust(&state, "no-trust", r#"{"Statement":[]}"#);
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "sess")],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected AccessDenied"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn assume_role_rejects_when_trust_policy_excludes_caller() {
+        let (svc, state) = make_sts_service();
+        // Trust policy only allows a specific service that isn't the
+        // anonymous caller; evaluator must reject.
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "ec2-only", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "sess")],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected AccessDenied"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn assume_role_rejects_when_trust_policy_explicitly_denies() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"},{"Effect":"Deny","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "deny-wins", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "sess")],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected AccessDenied"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── Service-linked roles ──
+
+    #[tokio::test]
+    async fn service_linked_role_rejects_non_service_caller() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
+        let arn = fakecloud_aws::arn::Arn::global(
+            "iam",
+            "123456789012",
+            "role/aws-service-role/elasticloadbalancing.amazonaws.com/AWSServiceRoleForELB",
+        )
+        .to_string();
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create("123456789012");
+            s.roles.insert(
+                "AWSServiceRoleForELB".to_string(),
+                crate::state::IamRole {
+                    role_name: "AWSServiceRoleForELB".to_string(),
+                    role_id: "AROASLR".to_string(),
+                    arn: arn.clone(),
+                    path: "/aws-service-role/elasticloadbalancing.amazonaws.com/".to_string(),
+                    assume_role_policy_document: trust.to_string(),
+                    created_at: Utc::now(),
+                    description: None,
+                    max_session_duration: 3600,
+                    tags: Vec::new(),
+                    permissions_boundary: None,
+                },
+            );
+        }
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &arn), ("RoleSessionName", "sess")],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected AccessDenied for non-service caller"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
     }
 
     // ── Unsupported action ──
