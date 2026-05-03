@@ -26,6 +26,17 @@ pub struct StackOutput {
     pub export_name: Option<String>,
 }
 
+/// Cross-stack export entry, keyed by `Export.Name` in `state.exports`.
+/// Tracks the resolved value plus the stack that owns it so `ListExports`
+/// can return a stable `ExportingStackId` and `DeleteStack` can attribute
+/// the export back to its source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackExport {
+    pub value: String,
+    pub exporting_stack_id: String,
+    pub exporting_stack_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stack {
     pub name: String,
@@ -63,6 +74,15 @@ pub struct CloudFormationState {
     pub termination_protection: BTreeMap<String, bool>,
     #[serde(default)]
     pub orgs_access_enabled: bool,
+    /// Account-wide exports keyed by `Export.Name`. Populated whenever a
+    /// stack's outputs include `Export.Name` and removed on stack delete.
+    #[serde(default)]
+    pub exports: BTreeMap<String, StackExport>,
+    /// Reverse-ref map: `imports[export_name]` lists the stack names that
+    /// have consumed the export via `Fn::ImportValue`. CloudFormation
+    /// blocks deleting a stack whose exports still appear here.
+    #[serde(default)]
+    pub imports: BTreeMap<String, Vec<String>>,
 }
 
 impl CloudFormationState {
@@ -76,6 +96,8 @@ impl CloudFormationState {
             stack_policies: BTreeMap::new(),
             termination_protection: BTreeMap::new(),
             orgs_access_enabled: false,
+            exports: BTreeMap::new(),
+            imports: BTreeMap::new(),
         }
     }
 
@@ -86,6 +108,8 @@ impl CloudFormationState {
         self.stack_policies.clear();
         self.termination_protection.clear();
         self.orgs_access_enabled = false;
+        self.exports.clear();
+        self.imports.clear();
     }
 }
 
