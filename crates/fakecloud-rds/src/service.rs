@@ -386,6 +386,9 @@ impl AwsService for RdsService {
             "RestoreDBInstanceFromDBSnapshot" => {
                 self.restore_db_instance_from_db_snapshot(&request).await
             }
+            "RestoreDBInstanceToPointInTime" => {
+                self.restore_db_instance_to_point_in_time(&request).await
+            }
             _ => self.handle_extra_action(&request),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
@@ -2006,6 +2009,181 @@ impl RdsService {
                 &format!(
                     "<DBInstance>{}</DBInstance>",
                     db_instance_xml(&replica, None)
+                ),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    async fn restore_db_instance_to_point_in_time(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let target_id = required_query_param(request, "TargetDBInstanceIdentifier")?;
+        let source_id = required_query_param(request, "SourceDBInstanceIdentifier")?;
+        let vpc_security_group_ids = parse_vpc_security_group_ids(request);
+        let tags = parse_tags(request)?;
+
+        let (source_instance, db_name) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+
+            if !state.begin_instance_creation(&target_id) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::CONFLICT,
+                    "DBInstanceAlreadyExists",
+                    format!("DBInstance {target_id} already exists."),
+                ));
+            }
+
+            let source_instance = match state.instances.get(&source_id).cloned() {
+                Some(inst) => inst,
+                None => {
+                    state.cancel_instance_creation(&target_id);
+                    return Err(db_instance_not_found(&source_id));
+                }
+            };
+
+            let default_db = default_db_name(&source_instance.engine);
+            let db_name = source_instance
+                .db_name
+                .as_deref()
+                .unwrap_or(default_db)
+                .to_string();
+
+            (source_instance, db_name)
+        };
+
+        let runtime = match self.require_runtime() {
+            Ok(rt) => rt,
+            Err(e) => {
+                self.state
+                    .write()
+                    .get_or_create(&request.account_id)
+                    .cancel_instance_creation(&target_id);
+                return Err(e);
+            }
+        };
+
+        let dump_data = match runtime
+            .dump_database(
+                &source_id,
+                &source_instance.engine,
+                &source_instance.master_username,
+                &source_instance.master_user_password,
+                &db_name,
+            )
+            .await
+        {
+            Ok(data) => data,
+            Err(e) => {
+                self.state
+                    .write()
+                    .get_or_create(&request.account_id)
+                    .cancel_instance_creation(&target_id);
+                return Err(runtime_error_to_service_error(e));
+            }
+        };
+
+        let (dbi_resource_id, db_instance_arn) = {
+            let accounts = self.state.read();
+            let empty = RdsState::new(&request.account_id, &request.region);
+            let s = accounts.get(&request.account_id).unwrap_or(&empty);
+            (s.next_dbi_resource_id(), s.db_instance_arn(&target_id))
+        };
+        let created_at = Utc::now();
+
+        let running = match runtime
+            .ensure_postgres(
+                &target_id,
+                &source_instance.engine,
+                &source_instance.engine_version,
+                &source_instance.master_username,
+                &source_instance.master_user_password,
+                &db_name,
+                &request.account_id,
+                &request.region,
+            )
+            .await
+        {
+            Ok(running) => running,
+            Err(e) => {
+                self.state
+                    .write()
+                    .get_or_create(&request.account_id)
+                    .cancel_instance_creation(&target_id);
+                return Err(runtime_error_to_service_error(e));
+            }
+        };
+
+        if let Err(e) = runtime
+            .restore_database(
+                &target_id,
+                &source_instance.engine,
+                &source_instance.master_username,
+                &source_instance.master_user_password,
+                &db_name,
+                &dump_data,
+            )
+            .await
+        {
+            self.state
+                .write()
+                .get_or_create(&request.account_id)
+                .cancel_instance_creation(&target_id);
+            runtime.stop_container(&target_id).await;
+            return Err(runtime_error_to_service_error(e));
+        }
+
+        let restore_to_time = required_query_param(request, "RestoreTime")
+            .ok()
+            .or_else(|| required_query_param(request, "RestoreToTime").ok());
+        let use_latest = required_query_param(request, "UseLatestRestorableTime")
+            .ok()
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let mut instance = build_pit_restored_instance(
+            &target_id,
+            db_instance_arn,
+            dbi_resource_id,
+            created_at,
+            vpc_security_group_ids,
+            &source_instance,
+            &running,
+            tags,
+        );
+
+        if let Some(t) = restore_to_time.as_ref() {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(t) {
+                instance.latest_restorable_time = Some(parsed.with_timezone(&Utc));
+            }
+        } else if use_latest {
+            instance.latest_restorable_time = source_instance.latest_restorable_time;
+        }
+
+        self.state
+            .write()
+            .get_or_create(&request.account_id)
+            .finish_instance_creation(instance.clone());
+
+        self.emit_event(
+            RdsSourceType::DbInstance,
+            &target_id,
+            &instance.db_instance_arn,
+            "RDS-EVENT-0008",
+            &["creation"],
+            "DB instance restored to point in time",
+        );
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            query_response_xml(
+                "RestoreDBInstanceToPointInTime",
+                RDS_NS,
+                &format!(
+                    "<DBInstance>{}</DBInstance>",
+                    db_instance_xml(&instance, None)
                 ),
                 &request.request_id,
             ),
