@@ -330,6 +330,13 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
+        // Validate before taking the write lock and before any mutation:
+        // an invalid EphemeralStorage.Size on an otherwise valid request
+        // must not silently apply the surrounding fields.
+        let validated_ephemeral = match body["EphemeralStorage"]["Size"].as_i64() {
+            Some(size) => Some(crate::service::validate_ephemeral_storage(size)?),
+            None => None,
+        };
         let mut accounts = self.state.write();
         // Pre-resolve layer attachments before re-borrowing accounts mutably
         // for the function. Layer ARNs may live in sibling accounts.
@@ -379,7 +386,7 @@ impl LambdaService {
                 Some(arn.to_string())
             };
         }
-        if let Some(size) = body["EphemeralStorage"]["Size"].as_i64() {
+        if let Some(size) = validated_ephemeral {
             func.ephemeral_storage_size = Some(size);
         }
         if body["VpcConfig"].is_object() {

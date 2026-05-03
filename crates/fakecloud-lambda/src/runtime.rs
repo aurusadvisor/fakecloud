@@ -314,9 +314,10 @@ impl ContainerRuntime {
         // EphemeralStorage.Size (MiB) maps to a tmpfs at /tmp so
         // function code that writes there hits the configured limit
         // instead of the docker default. Default 512 MiB matches AWS.
-        let ephemeral_mib = func.ephemeral_storage_size.unwrap_or(512).max(64);
-        cmd.arg("--tmpfs")
-            .arg(format!("/tmp:size={ephemeral_mib}m"));
+        // `exec` matches AWS Lambda's /tmp behavior (binaries unpacked
+        // there can be invoked); the default `noexec` would break that.
+        let tmpfs_arg = ephemeral_storage_tmpfs_arg(func.ephemeral_storage_size);
+        cmd.arg("--tmpfs").arg(tmpfs_arg);
 
         cmd.arg(&run_image);
 
@@ -450,9 +451,10 @@ impl ContainerRuntime {
         // EphemeralStorage.Size (MiB) maps to a tmpfs at /tmp so
         // function code that writes there hits the configured limit
         // instead of the docker default. Default 512 MiB matches AWS.
-        let ephemeral_mib = func.ephemeral_storage_size.unwrap_or(512).max(64);
-        cmd.arg("--tmpfs")
-            .arg(format!("/tmp:size={ephemeral_mib}m"));
+        // `exec` matches AWS Lambda's /tmp behavior (binaries unpacked
+        // there can be invoked); the default `noexec` would break that.
+        let tmpfs_arg = ephemeral_storage_tmpfs_arg(func.ephemeral_storage_size);
+        cmd.arg("--tmpfs").arg(tmpfs_arg);
 
         cmd.arg(&image).arg(&func.handler);
 
@@ -766,6 +768,22 @@ pub fn runtime_to_image(runtime: &str) -> Option<String> {
     Some(format!("public.ecr.aws/lambda/{}:{}", base, tag))
 }
 
+/// Build the `--tmpfs` argument string used by `docker create` so that
+/// `/tmp` inside the container is sized to the function's
+/// `EphemeralStorage.Size`. Pure helper extracted from the container
+/// boot path so unit tests can verify the flag without spawning Docker.
+///
+/// Defaults to AWS's 512 MiB when `size` is `None`, and clamps to a 64
+/// MiB minimum so legacy snapshots that smuggled in absurd values still
+/// produce a tmpfs Docker accepts. The `exec` mount option matches AWS
+/// Lambda's `/tmp` behavior — handlers that unpack and run binaries
+/// from `/tmp` would otherwise hit `EACCES` against Docker's default
+/// `noexec` tmpfs.
+pub(crate) fn ephemeral_storage_tmpfs_arg(size: Option<i64>) -> String {
+    let mib = size.unwrap_or(512).max(64);
+    format!("/tmp:size={mib}m,exec")
+}
+
 /// Extract a ZIP archive to a destination directory.
 pub fn extract_zip(zip_bytes: &[u8], dest: &Path) -> Result<(), RuntimeError> {
     let cursor = std::io::Cursor::new(zip_bytes);
@@ -958,5 +976,34 @@ mod tests {
             .read_to_string(&mut content)
             .unwrap();
         assert!(content.contains("def handler"));
+    }
+
+    #[test]
+    fn ephemeral_storage_tmpfs_arg_defaults_to_512_when_none() {
+        // None -> AWS default of 512 MiB. The `exec` flag is required so
+        // handlers that unpack and run binaries from /tmp don't hit
+        // EACCES against Docker's default `noexec` tmpfs.
+        assert_eq!(ephemeral_storage_tmpfs_arg(None), "/tmp:size=512m,exec");
+    }
+
+    #[test]
+    fn ephemeral_storage_tmpfs_arg_uses_supplied_size() {
+        assert_eq!(
+            ephemeral_storage_tmpfs_arg(Some(2048)),
+            "/tmp:size=2048m,exec"
+        );
+        assert_eq!(
+            ephemeral_storage_tmpfs_arg(Some(10240)),
+            "/tmp:size=10240m,exec"
+        );
+    }
+
+    #[test]
+    fn ephemeral_storage_tmpfs_arg_clamps_to_64_floor() {
+        // API-level validation already rejects values below 512, but the
+        // runtime defends against legacy snapshots and stale state by
+        // clamping to a 64 MiB floor that Docker still accepts.
+        assert_eq!(ephemeral_storage_tmpfs_arg(Some(0)), "/tmp:size=64m,exec");
+        assert_eq!(ephemeral_storage_tmpfs_arg(Some(32)), "/tmp:size=64m,exec");
     }
 }
