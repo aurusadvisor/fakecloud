@@ -333,6 +333,15 @@ async fn test_send_email_v1() {
         .send()
         .await
         .expect("verify identity");
+    // Sandbox accounts also require recipient verification.
+    for addr in ["to@example.com", "cc@example.com"] {
+        client
+            .verify_email_identity()
+            .email_address(addr)
+            .send()
+            .await
+            .expect("verify recipient");
+    }
 
     let resp = client
         .send_email()
@@ -393,6 +402,12 @@ async fn test_send_raw_email_v1() {
     client
         .verify_email_identity()
         .email_address("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+    client
+        .verify_email_identity()
+        .email_address("to@example.com")
         .send()
         .await
         .unwrap();
@@ -516,6 +531,12 @@ async fn test_send_templated_email_v1() {
         .send()
         .await
         .expect("verify identity");
+    client
+        .verify_email_identity()
+        .email_address("to@example.com")
+        .send()
+        .await
+        .expect("verify recipient");
 
     // Create template first
     client
@@ -587,6 +608,14 @@ async fn test_send_bulk_templated_email_v1() {
         .send()
         .await
         .unwrap();
+    for addr in ["a@example.com", "b@example.com"] {
+        client
+            .verify_email_identity()
+            .email_address(addr)
+            .send()
+            .await
+            .unwrap();
+    }
 
     client
         .create_template()

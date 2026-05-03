@@ -21,6 +21,31 @@ fn extract_email_address(from: &str) -> &str {
     from.trim()
 }
 
+/// Match an email against verified identities: exact email or matching
+/// verified-domain. Shared between sender + sandbox-recipient gates.
+pub(super) fn identity_is_verified(state: &crate::state::SesState, email: &str) -> bool {
+    if state
+        .identities
+        .get(email)
+        .map(|id| id.verified)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if let Some((_, domain)) = email.split_once('@') {
+        if !domain.is_empty()
+            && state
+                .identities
+                .get(domain)
+                .map(|id| id.verified)
+                .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 impl SesV2Service {
     fn render_template_for_send(
         &self,
@@ -88,7 +113,8 @@ impl SesV2Service {
     /// Reject sends where the sender is not a verified identity. Mirrors
     /// real SES: every From address must either match a verified email
     /// identity exactly, or its domain must match a verified domain
-    /// identity.
+    /// identity. Real SES v2 surfaces this as
+    /// `MailFromDomainNotVerifiedException` (HTTP 400).
     pub(super) fn reject_unverified_sender(
         &self,
         account_id: &str,
@@ -102,36 +128,57 @@ impl SesV2Service {
                 "FromEmailAddress is required",
             ));
         }
-        let domain = email.split_once('@').map(|(_, d)| d).unwrap_or("");
 
         let accounts = self.state.read();
-        let Some(state) = accounts.get(account_id) else {
-            return Some(Self::json_error(
-                StatusCode::BAD_REQUEST,
-                "MessageRejected",
-                &format!("Email address is not verified. The following identities failed the check in region {}: {}", "us-east-1", email),
-            ));
-        };
-
-        let email_ok = state
-            .identities
-            .get(email)
-            .map(|id| id.verified)
+        let verified = accounts
+            .get(account_id)
+            .map(|st| identity_is_verified(st, email))
             .unwrap_or(false);
-        let domain_ok = !domain.is_empty()
-            && state
-                .identities
-                .get(domain)
-                .map(|id| id.verified)
-                .unwrap_or(false);
 
-        if email_ok || domain_ok {
+        if verified {
+            None
+        } else {
+            Some(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "MailFromDomainNotVerifiedException",
+                "Mail-From domain not verified.",
+            ))
+        }
+    }
+
+    /// In sandbox accounts (`production_access_enabled = false`), every
+    /// recipient must also belong to a verified identity. Real SES
+    /// surfaces this as `MessageRejected` listing the failing addresses.
+    pub(super) fn reject_unverified_recipients(
+        &self,
+        account_id: &str,
+        recipients: &[&str],
+    ) -> Option<AwsResponse> {
+        let accounts = self.state.read();
+        let state = accounts.get(account_id)?;
+        if state.account_settings.production_access_enabled {
+            return None;
+        }
+        let mut failing: Vec<String> = Vec::new();
+        for raw in recipients {
+            let addr = extract_email_address(raw);
+            if addr.is_empty() {
+                continue;
+            }
+            if !identity_is_verified(state, addr) {
+                failing.push(addr.to_string());
+            }
+        }
+        if failing.is_empty() {
             None
         } else {
             Some(Self::json_error(
                 StatusCode::BAD_REQUEST,
                 "MessageRejected",
-                &format!("Email address is not verified. The following identities failed the check in region {}: {}", "us-east-1", email),
+                &format!(
+                    "Email address is not verified. The following identities failed the check: {}",
+                    failing.join(", ")
+                ),
             ))
         }
     }
@@ -163,6 +210,16 @@ impl SesV2Service {
         let to = extract_string_array(&body["Destination"]["ToAddresses"]);
         let cc = extract_string_array(&body["Destination"]["CcAddresses"]);
         let bcc = extract_string_array(&body["Destination"]["BccAddresses"]);
+
+        let recipients: Vec<&str> = to
+            .iter()
+            .chain(cc.iter())
+            .chain(bcc.iter())
+            .map(|s| s.as_str())
+            .collect();
+        if let Some(err) = self.reject_unverified_recipients(&req.account_id, &recipients) {
+            return Ok(err);
+        }
 
         let (subject, html_body, text_body, raw_data, template_name, template_data) =
             if body["Content"]["Simple"].is_object() {
@@ -274,6 +331,25 @@ impl SesV2Service {
             let to = extract_string_array(&entry["Destination"]["ToAddresses"]);
             let cc = extract_string_array(&entry["Destination"]["CcAddresses"]);
             let bcc = extract_string_array(&entry["Destination"]["BccAddresses"]);
+
+            let recipients: Vec<&str> = to
+                .iter()
+                .chain(cc.iter())
+                .chain(bcc.iter())
+                .map(|s| s.as_str())
+                .collect();
+            if self
+                .reject_unverified_recipients(&req.account_id, &recipients)
+                .is_some()
+            {
+                // Real SES surfaces unverified recipients per-entry,
+                // not as a whole-batch failure.
+                results.push(json!({
+                    "Status": "MESSAGE_REJECTED",
+                    "Error": "Email address is not verified.",
+                }));
+                continue;
+            }
 
             let message_id = uuid::Uuid::new_v4().to_string();
 

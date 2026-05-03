@@ -15,11 +15,7 @@ impl SesV2Service {
         let empty = SesState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let acct = &state.account_settings;
-        let production_access = acct
-            .details
-            .as_ref()
-            .and_then(|d| d.production_access_enabled)
-            .unwrap_or(true);
+        let production_access = acct.production_access_enabled;
         let mut response = json!({
             "DedicatedIpAutoWarmupEnabled": acct.dedicated_ip_auto_warmup_enabled,
             "EnforcementStatus": "HEALTHY",
@@ -113,6 +109,11 @@ impl SesV2Service {
             additional_contact_email_addresses: additional,
             production_access_enabled: production_access,
         });
+        // Mirror onto the top-level flag — it's the source of truth for
+        // the SendEmail sandbox-recipient gate.
+        if let Some(flag) = production_access {
+            state.account_settings.production_access_enabled = flag;
+        }
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 

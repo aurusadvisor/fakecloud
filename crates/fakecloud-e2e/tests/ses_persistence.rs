@@ -112,6 +112,11 @@ async fn persistence_suppression_persists_introspection_does_not() {
         .send()
         .await
         .unwrap();
+    ses.create_email_identity()
+        .email_identity("to@example.com")
+        .send()
+        .await
+        .unwrap();
 
     ses.put_suppressed_destination()
         .email_address("blocked@example.com")

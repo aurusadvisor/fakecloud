@@ -16,6 +16,14 @@ fn make_state() -> SharedSesState {
     ))
 }
 
+/// Flip the account out of sandbox so tests focused on send mechanics
+/// don't trip the recipient-verification gate.
+fn enable_production_access(state: &SharedSesState) {
+    let mut accounts = state.write();
+    let st = accounts.get_or_create("123456789012");
+    st.account_settings.production_access_enabled = true;
+}
+
 /// Seed a verified identity for the default test account so send tests
 /// don't trip the verified-sender gate.
 fn seed_identity(state: &SharedSesState, name: &str) {
@@ -223,6 +231,7 @@ async fn test_template_lifecycle() {
 #[tokio::test]
 async fn test_send_email() {
     let state = make_state();
+    enable_production_access(&state);
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -273,6 +282,7 @@ async fn test_send_email() {
 async fn test_send_email_skips_dkim_when_signing_disabled() {
     let state = make_state();
     seed_identity(&state, "plain@example.com");
+    enable_production_access(&state);
     {
         let mut accounts = state.write();
         let st = accounts.get_or_create("123456789012");
@@ -353,6 +363,7 @@ async fn test_configuration_set_lifecycle() {
 async fn test_send_email_raw_content() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -389,6 +400,7 @@ async fn test_send_email_raw_content() {
 async fn test_send_email_template_content() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -424,6 +436,7 @@ async fn test_send_email_template_content() {
 async fn test_send_email_template_renders_subject_and_body() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
     {
         use crate::state::EmailTemplate;
         let mut accounts = state.write();
@@ -485,6 +498,7 @@ async fn test_send_email_missing_content() {
 async fn test_send_email_with_cc_and_bcc() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -518,6 +532,7 @@ async fn test_send_email_with_cc_and_bcc() {
 async fn test_send_bulk_email() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -623,7 +638,8 @@ async fn test_send_email_rejects_unverified_sender() {
     let state = make_state();
     let svc = SesV2Service::new(state);
 
-    // No identity registered for sender@example.com → MessageRejected.
+    // No identity registered for sender@example.com → v2 surfaces this
+    // as MailFromDomainNotVerifiedException.
     let req = make_request(
         Method::POST,
         "/v2/email/outbound-emails",
@@ -636,13 +652,14 @@ async fn test_send_email_rejects_unverified_sender() {
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["__type"], "MessageRejected");
+    assert_eq!(body["__type"], "MailFromDomainNotVerifiedException");
 }
 
 #[tokio::test]
 async fn test_send_email_accepts_verified_domain() {
     let state = make_state();
-    // Verify the domain only → full address should be allowed.
+    // Verify the domain only → both sender and (in sandbox) recipient
+    // resolve through the same verified domain identity.
     seed_identity(&state, "example.com");
     let svc = SesV2Service::new(state);
 
@@ -652,6 +669,110 @@ async fn test_send_email_accepts_verified_domain() {
         r#"{
             "FromEmailAddress": "sender@example.com",
             "Destination": {"ToAddresses": ["recipient@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn send_email_v2_rejects_unverified_from_in_sandbox() {
+    let state = make_state();
+    let svc = SesV2Service::new(state);
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "noreply@example.com",
+            "Destination": {"ToAddresses": ["someone@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["__type"], "MailFromDomainNotVerifiedException");
+}
+
+#[tokio::test]
+async fn send_email_v2_accepts_verified_from_when_recipient_also_verified_in_sandbox() {
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    seed_identity(&state, "recipient@example.com");
+    let svc = SesV2Service::new(state);
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["recipient@example.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn send_email_v2_rejects_unverified_recipient_in_sandbox() {
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    let svc = SesV2Service::new(state);
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["unverified@elsewhere.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["__type"], "MessageRejected");
+    assert!(body["message"]
+        .as_str()
+        .unwrap_or("")
+        .contains("unverified@elsewhere.com"));
+}
+
+#[tokio::test]
+async fn send_email_v2_skips_recipient_check_in_production() {
+    let state = make_state();
+    seed_identity(&state, "sender@example.com");
+    enable_production_access(&state);
+    let svc = SesV2Service::new(state);
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "sender@example.com",
+            "Destination": {"ToAddresses": ["unverified@elsewhere.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn send_email_v2_accepts_verified_domain_when_from_uses_subdomain_or_address() {
+    let state = make_state();
+    seed_identity(&state, "example.com");
+    let svc = SesV2Service::new(state);
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "bot@example.com",
+            "Destination": {"ToAddresses": ["other@example.com"]},
             "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
         }"#,
     );
