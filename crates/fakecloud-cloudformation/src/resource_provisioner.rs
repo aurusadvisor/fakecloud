@@ -7754,11 +7754,106 @@ impl ResourceProvisioner {
             .get("AutoMinorVersionUpgrade")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        let default_port = if engine == "memcached" { 11211 } else { 6379 };
         let port = props
             .get("Port")
             .and_then(|v| v.as_i64())
             .map(|n| n as u16)
-            .unwrap_or(6379);
+            .unwrap_or(default_port);
+        let cache_parameter_group_name = props
+            .get("CacheParameterGroupName")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let security_group_ids: Vec<String> = props
+            .get("VpcSecurityGroupIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cache_security_group_names: Vec<String> = props
+            .get("CacheSecurityGroupNames")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let preferred_availability_zones: Vec<String> = props
+            .get("PreferredAvailabilityZones")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let snapshot_arns: Vec<String> = props
+            .get("SnapshotArns")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let snapshot_name = props
+            .get("SnapshotName")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let snapshot_retention_limit = props
+            .get("SnapshotRetentionLimit")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32)
+            .unwrap_or(0);
+        let snapshot_window = props
+            .get("SnapshotWindow")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let preferred_maintenance_window = props
+            .get("PreferredMaintenanceWindow")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let notification_topic_arn = props
+            .get("NotificationTopicArn")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let transit_encryption_enabled = props
+            .get("TransitEncryptionEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let auth_token = props
+            .get("AuthToken")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let auth_token_enabled = auth_token.is_some();
+        let network_type = props
+            .get("NetworkType")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| Some("ipv4".to_string()));
+        let ip_discovery = props
+            .get("IpDiscovery")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| Some("ipv4".to_string()));
+        let az_mode = props
+            .get("AZMode")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| Some("single-az".to_string()));
+        let outpost_mode = props
+            .get("OutpostMode")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let preferred_outpost_arn = props
+            .get("PreferredOutpostArn")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         let mut accounts = self.elasticache_state.write();
         let state = accounts.get_or_create(&self.account_id);
@@ -7784,12 +7879,27 @@ impl ResourceProvisioner {
             container_id: String::new(),
             host_port: 0,
             replication_group_id: None,
-            cache_parameter_group_name: None,
-            security_group_ids: Vec::new(),
+            cache_parameter_group_name,
+            security_group_ids,
             log_delivery_configurations: Vec::new(),
-            transit_encryption_enabled: false,
+            transit_encryption_enabled,
             at_rest_encryption_enabled: false,
-            auth_token_enabled: false,
+            auth_token_enabled,
+            port,
+            preferred_maintenance_window,
+            preferred_availability_zones,
+            notification_topic_arn,
+            cache_security_group_names,
+            snapshot_arns,
+            snapshot_name,
+            snapshot_retention_limit,
+            snapshot_window,
+            outpost_mode,
+            preferred_outpost_arn,
+            network_type,
+            ip_discovery,
+            az_mode,
+            auth_token,
         };
         state.cache_clusters.insert(id.clone(), cluster);
         Ok(ProvisionResult::new(id.clone())

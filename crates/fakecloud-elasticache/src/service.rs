@@ -840,6 +840,8 @@ impl ElastiCacheService {
         let cache_parameter_group_name = optional_query_param(request, "CacheParameterGroupName");
         let security_group_ids =
             parse_query_list_param(request, "SecurityGroupIds", "SecurityGroupId");
+        let cache_security_group_names =
+            parse_query_list_param(request, "CacheSecurityGroupNames", "CacheSecurityGroupName");
         let log_delivery_configurations = parse_log_delivery_configs(request);
         let transit_encryption_enabled = parse_optional_bool(
             optional_query_param(request, "TransitEncryptionEnabled").as_deref(),
@@ -849,7 +851,37 @@ impl ElastiCacheService {
             optional_query_param(request, "AtRestEncryptionEnabled").as_deref(),
         )?
         .unwrap_or(false);
-        let auth_token_enabled = optional_query_param(request, "AuthToken").is_some();
+        let auth_token = optional_query_param(request, "AuthToken");
+        let auth_token_enabled = auth_token.is_some();
+        // ElastiCache defaults: 6379 redis/valkey, 11211 memcached.
+        let default_port = if engine == ENGINE_MEMCACHED {
+            11211
+        } else {
+            6379
+        };
+        let port = optional_query_param(request, "Port")
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(default_port);
+        let preferred_maintenance_window =
+            optional_query_param(request, "PreferredMaintenanceWindow");
+        let preferred_availability_zones =
+            parse_query_list_param(request, "PreferredAvailabilityZones", "AvailabilityZone");
+        let notification_topic_arn = optional_query_param(request, "NotificationTopicArn");
+        let snapshot_arns = parse_query_list_param(request, "SnapshotArns", "SnapshotArn");
+        let snapshot_name = optional_query_param(request, "SnapshotName");
+        let snapshot_retention_limit = optional_query_param(request, "SnapshotRetentionLimit")
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(0);
+        let snapshot_window = optional_query_param(request, "SnapshotWindow");
+        let outpost_mode = optional_query_param(request, "OutpostMode");
+        let preferred_outpost_arn = optional_query_param(request, "PreferredOutpostArn");
+        // Default to ipv4 when unspecified, matching AWS's default network stack.
+        let network_type =
+            Some(optional_query_param(request, "NetworkType").unwrap_or_else(|| "ipv4".into()));
+        let ip_discovery =
+            Some(optional_query_param(request, "IpDiscovery").unwrap_or_else(|| "ipv4".into()));
+        let az_mode =
+            Some(optional_query_param(request, "AZMode").unwrap_or_else(|| "single-az".into()));
 
         let (preferred_availability_zone, arn) = {
             let mut accounts = self.state.write();
@@ -955,6 +987,21 @@ impl ElastiCacheService {
             transit_encryption_enabled,
             at_rest_encryption_enabled,
             auth_token_enabled,
+            port,
+            preferred_maintenance_window,
+            preferred_availability_zones,
+            notification_topic_arn,
+            cache_security_group_names,
+            snapshot_arns,
+            snapshot_name,
+            snapshot_retention_limit,
+            snapshot_window,
+            outpost_mode,
+            preferred_outpost_arn,
+            network_type,
+            ip_discovery,
+            az_mode,
+            auth_token,
         };
 
         let xml = cache_cluster_xml(&cluster, true);

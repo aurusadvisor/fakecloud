@@ -682,6 +682,98 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
             String::new()
         };
 
+    let preferred_maintenance_window_xml = cluster
+        .preferred_maintenance_window
+        .as_ref()
+        .map(|w| {
+            format!(
+                "<PreferredMaintenanceWindow>{}</PreferredMaintenanceWindow>",
+                xml_escape(w)
+            )
+        })
+        .unwrap_or_default();
+    let preferred_outpost_arn_xml = cluster
+        .preferred_outpost_arn
+        .as_ref()
+        .map(|a| {
+            format!(
+                "<PreferredOutpostArn>{}</PreferredOutpostArn>",
+                xml_escape(a)
+            )
+        })
+        .unwrap_or_default();
+    let outpost_mode_xml = cluster
+        .outpost_mode
+        .as_ref()
+        .map(|m| format!("<OutpostMode>{}</OutpostMode>", xml_escape(m)))
+        .unwrap_or_default();
+    let network_type_xml = cluster
+        .network_type
+        .as_ref()
+        .map(|n| format!("<NetworkType>{}</NetworkType>", xml_escape(n)))
+        .unwrap_or_default();
+    let ip_discovery_xml = cluster
+        .ip_discovery
+        .as_ref()
+        .map(|n| format!("<IpDiscovery>{}</IpDiscovery>", xml_escape(n)))
+        .unwrap_or_default();
+    let notification_topic_xml = cluster
+        .notification_topic_arn
+        .as_ref()
+        .map(|t| {
+            format!(
+                "<NotificationConfiguration><TopicArn>{}</TopicArn><TopicStatus>active</TopicStatus></NotificationConfiguration>",
+                xml_escape(t)
+            )
+        })
+        .unwrap_or_default();
+    let snapshot_window_xml = cluster
+        .snapshot_window
+        .as_ref()
+        .map(|w| format!("<SnapshotWindow>{}</SnapshotWindow>", xml_escape(w)))
+        .unwrap_or_default();
+    let snapshot_retention_limit_xml = format!(
+        "<SnapshotRetentionLimit>{}</SnapshotRetentionLimit>",
+        cluster.snapshot_retention_limit
+    );
+    let preferred_azs_xml = if cluster.preferred_availability_zones.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<PreferredAvailabilityZones>{}</PreferredAvailabilityZones>",
+            cluster
+                .preferred_availability_zones
+                .iter()
+                .map(|az| format!("<AvailabilityZone>{}</AvailabilityZone>", xml_escape(az)))
+                .collect::<String>()
+        )
+    };
+    // Defaults to single-az even if not set; emitted only when known so
+    // older snapshots without the field don't gain a fake value.
+    let az_mode_xml = cluster
+        .az_mode
+        .as_ref()
+        .map(|m| format!("<AZMode>{}</AZMode>", xml_escape(m)))
+        .unwrap_or_default();
+    let cache_security_groups_xml = if cluster.cache_security_group_names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<CacheSecurityGroups>{}</CacheSecurityGroups>",
+            cluster
+                .cache_security_group_names
+                .iter()
+                .map(|n| format!(
+                    "<CacheSecurityGroup>\
+                     <CacheSecurityGroupName>{}</CacheSecurityGroupName>\
+                     <Status>active</Status>\
+                     </CacheSecurityGroup>",
+                    xml_escape(n)
+                ))
+                .collect::<String>()
+        )
+    };
+
     format!(
         "<CacheClusterId>{}</CacheClusterId>\
          <CacheNodeType>{}</CacheNodeType>\
@@ -690,13 +782,25 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
          <CacheClusterStatus>{}</CacheClusterStatus>\
          <NumCacheNodes>{}</NumCacheNodes>\
          <PreferredAvailabilityZone>{}</PreferredAvailabilityZone>\
+         {preferred_azs_xml}\
+         {az_mode_xml}\
          <CacheClusterCreateTime>{}</CacheClusterCreateTime>\
+         {preferred_maintenance_window_xml}\
          {cache_subnet_group_name_xml}\
          {cache_nodes_xml}\
          {cache_parameter_group_xml}\
+         {cache_security_groups_xml}\
          {security_groups_xml}\
          {log_delivery_configurations_xml}\
          {configuration_endpoint_xml}\
+         <ClientDownloadLandingPage></ClientDownloadLandingPage>\
+         {notification_topic_xml}\
+         {snapshot_retention_limit_xml}\
+         {snapshot_window_xml}\
+         {outpost_mode_xml}\
+         {preferred_outpost_arn_xml}\
+         {network_type_xml}\
+         {ip_discovery_xml}\
          <TransitEncryptionEnabled>{}</TransitEncryptionEnabled>\
          <AtRestEncryptionEnabled>{}</AtRestEncryptionEnabled>\
          <AuthTokenEnabled>{}</AuthTokenEnabled>\
@@ -1421,6 +1525,21 @@ mod cluster_xml_tests {
             transit_encryption_enabled: false,
             at_rest_encryption_enabled: false,
             auth_token_enabled: false,
+            port: 6379,
+            preferred_maintenance_window: None,
+            preferred_availability_zones: Vec::new(),
+            notification_topic_arn: None,
+            cache_security_group_names: Vec::new(),
+            snapshot_arns: Vec::new(),
+            snapshot_name: None,
+            snapshot_retention_limit: 0,
+            snapshot_window: None,
+            outpost_mode: None,
+            preferred_outpost_arn: None,
+            network_type: None,
+            ip_discovery: None,
+            az_mode: None,
+            auth_token: None,
         }
     }
 
