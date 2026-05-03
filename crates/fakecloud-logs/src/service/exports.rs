@@ -68,21 +68,13 @@ impl LogsService {
         let log_stream_name_prefix = body["logStreamNamePrefix"].as_str().map(|s| s.to_string());
 
         let task_id = uuid::Uuid::new_v4().to_string();
-        let (status_code, status_message) = if from_time < to_time {
-            (
-                "COMPLETED".to_string(),
-                "Completed successfully".to_string(),
-            )
-        } else {
-            ("RUNNING".to_string(), "Task is running".to_string())
-        };
+        let now = chrono::Utc::now().timestamp_millis();
 
-        // Collect matching events. Render the export payload, then
-        // write it to the destination S3 bucket via the delivery bus
-        // so DescribeLogGroups callers can verify content via real
-        // S3 GetObject. Falls back to the internal export_storage map
-        // when no S3 writer is wired (in-process tests).
-        let mut exported_lines: Vec<String> = Vec::new();
+        // Collect matching events per stream. We render one S3 object per
+        // log stream as JSONL ({"timestamp": ..., "message": ...}) so a
+        // downstream reader sees each stream's events grouped together,
+        // which mirrors how real CloudWatch export tasks emit objects.
+        let mut per_stream: Vec<(String, Vec<crate::state::LogEvent>)> = Vec::new();
         {
             let accounts = self.state.read();
             let empty = crate::state::LogsState::new(&req.account_id, &req.region);
@@ -95,35 +87,58 @@ impl LogsService {
                                 continue;
                             }
                         }
-                        for event in &stream.events {
-                            if event.timestamp >= from_time && event.timestamp < to_time {
-                                exported_lines.push(event.message.clone());
-                            }
+                        let matches: Vec<crate::state::LogEvent> = stream
+                            .events
+                            .iter()
+                            .filter(|e| e.timestamp >= from_time && e.timestamp < to_time)
+                            .cloned()
+                            .collect();
+                        if !matches.is_empty() {
+                            per_stream.push((stream_name.clone(), matches));
                         }
                     }
                 }
             }
         }
 
-        let s3_key = format!("{destination_prefix}/{log_group_name}/{task_id}");
+        let (status_code, status_message, completion_time) = if from_time < to_time {
+            (
+                "COMPLETED".to_string(),
+                "Completed successfully".to_string(),
+                Some(now),
+            )
+        } else {
+            ("RUNNING".to_string(), "Task is running".to_string(), None)
+        };
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if from_time < to_time && !exported_lines.is_empty() {
-            let data = exported_lines.join("\n");
-            let body = data.into_bytes();
-            match self.delivery_bus.put_object_to_s3(
-                &req.account_id,
-                &destination,
-                &s3_key,
-                body.clone(),
-                Some("text/plain"),
-            ) {
-                Ok(()) => {}
-                Err(_) => {
-                    let fallback_key = format!(
-                        "{}/{}/{}/{}",
-                        destination, destination_prefix, log_group_name, task_id
-                    );
+        if from_time < to_time {
+            for (stream_name, events) in &per_stream {
+                let mut data = String::new();
+                for event in events {
+                    let line = serde_json::to_string(&json!({
+                        "timestamp": event.timestamp,
+                        "message": event.message,
+                    }))
+                    .unwrap();
+                    data.push_str(&line);
+                    data.push('\n');
+                }
+                let s3_key = format!("{destination_prefix}/{task_id}/{stream_name}-{now}");
+                let body = data.into_bytes();
+                if self
+                    .delivery_bus
+                    .put_object_to_s3(
+                        &req.account_id,
+                        &destination,
+                        &s3_key,
+                        body.clone(),
+                        Some("application/x-ndjson"),
+                    )
+                    .is_err()
+                {
+                    let fallback_key = format!("{destination}/{s3_key}");
                     state.export_storage.insert(fallback_key, body);
                 }
             }
@@ -140,6 +155,8 @@ impl LogsService {
             destination_prefix,
             status_code,
             status_message,
+            creation_time: now,
+            completion_time,
         });
 
         Ok(AwsResponse::json(
@@ -215,6 +232,11 @@ impl LogsService {
                 if let Some(ref prefix) = t.log_stream_name_prefix {
                     obj["logStreamNamePrefix"] = json!(prefix);
                 }
+                let mut exec_info = json!({ "creationTime": t.creation_time });
+                if let Some(completion) = t.completion_time {
+                    exec_info["completionTime"] = json!(completion);
+                }
+                obj["executionInfo"] = exec_info;
                 obj
             })
             .collect();
@@ -412,6 +434,328 @@ mod tests {
         assert!(data.contains("export event 1"));
         assert!(data.contains("export event 2"));
         assert!(data.contains("export event 3"));
+    }
+
+    // ---- Z2: real S3 writes via DeliveryBus ----
+
+    type S3PutRecord = (String, String, String, Vec<u8>, Option<String>);
+
+    #[derive(Default)]
+    struct S3Recorder {
+        // (account, bucket, key, body, content_type)
+        objects: parking_lot::Mutex<Vec<S3PutRecord>>,
+    }
+
+    impl fakecloud_core::delivery::S3Delivery for S3Recorder {
+        fn put_object(
+            &self,
+            account_id: &str,
+            bucket: &str,
+            key: &str,
+            body: Vec<u8>,
+            content_type: Option<&str>,
+        ) -> Result<(), String> {
+            self.objects.lock().push((
+                account_id.to_string(),
+                bucket.to_string(),
+                key.to_string(),
+                body,
+                content_type.map(|s| s.to_string()),
+            ));
+            Ok(())
+        }
+
+        fn get_object(
+            &self,
+            _account_id: &str,
+            bucket: &str,
+            key: &str,
+        ) -> Result<Vec<u8>, String> {
+            self.objects
+                .lock()
+                .iter()
+                .find(|(_, b, k, _, _)| b == bucket && k == key)
+                .map(|(_, _, _, body, _)| body.clone())
+                .ok_or_else(|| format!("not found: {bucket}/{key}"))
+        }
+    }
+
+    fn make_service_with_s3(recorder: std::sync::Arc<S3Recorder>) -> crate::service::LogsService {
+        use fakecloud_core::delivery::DeliveryBus;
+        let state = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let bus = DeliveryBus::new().with_s3(recorder);
+        crate::service::LogsService::new(state, std::sync::Arc::new(bus))
+    }
+
+    #[test]
+    fn create_export_task_writes_events_to_s3() {
+        let recorder = std::sync::Arc::new(S3Recorder::default());
+        let svc = make_service_with_s3(recorder.clone());
+        create_group(&svc, "g");
+        create_stream(&svc, "g", "s1");
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "g",
+                "logStreamName": "s1",
+                "logEvents": [
+                    { "timestamp": now, "message": "evt-a" },
+                    { "timestamp": now + 1, "message": "evt-b" },
+                    { "timestamp": now + 2, "message": "evt-c" },
+                ],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        let req = make_request(
+            "CreateExportTask",
+            json!({
+                "logGroupName": "g",
+                "from": now - 1,
+                "to": now + 100,
+                "destination": "exp-bucket",
+                "destinationPrefix": "p",
+            }),
+        );
+        svc.create_export_task(&req).unwrap();
+
+        let objects = recorder.objects.lock();
+        assert_eq!(objects.len(), 1, "expected one S3 object");
+        let (_, bucket, key, body, content_type) = &objects[0];
+        assert_eq!(bucket, "exp-bucket");
+        assert!(key.starts_with("p/"));
+        assert!(key.contains("/s1-"));
+        assert_eq!(content_type.as_deref(), Some("application/x-ndjson"));
+        let text = String::from_utf8_lossy(body);
+        let lines: Vec<&str> = text.trim().lines().collect();
+        assert_eq!(lines.len(), 3);
+        let first: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["timestamp"].as_i64().unwrap(), now);
+        assert_eq!(first["message"].as_str().unwrap(), "evt-a");
+    }
+
+    #[test]
+    fn create_export_task_filters_by_time_range() {
+        let recorder = std::sync::Arc::new(S3Recorder::default());
+        let svc = make_service_with_s3(recorder.clone());
+        create_group(&svc, "g");
+        create_stream(&svc, "g", "s1");
+
+        // Use real-clock timestamps so PutLogEvents doesn't reject them
+        // as too old; offsets simulate t=1/5/10.
+        let base = chrono::Utc::now().timestamp_millis();
+        let t_low = base + 1;
+        let t_mid = base + 5;
+        let t_high = base + 10;
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "g",
+                "logStreamName": "s1",
+                "logEvents": [
+                    { "timestamp": t_low, "message": "low" },
+                    { "timestamp": t_mid, "message": "mid" },
+                    { "timestamp": t_high, "message": "high" },
+                ],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        let req = make_request(
+            "CreateExportTask",
+            json!({
+                "logGroupName": "g",
+                "from": base + 3,
+                "to": base + 8,
+                "destination": "tr-bucket",
+                "destinationPrefix": "p",
+            }),
+        );
+        svc.create_export_task(&req).unwrap();
+
+        let objects = recorder.objects.lock();
+        assert_eq!(objects.len(), 1);
+        let body = String::from_utf8_lossy(&objects[0].3);
+        assert!(body.contains("\"mid\""));
+        assert!(!body.contains("\"low\""));
+        assert!(!body.contains("\"high\""));
+    }
+
+    #[test]
+    fn create_export_task_marks_task_completed() {
+        let recorder = std::sync::Arc::new(S3Recorder::default());
+        let svc = make_service_with_s3(recorder);
+        create_group(&svc, "g");
+        create_stream(&svc, "g", "s1");
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "g",
+                "logStreamName": "s1",
+                "logEvents": [{ "timestamp": now, "message": "x" }],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        let req = make_request(
+            "CreateExportTask",
+            json!({
+                "logGroupName": "g",
+                "from": now - 1,
+                "to": now + 1000,
+                "destination": "tc-bucket",
+                "destinationPrefix": "p",
+            }),
+        );
+        let resp = svc.create_export_task(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let task_id = body["taskId"].as_str().unwrap();
+
+        let req = make_request("DescribeExportTasks", json!({ "taskId": task_id }));
+        let resp = svc.describe_export_tasks(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let task = &body["exportTasks"][0];
+        assert_eq!(task["status"]["code"].as_str().unwrap(), "COMPLETED");
+        let exec = &task["executionInfo"];
+        assert!(exec["creationTime"].as_i64().unwrap() > 0);
+        assert!(exec["completionTime"].as_i64().unwrap() > 0);
+    }
+
+    #[test]
+    fn create_delivery_to_s3_destination_records_target() {
+        let recorder = std::sync::Arc::new(S3Recorder::default());
+        let svc = make_service_with_s3(recorder);
+        create_group(&svc, "del-grp");
+
+        let req = make_request(
+            "DescribeLogGroups",
+            json!({ "logGroupNamePrefix": "del-grp" }),
+        );
+        let resp = svc.describe_log_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let group_arn = body["logGroups"][0]["arn"].as_str().unwrap().to_string();
+
+        let req = make_request(
+            "PutDeliverySource",
+            json!({
+                "name": "ds-src",
+                "resourceArn": group_arn,
+                "logType": "APPLICATION_LOGS",
+            }),
+        );
+        svc.put_delivery_source(&req).unwrap();
+
+        let req = make_request(
+            "PutDeliveryDestination",
+            json!({
+                "name": "ds-dest",
+                "deliveryDestinationConfiguration": {
+                    "destinationResourceArn": "arn:aws:s3:::my-delivery-bucket"
+                }
+            }),
+        );
+        svc.put_delivery_destination(&req).unwrap();
+
+        let req = make_request("GetDeliveryDestination", json!({ "name": "ds-dest" }));
+        let resp = svc.get_delivery_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let dest_arn = body["deliveryDestination"]["arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let req = make_request(
+            "CreateDelivery",
+            json!({
+                "deliverySourceName": "ds-src",
+                "deliveryDestinationArn": dest_arn,
+            }),
+        );
+        let resp = svc.create_delivery(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["delivery"]["deliveryDestinationType"], "S3");
+    }
+
+    #[test]
+    fn put_log_events_after_delivery_creates_s3_objects() {
+        let recorder = std::sync::Arc::new(S3Recorder::default());
+        let svc = make_service_with_s3(recorder.clone());
+        create_group(&svc, "live-grp");
+        create_stream(&svc, "live-grp", "s1");
+
+        let req = make_request(
+            "DescribeLogGroups",
+            json!({ "logGroupNamePrefix": "live-grp" }),
+        );
+        let resp = svc.describe_log_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let group_arn = body["logGroups"][0]["arn"].as_str().unwrap().to_string();
+
+        let req = make_request(
+            "PutDeliverySource",
+            json!({
+                "name": "live-src",
+                "resourceArn": group_arn,
+                "logType": "APPLICATION_LOGS",
+            }),
+        );
+        svc.put_delivery_source(&req).unwrap();
+
+        let req = make_request(
+            "PutDeliveryDestination",
+            json!({
+                "name": "live-dest",
+                "deliveryDestinationConfiguration": {
+                    "destinationResourceArn": "arn:aws:s3:::live-bucket"
+                }
+            }),
+        );
+        svc.put_delivery_destination(&req).unwrap();
+
+        let req = make_request("GetDeliveryDestination", json!({ "name": "live-dest" }));
+        let resp = svc.get_delivery_destination(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let dest_arn = body["deliveryDestination"]["arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let req = make_request(
+            "CreateDelivery",
+            json!({
+                "deliverySourceName": "live-src",
+                "deliveryDestinationArn": dest_arn,
+            }),
+        );
+        svc.create_delivery(&req).unwrap();
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let req = make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "live-grp",
+                "logStreamName": "s1",
+                "logEvents": [
+                    { "timestamp": now, "message": "live-a" },
+                    { "timestamp": now + 1, "message": "live-b" },
+                ],
+            }),
+        );
+        svc.put_log_events(&req).unwrap();
+
+        let objects = recorder.objects.lock();
+        assert!(!objects.is_empty(), "expected delivery to write S3 objects");
+        let (_, bucket, _, body, _) = &objects[0];
+        assert_eq!(bucket, "live-bucket");
+        let text = String::from_utf8_lossy(body);
+        assert!(text.contains("live-a"));
+        assert!(text.contains("live-b"));
     }
 
     #[test]

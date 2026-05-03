@@ -490,8 +490,16 @@ impl LogsService {
         // S3 GetObject. Falls back to the internal export_storage map
         // when no S3 writer is wired (in-process tests).
         if !delivery_targets.is_empty() && !accepted_events.is_empty() {
-            let lines: Vec<String> = accepted_events.iter().map(|e| e.message.clone()).collect();
-            let data = lines.join("\n");
+            let mut data = String::new();
+            for event in &accepted_events {
+                let line = serde_json::to_string(&json!({
+                    "timestamp": event.timestamp,
+                    "message": event.message,
+                }))
+                .unwrap();
+                data.push_str(&line);
+                data.push('\n');
+            }
             let now_str = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
             let account_id_owned = state.account_id.clone();
             for dest_arn in &delivery_targets {
@@ -508,7 +516,7 @@ impl LogsService {
                         bucket,
                         &s3_key,
                         body.clone(),
-                        Some("text/plain"),
+                        Some("application/x-ndjson"),
                     )
                     .is_err()
                 {

@@ -242,6 +242,10 @@ pub struct ExportTask {
     pub destination_prefix: String,
     pub status_code: String,
     pub status_message: String,
+    #[serde(default)]
+    pub creation_time: i64,
+    #[serde(default)]
+    pub completion_time: Option<i64>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
