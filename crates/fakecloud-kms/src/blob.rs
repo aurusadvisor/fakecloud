@@ -248,4 +248,31 @@ mod tests {
         let b = encode(&mk, "k", b"same");
         assert_ne!(a, b, "fresh IV should make ciphertext non-deterministic");
     }
+
+    #[test]
+    fn decode_with_context_round_trips_when_ec_matches() {
+        let mk = fixed_master();
+        let aad = b"{\"app\":\"prod\"}";
+        let blob = encode_with_context(&mk, "k", b"secret", aad);
+        let decoded = decode_with_context(&mk, &blob, aad).expect("matching EC must decode");
+        assert_eq!(decoded.plaintext, b"secret");
+    }
+
+    #[test]
+    fn decode_with_context_rejects_mismatched_ec() {
+        let mk = fixed_master();
+        let blob = encode_with_context(&mk, "k", b"secret", b"{\"app\":\"prod\"}");
+        // Different EC AAD bytes — AEAD verification must fail.
+        assert!(decode_with_context(&mk, &blob, b"{\"app\":\"staging\"}").is_none());
+        // Missing EC at decrypt time — same outcome.
+        assert!(decode_with_context(&mk, &blob, b"").is_none());
+    }
+
+    #[test]
+    fn decode_without_context_rejects_blob_encoded_with_ec() {
+        let mk = fixed_master();
+        let blob = encode_with_context(&mk, "k", b"secret", b"{\"x\":\"y\"}");
+        // Plain `decode` passes empty AAD; EC-bound blob must reject.
+        assert!(decode(&mk, &blob).is_none());
+    }
 }
