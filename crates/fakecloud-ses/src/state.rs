@@ -463,7 +463,7 @@ impl SesState {
                 suppressed_reasons: Vec::new(),
                 vdm_attributes: None,
                 details: None,
-                production_access_enabled: false,
+                production_access_enabled: true,
             },
             import_jobs: BTreeMap::new(),
             export_jobs: BTreeMap::new(),

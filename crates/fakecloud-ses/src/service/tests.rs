@@ -24,6 +24,15 @@ fn enable_production_access(state: &SharedSesState) {
     st.account_settings.production_access_enabled = true;
 }
 
+/// Flip into sandbox mode for tests that explicitly verify the sandbox
+/// recipient gate. Default is production access (set in
+/// `MultiAccountState::new`).
+fn disable_production_access(state: &SharedSesState) {
+    let mut accounts = state.write();
+    let st = accounts.get_or_create("123456789012");
+    st.account_settings.production_access_enabled = false;
+}
+
 /// Seed a verified identity for the default test account so send tests
 /// don't trip the verified-sender gate.
 fn seed_identity(state: &SharedSesState, name: &str) {
@@ -719,6 +728,7 @@ async fn send_email_v2_accepts_verified_from_when_recipient_also_verified_in_san
 #[tokio::test]
 async fn send_email_v2_rejects_unverified_recipient_in_sandbox() {
     let state = make_state();
+    disable_production_access(&state);
     seed_identity(&state, "sender@example.com");
     let svc = SesV2Service::new(state);
 
