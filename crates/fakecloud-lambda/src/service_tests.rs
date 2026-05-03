@@ -1903,3 +1903,224 @@ async fn tag_state_unified_no_duplicate_state_tags() {
     // is no `state.tags` field to read from. The runtime check on
     // `func.tags` confirms tags actually landed in the unified slot.
 }
+
+// ── D4: reserved-concurrency enforcement at invoke ──
+
+#[tokio::test]
+async fn reserved_concurrency_returns_429_when_inflight_at_cap() {
+    // Simulate an in-flight invoke by pre-loading the per-function
+    // counter to the configured cap. The next invoke must reject with
+    // 429 + `TooManyRequestsException` and a `Reason` body field of
+    // `ReservedFunctionConcurrentInvocationLimitExceeded`.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "rcfn").await;
+    // Cap = 1.
+    let body = json!({"ReservedConcurrentExecutions": 1});
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/rcfn/concurrency",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Pretend a sibling invoke is already running.
+    svc.inflight_invocations
+        .write()
+        .insert("123456789012:rcfn".to_string(), 1);
+
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/rcfn/invocations",
+        r#"{}"#,
+    );
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("should be throttled"),
+    };
+    assert_eq!(err.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(err.code(), "TooManyRequestsException");
+    let reason = err
+        .extra_fields()
+        .iter()
+        .find(|(k, _)| k == "Reason")
+        .map(|(_, v)| v.as_str());
+    assert_eq!(
+        reason,
+        Some("ReservedFunctionConcurrentInvocationLimitExceeded")
+    );
+    // Counter must not be bumped on rejection (still 1, not 2) — the
+    // guard should never have been created.
+    assert_eq!(
+        svc.inflight_invocations
+            .read()
+            .get("123456789012:rcfn")
+            .copied(),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn reserved_concurrency_under_cap_does_not_throttle() {
+    // Cap = 2 with 1 inflight: the next invoke is allowed past the
+    // gate. It still fails downstream because the seeded function has
+    // no code package, but that's a 4xx with a different code than the
+    // throttle error — confirming the gate did not reject.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "rcfn2").await;
+    let body = json!({"ReservedConcurrentExecutions": 2});
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/rcfn2/concurrency",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    svc.inflight_invocations
+        .write()
+        .insert("123456789012:rcfn2".to_string(), 1);
+
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/rcfn2/invocations",
+        r#"{}"#,
+    );
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected downstream error after gate"),
+    };
+    assert_ne!(err.code(), "TooManyRequestsException");
+    // Guard ran and dropped, so the counter is back to its pre-invoke
+    // value of 1 — Drop fires synchronously when the future returns.
+    assert_eq!(
+        svc.inflight_invocations
+            .read()
+            .get("123456789012:rcfn2")
+            .copied(),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn reserved_concurrency_decrements_on_error_path() {
+    // No reserved cap set → no gating, but the counter is still
+    // incremented and decremented as the invoke flows through. Failing
+    // on missing code package must not leak a slot.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "decfn").await;
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/decfn/invocations",
+        r#"{}"#,
+    );
+    let _ = svc.handle(req).await;
+    // After the failed call, the entry should have been removed (Drop
+    // removes when the count would go to zero).
+    assert!(svc
+        .inflight_invocations
+        .read()
+        .get("123456789012:decfn")
+        .is_none());
+}
+
+// ── D4: alias weighted routing ──
+
+#[tokio::test]
+async fn resolve_qualifier_alias_no_routing_config_picks_primary() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "afn1").await;
+
+    // Publish v1, then create an alias pinned to v1 with no routing.
+    let req = make_request(Method::POST, "/2015-03-31/functions/afn1/versions", "{}");
+    svc.handle(req).await.unwrap();
+    let body = json!({"Name": "PROD", "FunctionVersion": "1"});
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/afn1/aliases",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let accounts = svc.state.read();
+    let state = accounts.get("123456789012").unwrap();
+    for _ in 0..50 {
+        assert_eq!(
+            resolve_qualifier_to_version(state, "afn1", Some("PROD")),
+            Some("1".to_string())
+        );
+    }
+}
+
+#[tokio::test]
+async fn resolve_qualifier_alias_50_50_weights_split_within_band() {
+    // Statistical: with primary=v1 and AdditionalVersionWeights={"2": 0.5}
+    // a uniform pick over [0,1) lands on v1 ~50% and v2 ~50%. Allow a
+    // wide tolerance (30..70) so the test is not flaky on small N.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "afn2").await;
+
+    // Publish v1 + v2.
+    for _ in 0..2 {
+        let req = make_request(Method::POST, "/2015-03-31/functions/afn2/versions", "{}");
+        svc.handle(req).await.unwrap();
+        // Mutate $LATEST between publishes so versions snapshot
+        // distinctly.
+        let body = json!({"Description": "tick"});
+        let req = make_request(
+            Method::PUT,
+            "/2015-03-31/functions/afn2/configuration",
+            &body.to_string(),
+        );
+        svc.handle(req).await.unwrap();
+    }
+
+    let body = json!({
+        "Name": "CANARY",
+        "FunctionVersion": "1",
+        "RoutingConfig": {"AdditionalVersionWeights": {"2": 0.5}},
+    });
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/afn2/aliases",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let accounts = svc.state.read();
+    let state = accounts.get("123456789012").unwrap();
+    let mut v1 = 0;
+    let mut v2 = 0;
+    for _ in 0..200 {
+        match resolve_qualifier_to_version(state, "afn2", Some("CANARY")).as_deref() {
+            Some("1") => v1 += 1,
+            Some("2") => v2 += 1,
+            other => panic!("unexpected version {other:?}"),
+        }
+    }
+    assert!(
+        (60..=140).contains(&v1),
+        "v1={v1} out of expected band; v2={v2}"
+    );
+    assert!(
+        (60..=140).contains(&v2),
+        "v2={v2} out of expected band; v1={v1}"
+    );
+}
+
+#[tokio::test]
+async fn resolve_qualifier_numeric_returns_self() {
+    // `$LATEST` returns None (caller uses live $LATEST); a bare numeric
+    // qualifier returns itself without consulting aliases.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "qfn").await;
+    let accounts = svc.state.read();
+    let state = accounts.get("123456789012").unwrap();
+    assert_eq!(resolve_qualifier_to_version(state, "qfn", None), None);
+    assert_eq!(
+        resolve_qualifier_to_version(state, "qfn", Some("$LATEST")),
+        None
+    );
+    assert_eq!(
+        resolve_qualifier_to_version(state, "qfn", Some("7")),
+        Some("7".to_string())
+    );
+}
