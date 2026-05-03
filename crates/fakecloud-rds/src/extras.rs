@@ -221,6 +221,23 @@ impl RdsService {
             }
             "ModifyDBClusterParameterGroup" => {
                 let name = get_param(req, "DBClusterParameterGroupName").ok_or_else(|| missing("DBClusterParameterGroupName"))?;
+                let parsed = crate::service::parse_db_parameter_members(req);
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                if let Some(map) = state.extras.get_mut("cluster_param_groups") {
+                    if let Some(entry) = map.get_mut(&name) {
+                        if let Some(obj) = entry.as_object_mut() {
+                            if !obj.contains_key("Parameters") {
+                                obj.insert("Parameters".to_string(), json!({}));
+                            }
+                            if let Some(p) = obj.get_mut("Parameters").and_then(|p| p.as_object_mut()) {
+                                for (n, v) in parsed {
+                                    p.insert(n, json!(v));
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(xml_response("ModifyDBClusterParameterGroup", format!("    <DBClusterParameterGroupName>{}</DBClusterParameterGroupName>", xml_escape(&name)), &rid))
             }
             "ResetDBClusterParameterGroup" => {
@@ -235,7 +252,33 @@ impl RdsService {
                 xml_empty_action(&action, &rid)
             }
             "DescribeDBClusterParameterGroups" => list_extras_xml(self, &aid, "cluster_param_groups", "DBClusterParameterGroups", "DescribeDBClusterParameterGroups", cluster_pg_member_xml, &rid),
-            "DescribeDBClusterParameters" => Ok(xml_response("DescribeDBClusterParameters", "    <Parameters/>".to_string(), &rid)),
+            "DescribeDBClusterParameters" => {
+                let name = get_param(req, "DBClusterParameterGroupName").ok_or_else(|| missing("DBClusterParameterGroupName"))?;
+                let source_filter = get_param(req, "Source");
+                let want_user_source = source_filter.as_deref().is_none_or(|s| s == "user");
+                let accounts = self.state_handle().read();
+                let state = accounts.get(&aid);
+                let mut members = String::new();
+                if want_user_source {
+                    if let Some(s) = state {
+                        if let Some(map) = s.extras.get("cluster_param_groups") {
+                            if let Some(entry) = map.get(&name) {
+                                if let Some(params) = entry.get("Parameters").and_then(|p| p.as_object()) {
+                                    for (n, v) in params {
+                                        let value = v.as_str().unwrap_or("").to_string();
+                                        members.push_str(&format!(
+                                            "      <Parameter>\n        <ParameterName>{}</ParameterName>\n        <ParameterValue>{}</ParameterValue>\n        <Source>user</Source>\n        <ApplyType>dynamic</ApplyType>\n        <DataType>string</DataType>\n        <IsModifiable>true</IsModifiable>\n      </Parameter>\n",
+                                            xml_escape(n),
+                                            xml_escape(&value),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(xml_response("DescribeDBClusterParameters", format!("    <Parameters>\n{members}    </Parameters>"), &rid))
+            }
             "DescribeEngineDefaultClusterParameters" => Ok(xml_response("DescribeEngineDefaultClusterParameters", "    <EngineDefaults>\n      <Parameters/>\n    </EngineDefaults>".to_string(), &rid)),
 
             // ── DB Cluster endpoints ──
@@ -1125,7 +1168,10 @@ mod tests {
             &[("DBClusterParameterGroupName", "cpg")],
         );
         ok("DescribeDBClusterParameterGroups", &[]);
-        ok("DescribeDBClusterParameters", &[]);
+        ok(
+            "DescribeDBClusterParameters",
+            &[("DBClusterParameterGroupName", "cpg")],
+        );
         ok("DescribeEngineDefaultClusterParameters", &[]);
         ok(
             "DeleteDBClusterParameterGroup",
