@@ -2054,7 +2054,9 @@ async fn main() {
     if let Some(ref rt) = ecs_runtime {
         ecs_service = ecs_service.with_runtime(rt.clone());
     }
-    registry.register(Arc::new(ecs_service));
+    let ecs_service = Arc::new(ecs_service);
+    let ecs_service_for_scheduler = ecs_service.clone();
+    registry.register(ecs_service);
 
     let elbv2_introspection_state = elbv2_state.clone();
     let elbv2_service = Elbv2Service::new(elbv2_state.clone());
@@ -2470,11 +2472,25 @@ async fn main() {
         )
     };
     let delivery_for_scheduler = {
+        let kinesis_delivery_for_scheduler =
+            fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
+        let ses_dispatcher_for_scheduler: Arc<
+            dyn fakecloud_core::delivery::SesSendEmailDispatcher,
+        > = Arc::new(SesSendEmailDispatcherImpl {
+            state: ses_state.clone(),
+        });
+        let ecs_runner_for_scheduler: Arc<dyn fakecloud_core::delivery::EcsTaskRunner> =
+            Arc::new(EcsTaskRunnerImpl {
+                service: ecs_service_for_scheduler.clone(),
+            });
         let mut bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
             .with_sns(sns_delivery_for_scheduler)
             .with_eventbridge(eb_delivery_for_scheduler)
-            .with_stepfunctions(sfn_delivery_for_scheduler);
+            .with_stepfunctions(sfn_delivery_for_scheduler)
+            .with_kinesis(kinesis_delivery_for_scheduler)
+            .with_ses_dispatcher(ses_dispatcher_for_scheduler)
+            .with_ecs_task_runner(ecs_runner_for_scheduler);
         if let Some(ref ld) = lambda_delivery {
             bus = bus.with_lambda(ld.clone());
         }
@@ -5241,6 +5257,74 @@ impl fakecloud_core::delivery::EmailDispatcher for SesEmailDispatcher {
             dkim_signature: None,
             timestamp: chrono::Utc::now(),
         });
+    }
+}
+
+/// SES SendEmail dispatcher for cross-service universal targets
+/// (EventBridge Scheduler `arn:aws:scheduler:::aws-sdk:sesv2:sendEmail`,
+/// EventBridge Rules with SES targets). Distinct from `SesEmailDispatcher`
+/// which is the single-recipient primitive Cognito uses — this one
+/// preserves multi-recipient + subject + html semantics that real callers
+/// pass via the SES API shape.
+struct SesSendEmailDispatcherImpl {
+    state: fakecloud_ses::SharedSesState,
+}
+
+impl fakecloud_core::delivery::SesSendEmailDispatcher for SesSendEmailDispatcherImpl {
+    #[allow(clippy::too_many_arguments)]
+    fn send_email(
+        &self,
+        account_id: &str,
+        from: &str,
+        to: Vec<String>,
+        cc: Vec<String>,
+        bcc: Vec<String>,
+        subject: Option<&str>,
+        text_body: Option<&str>,
+        html_body: Option<&str>,
+    ) -> Result<(), String> {
+        if to.is_empty() && cc.is_empty() && bcc.is_empty() {
+            return Err("at least one recipient required".to_string());
+        }
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        state.sent_emails.push(fakecloud_ses::SentEmail {
+            message_id: format!("scheduler-{}", uuid::Uuid::new_v4()),
+            from: from.to_string(),
+            to,
+            cc,
+            bcc,
+            subject: subject.map(String::from),
+            html_body: html_body.map(String::from),
+            text_body: text_body.map(String::from),
+            raw_data: None,
+            template_name: None,
+            template_data: None,
+            dkim_signature: None,
+            timestamp: chrono::Utc::now(),
+        });
+        Ok(())
+    }
+}
+
+/// ECS RunTask runner for cross-service universal targets. Wraps an
+/// `Arc<EcsService>` so the call goes through the same validation +
+/// runtime spawn path as a direct ECS RunTask request.
+struct EcsTaskRunnerImpl {
+    service: Arc<fakecloud_ecs::EcsService>,
+}
+
+impl fakecloud_core::delivery::EcsTaskRunner for EcsTaskRunnerImpl {
+    fn run_task(
+        &self,
+        account_id: &str,
+        cluster: &str,
+        task_definition: &str,
+        launch_type: Option<&str>,
+        count: usize,
+    ) -> Result<(), String> {
+        self.service
+            .run_task_external(account_id, cluster, task_definition, launch_type, count)
     }
 }
 

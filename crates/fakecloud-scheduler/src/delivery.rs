@@ -96,10 +96,249 @@ pub fn deliver_target(bus: &Arc<DeliveryBus>, schedule: &Schedule) -> Result<(),
         return Ok(());
     }
 
+    // Templated ECS target: ARN names the cluster, EcsParameters carries
+    // TaskDefinitionArn / LaunchType / TaskCount.
+    if arn.contains(":ecs:") && arn.contains(":cluster/") {
+        return deliver_ecs_templated(bus, schedule, arn);
+    }
+
+    // Universal SDK target (`arn:aws:scheduler:::aws-sdk:<service>:<api>`)
+    // is the AWS-defined shape for arbitrary AWS APIs; we cover SES
+    // SendEmail / SendEmailV2 and ECS RunTask explicitly here, with
+    // remaining services documented as a roadmap item.
+    if let Some((service, action)) = parse_aws_sdk_universal_arn(arn) {
+        return deliver_aws_sdk_universal(bus, schedule, &service, &action, body);
+    }
+
     // Unsupported target type — log and succeed so we don't push it to
     // DLQ (DLQ is for deliverable-target failures, not unknown targets).
     tracing::warn!(target_arn = %arn, schedule = %schedule.name, "scheduler: unsupported target type, skipping");
     Ok(())
+}
+
+/// Deliver to an ECS cluster ARN target. The cluster name is taken from
+/// the ARN segment after `cluster/`; the task definition + launch type +
+/// count come from `Target.EcsParameters`. Missing TaskDefinitionArn is
+/// the failure case — surfaces as `InvalidParameter` so the schedule
+/// routes to its DLQ.
+fn deliver_ecs_templated(
+    bus: &Arc<DeliveryBus>,
+    schedule: &Schedule,
+    cluster_arn: &str,
+) -> Result<(), SqsDeliveryError> {
+    let account_id = account_id_from_arn(cluster_arn).unwrap_or_else(|| "000000000000".to_string());
+    let cluster = cluster_arn
+        .split(":cluster/")
+        .nth(1)
+        .unwrap_or("default")
+        .to_string();
+    let params = match schedule.target.ecs_parameters.as_ref() {
+        Some(p) => p,
+        None => {
+            return Err(SqsDeliveryError::InvalidParameter(
+                "ECS target requires EcsParameters".to_string(),
+            ));
+        }
+    };
+    let task_definition = match params.get("TaskDefinitionArn").and_then(|v| v.as_str()) {
+        Some(td) => td,
+        None => {
+            return Err(SqsDeliveryError::InvalidParameter(
+                "ECS target requires TaskDefinitionArn".to_string(),
+            ));
+        }
+    };
+    let launch_type = params.get("LaunchType").and_then(|v| v.as_str());
+    let count = params
+        .get("TaskCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1) as usize;
+    bus.run_ecs_task(&account_id, &cluster, task_definition, launch_type, count)
+        .map_err(SqsDeliveryError::InvalidParameter)
+}
+
+/// Parse `arn:aws:scheduler:::aws-sdk:<service>:<action>` (or the
+/// equivalent with a region/account in slot 3/4) into `(service, action)`.
+fn parse_aws_sdk_universal_arn(arn: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = arn.split(':').collect();
+    // Expected layout for the canonical universal target:
+    //   ["arn","aws","scheduler","","","aws-sdk","<service>","<action>"]
+    // AWS also accepts a region+account variant; either way the
+    // resource segment is `aws-sdk:<service>:<action>` and lives in the
+    // tail — find it by name.
+    let aws_sdk_idx = parts.iter().position(|p| *p == "aws-sdk")?;
+    let service = parts.get(aws_sdk_idx + 1)?;
+    let action = parts.get(aws_sdk_idx + 2)?;
+    if service.is_empty() || action.is_empty() {
+        return None;
+    }
+    Some((service.to_lowercase(), action.to_string()))
+}
+
+/// Dispatch a recognized aws-sdk universal target. Unknown service/api
+/// combinations log a warning and succeed (matching the previous
+/// behavior for unsupported targets — DLQ is for deliverable-target
+/// failures, not for unrecognized API combinations).
+fn deliver_aws_sdk_universal(
+    bus: &Arc<DeliveryBus>,
+    schedule: &Schedule,
+    service: &str,
+    action: &str,
+    body: &str,
+) -> Result<(), SqsDeliveryError> {
+    let action_lower = action.to_lowercase();
+    match (service, action_lower.as_str()) {
+        ("sesv2", "sendemail") | ("ses", "sendemail") => {
+            deliver_ses_send_email(bus, schedule, body, service == "sesv2")
+        }
+        ("ecs", "runtask") => deliver_ecs_universal(bus, schedule, body),
+        _ => {
+            tracing::warn!(
+                schedule = %schedule.name,
+                service = %service,
+                action = %action,
+                "scheduler: aws-sdk universal target not implemented for this API"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn deliver_ses_send_email(
+    bus: &Arc<DeliveryBus>,
+    schedule: &Schedule,
+    body: &str,
+    v2: bool,
+) -> Result<(), SqsDeliveryError> {
+    let req: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| SqsDeliveryError::InvalidParameter(format!("invalid JSON Input: {e}")))?;
+    let account_id =
+        account_id_from_arn(&schedule.arn).unwrap_or_else(|| "000000000000".to_string());
+
+    // SESv2 SendEmail uses FromEmailAddress/Destination/Content; v1 uses
+    // Source/Destination/Message. Parse both shapes.
+    let from = if v2 {
+        req.get("FromEmailAddress").and_then(|v| v.as_str())
+    } else {
+        req.get("Source").and_then(|v| v.as_str())
+    }
+    .ok_or_else(|| SqsDeliveryError::InvalidParameter("missing source/from".to_string()))?
+    .to_string();
+
+    let dest = req
+        .get("Destination")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let to = string_array(&dest, "ToAddresses");
+    let cc = string_array(&dest, "CcAddresses");
+    let bcc = string_array(&dest, "BccAddresses");
+    if to.is_empty() && cc.is_empty() && bcc.is_empty() {
+        return Err(SqsDeliveryError::InvalidParameter(
+            "SES SendEmail requires at least one recipient".to_string(),
+        ));
+    }
+
+    // SESv2 message lives at Content.Simple.{Subject,Body}; v1 at Message.
+    let (subject, text, html) = if v2 {
+        let simple = req
+            .get("Content")
+            .and_then(|c| c.get("Simple"))
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+        (
+            simple
+                .get("Subject")
+                .and_then(|s| s.get("Data"))
+                .and_then(|d| d.as_str())
+                .map(String::from),
+            simple
+                .get("Body")
+                .and_then(|b| b.get("Text"))
+                .and_then(|t| t.get("Data"))
+                .and_then(|d| d.as_str())
+                .map(String::from),
+            simple
+                .get("Body")
+                .and_then(|b| b.get("Html"))
+                .and_then(|h| h.get("Data"))
+                .and_then(|d| d.as_str())
+                .map(String::from),
+        )
+    } else {
+        let msg = req.get("Message").cloned().unwrap_or(serde_json::json!({}));
+        (
+            msg.get("Subject")
+                .and_then(|s| s.get("Data"))
+                .and_then(|d| d.as_str())
+                .map(String::from),
+            msg.get("Body")
+                .and_then(|b| b.get("Text"))
+                .and_then(|t| t.get("Data"))
+                .and_then(|d| d.as_str())
+                .map(String::from),
+            msg.get("Body")
+                .and_then(|b| b.get("Html"))
+                .and_then(|h| h.get("Data"))
+                .and_then(|d| d.as_str())
+                .map(String::from),
+        )
+    };
+
+    bus.send_ses_email(
+        &account_id,
+        &from,
+        to,
+        cc,
+        bcc,
+        subject.as_deref(),
+        text.as_deref(),
+        html.as_deref(),
+    )
+    .map_err(SqsDeliveryError::InvalidParameter)
+}
+
+fn deliver_ecs_universal(
+    bus: &Arc<DeliveryBus>,
+    schedule: &Schedule,
+    body: &str,
+) -> Result<(), SqsDeliveryError> {
+    let req: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| SqsDeliveryError::InvalidParameter(format!("invalid JSON Input: {e}")))?;
+    let account_id =
+        account_id_from_arn(&schedule.arn).unwrap_or_else(|| "000000000000".to_string());
+    let cluster = req
+        .get("Cluster")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
+    let task_definition = req
+        .get("TaskDefinition")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            SqsDeliveryError::InvalidParameter("RunTask requires TaskDefinition".to_string())
+        })?
+        .to_string();
+    let launch_type = req.get("LaunchType").and_then(|v| v.as_str());
+    let count = req
+        .get("Count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .max(1) as usize;
+    bus.run_ecs_task(&account_id, &cluster, &task_definition, launch_type, count)
+        .map_err(SqsDeliveryError::InvalidParameter)
+}
+
+fn string_array(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Route a failed delivery to the schedule's DLQ, if one is
@@ -511,6 +750,202 @@ mod tests {
             None
         );
         assert_eq!(account_id_from_arn("arn:malformed"), None);
+    }
+
+    type EcsRunCall = (String, String, String, Option<String>, usize);
+    struct EcsRunRecorder(Mutex<Vec<EcsRunCall>>);
+    impl fakecloud_core::delivery::EcsTaskRunner for EcsRunRecorder {
+        fn run_task(
+            &self,
+            account_id: &str,
+            cluster: &str,
+            task_definition: &str,
+            launch_type: Option<&str>,
+            count: usize,
+        ) -> Result<(), String> {
+            self.0.lock().unwrap().push((
+                account_id.to_string(),
+                cluster.to_string(),
+                task_definition.to_string(),
+                launch_type.map(String::from),
+                count,
+            ));
+            Ok(())
+        }
+    }
+
+    type SesCall = (
+        String,
+        String,
+        Vec<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    struct SesRecorder(Mutex<Vec<SesCall>>);
+    impl fakecloud_core::delivery::SesSendEmailDispatcher for SesRecorder {
+        #[allow(clippy::too_many_arguments)]
+        fn send_email(
+            &self,
+            account_id: &str,
+            from: &str,
+            to: Vec<String>,
+            _cc: Vec<String>,
+            _bcc: Vec<String>,
+            subject: Option<&str>,
+            text_body: Option<&str>,
+            html_body: Option<&str>,
+        ) -> Result<(), String> {
+            self.0.lock().unwrap().push((
+                account_id.to_string(),
+                from.to_string(),
+                to,
+                subject.map(String::from),
+                text_body.map(String::from),
+                html_body.map(String::from),
+            ));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn deliver_target_ecs_templated_uses_cluster_arn_and_ecs_parameters() {
+        let runner = Arc::new(EcsRunRecorder(Mutex::new(Vec::new())));
+        let bus = Arc::new(DeliveryBus::new().with_ecs_task_runner(runner.clone()));
+        let mut sched = make_schedule(
+            "arn:aws:ecs:us-east-1:111122223333:cluster/prod",
+            None,
+            Some(r#"{}"#),
+        );
+        sched.target.ecs_parameters = Some(serde_json::json!({
+            "TaskDefinitionArn": "arn:aws:ecs:us-east-1:111122223333:task-definition/web:7",
+            "LaunchType": "FARGATE",
+            "TaskCount": 2u64,
+        }));
+        let result = deliver_target(&bus, &sched);
+        assert!(result.is_ok());
+        let calls = runner.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "111122223333");
+        assert_eq!(calls[0].1, "prod");
+        assert_eq!(
+            calls[0].2,
+            "arn:aws:ecs:us-east-1:111122223333:task-definition/web:7"
+        );
+        assert_eq!(calls[0].3.as_deref(), Some("FARGATE"));
+        assert_eq!(calls[0].4, 2);
+    }
+
+    #[test]
+    fn deliver_target_ecs_templated_without_task_definition_returns_invalid_parameter() {
+        let runner = Arc::new(EcsRunRecorder(Mutex::new(Vec::new())));
+        let bus = Arc::new(DeliveryBus::new().with_ecs_task_runner(runner));
+        let mut sched = make_schedule("arn:aws:ecs:us-east-1:1:cluster/prod", None, Some(r#"{}"#));
+        sched.target.ecs_parameters = Some(serde_json::json!({"LaunchType": "FARGATE"}));
+        let result = deliver_target(&bus, &sched);
+        assert!(matches!(result, Err(SqsDeliveryError::InvalidParameter(_))));
+    }
+
+    #[test]
+    fn aws_sdk_universal_target_dispatches_ses_v2_send_email() {
+        let ses = Arc::new(SesRecorder(Mutex::new(Vec::new())));
+        let bus = Arc::new(DeliveryBus::new().with_ses_dispatcher(ses.clone()));
+        let body = serde_json::json!({
+            "FromEmailAddress": "no-reply@example.com",
+            "Destination": {"ToAddresses": ["a@example.com", "b@example.com"]},
+            "Content": {"Simple": {
+                "Subject": {"Data": "hello"},
+                "Body": {"Text": {"Data": "world"}, "Html": {"Data": "<b>hi</b>"}}
+            }}
+        });
+        let sched = make_schedule(
+            "arn:aws:scheduler:::aws-sdk:sesv2:sendEmail",
+            None,
+            Some(&body.to_string()),
+        );
+        let result = deliver_target(&bus, &sched);
+        assert!(result.is_ok(), "got {result:?}");
+        let calls = ses.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "no-reply@example.com");
+        assert_eq!(
+            calls[0].2,
+            vec!["a@example.com".to_string(), "b@example.com".to_string()]
+        );
+        assert_eq!(calls[0].3.as_deref(), Some("hello"));
+        assert_eq!(calls[0].4.as_deref(), Some("world"));
+        assert_eq!(calls[0].5.as_deref(), Some("<b>hi</b>"));
+    }
+
+    #[test]
+    fn aws_sdk_universal_target_dispatches_ses_v1_send_email() {
+        let ses = Arc::new(SesRecorder(Mutex::new(Vec::new())));
+        let bus = Arc::new(DeliveryBus::new().with_ses_dispatcher(ses.clone()));
+        let body = serde_json::json!({
+            "Source": "from@example.com",
+            "Destination": {"ToAddresses": ["to@example.com"]},
+            "Message": {"Subject": {"Data": "s"}, "Body": {"Text": {"Data": "t"}}}
+        });
+        let sched = make_schedule(
+            "arn:aws:scheduler:::aws-sdk:ses:sendEmail",
+            None,
+            Some(&body.to_string()),
+        );
+        assert!(deliver_target(&bus, &sched).is_ok());
+        let calls = ses.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "from@example.com");
+        assert_eq!(calls[0].3.as_deref(), Some("s"));
+        assert_eq!(calls[0].4.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn aws_sdk_universal_target_dispatches_ecs_run_task() {
+        let runner = Arc::new(EcsRunRecorder(Mutex::new(Vec::new())));
+        let bus = Arc::new(DeliveryBus::new().with_ecs_task_runner(runner.clone()));
+        let body = serde_json::json!({
+            "Cluster": "prod",
+            "TaskDefinition": "web:9",
+            "LaunchType": "EC2",
+            "Count": 3u64,
+        });
+        let sched = make_schedule(
+            "arn:aws:scheduler:::aws-sdk:ecs:runTask",
+            None,
+            Some(&body.to_string()),
+        );
+        assert!(deliver_target(&bus, &sched).is_ok());
+        let calls = runner.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "prod");
+        assert_eq!(calls[0].2, "web:9");
+        assert_eq!(calls[0].3.as_deref(), Some("EC2"));
+        assert_eq!(calls[0].4, 3);
+    }
+
+    #[test]
+    fn aws_sdk_universal_target_unknown_api_is_ok_no_dlq() {
+        let bus = Arc::new(DeliveryBus::new());
+        let sched = make_schedule("arn:aws:scheduler:::aws-sdk:s3:putObject", None, Some("{}"));
+        // Unknown API → log + succeed (no DLQ; DLQ is for deliverable
+        // failures, not unimplemented surfaces).
+        assert!(deliver_target(&bus, &sched).is_ok());
+    }
+
+    #[test]
+    fn parse_aws_sdk_universal_arn_extracts_service_and_action() {
+        assert_eq!(
+            parse_aws_sdk_universal_arn("arn:aws:scheduler:::aws-sdk:sesv2:sendEmail"),
+            Some(("sesv2".to_string(), "sendEmail".to_string()))
+        );
+        assert_eq!(
+            parse_aws_sdk_universal_arn("arn:aws:scheduler:us-east-1:1:aws-sdk:ecs:runTask"),
+            Some(("ecs".to_string(), "runTask".to_string()))
+        );
+        assert_eq!(
+            parse_aws_sdk_universal_arn("arn:aws:sqs:us-east-1:1:q"),
+            None
+        );
     }
 
     #[test]

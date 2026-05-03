@@ -23,6 +23,10 @@ pub struct DeliveryBus {
     s3_writer: Option<Arc<dyn S3Delivery>>,
     /// Put records into Firehose delivery streams.
     firehose_sender: Option<Arc<dyn FirehoseDelivery>>,
+    /// Send a high-level SES SendEmail call (cross-service universal target).
+    ses_dispatcher: Option<Arc<dyn SesSendEmailDispatcher>>,
+    /// Run an ECS task on a cluster (cross-service universal target).
+    ecs_task_runner: Option<Arc<dyn EcsTaskRunner>>,
 }
 
 /// Message attribute for SQS delivery from SNS.
@@ -202,6 +206,39 @@ pub trait S3Delivery: Send + Sync {
     ) -> Result<(), String>;
 }
 
+/// SES SendEmail dispatch for callers that already speak the AWS SES
+/// SendEmail / SendEmailV2 shape (multiple to/cc/bcc, optional subject,
+/// text/html bodies). Distinct from `EmailDispatcher`, which is the
+/// single-recipient cross-service primitive used by Cognito.
+pub trait SesSendEmailDispatcher: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
+    fn send_email(
+        &self,
+        account_id: &str,
+        from: &str,
+        to: Vec<String>,
+        cc: Vec<String>,
+        bcc: Vec<String>,
+        subject: Option<&str>,
+        text_body: Option<&str>,
+        html_body: Option<&str>,
+    ) -> Result<(), String>;
+}
+
+/// Synthesize an ECS RunTask call from outside the ECS crate. Used by
+/// EventBridge Scheduler and EventBridge Rules to start tasks without
+/// depending directly on `fakecloud_ecs`.
+pub trait EcsTaskRunner: Send + Sync {
+    fn run_task(
+        &self,
+        account_id: &str,
+        cluster: &str,
+        task_definition: &str,
+        launch_type: Option<&str>,
+        count: usize,
+    ) -> Result<(), String>;
+}
+
 /// Outbound email dispatch used by services that emulate AWS flows that
 /// route through SES (Cognito verification, etc.) without taking a direct
 /// dependency on the SES crate.
@@ -263,6 +300,56 @@ impl DeliveryBus {
             stepfunctions_starter: None,
             s3_writer: None,
             firehose_sender: None,
+            ses_dispatcher: None,
+            ecs_task_runner: None,
+        }
+    }
+
+    pub fn with_ses_dispatcher(mut self, dispatcher: Arc<dyn SesSendEmailDispatcher>) -> Self {
+        self.ses_dispatcher = Some(dispatcher);
+        self
+    }
+
+    pub fn with_ecs_task_runner(mut self, runner: Arc<dyn EcsTaskRunner>) -> Self {
+        self.ecs_task_runner = Some(runner);
+        self
+    }
+
+    /// Send an email via SES. Returns `Err` when no SES dispatcher is
+    /// wired or the underlying impl rejects (bad source/dest).
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_ses_email(
+        &self,
+        account_id: &str,
+        from: &str,
+        to: Vec<String>,
+        cc: Vec<String>,
+        bcc: Vec<String>,
+        subject: Option<&str>,
+        text_body: Option<&str>,
+        html_body: Option<&str>,
+    ) -> Result<(), String> {
+        match self.ses_dispatcher {
+            Some(ref d) => {
+                d.send_email(account_id, from, to, cc, bcc, subject, text_body, html_body)
+            }
+            None => Err("SES dispatcher not configured".to_string()),
+        }
+    }
+
+    /// Run an ECS task. Returns `Err` when no ECS runner is wired or
+    /// the impl rejects (unknown cluster / task definition).
+    pub fn run_ecs_task(
+        &self,
+        account_id: &str,
+        cluster: &str,
+        task_definition: &str,
+        launch_type: Option<&str>,
+        count: usize,
+    ) -> Result<(), String> {
+        match self.ecs_task_runner {
+            Some(ref r) => r.run_task(account_id, cluster, task_definition, launch_type, count),
+            None => Err("ECS task runner not configured".to_string()),
         }
     }
 
