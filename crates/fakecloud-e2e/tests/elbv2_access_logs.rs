@@ -251,9 +251,15 @@ async fn elbv2_dataplane_emits_access_log_to_s3_after_flush() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
 
-    // 7. Trigger the periodic flusher synchronously via the
-    //    introspection endpoint so the test doesn't have to wait for
-    //    the 60s tick.
+    // 7. Drop the client so its TCP connection closes — that's what
+    //    the dataplane's accept_loop watches for to emit the
+    //    connection-log entry. Then sleep briefly so the spawn task
+    //    has a chance to record into the buffer before we flush.
+    drop(resp);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Trigger the periodic flusher synchronously via the
+    // introspection endpoint so the test doesn't have to wait for
+    // the 60s tick.
     let flush_url = format!("{}/_fakecloud/elbv2/access-logs/flush", server.endpoint());
     let flush_resp = reqwest::Client::new()
         .post(&flush_url)
@@ -313,5 +319,29 @@ async fn elbv2_dataplane_emits_access_log_to_s3_after_flush() {
     assert!(
         conn_obj.is_some(),
         "expected at least one connection-log object (key with _conn_)"
+    );
+    // Decode the connection log and assert exactly one record was
+    // emitted for the request. This guards against the regression
+    // where keep-alive connections double-counted by emitting one
+    // connection-log record per request instead of per connection.
+    let conn_key = conn_obj.unwrap().key().unwrap().to_string();
+    let conn_body = s3
+        .get_object()
+        .bucket("alb-access-logs")
+        .key(&conn_key)
+        .send()
+        .await
+        .unwrap()
+        .body
+        .collect()
+        .await
+        .unwrap()
+        .into_bytes();
+    let conn_decoded = helpers::gunzip(&conn_body);
+    let conn_text = String::from_utf8_lossy(&conn_decoded);
+    let line_count = conn_text.lines().filter(|l| !l.is_empty()).count();
+    assert_eq!(
+        line_count, 1,
+        "exactly one connection-log entry expected per established connection, got {line_count}: {conn_text}"
     );
 }

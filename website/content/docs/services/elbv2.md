@@ -100,7 +100,7 @@ Set `FAKECLOUD_ELBV2_DISABLE_DATAPLANE=true` to turn off the data plane (the con
 
 ## Access logs and connection logs
 
-When an ALB has `access_logs.s3.enabled=true` (and/or `connection_logs.s3.enabled=true`) plus `access_logs.s3.bucket` set on its attributes, the data plane records one log line per served request and one per established connection. Lines are buffered in memory and flushed to S3 either on a 60-second timer or when the buffer hits 1000 records, whichever comes first. The body is gzip-compressed; the object key follows the AWS pattern:
+When an ALB has `access_logs.s3.enabled=true` (and/or `connection_logs.s3.enabled=true`) plus the corresponding bucket attribute set (`access_logs.s3.bucket` for access logs, `connection_logs.s3.bucket` for connection logs), the data plane records one log line per served request and one per established connection. Lines are buffered in memory and flushed to S3 either on a 60-second timer or when the buffer hits 1000 records, whichever comes first. The body is gzip-compressed; the object key follows the AWS pattern:
 
 ```
 <prefix>/AWSLogs/<account>/elasticloadbalancing/<region>/YYYY/MM/DD/<account>_elasticloadbalancing_<region>_<lb-id>_<timestamp>_<ip>_<random>.log.gz

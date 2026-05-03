@@ -291,7 +291,12 @@ impl AccessLogger {
                 let connection = log_target_from_attrs(lb, "connection_logs.s3");
                 return Some(LogMetadata {
                     account_id: account.clone(),
-                    region: self.region.clone(),
+                    // Pull region out of the ARN
+                    // (`arn:aws:elasticloadbalancing:<region>:...`) so
+                    // non-`us-east-1` load balancers get the correct
+                    // object key; fall back to the bus default for
+                    // malformed ARNs.
+                    region: parse_arn_region(lb_arn).unwrap_or_else(|| self.region.clone()),
                     lb_arn: lb_arn.to_string(),
                     lb_id: parse_lb_suffix(lb_arn).unwrap_or_else(|| lb.name.clone()),
                     access,
@@ -300,6 +305,17 @@ impl AccessLogger {
             }
         }
         None
+    }
+}
+
+/// Pull the region segment out of an ELB ARN — index 3 of the
+/// `arn:aws:elasticloadbalancing:<region>:<account>:...` form.
+fn parse_arn_region(arn: &str) -> Option<String> {
+    let segment = arn.split(':').nth(3)?;
+    if segment.is_empty() {
+        None
+    } else {
+        Some(segment.to_string())
     }
 }
 
@@ -646,5 +662,43 @@ mod tests {
         assert!(key.starts_with("my/prefix/AWSLogs/123456789012/elasticloadbalancing/us-east-1/"));
         assert!(key.contains("123456789012_elasticloadbalancing_us-east-1_abcdef0123456789_"));
         assert!(key.ends_with(".log.gz"));
+    }
+
+    #[test]
+    fn key_uses_region_from_arn_not_default() {
+        // LB in eu-west-1; bus default is us-east-1. The key should
+        // carry the LB's actual region.
+        let arn =
+            "arn:aws:elasticloadbalancing:eu-west-1:123456789012:loadbalancer/app/euwest/abc123";
+        let mut lb = lb_with_access_logs("eu-bucket", None);
+        lb.arn = arn.to_string();
+        let mut accounts = Elbv2Accounts::new();
+        let st = accounts.get_or_create(ACCOUNT);
+        st.load_balancers.insert(arn.to_string(), lb);
+        let state = Arc::new(RwLock::new(accounts));
+        let s3 = Arc::new(CountingS3::new());
+        let bus = Arc::new(DeliveryBus::new().with_s3(s3.clone()));
+        let logger = AccessLogger::new(state, bus);
+        logger.record(arn, sample_record());
+        logger.flush_all();
+        let key = s3.last_key.lock().clone().expect("key");
+        assert!(
+            key.contains("/elasticloadbalancing/eu-west-1/"),
+            "key should carry eu-west-1 region: {key}"
+        );
+        assert!(
+            key.contains("_elasticloadbalancing_eu-west-1_"),
+            "key filename should carry eu-west-1: {key}"
+        );
+    }
+
+    #[test]
+    fn parse_arn_region_handles_malformed_arns() {
+        assert_eq!(
+            parse_arn_region("arn:aws:elasticloadbalancing:us-east-2:1:loadbalancer/app/x/y"),
+            Some("us-east-2".to_string())
+        );
+        assert_eq!(parse_arn_region("nope"), None);
+        assert_eq!(parse_arn_region("arn:aws:elb::1:lb"), None);
     }
 }

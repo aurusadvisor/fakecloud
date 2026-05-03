@@ -238,10 +238,21 @@ async fn accept_loop(dp: DataPlane, lb_arn: String, listener: TcpListener) {
                 continue;
             }
         };
+        // Capture the local addr (i.e. the LB's bound listener address)
+        // before moving the socket into the connection task. Used for
+        // the `destination_ip:port` field of the connection log.
+        let local_addr = sock.local_addr().ok();
         let dp2 = dp.clone();
         let lb_arn2 = lb_arn.clone();
         tokio::spawn(async move {
+            let connection_start = Instant::now();
+            let connection_creation_time = Utc::now();
             let io = TokioIo::new(sock);
+            // Clone before the move into the service closure so we
+            // still hold an owned reference for the post-serve
+            // connection-log emission below.
+            let dp_for_log = dp2.clone();
+            let lb_for_log = lb_arn2.clone();
             let svc = service_fn(move |req| {
                 let dp3 = dp2.clone();
                 let lb3 = lb_arn2.clone();
@@ -254,8 +265,83 @@ async fn accept_loop(dp: DataPlane, lb_arn: String, listener: TcpListener) {
             {
                 debug!("ELBv2 data plane: connection error: {e}");
             }
+            // One connection log per established connection, not per
+            // request. Keep-alive connections that serve N requests
+            // still produce exactly one connection-log entry covering
+            // the lifetime of the TCP connection.
+            emit_connection_log(
+                &dp_for_log,
+                &lb_for_log,
+                peer_addr,
+                local_addr,
+                connection_creation_time,
+                connection_start,
+            );
         });
     }
+}
+
+/// Buffer one connection-log record for the LB. Called once per
+/// accepted TCP connection after `serve_connection` returns; covers
+/// the lifetime of the connection regardless of how many HTTP requests
+/// were served on it.
+fn emit_connection_log(
+    dp: &DataPlane,
+    lb_arn: &str,
+    peer_addr: SocketAddr,
+    local_addr: Option<SocketAddr>,
+    creation_time: chrono::DateTime<chrono::Utc>,
+    connection_start: Instant,
+) {
+    let Some(logger) = dp.access_logger.as_ref() else {
+        return;
+    };
+    let elapsed = connection_start.elapsed().as_secs_f64();
+    let elb_id = parse_lb_id(lb_arn).unwrap_or_else(|| lb_arn.to_string());
+    let (target_ip, target_port) = match local_addr {
+        Some(a) => (Some(a.ip().to_string()), Some(a.port())),
+        None => (None, None),
+    };
+    let target_port_list = match (target_ip.as_deref(), target_port) {
+        (Some(ip), Some(p)) => format!("{ip}:{p}"),
+        _ => "-".to_string(),
+    };
+    let record = AccessLogRecord {
+        log_type: LogType::Connection,
+        timestamp: chrono::Utc::now(),
+        elb_id,
+        client_ip: peer_addr.ip().to_string(),
+        client_port: peer_addr.port(),
+        target_ip,
+        target_port,
+        request_processing_time: elapsed,
+        target_processing_time: 0.0,
+        response_processing_time: 0.0,
+        elb_status_code: 0,
+        target_status_code: None,
+        received_bytes: 0,
+        sent_bytes: 0,
+        request_method: "-".to_string(),
+        request_url: "-".to_string(),
+        request_protocol: "-".to_string(),
+        user_agent: "-".to_string(),
+        ssl_cipher: "-".to_string(),
+        ssl_protocol: "-".to_string(),
+        target_group_arn: "-".to_string(),
+        trace_id: format!("Root=1-{:x}-{}", chrono::Utc::now().timestamp(), short_id()),
+        domain_name: "-".to_string(),
+        chosen_cert_arn: "-".to_string(),
+        matched_rule_priority: "-".to_string(),
+        request_creation_time: creation_time,
+        actions_executed: "-".to_string(),
+        redirect_url: "-".to_string(),
+        error_reason: "-".to_string(),
+        target_port_list,
+        target_status_code_list: "-".to_string(),
+        classification: "-".to_string(),
+        classification_reason: "-".to_string(),
+    };
+    logger.record(lb_arn, record);
 }
 
 async fn handle_request(
@@ -530,13 +616,11 @@ fn finalize_response(
         classification: "-".to_string(),
         classification_reason: "-".to_string(),
     };
-    logger.record(lb_arn, access_record.clone());
-    // Connection log: one line per established connection. AWS NLB +
-    // ALB connection logs share the same shape; we emit a parallel
-    // record so the connection_logs.s3.* path is exercised when set.
-    let mut conn_record = access_record;
-    conn_record.log_type = LogType::Connection;
-    logger.record(lb_arn, conn_record);
+    logger.record(lb_arn, access_record);
+    // The connection log is emitted once per accepted TCP connection
+    // by `accept_loop` after `serve_connection` returns. Keep-alive
+    // connections that serve multiple requests therefore produce
+    // exactly one connection-log entry, not one per request.
     resp
 }
 
