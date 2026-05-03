@@ -26,6 +26,31 @@ use crate::state::{
 use crate::template;
 use crate::xml_responses;
 
+/// Canonical `Fn::GetAtt` attribute names per resource type. Used to
+/// supplement the eagerly-captured `ProvisionResult::attributes` with
+/// live-state lookups via `ResourceProvisioner::get_att`. Resources not
+/// listed here just use whatever the create handler captured.
+fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
+    match resource_type {
+        "AWS::S3::Bucket" => &[
+            "Arn",
+            "DomainName",
+            "RegionalDomainName",
+            "DualStackDomainName",
+            "WebsiteURL",
+        ],
+        "AWS::Lambda::Function" => &["Arn", "FunctionUrl", "Version"],
+        "AWS::IAM::Role" => &["Arn", "RoleId"],
+        "AWS::SQS::Queue" => &["Arn", "QueueName", "QueueUrl"],
+        "AWS::SNS::Topic" => &["TopicArn", "TopicName"],
+        "AWS::DynamoDB::Table" => &["Arn", "StreamArn"],
+        "AWS::KMS::Key" => &["Arn", "KeyId"],
+        "AWS::SecretsManager::Secret" => &["Arn", "Id"],
+        "AWS::CloudFront::Distribution" => &["DomainName", "Id"],
+        _ => &[],
+    }
+}
+
 /// Multi-pass provisioning for all resources in a parsed template.
 ///
 /// Resources may `Ref` each other in either direction, and JSON object
@@ -71,10 +96,20 @@ fn provision_stack_resources(
                         stack_resource.logical_id.clone(),
                         stack_resource.physical_id.clone(),
                     );
-                    attributes.insert(
-                        stack_resource.logical_id.clone(),
-                        stack_resource.attributes.clone(),
-                    );
+                    // Start with the eagerly-captured attribute set, then
+                    // overlay anything the provisioner can resolve from
+                    // live state (e.g. attributes that depend on side-effects
+                    // recorded after the create handler returned).
+                    let mut attr_map = stack_resource.attributes.clone();
+                    for attr in well_known_attributes_for(&stack_resource.resource_type) {
+                        if attr_map.contains_key(*attr) {
+                            continue;
+                        }
+                        if let Some(v) = provisioner.get_att(&stack_resource, attr) {
+                            attr_map.insert((*attr).to_string(), v);
+                        }
+                    }
+                    attributes.insert(stack_resource.logical_id.clone(), attr_map);
                     resources.push(stack_resource);
                     made_progress = true;
                 }
