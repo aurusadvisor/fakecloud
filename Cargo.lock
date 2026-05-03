@@ -3296,6 +3296,7 @@ dependencies = [
  "fakecloud-aws",
  "fakecloud-core",
  "fakecloud-persistence",
+ "fakecloud-wafv2",
  "http 1.4.0",
  "http-body-util",
  "hyper 1.9.0",

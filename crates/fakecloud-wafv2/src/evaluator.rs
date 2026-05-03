@@ -40,6 +40,17 @@ pub enum WafAction {
     Challenge,
 }
 
+/// Detailed evaluation outcome. `action` is the final resolved
+/// action (same value [`evaluate`] returns); `count_rules` lists the
+/// names of rules whose `Count` action matched on the way to the
+/// terminal decision. Useful for emitting per-rule metrics without
+/// blocking the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WafEvaluation {
+    pub action: WafAction,
+    pub count_rules: Vec<String>,
+}
+
 /// Evaluate `req` against `web_acl`. Rules are processed in ascending
 /// `Priority`; matching `Count` rules are recorded but do not terminate
 /// evaluation. The first matching non-`Count` rule's action is returned;
@@ -50,10 +61,23 @@ pub fn evaluate(
     ipsets: &HashMap<String, IpSet>,
     regex_sets: &HashMap<String, RegexPatternSet>,
 ) -> WafAction {
+    evaluate_detailed(req, web_acl, ipsets, regex_sets).action
+}
+
+/// Like [`evaluate`] but also reports the names of rules whose
+/// matching `Count` action fired. The returned `action` is the same
+/// value [`evaluate`] would return.
+pub fn evaluate_detailed(
+    req: &WafRequest,
+    web_acl: &WebAcl,
+    ipsets: &HashMap<String, IpSet>,
+    regex_sets: &HashMap<String, RegexPatternSet>,
+) -> WafEvaluation {
     let mut rules: Vec<&Value> = web_acl.rules.iter().collect();
     rules.sort_by_key(|r| r.get("Priority").and_then(Value::as_i64).unwrap_or(0));
 
     let mut labels: HashSet<String> = HashSet::new();
+    let mut count_rules: Vec<String> = Vec::new();
 
     for rule in rules {
         let Some(stmt) = rule.get("Statement") else {
@@ -71,17 +95,27 @@ pub fn evaluate(
             }
         }
         if let Some(action) = rule.get("Action").and_then(rule_action) {
-            // Count is non-terminal: keep evaluating subsequent rules.
+            // Count is non-terminal: keep evaluating subsequent rules but
+            // record the rule for metrics.
             if action == WafAction::Count {
+                if let Some(name) = rule.get("Name").and_then(Value::as_str) {
+                    count_rules.push(name.to_owned());
+                }
                 continue;
             }
-            return action;
+            return WafEvaluation {
+                action,
+                count_rules,
+            };
         }
         // Rule with OverrideAction (rule group reference) doesn't terminate
         // here either since we don't expand rule groups in this batch.
     }
 
-    default_action(web_acl)
+    WafEvaluation {
+        action: default_action(web_acl),
+        count_rules,
+    }
 }
 
 impl WebAcl {
@@ -93,6 +127,17 @@ impl WebAcl {
         regex_sets: &HashMap<String, RegexPatternSet>,
     ) -> WafAction {
         evaluate(req, self, ipsets, regex_sets)
+    }
+
+    /// Convenience wrapper around [`evaluate_detailed`] for callers
+    /// holding a `&WebAcl`.
+    pub fn evaluate_detailed(
+        &self,
+        req: &WafRequest,
+        ipsets: &HashMap<String, IpSet>,
+        regex_sets: &HashMap<String, RegexPatternSet>,
+    ) -> WafEvaluation {
+        evaluate_detailed(req, self, ipsets, regex_sets)
     }
 }
 
