@@ -680,3 +680,215 @@ mod multi_container_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod port_mapping_tests {
+    //! Cover the `portMappings` -> `docker run --publish` translation
+    //! plus the per-container `networkBindings` projected onto the task.
+    //! The argv builder is exercised directly so we don't need a real
+    //! container CLI on the test host.
+    use super::*;
+    use crate::runtime::{
+        build_run_argv, mark_running_multi, ContainerPlan, PortMapping, RunningContainer,
+    };
+    use crate::state::{Container, EcsState};
+    use crate::SharedEcsState;
+    use chrono::Utc;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    fn plan_with_ports(
+        port_mappings: Vec<PortMapping>,
+        network_mode: Option<&str>,
+    ) -> ContainerPlan {
+        ContainerPlan {
+            container_name: "app".into(),
+            image: "alpine:latest".into(),
+            env: Vec::new(),
+            entry_point: Vec::new(),
+            command: Vec::new(),
+            secrets_refs: Vec::new(),
+            essential: true,
+            has_task_role: false,
+            port_mappings,
+            network_mode: network_mode.map(String::from),
+        }
+    }
+
+    fn argv_string(plan: &ContainerPlan) -> Vec<String> {
+        build_run_argv(plan, &[], "task-1", "host-gateway", "alpine:latest")
+    }
+
+    /// Helper for asserting a `--publish <spec>` pair is present in argv.
+    /// Returns true when the flag/value pair appears as adjacent entries.
+    fn argv_has_publish(argv: &[String], spec: &str) -> bool {
+        argv.windows(2).any(|w| w[0] == "--publish" && w[1] == spec)
+    }
+
+    #[test]
+    fn port_mappings_translate_to_publish_flags() {
+        let plan = plan_with_ports(
+            vec![PortMapping {
+                container_port: 80,
+                host_port: 8080,
+                protocol: "tcp".into(),
+            }],
+            None,
+        );
+        let argv = argv_string(&plan);
+        assert!(
+            argv_has_publish(&argv, "80:8080/tcp"),
+            "expected --publish 80:8080/tcp in argv: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn port_mappings_default_host_port_to_container_port() {
+        // host_port=0 in the parsed mapping means "AWS host-mode default";
+        // parse_port_mapping rewrites that to containerPort, so by the time
+        // we reach build_run_argv the host_port should already equal 80.
+        // Drive the same path through the JSON parser to lock in the
+        // default behaviour end to end.
+        let parsed =
+            crate::runtime::__test_parse_port_mapping(&serde_json::json!({"containerPort": 80}))
+                .expect("containerPort should parse");
+        assert_eq!(
+            parsed.host_port, 80,
+            "default hostPort should mirror containerPort"
+        );
+        let argv = argv_string(&plan_with_ports(vec![parsed], None));
+        assert!(
+            argv_has_publish(&argv, "80:80/tcp"),
+            "expected --publish 80:80/tcp when hostPort omitted: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn port_mappings_default_protocol_tcp() {
+        let parsed = crate::runtime::__test_parse_port_mapping(
+            &serde_json::json!({"containerPort": 443, "hostPort": 443}),
+        )
+        .expect("containerPort should parse");
+        assert_eq!(parsed.protocol, "tcp");
+        let argv = argv_string(&plan_with_ports(vec![parsed], None));
+        assert!(
+            argv_has_publish(&argv, "443:443/tcp"),
+            "expected default protocol tcp: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn awsvpc_network_mode_skips_publish() {
+        let plan = plan_with_ports(
+            vec![PortMapping {
+                container_port: 80,
+                host_port: 8080,
+                protocol: "tcp".into(),
+            }],
+            Some("awsvpc"),
+        );
+        let argv = argv_string(&plan);
+        assert!(
+            !argv.iter().any(|s| s == "--publish"),
+            "awsvpc must not emit --publish: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn network_bindings_populated_on_task() {
+        // Build a task in state, run mark_running_multi with a started
+        // container that has network_bindings populated, and verify
+        // task_to_json emits them under containers[0].networkBindings.
+        let mut accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
+        let acct = accounts.get_or_create("000000000000");
+        let arn = acct.cluster_arn("default");
+        acct.clusters
+            .insert("default".into(), Cluster::new("default", arn));
+        let mut task = Task {
+            task_arn: "arn:aws:ecs:us-east-1:000000000000:task/default/abc".into(),
+            task_id: "abc".into(),
+            cluster_arn: "arn:aws:ecs:us-east-1:000000000000:cluster/default".into(),
+            cluster_name: "default".into(),
+            task_definition_arn: "arn:aws:ecs:us-east-1:000000000000:task-definition/web:1".into(),
+            family: "web".into(),
+            revision: 1,
+            capacity_provider_name: None,
+            last_status: "PENDING".into(),
+            desired_status: "RUNNING".into(),
+            launch_type: "FARGATE".into(),
+            platform_version: None,
+            cpu: None,
+            memory: None,
+            containers: vec![Container {
+                container_arn: "arn:aws:ecs:us-east-1:000000000000:container/default/abc/web"
+                    .into(),
+                name: "web".into(),
+                image: "alpine".into(),
+                task_arn: "arn:aws:ecs:us-east-1:000000000000:task/default/abc".into(),
+                last_status: "PENDING".into(),
+                exit_code: None,
+                reason: None,
+                runtime_id: None,
+                essential: true,
+                cpu: None,
+                memory: None,
+                memory_reservation: None,
+                network_bindings: Vec::new(),
+                network_interfaces: Vec::new(),
+                health_status: None,
+                managed_agents: None,
+            }],
+            overrides: serde_json::json!({}),
+            started_by: None,
+            group: None,
+            connectivity: "CONNECTING".into(),
+            stop_code: None,
+            stopped_reason: None,
+            created_at: Utc::now(),
+            started_at: None,
+            stopping_at: None,
+            stopped_at: None,
+            pull_started_at: None,
+            pull_stopped_at: None,
+            connectivity_at: None,
+            started_by_ref_id: None,
+            execution_role_arn: None,
+            task_role_arn: None,
+            tags: Vec::new(),
+            awslogs: None,
+            captured_logs: String::new(),
+            protection: None,
+        };
+        task.last_status = "PENDING".into();
+        acct.tasks.insert("abc".into(), task);
+        let state: SharedEcsState = Arc::new(RwLock::new(accounts));
+
+        let bindings = vec![serde_json::json!({
+            "bindIP": "0.0.0.0",
+            "containerPort": 80,
+            "hostPort": 8080,
+            "protocol": "tcp",
+        })];
+        let started = vec![RunningContainer {
+            name: "web".into(),
+            container_id: "docker-id".into(),
+            essential: true,
+            exit_code: None,
+            network_bindings: bindings.clone(),
+        }];
+        mark_running_multi(&state, "000000000000", "abc", &started);
+
+        let accounts = state.read();
+        let task = accounts
+            .get("000000000000")
+            .unwrap()
+            .tasks
+            .get("abc")
+            .unwrap();
+        let json = task_to_json(task);
+        let nb = &json["containers"][0]["networkBindings"];
+        assert_eq!(nb, &serde_json::Value::Array(bindings));
+    }
+}

@@ -271,40 +271,9 @@ impl EcsRuntime {
         // to reason about than a clean failure.
         let mut started: Vec<RunningContainer> = Vec::with_capacity(resolved_plans.len());
         for (rp, run_image) in resolved_plans.iter().zip(run_images.iter()) {
+            let argv = build_run_argv(&rp.plan, &rp.env, task_id, &self.host_ip, run_image);
             let mut cmd = Command::new(&self.cli);
-            cmd.args(["run", "-d"])
-                .args(["--name", &format!("{}-{}", task_id, rp.plan.container_name)])
-                .args(["--label", &format!("fakecloud-ecs-task={}", task_id)])
-                .args([
-                    "--label",
-                    &format!("fakecloud-ecs-container={}", rp.plan.container_name),
-                ])
-                .args([
-                    "--add-host",
-                    &format!("host.docker.internal:{}", self.host_ip),
-                ]);
-            for (k, v) in &rp.env {
-                let transformed = v
-                    .replace("http://127.0.0.1:", "http://host.docker.internal:")
-                    .replace("https://127.0.0.1:", "https://host.docker.internal:")
-                    .replace("http://localhost:", "http://host.docker.internal:")
-                    .replace("https://localhost:", "https://host.docker.internal:");
-                cmd.arg("-e").arg(format!("{}={}", k, transformed));
-            }
-            // `containerDefinition.entryPoint` overrides the image's
-            // ENTRYPOINT. Docker CLI's `--entrypoint` only takes a single
-            // executable; any additional entryPoint elements are appended
-            // as positional args before the user-supplied `command[]`.
-            if let Some(first) = rp.plan.entry_point.first() {
-                cmd.args(["--entrypoint", first]);
-            }
-            cmd.arg(run_image);
-            for arg in rp.plan.entry_point.iter().skip(1) {
-                cmd.arg(arg);
-            }
-            for arg in &rp.plan.command {
-                cmd.arg(arg);
-            }
+            cmd.args(&argv);
             let run_out = cmd.output().await.map_err(|e| {
                 // Cleanup already-started containers on launch failure.
                 self.cleanup_partial_start(&started);
@@ -321,6 +290,7 @@ impl EcsRuntime {
                 container_id,
                 essential: rp.plan.essential,
                 exit_code: None,
+                network_bindings: network_bindings_for(&rp.plan),
             });
         }
 
@@ -703,15 +673,38 @@ impl EcsRuntime {
 
 /// Per-container launch plan derived from a task definition.
 #[derive(Clone, Debug)]
-struct ContainerPlan {
-    container_name: String,
-    image: String,
-    env: Vec<(String, String)>,
-    entry_point: Vec<String>,
-    command: Vec<String>,
-    secrets_refs: Vec<(String, String)>,
-    essential: bool,
-    has_task_role: bool,
+pub(crate) struct ContainerPlan {
+    pub(crate) container_name: String,
+    pub(crate) image: String,
+    pub(crate) env: Vec<(String, String)>,
+    pub(crate) entry_point: Vec<String>,
+    pub(crate) command: Vec<String>,
+    pub(crate) secrets_refs: Vec<(String, String)>,
+    pub(crate) essential: bool,
+    pub(crate) has_task_role: bool,
+    /// Port mappings parsed from the task definition. Each entry becomes
+    /// a `--publish containerPort:hostPort/protocol` flag on the docker
+    /// run command (except for `awsvpc`, where ports are exposed via the
+    /// per-task ENI rather than the docker host's port table).
+    pub(crate) port_mappings: Vec<PortMapping>,
+    /// Task-level network mode propagated to every container plan so the
+    /// argv builder can decide whether to emit `--publish` flags. Real
+    /// ECS treats `awsvpc` as "container is on its own ENI"; the
+    /// equivalent in fakecloud is "don't publish to the host".
+    pub(crate) network_mode: Option<String>,
+}
+
+/// One entry in a container's `portMappings`. Mirrors the AWS shape so
+/// [`build_run_argv`] and the `networkBindings` response can share the
+/// same parsed representation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PortMapping {
+    pub container_port: u16,
+    /// `0` (or unset in the source JSON) means "use the same value as
+    /// containerPort" — host-mode default per AWS docs.
+    pub host_port: u16,
+    /// Lower-case `tcp` / `udp`. Defaults to `tcp` when omitted.
+    pub protocol: String,
 }
 
 #[derive(Clone, Debug)]
@@ -739,6 +732,10 @@ pub(crate) struct RunningContainer {
     pub(crate) container_id: String,
     pub(crate) essential: bool,
     pub(crate) exit_code: Option<i64>,
+    /// Resolved `networkBindings` for DescribeTasks. Computed from the
+    /// task definition's `portMappings` at launch and surfaced verbatim
+    /// in the per-container response.
+    pub(crate) network_bindings: Vec<serde_json::Value>,
 }
 
 /// Pure decision: does the current set of containers warrant stopping
@@ -778,6 +775,11 @@ fn build_container_plans(
         ));
     }
     let has_task_role = task.task_role_arn.is_some();
+    let network_mode = s
+        .task_definitions
+        .get(&task.family)
+        .and_then(|revs| revs.get(&task.revision))
+        .and_then(|td| td.network_mode.clone());
     let mut plans = Vec::with_capacity(task.containers.len());
     for container in &task.containers {
         let def = find_container_definition(s, &task.family, task.revision, &container.name);
@@ -817,6 +819,15 @@ fn build_container_plans(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let port_mappings = def
+            .as_ref()
+            .and_then(|d| d.get("portMappings").and_then(|v| v.as_array()).cloned())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(parse_port_mapping)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         plans.push(ContainerPlan {
             container_name: container.name.clone(),
             image: container.image.clone(),
@@ -826,9 +837,129 @@ fn build_container_plans(
             secrets_refs,
             essential: container.essential,
             has_task_role,
+            port_mappings,
+            network_mode: network_mode.clone(),
         });
     }
     Ok(plans)
+}
+
+/// Test-only re-export of [`parse_port_mapping`] so sibling test modules
+/// can lock in the default-port / default-protocol behaviour without us
+/// widening the visibility of the parser itself.
+#[cfg(test)]
+pub(crate) fn __test_parse_port_mapping(value: &serde_json::Value) -> Option<PortMapping> {
+    parse_port_mapping(value)
+}
+
+/// Parse a single `portMappings[]` entry. Returns `None` for entries
+/// that are missing `containerPort` or have a value out of `u16` range.
+/// Defaults: `hostPort` -> `containerPort`, `protocol` -> `tcp`.
+fn parse_port_mapping(value: &serde_json::Value) -> Option<PortMapping> {
+    let container_port = value
+        .get("containerPort")
+        .and_then(|v| v.as_i64())
+        .filter(|n| (0..=u16::MAX as i64).contains(n))? as u16;
+    let host_port_raw = value
+        .get("hostPort")
+        .and_then(|v| v.as_i64())
+        .filter(|n| (0..=u16::MAX as i64).contains(n))
+        .map(|n| n as u16)
+        .unwrap_or(0);
+    let host_port = if host_port_raw == 0 {
+        container_port
+    } else {
+        host_port_raw
+    };
+    let protocol = value
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "tcp".to_string());
+    Some(PortMapping {
+        container_port,
+        host_port,
+        protocol,
+    })
+}
+
+/// Build the docker `run` argv for a single container plan. Pure so unit
+/// tests can assert on flag ordering / `--publish` translation without
+/// shelling out. The returned vector is everything *after* the binary
+/// name (i.e. starts with `run`, ends with the user-supplied command
+/// args).
+pub(crate) fn build_run_argv(
+    plan: &ContainerPlan,
+    env: &[(String, String)],
+    task_id: &str,
+    host_ip: &str,
+    run_image: &str,
+) -> Vec<String> {
+    let mut argv: Vec<String> = Vec::new();
+    argv.push("run".into());
+    argv.push("-d".into());
+    argv.push("--name".into());
+    argv.push(format!("{}-{}", task_id, plan.container_name));
+    argv.push("--label".into());
+    argv.push(format!("fakecloud-ecs-task={}", task_id));
+    argv.push("--label".into());
+    argv.push(format!("fakecloud-ecs-container={}", plan.container_name));
+    argv.push("--add-host".into());
+    argv.push(format!("host.docker.internal:{}", host_ip));
+    // `awsvpc` puts the container on a per-task ENI; emulating that on a
+    // local docker host means *not* publishing to the host port table.
+    // Bridge / host / default network modes still get `--publish`.
+    let publish_ports = plan.network_mode.as_deref() != Some("awsvpc");
+    if publish_ports {
+        for pm in &plan.port_mappings {
+            argv.push("--publish".into());
+            argv.push(format!(
+                "{}:{}/{}",
+                pm.container_port, pm.host_port, pm.protocol
+            ));
+        }
+    }
+    for (k, v) in env {
+        let transformed = v
+            .replace("http://127.0.0.1:", "http://host.docker.internal:")
+            .replace("https://127.0.0.1:", "https://host.docker.internal:")
+            .replace("http://localhost:", "http://host.docker.internal:")
+            .replace("https://localhost:", "https://host.docker.internal:");
+        argv.push("-e".into());
+        argv.push(format!("{}={}", k, transformed));
+    }
+    if let Some(first) = plan.entry_point.first() {
+        argv.push("--entrypoint".into());
+        argv.push(first.clone());
+    }
+    argv.push(run_image.to_string());
+    for arg in plan.entry_point.iter().skip(1) {
+        argv.push(arg.clone());
+    }
+    for arg in &plan.command {
+        argv.push(arg.clone());
+    }
+    argv
+}
+
+/// Render `networkBindings` JSON for a launched container. Empty under
+/// `awsvpc` (the equivalent info goes on the task's ENI attachments) and
+/// for containers without `portMappings`.
+pub(crate) fn network_bindings_for(plan: &ContainerPlan) -> Vec<serde_json::Value> {
+    if plan.network_mode.as_deref() == Some("awsvpc") {
+        return Vec::new();
+    }
+    plan.port_mappings
+        .iter()
+        .map(|pm| {
+            serde_json::json!({
+                "bindIP": "0.0.0.0",
+                "containerPort": pm.container_port,
+                "hostPort": pm.host_port,
+                "protocol": pm.protocol,
+            })
+        })
+        .collect()
 }
 
 struct TaskSnapshot {
@@ -944,7 +1075,7 @@ fn mark_pull_stopped(state: &SharedEcsState, account_id: &str, task_id: &str) {
     }
 }
 
-fn mark_running_multi(
+pub(crate) fn mark_running_multi(
     state: &SharedEcsState,
     account_id: &str,
     task_id: &str,
@@ -966,6 +1097,7 @@ fn mark_running_multi(
             if let Some(c) = task.containers.iter_mut().find(|c| c.name == rc.name) {
                 c.runtime_id = Some(rc.container_id.clone());
                 c.last_status = "RUNNING".into();
+                c.network_bindings = rc.network_bindings.clone();
             }
         }
         if let Some(cluster) = s.clusters.get_mut(&task.cluster_name) {
@@ -1238,12 +1370,14 @@ mod tests {
                 container_id: "id-app".into(),
                 essential: true,
                 exit_code: Some(0),
+                network_bindings: Vec::new(),
             },
             RunningContainer {
                 name: "sidecar".into(),
                 container_id: "id-sc".into(),
                 essential: false,
                 exit_code: None,
+                network_bindings: Vec::new(),
             },
         ];
         assert!(task_should_stop(&containers));
@@ -1257,12 +1391,14 @@ mod tests {
                 container_id: "id-app".into(),
                 essential: true,
                 exit_code: None,
+                network_bindings: Vec::new(),
             },
             RunningContainer {
                 name: "sidecar".into(),
                 container_id: "id-sc".into(),
                 essential: false,
                 exit_code: Some(0),
+                network_bindings: Vec::new(),
             },
         ];
         assert!(!task_should_stop(&containers));
@@ -1276,12 +1412,14 @@ mod tests {
                 container_id: "id-a".into(),
                 essential: false,
                 exit_code: Some(0),
+                network_bindings: Vec::new(),
             },
             RunningContainer {
                 name: "b".into(),
                 container_id: "id-b".into(),
                 essential: false,
                 exit_code: Some(1),
+                network_bindings: Vec::new(),
             },
         ];
         assert!(task_should_stop(&containers));
@@ -1306,12 +1444,14 @@ mod tests {
                 container_id: "id-app".into(),
                 essential: true,
                 exit_code: Some(0),
+                network_bindings: Vec::new(),
             },
             RunningContainer {
                 name: "sidecar".into(),
                 container_id: "id-sc".into(),
                 essential: false,
                 exit_code: Some(137),
+                network_bindings: Vec::new(),
             },
         ];
         finalize_stopped_multi(
