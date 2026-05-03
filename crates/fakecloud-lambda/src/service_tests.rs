@@ -2124,3 +2124,234 @@ async fn resolve_qualifier_numeric_returns_self() {
         Some("7".to_string())
     );
 }
+
+#[tokio::test]
+async fn create_function_with_ephemeral_storage_persists_size() {
+    // EphemeralStorage.Size sent on CreateFunction must round-trip
+    // through GetFunctionConfiguration. Default is 512 when unset.
+    let svc = LambdaService::new(make_state());
+    let body = json!({
+        "FunctionName": "ephem",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "Code": {},
+        "EphemeralStorage": {"Size": 2048}
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::CREATED);
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["EphemeralStorage"]["Size"], 2048);
+
+    let req = make_request(Method::GET, "/2015-03-31/functions/ephem/configuration", "");
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["EphemeralStorage"]["Size"], 2048);
+}
+
+#[tokio::test]
+async fn create_function_without_ephemeral_storage_defaults_to_512() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "edflt").await;
+    let req = make_request(Method::GET, "/2015-03-31/functions/edflt/configuration", "");
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["EphemeralStorage"]["Size"], 512);
+}
+
+#[tokio::test]
+async fn ephemeral_storage_validation_rejects_below_512() {
+    let svc = LambdaService::new(make_state());
+    let body = json!({
+        "FunctionName": "elow",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "Code": {},
+        "EphemeralStorage": {"Size": 256}
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected validation error for size < 512"),
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert!(err.code().contains("InvalidParameterValueException"));
+}
+
+#[tokio::test]
+async fn ephemeral_storage_validation_rejects_above_10240() {
+    let svc = LambdaService::new(make_state());
+    let body = json!({
+        "FunctionName": "ehigh",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "Code": {},
+        "EphemeralStorage": {"Size": 20480}
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected validation error for size > 10240"),
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert!(err.code().contains("InvalidParameterValueException"));
+}
+
+#[tokio::test]
+async fn ephemeral_storage_accepts_boundaries_512_and_10240() {
+    let svc = LambdaService::new(make_state());
+    for (name, size) in [("emin", 512), ("emax", 10240)] {
+        let body = json!({
+            "FunctionName": name,
+            "Runtime": "python3.12",
+            "Role": "arn:aws:iam::123456789012:role/r",
+            "Handler": "index.handler",
+            "Code": {},
+            "EphemeralStorage": {"Size": size}
+        });
+        let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["EphemeralStorage"]["Size"], size);
+    }
+}
+
+#[tokio::test]
+async fn update_function_configuration_rejects_invalid_ephemeral_storage() {
+    // Validation must run before any field mutation; an out-of-range
+    // EphemeralStorage.Size on an otherwise valid Update body must
+    // not silently apply the surrounding fields.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "uephem").await;
+
+    let body = json!({
+        "Handler": "new.handler",
+        "EphemeralStorage": {"Size": 100}
+    });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/uephem/configuration",
+        &body.to_string(),
+    );
+    let err = match svc.handle(req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected validation error for size < 512"),
+    };
+    assert!(err.code().contains("InvalidParameterValueException"));
+
+    // Handler must NOT have been updated despite the request body.
+    let req = make_request(
+        Method::GET,
+        "/2015-03-31/functions/uephem/configuration",
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["Handler"], "index.handler");
+}
+
+#[tokio::test]
+async fn update_function_configuration_accepts_vpc_config() {
+    // VpcConfig fields (SubnetIds, SecurityGroupIds, Ipv6AllowedForDualStack)
+    // must round-trip through UpdateFunctionConfiguration without being
+    // dropped.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "vpcfn").await;
+
+    let body = json!({
+        "VpcConfig": {
+            "SubnetIds": ["subnet-aaa", "subnet-bbb"],
+            "SecurityGroupIds": ["sg-111", "sg-222"],
+            "Ipv6AllowedForDualStack": true
+        }
+    });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/vpcfn/configuration",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, "/2015-03-31/functions/vpcfn/configuration", "");
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["VpcConfig"]["SubnetIds"][0], "subnet-aaa");
+    assert_eq!(v["VpcConfig"]["SubnetIds"][1], "subnet-bbb");
+    assert_eq!(v["VpcConfig"]["SecurityGroupIds"][0], "sg-111");
+    assert_eq!(v["VpcConfig"]["SecurityGroupIds"][1], "sg-222");
+    assert_eq!(v["VpcConfig"]["Ipv6AllowedForDualStack"], true);
+}
+
+#[tokio::test]
+async fn update_function_configuration_accepts_snap_start() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "snapfn").await;
+
+    let body = json!({
+        "SnapStart": {"ApplyOn": "PublishedVersions"}
+    });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/snapfn/configuration",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(
+        Method::GET,
+        "/2015-03-31/functions/snapfn/configuration",
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["SnapStart"]["ApplyOn"], "PublishedVersions");
+}
+
+#[tokio::test]
+async fn snap_start_optimization_status_flips_on_after_publish_version() {
+    // With ApplyOn=PublishedVersions, AWS reports OptimizationStatus="On"
+    // on the published-version snapshot once optimization completes.
+    // fakecloud has no real optimization step, so we flip the status
+    // eagerly on PublishVersion so clients waiting on the transition
+    // see the steady state.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "snapopt").await;
+
+    // Configure SnapStart on $LATEST.
+    let body = json!({"SnapStart": {"ApplyOn": "PublishedVersions"}});
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/snapopt/configuration",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Publish a version.
+    let req = make_request(Method::POST, "/2015-03-31/functions/snapopt/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["Version"], "1");
+    assert_eq!(v["SnapStart"]["ApplyOn"], "PublishedVersions");
+    assert_eq!(v["SnapStart"]["OptimizationStatus"], "On");
+}
+
+#[tokio::test]
+async fn snap_start_default_response_has_apply_on_none() {
+    // Functions without an explicit SnapStart still echo a default
+    // SnapStart block so SDKs that always read both fields don't NPE.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "snapdef").await;
+    let req = make_request(
+        Method::GET,
+        "/2015-03-31/functions/snapdef/configuration",
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["SnapStart"]["ApplyOn"], "None");
+    assert_eq!(v["SnapStart"]["OptimizationStatus"], "Off");
+}

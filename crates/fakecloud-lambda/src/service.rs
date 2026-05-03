@@ -137,6 +137,25 @@ fn is_function_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+/// AWS bounds `EphemeralStorage.Size` to `[512, 10240]` MiB. Anything
+/// outside that range is rejected at the API edge with
+/// `InvalidParameterValueException`, matching the real Lambda control
+/// plane. Returns the validated size unchanged on success.
+pub(crate) fn validate_ephemeral_storage(size: i64) -> Result<i64, AwsServiceError> {
+    if !(512..=10240).contains(&size) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValueException",
+            format!(
+                "Value {size} at 'ephemeralStorage.size' failed to satisfy constraint: \
+                 Member must satisfy constraint: [Member must have value less than or equal to 10240, \
+                 Member must have value greater than or equal to 512]"
+            ),
+        ));
+    }
+    Ok(size)
+}
+
 /// All fields of a `CreateFunction` request, already parsed and
 /// defaulted. The code zip (if any) is eagerly base64-decoded so the
 /// caller can hash it without doing the decode again.
@@ -257,7 +276,10 @@ impl CreateFunctionInput {
 
         let tracing_mode = body["TracingConfig"]["Mode"].as_str().map(String::from);
         let kms_key_arn = body["KMSKeyArn"].as_str().map(String::from);
-        let ephemeral_storage_size = body["EphemeralStorage"]["Size"].as_i64();
+        let ephemeral_storage_size = match body["EphemeralStorage"]["Size"].as_i64() {
+            Some(size) => Some(validate_ephemeral_storage(size)?),
+            None => None,
+        };
         let vpc_config = body["VpcConfig"]
             .is_object()
             .then(|| body["VpcConfig"].clone());
@@ -1488,6 +1510,17 @@ impl LambdaService {
         }
         // Each numbered version gets its own RevisionId, decoupled from $LATEST.
         snapshot.revision_id = uuid::Uuid::new_v4().to_string();
+
+        // SnapStart optimization completes asynchronously on real Lambda
+        // when ApplyOn=PublishedVersions. fakecloud has no actual
+        // optimization step, so we flip OptimizationStatus to "On"
+        // eagerly on the published-version snapshot so clients that
+        // wait on this transition see the steady state immediately.
+        if let Some(snap) = snapshot.snap_start.as_mut() {
+            if snap.get("ApplyOn").and_then(|v| v.as_str()) == Some("PublishedVersions") {
+                snap["OptimizationStatus"] = json!("On");
+            }
+        }
 
         // Append to numbered list and store the snapshot.
         state
