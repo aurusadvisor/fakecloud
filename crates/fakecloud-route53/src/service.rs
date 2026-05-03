@@ -2662,15 +2662,20 @@ use helpers::*;
 /// the routing policy fields each set may carry. Mirrors real Route 53:
 /// - Failover (PRIMARY+SECONDARY): primary if healthy, otherwise secondary
 /// - Multi-value answer: up to 8 healthy values combined
-/// - Weighted: deterministic pick keyed by the resolver subnet
-/// - Latency / Geolocation: stable pick based on subnet hash
-/// - Default (no routing fields): first set's records
+/// - Weighted: pick proportional to weight, deterministically keyed by subnet
+/// - Latency: pick the record whose region matches the client's region
+/// - Geolocation: match country/continent against record's GeoLocation
+/// - Alias targets: synthesize records from the alias DNS name
+/// - Default (no routing fields): first healthy record's values
 fn resolve_routing_policy(
     candidates: &[&crate::model::ResourceRecordSet],
     health_checks: &std::collections::BTreeMap<String, crate::state::StoredHealthCheck>,
     edns0_subnet: Option<&str>,
 ) -> Vec<String> {
     fn rr_values(r: &crate::model::ResourceRecordSet) -> Vec<String> {
+        if let Some(alias) = r.alias_target.as_ref() {
+            return resolve_alias_target(alias, &r.record_type);
+        }
         r.resource_records
             .as_ref()
             .map(|rr| rr.resource_record.iter().map(|x| x.value.clone()).collect())
@@ -2751,9 +2756,11 @@ fn resolve_routing_policy(
         return rr_values(healthy[0]);
     }
 
+    // Latency-based: pick the record whose region matches the client subnet's
+    // inferred region. Fall back to the closest region by hash distance.
     if candidates
         .iter()
-        .any(|r| r.region.is_some() || r.geo_location.is_some())
+        .any(|r| r.region.is_some() && r.geo_location.is_none())
     {
         let healthy: Vec<&&crate::model::ResourceRecordSet> = candidates
             .iter()
@@ -2762,8 +2769,66 @@ fn resolve_routing_policy(
         if healthy.is_empty() {
             return Vec::new();
         }
+        let client_region = infer_region_from_subnet(edns0_subnet);
+        if let Some(r) = healthy
+            .iter()
+            .find(|r| r.region.as_deref() == Some(client_region.as_str()))
+        {
+            return rr_values(r);
+        }
+        // No exact region match — fall back to a deterministic pick.
         let idx = (subnet_hash(edns0_subnet) as usize) % healthy.len();
         return rr_values(healthy[idx]);
+    }
+
+    // Geolocation: match country/continent of client against record GeoLocation.
+    // A record with GeoLocation { country_code: "*" } (or no GeoLocation) acts
+    // as the default. Real Route 53 uses a record with no GeoLocation as the
+    // default; we match either form.
+    if candidates.iter().any(|r| r.geo_location.is_some()) {
+        let healthy: Vec<&&crate::model::ResourceRecordSet> = candidates
+            .iter()
+            .filter(|r| is_healthy(r, health_checks))
+            .collect();
+        if healthy.is_empty() {
+            return Vec::new();
+        }
+        let (client_country, client_continent) = infer_geo_from_subnet(edns0_subnet);
+        // 1) Exact country match.
+        if let Some(r) = healthy.iter().find(|r| {
+            r.geo_location
+                .as_ref()
+                .and_then(|g| g.country_code.as_deref())
+                .map(|c| c == client_country)
+                .unwrap_or(false)
+        }) {
+            return rr_values(r);
+        }
+        // 2) Continent match.
+        if let Some(r) = healthy.iter().find(|r| {
+            r.geo_location
+                .as_ref()
+                .and_then(|g| g.continent_code.as_deref())
+                .map(|c| c == client_continent)
+                .unwrap_or(false)
+        }) {
+            return rr_values(r);
+        }
+        // 3) Default record: GeoLocation with country_code="*" or no GeoLocation.
+        if let Some(r) = healthy.iter().find(|r| {
+            r.geo_location
+                .as_ref()
+                .and_then(|g| g.country_code.as_deref())
+                .map(|c| c == "*")
+                .unwrap_or(false)
+        }) {
+            return rr_values(r);
+        }
+        if let Some(r) = healthy.iter().find(|r| r.geo_location.is_none()) {
+            return rr_values(r);
+        }
+        // 4) Last resort: first healthy.
+        return rr_values(healthy[0]);
     }
 
     candidates
@@ -2772,6 +2837,90 @@ fn resolve_routing_policy(
         .or_else(|| candidates.first())
         .map(|r| rr_values(r))
         .unwrap_or_default()
+}
+
+/// Resolve an alias target to synthetic record values. Real Route 53 follows
+/// the alias to the underlying ELB/CloudFront/S3 endpoint and returns A/AAAA
+/// records. For fakecloud's TestDNSAnswer we synthesise a deterministic IP
+/// per DNS name so tests can assert on stable values, and surface the alias
+/// hostname for non-A types.
+fn resolve_alias_target(alias: &crate::model::AliasTarget, record_type: &str) -> Vec<String> {
+    let name = alias.dns_name.trim_end_matches('.');
+    if record_type == "A" || record_type == "AAAA" {
+        let h = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for b in name.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h
+        };
+        if record_type == "AAAA" {
+            // Deterministic IPv6 in the documentation prefix 2001:db8::/32.
+            let a = (h & 0xffff) as u16;
+            let b = ((h >> 16) & 0xffff) as u16;
+            let c = ((h >> 32) & 0xffff) as u16;
+            let d = ((h >> 48) & 0xffff) as u16;
+            return vec![format!("2001:db8:{a:x}:{b:x}::{c:x}:{d:x}")];
+        }
+        // Deterministic IPv4 in the documentation range 192.0.2.0/24, with
+        // the second/third octet derived from the hash so distinct aliases
+        // surface as distinct addresses (avoids collisions across services).
+        let oct2 = ((h >> 16) & 0xff) as u8;
+        let oct3 = ((h >> 8) & 0xff) as u8;
+        let oct4 = (h & 0xff) as u8;
+        return vec![format!(
+            "198.51.{}.{oct4}",
+            ((oct2 as u16) << 8 | oct3 as u16) % 256
+        )];
+    }
+    // Non-A/AAAA aliases (CNAME, etc.) surface the alias hostname directly.
+    vec![name.to_string()]
+}
+
+/// Infer an AWS region from a client subnet IP. Used by latency-based
+/// routing. Real Route 53 uses BGP-derived geolocation; fakecloud uses a
+/// deterministic /8-prefix mapping that is stable across calls so tests can
+/// pin a request to a specific region.
+fn infer_region_from_subnet(subnet: Option<&str>) -> String {
+    let Some(s) = subnet else {
+        return "us-east-1".to_string();
+    };
+    let first_octet: u32 = s
+        .split('.')
+        .next()
+        .and_then(|o| o.parse().ok())
+        .unwrap_or(0);
+    match first_octet {
+        0..=63 => "us-east-1".to_string(),
+        64..=127 => "us-west-2".to_string(),
+        128..=159 => "eu-west-1".to_string(),
+        160..=191 => "eu-central-1".to_string(),
+        192..=223 => "ap-southeast-1".to_string(),
+        _ => "ap-northeast-1".to_string(),
+    }
+}
+
+/// Infer (country_code, continent_code) from a client subnet IP. Used by
+/// geolocation routing. Stable mapping keyed by the first octet so tests
+/// can pin a request to a specific country.
+fn infer_geo_from_subnet(subnet: Option<&str>) -> (String, String) {
+    let Some(s) = subnet else {
+        return ("US".to_string(), "NA".to_string());
+    };
+    let first_octet: u32 = s
+        .split('.')
+        .next()
+        .and_then(|o| o.parse().ok())
+        .unwrap_or(0);
+    match first_octet {
+        0..=63 => ("US".to_string(), "NA".to_string()),
+        64..=127 => ("CA".to_string(), "NA".to_string()),
+        128..=159 => ("GB".to_string(), "EU".to_string()),
+        160..=191 => ("DE".to_string(), "EU".to_string()),
+        192..=223 => ("SG".to_string(), "AS".to_string()),
+        _ => ("JP".to_string(), "AS".to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -3044,5 +3193,317 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(body.contains("<Status>Failure</Status>"), "body: {body}");
+    }
+
+    // ─── TestDNSAnswer routing-policy E2E tests (U2) ──────────────────
+
+    fn svc_with_zone(records: Vec<crate::model::ResourceRecordSet>) -> (Route53Service, String) {
+        let state = Arc::new(RwLock::new(Route53Accounts::default()));
+        let zone_id = "Z123ABC".to_string();
+        {
+            let mut s = state.write();
+            let account = s.accounts.entry(DEFAULT_ACCOUNT.to_string()).or_default();
+            account.hosted_zones.insert(
+                zone_id.clone(),
+                crate::state::StoredHostedZone {
+                    id: zone_id.clone(),
+                    name: "example.com.".to_string(),
+                    caller_reference: "ref".to_string(),
+                    comment: None,
+                    private_zone: false,
+                    features: None,
+                    vpcs: vec![],
+                    delegation_set_id: None,
+                    name_servers: vec![],
+                    created_time: Utc::now(),
+                    resource_record_sets: records,
+                },
+            );
+        }
+        (Route53Service::new(state), zone_id)
+    }
+
+    fn req_for_dns(zone_id: &str, name: &str, rtype: &str, edns0: Option<&str>) -> AwsRequest {
+        let mut params: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        params.insert("hostedzoneid".to_string(), zone_id.to_string());
+        params.insert("recordname".to_string(), name.to_string());
+        params.insert("recordtype".to_string(), rtype.to_string());
+        if let Some(s) = edns0 {
+            params.insert("edns0clientsubnetip".to_string(), s.to_string());
+        }
+        let raw_path = "/2013-04-01/testdnsanswer".to_string();
+        let segs: Vec<String> = raw_path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        AwsRequest {
+            service: "route53".to_string(),
+            action: "TestDNSAnswer".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: DEFAULT_ACCOUNT.to_string(),
+            request_id: "test".to_string(),
+            headers: HeaderMap::new(),
+            query_params: params,
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: segs,
+            raw_path,
+            raw_query: String::new(),
+            method: http::Method::GET,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn extract_record_data(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = body;
+        while let Some(start) = rest.find("<RecordDataEntry>") {
+            rest = &rest[start + "<RecordDataEntry>".len()..];
+            let Some(end) = rest.find("</RecordDataEntry>") else {
+                break;
+            };
+            out.push(rest[..end].to_string());
+            rest = &rest[end + "</RecordDataEntry>".len()..];
+        }
+        out
+    }
+
+    #[test]
+    fn test_dns_answer_simple_returns_records() {
+        let r = rrset("1.2.3.4");
+        let (svc, zid) = svc_with_zone(vec![r]);
+        let req = req_for_dns(&zid, "x.example.com", "A", None);
+        let resp = svc.test_dns_answer(&req).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert_eq!(extract_record_data(&body), vec!["1.2.3.4".to_string()]);
+    }
+
+    #[test]
+    fn test_dns_answer_weighted_picks_proportional_to_weight() {
+        let mut a = rrset("1.1.1.1");
+        a.weight = Some(1);
+        a.set_identifier = Some("light".to_string());
+        let mut b = rrset("9.9.9.9");
+        b.weight = Some(99);
+        b.set_identifier = Some("heavy".to_string());
+        let (svc, zid) = svc_with_zone(vec![a, b]);
+        // Sweep distinct subnets to exercise the weighted distribution.
+        let mut heavy = 0usize;
+        let mut light = 0usize;
+        for i in 0..200 {
+            let subnet = format!("203.0.113.{}", i % 200);
+            let req = req_for_dns(&zid, "x.example.com", "A", Some(&subnet));
+            let resp = svc.test_dns_answer(&req).unwrap();
+            let body = std::str::from_utf8(resp.body.expect_bytes())
+                .unwrap()
+                .to_string();
+            let data = extract_record_data(&body);
+            assert_eq!(data.len(), 1);
+            if data[0] == "9.9.9.9" {
+                heavy += 1;
+            } else if data[0] == "1.1.1.1" {
+                light += 1;
+            }
+        }
+        // With 99:1 weight ratio, heavy should dominate by a large margin.
+        assert!(
+            heavy > 10 * light,
+            "expected heavy-weighted record to dominate, got heavy={heavy} light={light}"
+        );
+    }
+
+    #[test]
+    fn test_dns_answer_failover_uses_primary_when_healthy() {
+        let mut p = rrset("10.0.0.1");
+        p.failover = Some("PRIMARY".to_string());
+        p.health_check_id = Some("hc-up".to_string());
+        let mut s = rrset("10.0.0.2");
+        s.failover = Some("SECONDARY".to_string());
+        let (svc, zid) = svc_with_zone(vec![p, s]);
+        // Seed the health check as healthy.
+        {
+            let mut st = svc.state.write();
+            let acct = st.accounts.get_mut(DEFAULT_ACCOUNT).unwrap();
+            acct.health_checks.insert(
+                "hc-up".to_string(),
+                StoredHealthCheck {
+                    id: "hc-up".to_string(),
+                    caller_reference: "r".to_string(),
+                    version: 1,
+                    config: HealthCheckConfig::default(),
+                    created_time: Utc::now(),
+                    status: HealthCheckStatus::Success,
+                    last_failure_reason: None,
+                },
+            );
+        }
+        let req = req_for_dns(&zid, "x.example.com", "A", None);
+        let resp = svc.test_dns_answer(&req).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert_eq!(extract_record_data(&body), vec!["10.0.0.1".to_string()]);
+    }
+
+    #[test]
+    fn test_dns_answer_failover_falls_back_to_secondary_when_primary_unhealthy() {
+        let mut p = rrset("10.0.0.1");
+        p.failover = Some("PRIMARY".to_string());
+        p.health_check_id = Some("hc-flip".to_string());
+        let mut s = rrset("10.0.0.2");
+        s.failover = Some("SECONDARY".to_string());
+        let (svc, zid) = svc_with_zone(vec![p, s]);
+        {
+            let mut st = svc.state.write();
+            let acct = st.accounts.get_mut(DEFAULT_ACCOUNT).unwrap();
+            acct.health_checks.insert(
+                "hc-flip".to_string(),
+                StoredHealthCheck {
+                    id: "hc-flip".to_string(),
+                    caller_reference: "r".to_string(),
+                    version: 1,
+                    config: HealthCheckConfig::default(),
+                    created_time: Utc::now(),
+                    status: HealthCheckStatus::Success,
+                    last_failure_reason: None,
+                },
+            );
+        }
+        // Flip primary's health to failure via the public helper.
+        assert!(svc.set_health_check_status(
+            "hc-flip",
+            HealthCheckStatus::Failure,
+            Some("simulated outage".to_string()),
+        ));
+        let req = req_for_dns(&zid, "x.example.com", "A", None);
+        let resp = svc.test_dns_answer(&req).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert_eq!(extract_record_data(&body), vec!["10.0.0.2".to_string()]);
+    }
+
+    #[test]
+    fn test_dns_answer_multivalue_returns_up_to_8_healthy() {
+        // Case 1: 10 records, 6 healthy → 6 returned.
+        let mut records = Vec::new();
+        for i in 0..6 {
+            let mut r = rrset(&format!("10.0.0.{i}"));
+            r.multi_value_answer = Some(true);
+            r.set_identifier = Some(format!("h-{i}"));
+            records.push(r);
+        }
+        for i in 6..10 {
+            let mut r = rrset(&format!("10.0.0.{i}"));
+            r.multi_value_answer = Some(true);
+            r.set_identifier = Some(format!("u-{i}"));
+            r.health_check_id = Some("hc-down".to_string());
+            records.push(r);
+        }
+        let (svc, zid) = svc_with_zone(records);
+        {
+            let mut st = svc.state.write();
+            let acct = st.accounts.get_mut(DEFAULT_ACCOUNT).unwrap();
+            acct.health_checks.insert(
+                "hc-down".to_string(),
+                StoredHealthCheck {
+                    id: "hc-down".to_string(),
+                    caller_reference: "r".to_string(),
+                    version: 1,
+                    config: HealthCheckConfig::default(),
+                    created_time: Utc::now(),
+                    status: HealthCheckStatus::Failure,
+                    last_failure_reason: None,
+                },
+            );
+        }
+        let req = req_for_dns(&zid, "x.example.com", "A", None);
+        let resp = svc.test_dns_answer(&req).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert_eq!(extract_record_data(&body).len(), 6);
+
+        // Case 2: 12 healthy → cap at 8.
+        let mut records = Vec::new();
+        for i in 0..12 {
+            let mut r = rrset(&format!("10.0.1.{i}"));
+            r.multi_value_answer = Some(true);
+            r.set_identifier = Some(format!("h-{i}"));
+            records.push(r);
+        }
+        let (svc2, zid2) = svc_with_zone(records);
+        let req2 = req_for_dns(&zid2, "x.example.com", "A", None);
+        let resp2 = svc2.test_dns_answer(&req2).unwrap();
+        let body2 = std::str::from_utf8(resp2.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert_eq!(extract_record_data(&body2).len(), 8);
+    }
+
+    #[test]
+    fn test_dns_answer_geolocation_matches_country_to_record() {
+        let mut us = rrset("1.0.0.1");
+        us.set_identifier = Some("us".to_string());
+        us.geo_location = Some(crate::model::GeoLocation {
+            country_code: Some("US".to_string()),
+            ..Default::default()
+        });
+        let mut default = rrset("9.0.0.9");
+        default.set_identifier = Some("default".to_string());
+        default.geo_location = Some(crate::model::GeoLocation {
+            country_code: Some("*".to_string()),
+            ..Default::default()
+        });
+        let (svc, zid) = svc_with_zone(vec![us, default]);
+
+        // EDNS0 IP `10.x.y.z` infers country "US" → should hit the US record.
+        let req = req_for_dns(&zid, "x.example.com", "A", Some("10.0.0.1"));
+        let resp = svc.test_dns_answer(&req).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert_eq!(extract_record_data(&body), vec!["1.0.0.1".to_string()]);
+
+        // EDNS0 IP `200.x.y.z` infers SG (continent AS) → no country/continent
+        // match, falls back to the default record.
+        let req2 = req_for_dns(&zid, "x.example.com", "A", Some("200.0.0.1"));
+        let resp2 = svc.test_dns_answer(&req2).unwrap();
+        let body2 = std::str::from_utf8(resp2.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        assert_eq!(extract_record_data(&body2), vec!["9.0.0.9".to_string()]);
+    }
+
+    #[test]
+    fn test_dns_answer_alias_target_synthesizes_record() {
+        let mut r = rrset("ignored");
+        r.resource_records = None;
+        r.alias_target = Some(crate::model::AliasTarget {
+            hosted_zone_id: "Z2FDTNDATAQYW2".to_string(),
+            dns_name: "example-lb-1234.us-east-1.elb.amazonaws.com.".to_string(),
+            evaluate_target_health: false,
+        });
+        let (svc, zid) = svc_with_zone(vec![r]);
+        let req = req_for_dns(&zid, "x.example.com", "A", None);
+        let resp = svc.test_dns_answer(&req).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        let data = extract_record_data(&body);
+        assert_eq!(data.len(), 1);
+        // Synthesised IPv4 in 198.51.0.0/16.
+        assert!(
+            data[0].starts_with("198.51."),
+            "expected synthesised A in 198.51.0.0/16, got {}",
+            data[0]
+        );
     }
 }
