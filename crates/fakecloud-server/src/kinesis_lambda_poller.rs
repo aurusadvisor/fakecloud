@@ -27,6 +27,11 @@ struct Mapping {
     filter: FilterSet,
     starting_position: Option<String>,
     starting_position_timestamp: Option<f64>,
+    /// True when the function opted into partial-batch failure handling
+    /// via `FunctionResponseTypes: ["ReportBatchItemFailures"]`. The
+    /// checkpoint advances only past the first failed sequence number;
+    /// records at or after that point are retried on the next poll.
+    report_batch_item_failures: bool,
 }
 
 pub struct KinesisLambdaPoller {
@@ -75,6 +80,10 @@ impl KinesisLambdaPoller {
                             filter: FilterSet::from_strings(m.filter_patterns.iter()),
                             starting_position: m.starting_position.clone(),
                             starting_position_timestamp: m.starting_position_timestamp,
+                            report_batch_item_failures: m
+                                .function_response_types
+                                .iter()
+                                .any(|t| t.eq_ignore_ascii_case("ReportBatchItemFailures")),
                         })
                         .collect::<Vec<_>>()
                 })
@@ -170,12 +179,12 @@ impl KinesisLambdaPoller {
                     }
                     let end = shard.records.len().min(start.saturating_add(limit));
                     let records = shard.records[start..end].to_vec();
-                    Some((shard.shard_id.clone(), end, records))
+                    Some((shard.shard_id.clone(), start, end, records))
                 })
                 .collect::<Vec<_>>()
         };
 
-        for (shard_id, end, records) in deliveries {
+        for (shard_id, start, end, records) in deliveries {
             // Build per-record JSON, then split into matched + dropped
             // by FilterCriteria. Dropped records still advance the
             // checkpoint — AWS docs say filtered-out records "do not
@@ -225,39 +234,61 @@ impl KinesisLambdaPoller {
             let payload = json!({ "Records": matched }).to_string();
 
             let used_real_delivery = self.lambda_delivery.is_some();
-            let delivered = if let Some(ref delivery) = self.lambda_delivery {
-                match delivery
-                    .invoke_lambda(&mapping.function_arn, &payload)
-                    .await
-                {
-                    Ok(_) => true,
-                    Err(error) => {
-                        tracing::warn!(
-                            function_arn = %mapping.function_arn,
-                            stream_arn = %mapping.stream_arn,
-                            shard_id = %shard_id,
-                            error = %error,
-                            "Kinesis->Lambda: function invocation failed"
-                        );
-                        false
+            // Sequence numbers of the source records in batch order —
+            // used below to compute the partial-batch checkpoint when
+            // the function opted into ReportBatchItemFailures. We use
+            // `records` (not `matched`) so a failure at a given seqno
+            // also retries the filter-dropped records before it on the
+            // next poll, which is what AWS does — filtered records get
+            // re-evaluated and dropped again, but the failure point
+            // anchors to the actual stream offset.
+            let record_seqs: Vec<String> =
+                records.iter().map(|r| r.sequence_number.clone()).collect();
+
+            let invoke_result: Option<Result<Vec<u8>, String>> =
+                if let Some(ref delivery) = self.lambda_delivery {
+                    Some(
+                        delivery
+                            .invoke_lambda(&mapping.function_arn, &payload)
+                            .await,
+                    )
+                } else {
+                    None
+                };
+
+            let advance_to: Option<usize> = match &invoke_result {
+                Some(Ok(body)) if mapping.report_batch_item_failures => {
+                    match first_failed_index(body, &record_seqs) {
+                        Some(idx) => Some(start.saturating_add(idx)),
+                        None => Some(end),
                     }
                 }
-            } else {
-                true
+                Some(Ok(_)) => Some(end),
+                Some(Err(error)) => {
+                    tracing::warn!(
+                        function_arn = %mapping.function_arn,
+                        stream_arn = %mapping.stream_arn,
+                        shard_id = %shard_id,
+                        error = %error,
+                        "Kinesis->Lambda: function invocation failed; batch will be retried"
+                    );
+                    None
+                }
+                None => Some(end),
             };
 
             // Only advance the checkpoint after a successful invoke.
             // A failed invoke leaves the records pending so the next
             // poll retries them — matches AWS's at-least-once guarantee.
-            if !delivered {
+            let Some(new_checkpoint) = advance_to else {
                 continue;
-            }
+            };
 
             {
                 let account_id = mapping.stream_arn.split(':').nth(4).unwrap_or("");
                 let mut kinesis_accounts = self.kinesis_state.write();
                 let kinesis = kinesis_accounts.get_or_create(account_id);
-                kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, end);
+                kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, new_checkpoint);
             }
 
             if !used_real_delivery {
@@ -272,5 +303,70 @@ impl KinesisLambdaPoller {
                 });
             }
         }
+    }
+}
+
+/// Parse the Lambda response body as `{"batchItemFailures":[{"itemIdentifier":"<seqno>"}]}`
+/// and return the index in `batch_seqs` of the first failed sequence
+/// number. Returns `None` when the body doesn't decode, the failures
+/// list is empty, or no failure references a sequence number actually
+/// in the batch (AWS ignores stale identifiers). Kinesis-specific:
+/// callers advance the shard checkpoint to this index, so the failed
+/// record and everything after it gets retried on the next poll.
+fn first_failed_index(body: &[u8], batch_seqs: &[String]) -> Option<usize> {
+    let parsed: Value = serde_json::from_slice(body).ok()?;
+    let failures = parsed.get("batchItemFailures")?.as_array()?;
+    let failed_seqs: Vec<&str> = failures
+        .iter()
+        .filter_map(|f| f.get("itemIdentifier").and_then(|v| v.as_str()))
+        .collect();
+    if failed_seqs.is_empty() {
+        return None;
+    }
+    batch_seqs
+        .iter()
+        .enumerate()
+        .filter(|(_, seq)| failed_seqs.contains(&seq.as_str()))
+        .map(|(idx, _)| idx)
+        .min()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_failed_index_finds_lowest_in_batch_order() {
+        let body = br#"{"batchItemFailures":[{"itemIdentifier":"3"},{"itemIdentifier":"1"}]}"#;
+        let seqs = ["0", "1", "2", "3", "4"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        // Lowest index in batch order is 1 (seq "1").
+        assert_eq!(first_failed_index(body, &seqs), Some(1));
+    }
+
+    #[test]
+    fn first_failed_index_ignores_stale_identifiers() {
+        let body = br#"{"batchItemFailures":[{"itemIdentifier":"99"}]}"#;
+        let seqs = ["0", "1", "2"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert!(first_failed_index(body, &seqs).is_none());
+    }
+
+    #[test]
+    fn first_failed_index_empty_failures_returns_none() {
+        let body = br#"{"batchItemFailures":[]}"#;
+        let seqs = ["a", "b"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(first_failed_index(body, &seqs).is_none());
+    }
+
+    #[test]
+    fn first_failed_index_invalid_json_returns_none() {
+        let body = b"not json";
+        let seqs = ["a"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(first_failed_index(body, &seqs).is_none());
     }
 }
