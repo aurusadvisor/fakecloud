@@ -21,9 +21,9 @@
 //!    let it die) and return a timeout error.
 //!
 //! Real CloudFront Functions are bounded at ~1ms of CPU per request and
-//! 2MB of memory. We mirror that with a 10ms wall-clock budget — looser
-//! to avoid flakes on shared CI runners, still tight enough that
-//! `while(1){}` is killed in tests.
+//! 2MB of memory. We mirror that with a 250ms wall-clock budget —
+//! looser than AWS to absorb cold-start jitter on shared CI runners,
+//! still tight enough that `while(1){}` is killed in tests.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -101,11 +101,24 @@ pub(crate) fn run_handler(code: &str, event_json: &[u8]) -> JsExecution {
             }
             exec
         }
-        Err(_) => {
+        Err(mpsc::RecvTimeoutError::Timeout) => {
             let msg = format!(
                 "function execution exceeded the {}ms time limit",
                 EXECUTION_TIMEOUT.as_millis()
             );
+            JsExecution {
+                output: None,
+                error: Some(msg.clone()),
+                logs: vec![format!("ERROR: {msg}")],
+                compute_utilization: 101,
+            }
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            // The worker thread either failed to spawn (`spawn()` errored
+            // and the sender was dropped) or panicked partway through.
+            // Surface that distinctly so a host-level problem doesn't get
+            // misdiagnosed as adversarial JS.
+            let msg = "function execution worker thread panicked or failed to spawn".to_string();
             JsExecution {
                 output: None,
                 error: Some(msg.clone()),
