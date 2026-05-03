@@ -2156,6 +2156,7 @@ pub(crate) fn build_table_description(table: &DynamoTable) -> Value {
 
 pub(crate) fn execute_partiql_statement(
     state: &SharedDynamoDbState,
+    account_id: &str,
     statement: &str,
     parameters: &[Value],
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -2163,13 +2164,13 @@ pub(crate) fn execute_partiql_statement(
     let upper = trimmed.to_ascii_uppercase();
 
     if upper.starts_with("SELECT") {
-        execute_partiql_select(state, trimmed, parameters)
+        execute_partiql_select(state, account_id, trimmed, parameters)
     } else if upper.starts_with("INSERT") {
-        execute_partiql_insert(state, trimmed, parameters)
+        execute_partiql_insert(state, account_id, trimmed, parameters)
     } else if upper.starts_with("UPDATE") {
-        execute_partiql_update(state, trimmed, parameters)
+        execute_partiql_update(state, account_id, trimmed, parameters)
     } else if upper.starts_with("DELETE") {
-        execute_partiql_delete(state, trimmed, parameters)
+        execute_partiql_delete(state, account_id, trimmed, parameters)
     } else {
         Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
@@ -2253,6 +2254,18 @@ pub(crate) fn execute_partiql_in_state(
         let value_str = rest.trim()[value_pos + 5..].trim();
         let item = parse_partiql_value_object(value_str, parameters)?;
         let table = get_table_mut(&mut state.tables, &table_name)?;
+        for key_attr in &table.key_schema {
+            if !item.contains_key(&key_attr.attribute_name) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!(
+                        "One or more parameter values were invalid: Missing the key {} in the item",
+                        key_attr.attribute_name
+                    ),
+                ));
+            }
+        }
         let key = extract_key(table, &item);
         if table.find_item_index(&key).is_some() {
             return Err(AwsServiceError::aws_error(
@@ -2377,6 +2390,7 @@ pub(crate) fn execute_partiql_in_state(
 /// Parse a simple `SELECT * FROM tablename WHERE pk = 'value'` or with parameters.
 pub(crate) fn execute_partiql_select(
     state: &SharedDynamoDbState,
+    account_id: &str,
     statement: &str,
     parameters: &[Value],
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -2394,7 +2408,8 @@ pub(crate) fn execute_partiql_select(
     let (table_name, rest) = parse_partiql_table_name(after_from);
 
     let __mas = state.read();
-    let state = __mas.default_ref();
+    let empty_state = crate::state::DynamoDbState::new(account_id, "us-east-1");
+    let state = __mas.get(account_id).unwrap_or(&empty_state);
     let table = get_table(&state.tables, &table_name)?;
 
     let rest_upper = rest.trim().to_ascii_uppercase();
@@ -2412,6 +2427,7 @@ pub(crate) fn execute_partiql_select(
 
 pub(crate) fn execute_partiql_insert(
     state: &SharedDynamoDbState,
+    account_id: &str,
     statement: &str,
     parameters: &[Value],
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -2442,8 +2458,25 @@ pub(crate) fn execute_partiql_insert(
     let item = parse_partiql_value_object(value_str, parameters)?;
 
     let mut __mas = state.write();
-    let state = __mas.default_mut();
+    let state = __mas.get_or_create(account_id);
     let table = get_table_mut(&mut state.tables, &table_name)?;
+    // Validate every key-schema attribute is present in the item.
+    // Real DDB rejects an INSERT that omits any key attribute with a
+    // ValidationException; without this check we'd silently insert an
+    // item with a phantom default key (the AttributeValue::Null fallback
+    // from `extract_key`) and clobber any prior insert that did the same.
+    for key_attr in &table.key_schema {
+        if !item.contains_key(&key_attr.attribute_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "One or more parameter values were invalid: Missing the key {} in the item",
+                    key_attr.attribute_name
+                ),
+            ));
+        }
+    }
     let key = extract_key(table, &item);
     if table.find_item_index(&key).is_some() {
         // DynamoDB PartiQL INSERT fails if item exists
@@ -2462,6 +2495,7 @@ pub(crate) fn execute_partiql_insert(
 
 pub(crate) fn execute_partiql_update(
     state: &SharedDynamoDbState,
+    account_id: &str,
     statement: &str,
     parameters: &[Value],
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -2490,7 +2524,7 @@ pub(crate) fn execute_partiql_update(
     };
 
     let mut __mas = state.write();
-    let state = __mas.default_mut();
+    let state = __mas.get_or_create(account_id);
     let table = get_table_mut(&mut state.tables, &table_name)?;
 
     let matched_indices = if !where_clause.is_empty() {
@@ -2523,6 +2557,7 @@ pub(crate) fn execute_partiql_update(
 
 pub(crate) fn execute_partiql_delete(
     state: &SharedDynamoDbState,
+    account_id: &str,
     statement: &str,
     parameters: &[Value],
 ) -> Result<AwsResponse, AwsServiceError> {
@@ -2550,7 +2585,7 @@ pub(crate) fn execute_partiql_delete(
     let where_clause = rest.trim()[5..].trim();
 
     let mut __mas = state.write();
-    let state = __mas.default_mut();
+    let state = __mas.get_or_create(account_id);
     let table = get_table_mut(&mut state.tables, &table_name)?;
 
     let mut indices = find_partiql_where_indices(table, where_clause, parameters)?;
@@ -2602,13 +2637,13 @@ pub(crate) fn find_partiql_where_indices(
     parameters: &[Value],
 ) -> Result<Vec<usize>, AwsServiceError> {
     let conditions = split_partiql_and_clauses(where_clause);
-    let parsed_conditions = parse_partiql_equality_conditions(&conditions, parameters);
+    let parsed_conditions = parse_partiql_conditions(&conditions, parameters);
 
     let mut indices = Vec::new();
     for (i, item) in table.items.iter().enumerate() {
         let all_match = parsed_conditions
             .iter()
-            .all(|(attr, expected)| item.get(attr) == Some(expected));
+            .all(|c| evaluate_partiql_cond(c, item));
         if all_match {
             indices.push(i);
         }
@@ -2617,43 +2652,257 @@ pub(crate) fn find_partiql_where_indices(
     Ok(indices)
 }
 
+/// A parsed PartiQL WHERE clause condition. Equality remains the
+/// hot path; comparison/range/membership/function ops were added in
+/// L4 so PartiQL filters can express anything DDB's expression
+/// language can.
+#[derive(Debug, Clone)]
+pub(crate) enum PartiqlCond {
+    Eq(String, Value),
+    Ne(String, Value),
+    Lt(String, Value),
+    Le(String, Value),
+    Gt(String, Value),
+    Ge(String, Value),
+    Between(String, Value, Value),
+    In(String, Vec<Value>),
+    BeginsWith(String, Value),
+    Contains(String, Value),
+    AttributeExists(String),
+    AttributeNotExists(String),
+}
+
+pub(crate) fn evaluate_partiql_cond(
+    cond: &PartiqlCond,
+    item: &HashMap<String, AttributeValue>,
+) -> bool {
+    match cond {
+        PartiqlCond::Eq(a, v) => item.get(a) == Some(v),
+        PartiqlCond::Ne(a, v) => item.get(a) != Some(v),
+        PartiqlCond::Lt(a, v) => compare_attr(item.get(a), v).is_some_and(|c| c < 0),
+        PartiqlCond::Le(a, v) => compare_attr(item.get(a), v).is_some_and(|c| c <= 0),
+        PartiqlCond::Gt(a, v) => compare_attr(item.get(a), v).is_some_and(|c| c > 0),
+        PartiqlCond::Ge(a, v) => compare_attr(item.get(a), v).is_some_and(|c| c >= 0),
+        PartiqlCond::Between(a, lo, hi) => {
+            let l = compare_attr(item.get(a), lo).is_some_and(|c| c >= 0);
+            let r = compare_attr(item.get(a), hi).is_some_and(|c| c <= 0);
+            l && r
+        }
+        PartiqlCond::In(a, vals) => match item.get(a) {
+            Some(v) => vals.iter().any(|x| x == v),
+            None => false,
+        },
+        PartiqlCond::BeginsWith(a, prefix) => attr_string(item.get(a))
+            .zip(attr_string(Some(prefix)))
+            .is_some_and(|(s, p)| s.starts_with(&p)),
+        PartiqlCond::Contains(a, needle) => attr_string(item.get(a))
+            .zip(attr_string(Some(needle)))
+            .is_some_and(|(s, n)| s.contains(&n)),
+        PartiqlCond::AttributeExists(a) => item.contains_key(a),
+        PartiqlCond::AttributeNotExists(a) => !item.contains_key(a),
+    }
+}
+
+/// Three-way compare two AttributeValue payloads. Returns `Some(c)`
+/// where the sign matches `lhs - rhs` (-1/0/+1), or `None` when the
+/// comparison is undefined (mixed types, missing lhs, parse errors).
+pub(crate) fn compare_attr(lhs: Option<&Value>, rhs: &Value) -> Option<i32> {
+    let l = lhs?.as_object()?;
+    let r = rhs.as_object()?;
+    if let (Some(a), Some(b)) = (
+        l.get("N").and_then(|v| v.as_str()),
+        r.get("N").and_then(|v| v.as_str()),
+    ) {
+        let an: f64 = a.parse().ok()?;
+        let bn: f64 = b.parse().ok()?;
+        return Some(an.partial_cmp(&bn).map(|o| o as i32).unwrap_or(0));
+    }
+    if let (Some(a), Some(b)) = (
+        l.get("S").and_then(|v| v.as_str()),
+        r.get("S").and_then(|v| v.as_str()),
+    ) {
+        return Some(match a.cmp(b) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        });
+    }
+    None
+}
+
+/// Pull the underlying string out of a PartiQL string-typed
+/// AttributeValue (`{"S": "..."}`).
+pub(crate) fn attr_string(v: Option<&Value>) -> Option<String> {
+    v?.as_object()?.get("S")?.as_str().map(|s| s.to_string())
+}
+
+/// Parse a list of `<expr>` clauses into [`PartiqlCond`] entries.
+/// Conditions that don't parse are silently dropped — the WHERE
+/// clause yields zero matches in that case rather than 500-ing.
+pub(crate) fn parse_partiql_conditions(
+    conditions: &[&str],
+    parameters: &[Value],
+) -> Vec<PartiqlCond> {
+    let mut param_idx = 0usize;
+    let mut parsed = Vec::new();
+    for cond in conditions {
+        if let Some(c) = parse_one_partiql_condition(cond.trim(), parameters, &mut param_idx) {
+            parsed.push(c);
+        }
+    }
+    parsed
+}
+
+fn parse_one_partiql_condition(
+    cond: &str,
+    parameters: &[Value],
+    param_idx: &mut usize,
+) -> Option<PartiqlCond> {
+    let upper = cond.to_ascii_uppercase();
+
+    // Function-style: begins_with(attr, val), contains(attr, val),
+    // attribute_exists(attr), attribute_not_exists(attr).
+    if let Some(arg) = strip_func(cond, &upper, "ATTRIBUTE_EXISTS") {
+        return Some(PartiqlCond::AttributeExists(strip_attr(arg)));
+    }
+    if let Some(arg) = strip_func(cond, &upper, "ATTRIBUTE_NOT_EXISTS") {
+        return Some(PartiqlCond::AttributeNotExists(strip_attr(arg)));
+    }
+    if let Some(args) = strip_func(cond, &upper, "BEGINS_WITH") {
+        let (attr, val) = split_two_args(args, parameters, param_idx)?;
+        return Some(PartiqlCond::BeginsWith(attr, val));
+    }
+    if let Some(args) = strip_func(cond, &upper, "CONTAINS") {
+        let (attr, val) = split_two_args(args, parameters, param_idx)?;
+        return Some(PartiqlCond::Contains(attr, val));
+    }
+
+    // BETWEEN: `attr BETWEEN lo AND hi`. The split-on-AND step
+    // already preserved the inner AND, so we see the full clause.
+    if let Some(b) = upper.find(" BETWEEN ") {
+        let attr = cond[..b].trim().trim_matches('"').to_string();
+        let rest = cond[b + 9..].trim();
+        let rest_upper = rest.to_ascii_uppercase();
+        if let Some(a) = rest_upper.find(" AND ") {
+            let lo = parse_partiql_literal(rest[..a].trim(), parameters, param_idx)?;
+            let hi = parse_partiql_literal(rest[a + 5..].trim(), parameters, param_idx)?;
+            return Some(PartiqlCond::Between(attr, lo, hi));
+        }
+    }
+
+    // IN: `attr IN (a, b, c)`.
+    if let Some(i) = upper.find(" IN ") {
+        let attr = cond[..i].trim().trim_matches('"').to_string();
+        let after = cond[i + 4..].trim();
+        let inner = after
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))?
+            .trim();
+        let mut vals = Vec::new();
+        for raw in inner.split(',') {
+            if let Some(v) = parse_partiql_literal(raw.trim(), parameters, param_idx) {
+                vals.push(v);
+            }
+        }
+        return Some(PartiqlCond::In(attr, vals));
+    }
+
+    // Operator-style. Order matters: longest operator first so `<=`
+    // doesn't get parsed as `<`.
+    for op in ["<>", "<=", ">=", "<", ">", "="] {
+        if let Some(idx) = cond.find(op) {
+            let attr = cond[..idx].trim().trim_matches('"').to_string();
+            let rhs = cond[idx + op.len()..].trim();
+
+            // BETWEEN expressed as a chained `>=` AND `<=` is split on
+            // " AND " upstream; the literal `BETWEEN x AND y` form is
+            // handled below.
+            let val = parse_partiql_literal(rhs, parameters, param_idx)?;
+            return Some(match op {
+                "=" => PartiqlCond::Eq(attr, val),
+                "<>" => PartiqlCond::Ne(attr, val),
+                "<=" => PartiqlCond::Le(attr, val),
+                ">=" => PartiqlCond::Ge(attr, val),
+                "<" => PartiqlCond::Lt(attr, val),
+                ">" => PartiqlCond::Gt(attr, val),
+                _ => return None,
+            });
+        }
+    }
+
+    None
+}
+
+fn strip_func<'a>(cond: &'a str, upper: &str, name: &str) -> Option<&'a str> {
+    let prefix = format!("{name}(");
+    if !upper.starts_with(&prefix) || !cond.ends_with(')') {
+        return None;
+    }
+    Some(cond[prefix.len()..cond.len() - 1].trim())
+}
+
+fn strip_attr(s: &str) -> String {
+    s.trim().trim_matches('"').to_string()
+}
+
+fn split_two_args(
+    args: &str,
+    parameters: &[Value],
+    param_idx: &mut usize,
+) -> Option<(String, Value)> {
+    let (a, b) = args.split_once(',')?;
+    let attr = strip_attr(a);
+    let val = parse_partiql_literal(b.trim(), parameters, param_idx)?;
+    Some((attr, val))
+}
+
 /// Split a PartiQL WHERE clause on case-insensitive ` AND ` boundaries.
+/// Honors:
+/// - `BETWEEN x AND y` — the inner AND must not split the clause
+/// - `IN (a, b, c)` — internal commas/ANDs are inside parens, never matched
 pub(crate) fn split_partiql_and_clauses(where_clause: &str) -> Vec<&str> {
     let upper = where_clause.to_uppercase();
     if !upper.contains(" AND ") {
         return vec![where_clause.trim()];
     }
     let mut parts = Vec::new();
-    let mut last = 0;
-    for (i, _) in upper.match_indices(" AND ") {
-        parts.push(where_clause[last..i].trim());
-        last = i + 5;
+    let mut last = 0usize;
+    let mut paren_depth: i32 = 0;
+    let mut in_quote = false;
+    let bytes = where_clause.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        match c {
+            '\'' => in_quote = !in_quote,
+            '(' if !in_quote => paren_depth += 1,
+            ')' if !in_quote => paren_depth -= 1,
+            _ => {}
+        }
+        if !in_quote
+            && paren_depth == 0
+            && i + 5 <= bytes.len()
+            && upper.as_bytes()[i..i + 5] == *b" AND "
+        {
+            // Suppress this AND when it's the inner AND of a
+            // BETWEEN: search backward for the most recent BETWEEN
+            // since the previous split point and require that no
+            // sibling AND has appeared between them.
+            let segment = &upper[last..i];
+            let in_between = segment
+                .rfind(" BETWEEN ")
+                .is_some_and(|b| segment[b + 9..].find(" AND ").is_none());
+            if !in_between {
+                parts.push(where_clause[last..i].trim());
+                last = i + 5;
+                i += 5;
+                continue;
+            }
+        }
+        i += 1;
     }
     parts.push(where_clause[last..].trim());
     parts
-}
-
-/// Parse each `col = literal` (or `col = ?`) condition into an
-/// `(attribute_name, expected_AttributeValue)` pair. Conditions that
-/// don't parse as equality, or whose RHS literal can't be resolved, are
-/// silently dropped — that mirrors the prior inline behavior.
-pub(crate) fn parse_partiql_equality_conditions(
-    conditions: &[&str],
-    parameters: &[Value],
-) -> Vec<(String, Value)> {
-    let mut param_idx = 0usize;
-    let mut parsed = Vec::new();
-    for cond in conditions {
-        let cond = cond.trim();
-        if let Some((left, right)) = cond.split_once('=') {
-            let attr = left.trim().trim_matches('"').to_string();
-            let val_str = right.trim();
-            if let Some(value) = parse_partiql_literal(val_str, parameters, &mut param_idx) {
-                parsed.push((attr, value));
-            }
-        }
-    }
-    parsed
 }
 
 /// Parse a PartiQL literal value. Supports:
