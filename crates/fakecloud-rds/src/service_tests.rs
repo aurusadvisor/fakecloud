@@ -1918,6 +1918,47 @@ async fn restore_db_instance_unknown_snapshot_errors() {
         .is_err());
 }
 
+#[tokio::test]
+async fn restore_db_instance_to_point_in_time_missing_ids_errors() {
+    let svc = make_service();
+    let req = request("RestoreDBInstanceToPointInTime", &[]);
+    assert!(svc
+        .restore_db_instance_to_point_in_time(&req)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn restore_db_instance_to_point_in_time_missing_target_errors() {
+    let svc = make_service();
+    let req = request(
+        "RestoreDBInstanceToPointInTime",
+        &[("SourceDBInstanceIdentifier", "src")],
+    );
+    assert!(svc
+        .restore_db_instance_to_point_in_time(&req)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn restore_db_instance_to_point_in_time_unknown_source_errors() {
+    let svc = make_service();
+    let req = request(
+        "RestoreDBInstanceToPointInTime",
+        &[
+            ("SourceDBInstanceIdentifier", "ghost"),
+            ("TargetDBInstanceIdentifier", "restored"),
+        ],
+    );
+    let err = svc
+        .restore_db_instance_to_point_in_time(&req)
+        .await
+        .err()
+        .expect("unknown source should error");
+    assert_eq!(err.code(), "DBInstanceNotFound");
+}
+
 // ── create_db_instance_read_replica ──
 
 #[tokio::test]

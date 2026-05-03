@@ -726,8 +726,148 @@ impl RdsService {
             "DescribeEngineDefaultParameters" => Ok(xml_response("DescribeEngineDefaultParameters", "    <EngineDefaults>\n      <Parameters/>\n    </EngineDefaults>".to_string(), &rid)),
             "DescribeDBSnapshotAttributes" => Ok(xml_response("DescribeDBSnapshotAttributes", "    <DBSnapshotAttributesResult>\n      <DBSnapshotAttributes/>\n    </DBSnapshotAttributesResult>".to_string(), &rid)),
             "ModifyDBSnapshot" | "ModifyDBSnapshotAttribute" => Ok(xml_response(action.as_str(), "    <DBSnapshot/>".to_string(), &rid)),
-            "RestoreDBClusterFromS3" | "RestoreDBClusterFromSnapshot" | "RestoreDBClusterToPointInTime" => Ok(xml_response(action.as_str(), "    <DBCluster/>".to_string(), &rid)),
-            "RestoreDBInstanceFromS3" | "RestoreDBInstanceToPointInTime" => Ok(xml_response(action.as_str(), "    <DBInstance/>".to_string(), &rid)),
+            "RestoreDBClusterFromSnapshot" => {
+                let target = get_param(req, "DBClusterIdentifier")
+                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
+                let snapshot_id = get_param(req, "SnapshotIdentifier")
+                    .or_else(|| get_param(req, "DBClusterSnapshotIdentifier"))
+                    .ok_or_else(|| missing("SnapshotIdentifier"))?;
+                let arn = Arn::new("rds", region, &aid, &format!("cluster:{target}")).to_string();
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let snapshot = state
+                    .extras
+                    .get("cluster_snapshots")
+                    .and_then(|m| m.get(&snapshot_id))
+                    .cloned()
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {snapshot_id} not found."),
+                        )
+                    })?;
+                let source_cluster_id = snapshot
+                    .get("DBClusterIdentifier")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let mut entry = state
+                    .extras
+                    .get("clusters")
+                    .and_then(|m| m.get(source_cluster_id))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({
+                            "Engine": get_param(req, "Engine").unwrap_or_else(|| "aurora-postgresql".to_string()),
+                            "EngineVersion": get_param(req, "EngineVersion").unwrap_or_else(|| "15.3".to_string()),
+                            "MasterUsername": "postgres",
+                            "Port": 5432,
+                        })
+                    });
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.insert("DBClusterIdentifier".to_string(), json!(target));
+                    obj.insert("DBClusterArn".to_string(), json!(arn));
+                    obj.insert("Status".to_string(), json!("available"));
+                    obj.insert(
+                        "Endpoint".to_string(),
+                        json!(format!("{target}.cluster-xxx.{region}.rds.amazonaws.com")),
+                    );
+                    obj.insert(
+                        "ReaderEndpoint".to_string(),
+                        json!(format!("{target}.cluster-ro-xxx.{region}.rds.amazonaws.com")),
+                    );
+                    obj.remove("ReplicationSourceIdentifier");
+                    if let Some(engine) = get_param(req, "Engine") {
+                        obj.insert("Engine".to_string(), json!(engine));
+                    }
+                    if let Some(version) = get_param(req, "EngineVersion") {
+                        obj.insert("EngineVersion".to_string(), json!(version));
+                    }
+                    if let Some(port) = get_param(req, "Port").and_then(|p| p.parse::<i64>().ok()) {
+                        obj.insert("Port".to_string(), json!(port));
+                    }
+                }
+                store(&mut state.extras, "clusters").insert(target.clone(), entry);
+                drop(accounts);
+                self.emit_event(
+                    RdsSourceType::DbCluster,
+                    &target,
+                    &arn,
+                    "RDS-EVENT-0170",
+                    &["creation"],
+                    "DB cluster restored from snapshot",
+                );
+                Ok(xml_response(
+                    "RestoreDBClusterFromSnapshot",
+                    db_cluster_xml(&target, &arn),
+                    &rid,
+                ))
+            }
+            "RestoreDBClusterToPointInTime" => {
+                let target = get_param(req, "DBClusterIdentifier")
+                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
+                let source = get_param(req, "SourceDBClusterIdentifier")
+                    .ok_or_else(|| missing("SourceDBClusterIdentifier"))?;
+                let arn = Arn::new("rds", region, &aid, &format!("cluster:{target}")).to_string();
+                let mut accounts = write_state!();
+                let state = accounts.get_or_create(&aid);
+                let mut entry = state
+                    .extras
+                    .get("clusters")
+                    .and_then(|m| m.get(&source))
+                    .cloned()
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterNotFoundFault",
+                            format!("DBCluster {source} not found."),
+                        )
+                    })?;
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.insert("DBClusterIdentifier".to_string(), json!(target));
+                    obj.insert("DBClusterArn".to_string(), json!(arn));
+                    obj.insert("Status".to_string(), json!("available"));
+                    obj.insert(
+                        "Endpoint".to_string(),
+                        json!(format!("{target}.cluster-xxx.{region}.rds.amazonaws.com")),
+                    );
+                    obj.insert(
+                        "ReaderEndpoint".to_string(),
+                        json!(format!("{target}.cluster-ro-xxx.{region}.rds.amazonaws.com")),
+                    );
+                    if let Some(restore_time) = get_param(req, "RestoreToTime") {
+                        obj.insert("RestoreToTime".to_string(), json!(restore_time));
+                    }
+                    if let Some(latest) = get_param(req, "UseLatestRestorableTime") {
+                        obj.insert("UseLatestRestorableTime".to_string(), json!(latest));
+                    }
+                }
+                store(&mut state.extras, "clusters").insert(target.clone(), entry);
+                drop(accounts);
+                self.emit_event(
+                    RdsSourceType::DbCluster,
+                    &target,
+                    &arn,
+                    "RDS-EVENT-0171",
+                    &["creation"],
+                    "DB cluster restored to point in time",
+                );
+                Ok(xml_response(
+                    "RestoreDBClusterToPointInTime",
+                    db_cluster_xml(&target, &arn),
+                    &rid,
+                ))
+            }
+            "RestoreDBClusterFromS3" => Ok(xml_response(
+                action.as_str(),
+                "    <DBCluster/>".to_string(),
+                &rid,
+            )),
+            "RestoreDBInstanceFromS3" => Ok(xml_response(
+                action.as_str(),
+                "    <DBInstance/>".to_string(),
+                &rid,
+            )),
 
             // ── Recommendations ──
             "DescribeDBRecommendations" => Ok(xml_response("DescribeDBRecommendations", "    <DBRecommendations/>".to_string(), &rid)),
@@ -1526,10 +1666,7 @@ mod tests {
         ok("ModifyDBSnapshot", &[]);
         ok("ModifyDBSnapshotAttribute", &[]);
         ok("RestoreDBClusterFromS3", &[]);
-        ok("RestoreDBClusterFromSnapshot", &[]);
-        ok("RestoreDBClusterToPointInTime", &[]);
         ok("RestoreDBInstanceFromS3", &[]);
-        ok("RestoreDBInstanceToPointInTime", &[]);
         ok("DescribeAccountAttributes", &[]);
         ok("DescribeEventCategories", &[]);
         ok("DescribeEvents", &[]);
@@ -1890,5 +2027,104 @@ mod tests {
             .err()
             .expect("missing identifier should error");
         assert_eq!(err.code(), "InvalidParameterValue");
+    }
+
+    #[test]
+    fn restore_db_cluster_from_snapshot_clones_source_cluster_fields() {
+        let svc = svc();
+        create_cluster(&svc, "src");
+        // Mutate source so we can verify it carries through.
+        svc.handle_extra_action(&req(
+            "ModifyDBCluster",
+            &[
+                ("DBClusterIdentifier", "src"),
+                ("EngineVersion", "16.1"),
+                ("BackupRetentionPeriod", "21"),
+            ],
+        ))
+        .expect("ModifyDBCluster");
+        // Snapshot the source.
+        svc.handle_extra_action(&req(
+            "CreateDBClusterSnapshot",
+            &[
+                ("DBClusterSnapshotIdentifier", "snap1"),
+                ("DBClusterIdentifier", "src"),
+            ],
+        ))
+        .expect("CreateDBClusterSnapshot");
+        svc.handle_extra_action(&req(
+            "RestoreDBClusterFromSnapshot",
+            &[
+                ("DBClusterIdentifier", "restored"),
+                ("SnapshotIdentifier", "snap1"),
+            ],
+        ))
+        .expect("RestoreDBClusterFromSnapshot");
+        let v = cluster_value(&svc, "restored");
+        assert_eq!(v["DBClusterIdentifier"].as_str(), Some("restored"));
+        assert_eq!(v["EngineVersion"].as_str(), Some("16.1"));
+        assert_eq!(v["BackupRetentionPeriod"].as_str(), Some("21"));
+        assert_eq!(v["Status"].as_str(), Some("available"));
+        assert!(v["DBClusterArn"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(":cluster:restored"));
+    }
+
+    #[test]
+    fn restore_db_cluster_from_snapshot_unknown_snapshot_errors() {
+        let svc = svc();
+        let err = svc
+            .handle_extra_action(&req(
+                "RestoreDBClusterFromSnapshot",
+                &[
+                    ("DBClusterIdentifier", "restored"),
+                    ("SnapshotIdentifier", "ghost"),
+                ],
+            ))
+            .err()
+            .expect("missing snapshot should error");
+        assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault");
+    }
+
+    #[test]
+    fn restore_db_cluster_to_point_in_time_clones_source() {
+        let svc = svc();
+        create_cluster(&svc, "src");
+        svc.handle_extra_action(&req(
+            "ModifyDBCluster",
+            &[("DBClusterIdentifier", "src"), ("EngineVersion", "16.2")],
+        ))
+        .expect("ModifyDBCluster");
+        svc.handle_extra_action(&req(
+            "RestoreDBClusterToPointInTime",
+            &[
+                ("DBClusterIdentifier", "pit"),
+                ("SourceDBClusterIdentifier", "src"),
+                ("UseLatestRestorableTime", "true"),
+            ],
+        ))
+        .expect("RestoreDBClusterToPointInTime");
+        let v = cluster_value(&svc, "pit");
+        assert_eq!(v["DBClusterIdentifier"].as_str(), Some("pit"));
+        assert_eq!(v["EngineVersion"].as_str(), Some("16.2"));
+        assert_eq!(v["Status"].as_str(), Some("available"));
+        assert_eq!(v["UseLatestRestorableTime"].as_str(), Some("true"));
+    }
+
+    #[test]
+    fn restore_db_cluster_to_point_in_time_unknown_source_errors() {
+        let svc = svc();
+        let err = svc
+            .handle_extra_action(&req(
+                "RestoreDBClusterToPointInTime",
+                &[
+                    ("DBClusterIdentifier", "pit"),
+                    ("SourceDBClusterIdentifier", "ghost"),
+                ],
+            ))
+            .err()
+            .expect("missing source should error");
+        assert_eq!(err.code(), "DBClusterNotFoundFault");
     }
 }
