@@ -53,6 +53,8 @@ pub struct DbInstance {
     pub db_parameter_group_name: Option<String>,
     pub backup_retention_period: i32,
     pub preferred_backup_window: String,
+    #[serde(default)]
+    pub preferred_maintenance_window: Option<String>,
     pub latest_restorable_time: Option<DateTime<Utc>>,
     pub option_group_name: Option<String>,
     pub multi_az: bool,
@@ -107,6 +109,22 @@ pub struct PendingModifiedValues {
     pub multi_az: Option<bool>,
     pub engine_version: Option<String>,
     pub master_user_password: Option<String>,
+    #[serde(default)]
+    pub preferred_backup_window: Option<String>,
+    #[serde(default)]
+    pub preferred_maintenance_window: Option<String>,
+    #[serde(default)]
+    pub db_parameter_group_name: Option<String>,
+    #[serde(default)]
+    pub iops: Option<i32>,
+    #[serde(default)]
+    pub storage_type: Option<String>,
+    #[serde(default)]
+    pub monitoring_interval: Option<i32>,
+    #[serde(default)]
+    pub performance_insights_enabled: Option<bool>,
+    #[serde(default)]
+    pub enabled_cloudwatch_logs_exports: Option<Vec<String>>,
 }
 
 impl fmt::Debug for PendingModifiedValues {
@@ -120,6 +138,23 @@ impl fmt::Debug for PendingModifiedValues {
             .field(
                 "master_user_password",
                 &self.master_user_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("preferred_backup_window", &self.preferred_backup_window)
+            .field(
+                "preferred_maintenance_window",
+                &self.preferred_maintenance_window,
+            )
+            .field("db_parameter_group_name", &self.db_parameter_group_name)
+            .field("iops", &self.iops)
+            .field("storage_type", &self.storage_type)
+            .field("monitoring_interval", &self.monitoring_interval)
+            .field(
+                "performance_insights_enabled",
+                &self.performance_insights_enabled,
+            )
+            .field(
+                "enabled_cloudwatch_logs_exports",
+                &self.enabled_cloudwatch_logs_exports,
             )
             .finish()
     }
@@ -697,6 +732,7 @@ mod tests {
                 db_parameter_group_name: None,
                 backup_retention_period: 1,
                 preferred_backup_window: "03:00-04:00".to_string(),
+                preferred_maintenance_window: None,
                 latest_restorable_time: Some(created_at),
                 option_group_name: None,
                 multi_az: false,
@@ -828,6 +864,7 @@ mod tests {
             db_parameter_group_name: None,
             backup_retention_period: 0,
             preferred_backup_window: String::new(),
+            preferred_maintenance_window: None,
             latest_restorable_time: None,
             option_group_name: None,
             multi_az: false,

@@ -173,6 +173,29 @@ pub(crate) fn parse_cloudwatch_logs_exports(req: &AwsRequest, base: &str) -> Vec
     parse_string_member_list(req, base)
 }
 
+pub(crate) fn parse_optional_i32(value: Option<&str>) -> Result<Option<i32>, AwsServiceError> {
+    value
+        .map(|raw| {
+            raw.parse::<i32>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("Integer parameter value '{raw}' is invalid."),
+                )
+            })
+        })
+        .transpose()
+}
+
+/// Collect the `member.N` values for a Query-protocol log-types list
+/// nested under `CloudwatchLogsExportConfiguration` (e.g.
+/// `CloudwatchLogsExportConfiguration.EnableLogTypes.member.1`). Returns
+/// an empty vec when no values are present.
+pub(crate) fn collect_cloudwatch_log_types(req: &AwsRequest, list_name: &str) -> Vec<String> {
+    let base = format!("CloudwatchLogsExportConfiguration.{list_name}");
+    parse_string_member_list(req, &base)
+}
+
 pub(crate) fn parse_optional_bool(value: Option<&str>) -> Result<Option<bool>, AwsServiceError> {
     value
         .map(|raw| match raw {
@@ -474,6 +497,7 @@ pub(crate) fn build_restored_instance(
         db_parameter_group_name: None,
         backup_retention_period: 1,
         preferred_backup_window: "03:00-04:00".to_string(),
+        preferred_maintenance_window: None,
         latest_restorable_time: Some(created_at),
         option_group_name: None,
         multi_az: false,
@@ -535,6 +559,7 @@ pub(crate) fn build_read_replica_instance(
         db_parameter_group_name: source.db_parameter_group_name.clone(),
         backup_retention_period: source.backup_retention_period,
         preferred_backup_window: source.preferred_backup_window.clone(),
+        preferred_maintenance_window: source.preferred_maintenance_window.clone(),
         latest_restorable_time: if source.backup_retention_period > 0 {
             Some(created_at)
         } else {

@@ -534,6 +534,7 @@ impl RdsService {
                 db_parameter_group_name,
                 backup_retention_period,
                 preferred_backup_window,
+                preferred_maintenance_window: None,
                 latest_restorable_time: if backup_retention_period > 0 {
                     Some(created_at)
                 } else {
@@ -897,6 +898,35 @@ impl RdsService {
             parse_optional_bool(optional_query_param(request, "DeletionProtection").as_deref())?;
         let apply_immediately =
             parse_optional_bool(optional_query_param(request, "ApplyImmediately").as_deref())?;
+        let master_user_password = optional_query_param(request, "MasterUserPassword");
+        let backup_retention_period =
+            parse_optional_i32(optional_query_param(request, "BackupRetentionPeriod").as_deref())?;
+        let preferred_backup_window = optional_query_param(request, "PreferredBackupWindow");
+        let preferred_maintenance_window =
+            optional_query_param(request, "PreferredMaintenanceWindow");
+        let engine_version = optional_query_param(request, "EngineVersion");
+        let allocated_storage =
+            parse_optional_i32(optional_query_param(request, "AllocatedStorage").as_deref())?;
+        let db_parameter_group_name = optional_query_param(request, "DBParameterGroupName");
+        let multi_az = parse_optional_bool(optional_query_param(request, "MultiAZ").as_deref())?;
+        let iops = parse_optional_i32(optional_query_param(request, "Iops").as_deref())?;
+        let storage_type = optional_query_param(request, "StorageType");
+        let master_user_secret_kms_key_id =
+            optional_query_param(request, "MasterUserSecretKmsKeyId");
+        let ca_certificate_identifier = optional_query_param(request, "CACertificateIdentifier");
+        let monitoring_interval =
+            parse_optional_i32(optional_query_param(request, "MonitoringInterval").as_deref())?;
+        let performance_insights_enabled = parse_optional_bool(
+            optional_query_param(request, "EnablePerformanceInsights").as_deref(),
+        )?;
+
+        // CloudWatch logs exports — AWS lets callers both opt-in to and
+        // opt-out of specific log types in the same call. We compute the
+        // resulting set per AWS semantics: start from current, remove
+        // DisableLogTypes, then union with EnableLogTypes.
+        let cloudwatch_enable = collect_cloudwatch_log_types(request, "EnableLogTypes");
+        let cloudwatch_disable = collect_cloudwatch_log_types(request, "DisableLogTypes");
+        let cloudwatch_changed = !cloudwatch_enable.is_empty() || !cloudwatch_disable.is_empty();
 
         // Parse VPC security group IDs - only if at least one is provided
         let vpc_security_group_ids = {
@@ -915,9 +945,25 @@ impl RdsService {
             }
         };
 
+        // At-least-one-field validation: every supported mutable input.
         if db_instance_class.is_none()
             && deletion_protection.is_none()
             && vpc_security_group_ids.is_none()
+            && master_user_password.is_none()
+            && backup_retention_period.is_none()
+            && preferred_backup_window.is_none()
+            && preferred_maintenance_window.is_none()
+            && engine_version.is_none()
+            && allocated_storage.is_none()
+            && db_parameter_group_name.is_none()
+            && multi_az.is_none()
+            && iops.is_none()
+            && storage_type.is_none()
+            && master_user_secret_kms_key_id.is_none()
+            && ca_certificate_identifier.is_none()
+            && monitoring_interval.is_none()
+            && performance_insights_enabled.is_none()
+            && !cloudwatch_changed
         {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -936,32 +982,135 @@ impl RdsService {
             .get_mut(&db_instance_identifier)
             .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
 
-        // If ApplyImmediately is false, stage changes as pending
-        if apply_immediately == Some(false) {
-            let pending = instance
-                .pending_modified_values
-                .get_or_insert(Default::default());
-            if let Some(class) = db_instance_class {
-                pending.db_instance_class = Some(class);
+        // Fields AWS always applies immediately (per AWS RDS docs),
+        // regardless of ApplyImmediately:
+        //   deletion_protection, vpc_security_group_ids,
+        //   ca_certificate_identifier, master_user_secret_kms_key_id,
+        //   enabled_cloudwatch_logs_exports.
+        if let Some(deletion_protection) = deletion_protection {
+            instance.deletion_protection = deletion_protection;
+        }
+        if let Some(security_group_ids) = vpc_security_group_ids {
+            instance.vpc_security_group_ids = security_group_ids;
+        }
+        if let Some(ca_id) = ca_certificate_identifier {
+            instance.ca_certificate_identifier = Some(ca_id);
+        }
+        if let Some(kms_key) = master_user_secret_kms_key_id {
+            instance.master_user_secret_kms_key_id = Some(kms_key);
+        }
+        if cloudwatch_changed {
+            let mut current: Vec<String> = instance.enabled_cloudwatch_logs_exports.clone();
+            current.retain(|t| !cloudwatch_disable.contains(t));
+            for t in &cloudwatch_enable {
+                if !current.contains(t) {
+                    current.push(t.clone());
+                }
             }
-            // Note: deletion_protection and vpc_security_group_ids are applied immediately
-            // regardless of ApplyImmediately flag (per AWS behavior)
-            if let Some(deletion_protection) = deletion_protection {
-                instance.deletion_protection = deletion_protection;
-            }
-            if let Some(security_group_ids) = vpc_security_group_ids {
-                instance.vpc_security_group_ids = security_group_ids;
-            }
-        } else {
-            // Apply immediately (default behavior)
+            instance.enabled_cloudwatch_logs_exports = current;
+        }
+
+        // Fields gated on ApplyImmediately. Default (None or true) is
+        // immediate; false stages to pending_modified_values.
+        let immediate = apply_immediately != Some(false);
+        if immediate {
             if let Some(class) = db_instance_class {
                 instance.db_instance_class = class;
             }
-            if let Some(deletion_protection) = deletion_protection {
-                instance.deletion_protection = deletion_protection;
+            if let Some(pwd) = master_user_password {
+                instance.master_user_password = pwd;
             }
-            if let Some(security_group_ids) = vpc_security_group_ids {
-                instance.vpc_security_group_ids = security_group_ids;
+            if let Some(retention) = backup_retention_period {
+                instance.backup_retention_period = retention;
+            }
+            if let Some(window) = preferred_backup_window {
+                instance.preferred_backup_window = window;
+            }
+            if let Some(window) = preferred_maintenance_window {
+                instance.preferred_maintenance_window = Some(window);
+            }
+            if let Some(version) = engine_version {
+                instance.engine_version = version;
+            }
+            if let Some(storage) = allocated_storage {
+                instance.allocated_storage = storage;
+            }
+            if let Some(name) = db_parameter_group_name {
+                instance.db_parameter_group_name = Some(name);
+            }
+            if let Some(az) = multi_az {
+                instance.multi_az = az;
+            }
+            if let Some(iops_val) = iops {
+                instance.iops = Some(iops_val);
+            }
+            if let Some(stype) = storage_type {
+                instance.storage_type = Some(stype);
+            }
+            if let Some(interval) = monitoring_interval {
+                instance.monitoring_interval = Some(interval);
+            }
+            if let Some(pi) = performance_insights_enabled {
+                instance.performance_insights_enabled = pi;
+            }
+        } else {
+            // Stage only if at least one deferrable field was supplied.
+            let any_deferred = db_instance_class.is_some()
+                || master_user_password.is_some()
+                || backup_retention_period.is_some()
+                || preferred_backup_window.is_some()
+                || preferred_maintenance_window.is_some()
+                || engine_version.is_some()
+                || allocated_storage.is_some()
+                || db_parameter_group_name.is_some()
+                || multi_az.is_some()
+                || iops.is_some()
+                || storage_type.is_some()
+                || monitoring_interval.is_some()
+                || performance_insights_enabled.is_some();
+            if any_deferred {
+                let pending = instance
+                    .pending_modified_values
+                    .get_or_insert(Default::default());
+                if let Some(class) = db_instance_class {
+                    pending.db_instance_class = Some(class);
+                }
+                if let Some(pwd) = master_user_password {
+                    pending.master_user_password = Some(pwd);
+                }
+                if let Some(retention) = backup_retention_period {
+                    pending.backup_retention_period = Some(retention);
+                }
+                if let Some(window) = preferred_backup_window {
+                    pending.preferred_backup_window = Some(window);
+                }
+                if let Some(window) = preferred_maintenance_window {
+                    pending.preferred_maintenance_window = Some(window);
+                }
+                if let Some(version) = engine_version {
+                    pending.engine_version = Some(version);
+                }
+                if let Some(storage) = allocated_storage {
+                    pending.allocated_storage = Some(storage);
+                }
+                if let Some(name) = db_parameter_group_name {
+                    pending.db_parameter_group_name = Some(name);
+                }
+                if let Some(az) = multi_az {
+                    pending.multi_az = Some(az);
+                }
+                if let Some(iops_val) = iops {
+                    pending.iops = Some(iops_val);
+                }
+                if let Some(stype) = storage_type {
+                    pending.storage_type = Some(stype);
+                }
+                if let Some(interval) = monitoring_interval {
+                    pending.monitoring_interval = Some(interval);
+                }
+                if let Some(pi) = performance_insights_enabled {
+                    pending.performance_insights_enabled = Some(pi);
+                }
             }
         }
         let instance_arn = instance.db_instance_arn.clone();
