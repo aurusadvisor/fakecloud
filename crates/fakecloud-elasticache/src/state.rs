@@ -128,6 +128,56 @@ pub struct CacheCluster {
     /// `AuthTokenEnabled` — true when an AUTH token was supplied.
     #[serde(default)]
     pub auth_token_enabled: bool,
+    /// Configured `Port` from the create request. Stored separately
+    /// from `endpoint_port`/`host_port` so the engine default
+    /// (6379 redis / 11211 memcached) round-trips even when the
+    /// container listens elsewhere.
+    #[serde(default)]
+    pub port: u16,
+    /// `PreferredMaintenanceWindow` from the request, e.g. `sun:23:00-mon:01:30`.
+    #[serde(default)]
+    pub preferred_maintenance_window: Option<String>,
+    /// `PreferredAvailabilityZones.member.N` — populated for memcached clusters
+    /// pinning each node to a specific AZ.
+    #[serde(default)]
+    pub preferred_availability_zones: Vec<String>,
+    /// `NotificationTopicArn` for cluster events.
+    #[serde(default)]
+    pub notification_topic_arn: Option<String>,
+    /// Legacy EC2-Classic security group names.
+    #[serde(default)]
+    pub cache_security_group_names: Vec<String>,
+    /// `SnapshotArns.member.N` — RDB seed snapshot S3 ARNs (redis only).
+    #[serde(default)]
+    pub snapshot_arns: Vec<String>,
+    /// `SnapshotName` — replication-group / cluster snapshot to seed from.
+    #[serde(default)]
+    pub snapshot_name: Option<String>,
+    /// `SnapshotRetentionLimit` — daily snapshots to keep.
+    #[serde(default)]
+    pub snapshot_retention_limit: i32,
+    /// `SnapshotWindow` — time range when automatic snapshots run.
+    #[serde(default)]
+    pub snapshot_window: Option<String>,
+    /// `OutpostMode` — `single-outpost` or `cross-outpost`.
+    #[serde(default)]
+    pub outpost_mode: Option<String>,
+    /// `PreferredOutpostArn` — ARN of the AWS Outpost the cluster pins to.
+    #[serde(default)]
+    pub preferred_outpost_arn: Option<String>,
+    /// `NetworkType` — `ipv4`, `ipv6`, or `dual_stack`.
+    #[serde(default)]
+    pub network_type: Option<String>,
+    /// `IpDiscovery` — `ipv4` or `ipv6`.
+    #[serde(default)]
+    pub ip_discovery: Option<String>,
+    /// `AZMode` — `single-az` or `cross-az` (memcached multi-node).
+    #[serde(default)]
+    pub az_mode: Option<String>,
+    /// Raw AUTH token. Stored verbatim so a future modify can
+    /// compare/rotate; never echoed back in describe XML.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1248,6 +1298,21 @@ mod tests {
                 transit_encryption_enabled: false,
                 at_rest_encryption_enabled: false,
                 auth_token_enabled: false,
+                port: 6379,
+                preferred_maintenance_window: None,
+                preferred_availability_zones: Vec::new(),
+                notification_topic_arn: None,
+                cache_security_group_names: Vec::new(),
+                snapshot_arns: Vec::new(),
+                snapshot_name: None,
+                snapshot_retention_limit: 0,
+                snapshot_window: None,
+                outpost_mode: None,
+                preferred_outpost_arn: None,
+                network_type: None,
+                ip_discovery: None,
+                az_mode: None,
+                auth_token: None,
             },
         );
         assert_eq!(state.cache_clusters.len(), 1);

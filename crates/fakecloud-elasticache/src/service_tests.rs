@@ -153,6 +153,21 @@ fn cache_cluster_xml_contains_expected_fields() {
         transit_encryption_enabled: false,
         at_rest_encryption_enabled: false,
         auth_token_enabled: false,
+        port: 6379,
+        preferred_maintenance_window: None,
+        preferred_availability_zones: Vec::new(),
+        notification_topic_arn: None,
+        cache_security_group_names: Vec::new(),
+        snapshot_arns: Vec::new(),
+        snapshot_name: None,
+        snapshot_retention_limit: 0,
+        snapshot_window: None,
+        outpost_mode: None,
+        preferred_outpost_arn: None,
+        network_type: None,
+        ip_discovery: None,
+        az_mode: None,
+        auth_token: None,
     };
     let xml = cache_cluster_xml(&cluster, true);
     assert!(xml.contains("<CacheClusterId>classic-1</CacheClusterId>"));
@@ -693,6 +708,21 @@ fn service_with_cache_cluster(cluster_id: &str) -> ElastiCacheService {
                 transit_encryption_enabled: false,
                 at_rest_encryption_enabled: false,
                 auth_token_enabled: false,
+                port: 6379,
+                preferred_maintenance_window: None,
+                preferred_availability_zones: Vec::new(),
+                notification_topic_arn: None,
+                cache_security_group_names: Vec::new(),
+                snapshot_arns: Vec::new(),
+                snapshot_name: None,
+                snapshot_retention_limit: 0,
+                snapshot_window: None,
+                outpost_mode: None,
+                preferred_outpost_arn: None,
+                network_type: None,
+                ip_discovery: None,
+                az_mode: None,
+                auth_token: None,
             },
         );
     }
@@ -732,6 +762,21 @@ fn describe_cache_clusters_returns_all() {
                 transit_encryption_enabled: false,
                 at_rest_encryption_enabled: false,
                 auth_token_enabled: false,
+                port: 6380,
+                preferred_maintenance_window: None,
+                preferred_availability_zones: Vec::new(),
+                notification_topic_arn: None,
+                cache_security_group_names: Vec::new(),
+                snapshot_arns: Vec::new(),
+                snapshot_name: None,
+                snapshot_retention_limit: 0,
+                snapshot_window: None,
+                outpost_mode: None,
+                preferred_outpost_arn: None,
+                network_type: None,
+                ip_discovery: None,
+                az_mode: None,
+                auth_token: None,
             },
         );
     }
@@ -3257,6 +3302,21 @@ async fn reboot_cache_cluster_marks_rebooting_when_no_runtime() {
                 transit_encryption_enabled: false,
                 at_rest_encryption_enabled: false,
                 auth_token_enabled: false,
+                port: 6379,
+                preferred_maintenance_window: None,
+                preferred_availability_zones: Vec::new(),
+                notification_topic_arn: None,
+                cache_security_group_names: Vec::new(),
+                snapshot_arns: Vec::new(),
+                snapshot_name: None,
+                snapshot_retention_limit: 0,
+                snapshot_window: None,
+                outpost_mode: None,
+                preferred_outpost_arn: None,
+                network_type: None,
+                ip_discovery: None,
+                az_mode: None,
+                auth_token: None,
             },
         );
     }
@@ -3389,4 +3449,379 @@ fn migration_ops_unknown_replication_group_errors() {
         Ok(_) => panic!("expected error"),
     };
     assert_eq!(err.code(), "ReplicationGroupNotFoundFault");
+}
+
+// ── cache cluster create field round-trip (N2) ──
+//
+// Build a CacheCluster as if `CreateCacheCluster` had run, by re-running
+// the same parser the handler uses (sans runtime). The runtime path needs
+// docker, so unit tests skip it by inserting the fully-built struct directly.
+fn cache_cluster_from_request(req: &AwsRequest) -> crate::state::CacheCluster {
+    let cache_cluster_id = required_query_param(req, "CacheClusterId").unwrap();
+    let engine = optional_query_param(req, "Engine").unwrap_or_else(|| ENGINE_REDIS.to_string());
+    let default_version = match engine.as_str() {
+        "valkey" => "8.0",
+        "memcached" => "1.6.22",
+        _ => "7.1",
+    };
+    let engine_version =
+        optional_query_param(req, "EngineVersion").unwrap_or_else(|| default_version.to_string());
+    let cache_node_type =
+        optional_query_param(req, "CacheNodeType").unwrap_or_else(|| "cache.t3.micro".to_string());
+    let num_cache_nodes: i32 = optional_query_param(req, "NumCacheNodes")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let cache_subnet_group_name =
+        optional_query_param(req, "CacheSubnetGroupName").or_else(|| Some("default".to_string()));
+    let auto_minor_version_upgrade =
+        parse_optional_bool(optional_query_param(req, "AutoMinorVersionUpgrade").as_deref())
+            .unwrap()
+            .unwrap_or(true);
+    let cache_parameter_group_name = optional_query_param(req, "CacheParameterGroupName");
+    let security_group_ids = parse_query_list_param(req, "SecurityGroupIds", "SecurityGroupId");
+    let cache_security_group_names =
+        parse_query_list_param(req, "CacheSecurityGroupNames", "CacheSecurityGroupName");
+    let log_delivery_configurations = parse_log_delivery_configs(req);
+    let transit_encryption_enabled =
+        parse_optional_bool(optional_query_param(req, "TransitEncryptionEnabled").as_deref())
+            .unwrap()
+            .unwrap_or(false);
+    let at_rest_encryption_enabled =
+        parse_optional_bool(optional_query_param(req, "AtRestEncryptionEnabled").as_deref())
+            .unwrap()
+            .unwrap_or(false);
+    let auth_token = optional_query_param(req, "AuthToken");
+    let auth_token_enabled = auth_token.is_some();
+    let default_port = if engine == "memcached" { 11211 } else { 6379 };
+    let port: u16 = optional_query_param(req, "Port")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default_port);
+    let preferred_availability_zone = optional_query_param(req, "PreferredAvailabilityZone")
+        .unwrap_or_else(|| "us-east-1a".to_string());
+    let preferred_availability_zones =
+        parse_query_list_param(req, "PreferredAvailabilityZones", "AvailabilityZone");
+    let preferred_maintenance_window = optional_query_param(req, "PreferredMaintenanceWindow");
+    let notification_topic_arn = optional_query_param(req, "NotificationTopicArn");
+    let snapshot_arns = parse_query_list_param(req, "SnapshotArns", "SnapshotArn");
+    let snapshot_name = optional_query_param(req, "SnapshotName");
+    let snapshot_retention_limit = optional_query_param(req, "SnapshotRetentionLimit")
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(0);
+    let snapshot_window = optional_query_param(req, "SnapshotWindow");
+    let outpost_mode = optional_query_param(req, "OutpostMode");
+    let preferred_outpost_arn = optional_query_param(req, "PreferredOutpostArn");
+    let network_type =
+        Some(optional_query_param(req, "NetworkType").unwrap_or_else(|| "ipv4".into()));
+    let ip_discovery =
+        Some(optional_query_param(req, "IpDiscovery").unwrap_or_else(|| "ipv4".into()));
+    let az_mode = Some(optional_query_param(req, "AZMode").unwrap_or_else(|| "single-az".into()));
+    let arn = format!("arn:aws:elasticache:us-east-1:123456789012:cluster:{cache_cluster_id}");
+    crate::state::CacheCluster {
+        cache_cluster_id: cache_cluster_id.clone(),
+        cache_node_type,
+        engine,
+        engine_version,
+        cache_cluster_status: "available".to_string(),
+        num_cache_nodes,
+        preferred_availability_zone,
+        cache_subnet_group_name,
+        auto_minor_version_upgrade,
+        arn,
+        created_at: "2024-01-01T00:00:00Z".to_string(),
+        endpoint_address: "127.0.0.1".to_string(),
+        endpoint_port: port,
+        container_id: "test-container".to_string(),
+        host_port: port,
+        replication_group_id: None,
+        cache_parameter_group_name,
+        security_group_ids,
+        log_delivery_configurations,
+        transit_encryption_enabled,
+        at_rest_encryption_enabled,
+        auth_token_enabled,
+        port,
+        preferred_maintenance_window,
+        preferred_availability_zones,
+        notification_topic_arn,
+        cache_security_group_names,
+        snapshot_arns,
+        snapshot_name,
+        snapshot_retention_limit,
+        snapshot_window,
+        outpost_mode,
+        preferred_outpost_arn,
+        network_type,
+        ip_discovery,
+        az_mode,
+        auth_token,
+    }
+}
+
+fn service_with_cache_cluster_from_request(req: &AwsRequest) -> ElastiCacheService {
+    let cluster = cache_cluster_from_request(req);
+    let shared: SharedElastiCacheState = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    {
+        let mut __a = shared.write();
+        let s = __a.default_mut();
+        s.tags.insert(cluster.arn.clone(), Vec::new());
+        s.cache_clusters
+            .insert(cluster.cache_cluster_id.clone(), cluster);
+    }
+    ElastiCacheService::new(shared)
+}
+
+#[test]
+fn create_cache_cluster_persists_log_delivery_configurations() {
+    let create_req = request(
+        "CreateCacheCluster",
+        &[
+            ("CacheClusterId", "log-cc"),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.LogType",
+                "slow-log",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.DestinationType",
+                "cloudwatch-logs",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.DestinationDetails.CloudWatchLogsDetails.LogGroup",
+                "/aws/elasticache/slow",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.LogFormat",
+                "json",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.LogType",
+                "engine-log",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.DestinationType",
+                "kinesis-firehose",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.DestinationDetails.KinesisFirehoseDetails.DeliveryStream",
+                "engine-stream",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.2.LogFormat",
+                "text",
+            ),
+        ],
+    );
+    let svc = service_with_cache_cluster_from_request(&create_req);
+
+    let describe = request("DescribeCacheClusters", &[("CacheClusterId", "log-cc")]);
+    let resp = svc.describe_cache_clusters(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<LogType>slow-log</LogType>"));
+    assert!(body.contains("<DestinationType>cloudwatch-logs</DestinationType>"));
+    assert!(body.contains("<LogGroup>/aws/elasticache/slow</LogGroup>"));
+    assert!(body.contains("<LogType>engine-log</LogType>"));
+    assert!(body.contains("<DestinationType>kinesis-firehose</DestinationType>"));
+    assert!(body.contains("<DeliveryStream>engine-stream</DeliveryStream>"));
+    assert!(body.contains("<LogFormat>text</LogFormat>"));
+}
+
+#[test]
+fn create_cache_cluster_persists_security_and_subnet_groups() {
+    let create_req = request(
+        "CreateCacheCluster",
+        &[
+            ("CacheClusterId", "sec-cc"),
+            ("CacheSubnetGroupName", "default"),
+            ("SecurityGroupIds.SecurityGroupId.1", "sg-aaa"),
+            ("SecurityGroupIds.SecurityGroupId.2", "sg-bbb"),
+            ("CacheSecurityGroupNames.CacheSecurityGroupName.1", "ec2c-1"),
+            ("CacheSecurityGroupNames.CacheSecurityGroupName.2", "ec2c-2"),
+            ("CacheParameterGroupName", "default.redis7"),
+        ],
+    );
+    let svc = service_with_cache_cluster_from_request(&create_req);
+
+    let describe = request("DescribeCacheClusters", &[("CacheClusterId", "sec-cc")]);
+    let resp = svc.describe_cache_clusters(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<CacheSubnetGroupName>default</CacheSubnetGroupName>"));
+    assert!(body.contains("<SecurityGroupId>sg-aaa</SecurityGroupId>"));
+    assert!(body.contains("<SecurityGroupId>sg-bbb</SecurityGroupId>"));
+    assert!(body.contains("<CacheSecurityGroupName>ec2c-1</CacheSecurityGroupName>"));
+    assert!(body.contains("<CacheSecurityGroupName>ec2c-2</CacheSecurityGroupName>"));
+    assert!(body.contains("<CacheParameterGroupName>default.redis7</CacheParameterGroupName>"));
+}
+
+#[test]
+fn create_cache_cluster_persists_snapshot_window_and_retention() {
+    let create_req = request(
+        "CreateCacheCluster",
+        &[
+            ("CacheClusterId", "snap-cc"),
+            ("SnapshotRetentionLimit", "7"),
+            ("SnapshotWindow", "03:00-05:00"),
+            ("SnapshotName", "seed-snapshot"),
+            (
+                "SnapshotArns.SnapshotArn.1",
+                "arn:aws:s3:::my-bucket/snap.rdb",
+            ),
+            ("PreferredMaintenanceWindow", "sun:23:00-mon:01:30"),
+            ("NotificationTopicArn", "arn:aws:sns:us-east-1:123:events"),
+        ],
+    );
+    let svc = service_with_cache_cluster_from_request(&create_req);
+
+    let describe = request("DescribeCacheClusters", &[("CacheClusterId", "snap-cc")]);
+    let resp = svc.describe_cache_clusters(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<SnapshotRetentionLimit>7</SnapshotRetentionLimit>"));
+    assert!(body.contains("<SnapshotWindow>03:00-05:00</SnapshotWindow>"));
+    assert!(body
+        .contains("<PreferredMaintenanceWindow>sun:23:00-mon:01:30</PreferredMaintenanceWindow>"));
+    assert!(body.contains("<TopicArn>arn:aws:sns:us-east-1:123:events</TopicArn>"));
+    // SnapshotName + SnapshotArns are stored on the struct but aren't echoed
+    // by Describe; assert the in-memory state holds them.
+    let state = svc.state.read();
+    let cluster = state
+        .get("123456789012")
+        .unwrap()
+        .cache_clusters
+        .get("snap-cc")
+        .unwrap();
+    assert_eq!(cluster.snapshot_name.as_deref(), Some("seed-snapshot"));
+    assert_eq!(
+        cluster.snapshot_arns,
+        vec!["arn:aws:s3:::my-bucket/snap.rdb".to_string()]
+    );
+}
+
+#[test]
+fn create_cache_cluster_persists_network_fields() {
+    let create_req = request(
+        "CreateCacheCluster",
+        &[
+            ("CacheClusterId", "net-cc"),
+            ("NetworkType", "dual_stack"),
+            ("IpDiscovery", "ipv6"),
+            ("AZMode", "cross-az"),
+            ("OutpostMode", "single-outpost"),
+            (
+                "PreferredOutpostArn",
+                "arn:aws:outposts:us-east-1:123:outpost/op-abc",
+            ),
+        ],
+    );
+    let svc = service_with_cache_cluster_from_request(&create_req);
+
+    let describe = request("DescribeCacheClusters", &[("CacheClusterId", "net-cc")]);
+    let resp = svc.describe_cache_clusters(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<NetworkType>dual_stack</NetworkType>"));
+    assert!(body.contains("<IpDiscovery>ipv6</IpDiscovery>"));
+    assert!(body.contains("<AZMode>cross-az</AZMode>"));
+    assert!(body.contains("<OutpostMode>single-outpost</OutpostMode>"));
+    assert!(body.contains(
+        "<PreferredOutpostArn>arn:aws:outposts:us-east-1:123:outpost/op-abc</PreferredOutpostArn>"
+    ));
+}
+
+#[test]
+fn create_cache_cluster_defaults_port_for_redis() {
+    let create_req = request(
+        "CreateCacheCluster",
+        &[("CacheClusterId", "redis-cc"), ("Engine", "redis")],
+    );
+    let svc = service_with_cache_cluster_from_request(&create_req);
+
+    let state = svc.state.read();
+    let cluster = state
+        .get("123456789012")
+        .unwrap()
+        .cache_clusters
+        .get("redis-cc")
+        .unwrap();
+    assert_eq!(cluster.port, 6379);
+}
+
+#[test]
+fn create_cache_cluster_defaults_port_for_memcached() {
+    let create_req = request(
+        "CreateCacheCluster",
+        &[("CacheClusterId", "mc-cc"), ("Engine", "memcached")],
+    );
+    let svc = service_with_cache_cluster_from_request(&create_req);
+
+    let state = svc.state.read();
+    let cluster = state
+        .get("123456789012")
+        .unwrap()
+        .cache_clusters
+        .get("mc-cc")
+        .unwrap();
+    assert_eq!(cluster.port, 11211);
+}
+
+#[test]
+fn create_cache_cluster_persists_preferred_azs() {
+    let create_req = request(
+        "CreateCacheCluster",
+        &[
+            ("CacheClusterId", "az-cc"),
+            ("Engine", "memcached"),
+            ("NumCacheNodes", "3"),
+            ("PreferredAvailabilityZone", "us-east-1a"),
+            (
+                "PreferredAvailabilityZones.AvailabilityZone.1",
+                "us-east-1a",
+            ),
+            (
+                "PreferredAvailabilityZones.AvailabilityZone.2",
+                "us-east-1b",
+            ),
+            (
+                "PreferredAvailabilityZones.AvailabilityZone.3",
+                "us-east-1c",
+            ),
+        ],
+    );
+    let svc = service_with_cache_cluster_from_request(&create_req);
+
+    let describe = request("DescribeCacheClusters", &[("CacheClusterId", "az-cc")]);
+    let resp = svc.describe_cache_clusters(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<PreferredAvailabilityZone>us-east-1a</PreferredAvailabilityZone>"));
+    assert!(body.contains("<AvailabilityZone>us-east-1a</AvailabilityZone>"));
+    assert!(body.contains("<AvailabilityZone>us-east-1b</AvailabilityZone>"));
+    assert!(body.contains("<AvailabilityZone>us-east-1c</AvailabilityZone>"));
+}
+
+#[test]
+fn create_cache_cluster_does_not_echo_auth_token() {
+    let create_req = request(
+        "CreateCacheCluster",
+        &[
+            ("CacheClusterId", "auth-cc"),
+            ("Engine", "redis"),
+            ("AuthToken", "supersecret-token-XYZ"),
+            ("TransitEncryptionEnabled", "true"),
+        ],
+    );
+    let svc = service_with_cache_cluster_from_request(&create_req);
+
+    let describe = request("DescribeCacheClusters", &[("CacheClusterId", "auth-cc")]);
+    let resp = svc.describe_cache_clusters(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<AuthTokenEnabled>true</AuthTokenEnabled>"));
+    // Raw token must never be echoed back in describe XML.
+    assert!(!body.contains("supersecret-token-XYZ"));
+    // But the stored struct keeps it for future ModifyCacheCluster comparisons.
+    let state = svc.state.read();
+    let cluster = state
+        .get("123456789012")
+        .unwrap()
+        .cache_clusters
+        .get("auth-cc")
+        .unwrap();
+    assert_eq!(cluster.auth_token.as_deref(), Some("supersecret-token-XYZ"));
 }
