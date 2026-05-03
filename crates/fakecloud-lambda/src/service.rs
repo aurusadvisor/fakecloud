@@ -1259,10 +1259,17 @@ impl LambdaService {
             let current = map.get(&concurrency_key).copied().unwrap_or(0);
             if let Some(limit) = cap {
                 if current >= limit {
-                    return Err(AwsServiceError::aws_error(
+                    // AWS returns the throttle Reason in the body so SDKs
+                    // can branch on `ReservedFunctionConcurrentInvocationLimitExceeded`
+                    // versus account-pool limits.
+                    return Err(AwsServiceError::aws_error_with_fields(
                         StatusCode::TOO_MANY_REQUESTS,
                         "TooManyRequestsException",
                         "Rate Exceeded.",
+                        vec![(
+                            "Reason".to_string(),
+                            "ReservedFunctionConcurrentInvocationLimitExceeded".to_string(),
+                        )],
                     ));
                 }
             }
