@@ -50,9 +50,11 @@ pub struct EcsRuntime {
     /// untouched and lets `docker pull` succeed against fakecloud ECR
     /// without a prior `aws ecr get-login-password | docker login`.
     docker_config: Option<Arc<TempDir>>,
-    /// Tracks container IDs per task ID so `stop_task` can kill in-flight
-    /// work without needing to block on the spawned executor future.
-    containers: RwLock<std::collections::HashMap<String, String>>,
+    /// Tracks per-task lists of `(container_name, docker_container_id)` so
+    /// `stop_task` can kill every container backing a task — multi-container
+    /// task definitions launch one docker container per `containerDefinitions`
+    /// entry, all of which must be torn down on stop.
+    containers: RwLock<std::collections::HashMap<String, Vec<(String, String)>>>,
     /// Cross-service delivery bus — emits `aws.ecs` EventBridge events
     /// on task state transitions when wired. `None` if the server started
     /// without EventBridge configured (or for unit tests).
@@ -186,241 +188,254 @@ impl EcsRuntime {
         task_id: &str,
         account_id: &str,
     ) -> Result<(), RuntimeError> {
-        let (image, mut env, entry_point, command, awslogs_container, secrets_refs, has_task_role) = {
-            let accounts = state.read();
-            let s = accounts
-                .get(account_id)
-                .ok_or_else(|| RuntimeError::ContainerStart("account missing".into()))?;
-            let task = s
-                .tasks
-                .get(task_id)
-                .ok_or_else(|| RuntimeError::ContainerStart("task missing".into()))?;
-            let container = task
-                .containers
-                .first()
-                .ok_or_else(|| RuntimeError::ContainerStart("task has no containers".into()))?;
-            let def = find_container_definition(s, &task.family, task.revision, &container.name);
-            let secrets = def
-                .as_ref()
-                .and_then(|d| d.get("secrets").and_then(|v| v.as_array()).cloned())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|e| {
-                            let name = e.get("name").and_then(|v| v.as_str())?.to_string();
-                            let value_from =
-                                e.get("valueFrom").and_then(|v| v.as_str())?.to_string();
-                            Some((name, value_from))
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let str_array = |key: &str| -> Vec<String> {
-                def.as_ref()
-                    .and_then(|d| d.get(key).and_then(|v| v.as_array()).cloned())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            };
-            (
-                container.image.clone(),
-                def.as_ref()
-                    .and_then(|d| d.get("environment").and_then(|v| v.as_array()).cloned())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|e| {
-                                let k = e.get("name").and_then(|v| v.as_str())?;
-                                let v = e.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                                Some((k.to_string(), v.to_string()))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
-                str_array("entryPoint"),
-                str_array("command"),
-                container.name.clone(),
-                secrets,
-                task.task_role_arn.is_some(),
-            )
-        };
+        // Build a per-container launch plan up-front so we hold the read
+        // lock once. Each entry carries everything needed to compose a
+        // `docker run` invocation for one container in the task.
+        let plans = build_container_plans(state, account_id, task_id, self.server_port)?;
+        if plans.is_empty() {
+            return Err(RuntimeError::ContainerStart(
+                "task has no containers".into(),
+            ));
+        }
 
-        // Resolve `containerDefinition.secrets[]` entries. Each entry is
-        // `{name, valueFrom}`; `valueFrom` is either a SecretsManager
-        // secret ARN (`arn:aws:secretsmanager:...:secret:name-AbCdEf`)
-        // or an SSM parameter ARN (`arn:aws:ssm:...:parameter/name`).
-        // Both are looked up synchronously against the in-process shared
-        // state and appended as env vars. Failed lookups fail the task —
-        // matching real ECS's "failed to retrieve secret" behaviour.
-        for (name, value_from) in &secrets_refs {
-            let resolved = self.resolve_secret(account_id, value_from);
-            match resolved {
-                Some(v) => env.push((name.clone(), v)),
-                None => {
-                    return Err(RuntimeError::ContainerStart(format!(
-                        "failed to resolve secret {name} from {value_from}"
-                    )))
+        // Resolve secrets for each plan. Failures fail the whole task to
+        // match real ECS's "failed to retrieve secret" behaviour — there's
+        // no point starting a sidecar when the app container will fail.
+        let mut resolved_plans: Vec<ResolvedContainerPlan> = Vec::with_capacity(plans.len());
+        for plan in plans {
+            let mut env = plan.env.clone();
+            for (name, value_from) in &plan.secrets_refs {
+                match self.resolve_secret(account_id, value_from) {
+                    Some(v) => env.push((name.clone(), v)),
+                    None => {
+                        return Err(RuntimeError::ContainerStart(format!(
+                            "failed to resolve secret {name} from {value_from}"
+                        )));
+                    }
+                }
+            }
+            if plan.has_task_role {
+                env.push((
+                    "AWS_CONTAINER_CREDENTIALS_FULL_URI".into(),
+                    format!(
+                        "http://host.docker.internal:{}/_fakecloud/ecs/creds/{}",
+                        self.server_port, task_id
+                    ),
+                ));
+            }
+            resolved_plans.push(ResolvedContainerPlan { plan, env });
+        }
+
+        // Pull every distinct image up-front so a second container's pull
+        // failure surfaces before we leave the first container running.
+        mark_pull_started(state, account_id, task_id);
+        let mut run_images: Vec<String> = Vec::with_capacity(resolved_plans.len());
+        for rp in &resolved_plans {
+            let local_pull_uri =
+                fakecloud_core::ecr_uri::translate_to_local(&rp.plan.image, self.server_port);
+            let pull_uri = local_pull_uri.as_deref().unwrap_or(&rp.plan.image);
+            let pull_out = self
+                .cli_command()
+                .args(["pull", pull_uri])
+                .output()
+                .await
+                .map_err(|e| RuntimeError::ImagePull(e.to_string()))?;
+            if !pull_out.status.success() {
+                let err = String::from_utf8_lossy(&pull_out.stderr).to_string();
+                return Err(RuntimeError::ImagePull(err));
+            }
+            // Retag the local pull URI to the AWS URI so `docker run` finds
+            // the image under the user-facing name. Digest-pinned refs
+            // can't be `docker tag` targets, so we fall through and run
+            // under the local URI in that case.
+            let run_image = if let Some(ref local_uri) = local_pull_uri {
+                if fakecloud_core::ecr_uri::is_digest_ref(&rp.plan.image) {
+                    local_uri.clone()
+                } else {
+                    let _ = self
+                        .cli_command()
+                        .args(["tag", local_uri, &rp.plan.image])
+                        .output()
+                        .await;
+                    rp.plan.image.clone()
+                }
+            } else {
+                rp.plan.image.clone()
+            };
+            run_images.push(run_image);
+        }
+        mark_pull_stopped(state, account_id, task_id);
+
+        // Launch every container detached. If any fails to start, kill the
+        // ones we already started and bail — partial-launch state is harder
+        // to reason about than a clean failure.
+        let mut started: Vec<RunningContainer> = Vec::with_capacity(resolved_plans.len());
+        for (rp, run_image) in resolved_plans.iter().zip(run_images.iter()) {
+            let mut cmd = Command::new(&self.cli);
+            cmd.args(["run", "-d"])
+                .args(["--name", &format!("{}-{}", task_id, rp.plan.container_name)])
+                .args(["--label", &format!("fakecloud-ecs-task={}", task_id)])
+                .args([
+                    "--label",
+                    &format!("fakecloud-ecs-container={}", rp.plan.container_name),
+                ])
+                .args([
+                    "--add-host",
+                    &format!("host.docker.internal:{}", self.host_ip),
+                ]);
+            for (k, v) in &rp.env {
+                let transformed = v
+                    .replace("http://127.0.0.1:", "http://host.docker.internal:")
+                    .replace("https://127.0.0.1:", "https://host.docker.internal:")
+                    .replace("http://localhost:", "http://host.docker.internal:")
+                    .replace("https://localhost:", "https://host.docker.internal:");
+                cmd.arg("-e").arg(format!("{}={}", k, transformed));
+            }
+            // `containerDefinition.entryPoint` overrides the image's
+            // ENTRYPOINT. Docker CLI's `--entrypoint` only takes a single
+            // executable; any additional entryPoint elements are appended
+            // as positional args before the user-supplied `command[]`.
+            if let Some(first) = rp.plan.entry_point.first() {
+                cmd.args(["--entrypoint", first]);
+            }
+            cmd.arg(run_image);
+            for arg in rp.plan.entry_point.iter().skip(1) {
+                cmd.arg(arg);
+            }
+            for arg in &rp.plan.command {
+                cmd.arg(arg);
+            }
+            let run_out = cmd.output().await.map_err(|e| {
+                // Cleanup already-started containers on launch failure.
+                self.cleanup_partial_start(&started);
+                RuntimeError::ContainerStart(e.to_string())
+            })?;
+            if !run_out.status.success() {
+                let err = String::from_utf8_lossy(&run_out.stderr).to_string();
+                self.cleanup_partial_start(&started);
+                return Err(RuntimeError::ContainerStart(err));
+            }
+            let container_id = String::from_utf8_lossy(&run_out.stdout).trim().to_string();
+            started.push(RunningContainer {
+                name: rp.plan.container_name.clone(),
+                container_id,
+                essential: rp.plan.essential,
+                exit_code: None,
+            });
+        }
+
+        // Stash all (name, container_id) pairs so StopTask/stop_all can
+        // reach every container backing this task.
+        {
+            let mut guard = self.containers.write();
+            guard.insert(
+                task_id.to_string(),
+                started
+                    .iter()
+                    .map(|c| (c.name.clone(), c.container_id.clone()))
+                    .collect(),
+            );
+        }
+        mark_running_multi(state, account_id, task_id, &started);
+        self.emit_state_change(state, account_id, task_id, "RUNNING", None);
+
+        // Wait for the first essential container (or, if none are
+        // essential, any container) to exit. ECS task lifetime is
+        // bounded by the first essential exit, after which all remaining
+        // containers are stopped.
+        let wait_outcome = self.wait_for_task_exit(&started).await?;
+
+        // Stop and reap any sidecars still running. Best-effort — failures
+        // here shouldn't keep the task from transitioning to STOPPED.
+        let mut final_containers = started.clone();
+        for (i, rc) in started.iter().enumerate() {
+            if Some(i) == wait_outcome.exited_index {
+                final_containers[i].exit_code = Some(wait_outcome.exit_code);
+                continue;
+            }
+            // Try to grab the exit code if the container already exited
+            // on its own (non-essential exits don't stop the task), then
+            // fall back to `docker stop` for stragglers.
+            let inspect = Command::new(&self.cli)
+                .args(["inspect", "-f", "{{.State.ExitCode}}", &rc.container_id])
+                .output()
+                .await;
+            let still_running = match inspect {
+                Ok(out) if out.status.success() => {
+                    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    // `docker inspect` returns 0 for not-yet-exited
+                    // containers, so we additionally check `State.Running`.
+                    let running = Command::new(&self.cli)
+                        .args(["inspect", "-f", "{{.State.Running}}", &rc.container_id])
+                        .output()
+                        .await
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+                        .unwrap_or(false);
+                    if !running {
+                        if let Ok(code) = s.parse::<i64>() {
+                            final_containers[i].exit_code = Some(code);
+                        }
+                    }
+                    running
+                }
+                _ => false,
+            };
+            if still_running {
+                let _ = Command::new(&self.cli)
+                    .args(["stop", "--time", "10", &rc.container_id])
+                    .output()
+                    .await;
+                let wait_out = Command::new(&self.cli)
+                    .args(["wait", &rc.container_id])
+                    .output()
+                    .await;
+                if let Ok(out) = wait_out {
+                    let code: i64 = String::from_utf8_lossy(&out.stdout)
+                        .trim()
+                        .parse()
+                        .unwrap_or(-1);
+                    final_containers[i].exit_code = Some(code);
                 }
             }
         }
 
-        // Inject `AWS_CONTAINER_CREDENTIALS_FULL_URI` when the task has
-        // a `taskRoleArn`. AWS SDKs pick this up via the default
-        // credential-provider chain. The endpoint runs on the main
-        // fakecloud server; the container reaches it via
-        // `host.docker.internal:<port>`.
-        if has_task_role {
-            env.push((
-                "AWS_CONTAINER_CREDENTIALS_FULL_URI".into(),
-                format!(
-                    "http://host.docker.internal:{}/_fakecloud/ecs/creds/{}",
-                    self.server_port, task_id
-                ),
-            ));
-        }
-
-        // Pull the image first so we can surface pull errors cleanly.
-        // AWS private-ECR URIs (`<acct>.dkr.ecr.<region>.amazonaws.com/...`)
-        // are translated to fakecloud's local OCI v2 endpoint; after
-        // pulling the local URI we retag it to the AWS URI so the
-        // container and task state carry the user-facing image reference.
-        mark_pull_started(state, account_id, task_id);
-        let local_pull_uri = fakecloud_core::ecr_uri::translate_to_local(&image, self.server_port);
-        let pull_uri = local_pull_uri.as_deref().unwrap_or(&image);
-        let pull_out = self
-            .cli_command()
-            .args(["pull", pull_uri])
-            .output()
-            .await
-            .map_err(|e| RuntimeError::ImagePull(e.to_string()))?;
-        if !pull_out.status.success() {
-            let err = String::from_utf8_lossy(&pull_out.stderr).to_string();
-            return Err(RuntimeError::ImagePull(err));
-        }
-        // Retag the local pull URI to the AWS URI so `docker run` finds
-        // the image under the user-facing name. Digest-pinned refs can't
-        // be `docker tag` targets, so we fall through and run under the
-        // local URI in that case (cosmetic tradeoff — the task's image
-        // field will show the 127.0.0.1 URI instead of the AWS digest).
-        let run_image = if let Some(ref local_uri) = local_pull_uri {
-            if fakecloud_core::ecr_uri::is_digest_ref(&image) {
-                local_uri.clone()
-            } else {
-                let _ = self
-                    .cli_command()
-                    .args(["tag", local_uri, &image])
-                    .output()
-                    .await;
-                image.clone()
-            }
-        } else {
-            image.clone()
-        };
-        mark_pull_stopped(state, account_id, task_id);
-
-        // Run the container detached so we can track its ID and wait
-        // asynchronously. `-d` prints the container ID on stdout.
-        let mut cmd = Command::new(&self.cli);
-        cmd.args(["run", "-d"])
-            .args(["--label", &format!("fakecloud-ecs-task={}", task_id)])
-            .args([
-                "--add-host",
-                &format!("host.docker.internal:{}", self.host_ip),
-            ]);
-        for (k, v) in &env {
-            let transformed = v
-                .replace("http://127.0.0.1:", "http://host.docker.internal:")
-                .replace("https://127.0.0.1:", "https://host.docker.internal:")
-                .replace("http://localhost:", "http://host.docker.internal:")
-                .replace("https://localhost:", "https://host.docker.internal:");
-            cmd.arg("-e").arg(format!("{}={}", k, transformed));
-        }
-        // `containerDefinition.entryPoint` overrides the image's ENTRYPOINT.
-        // Docker CLI's `--entrypoint` only takes a single executable; any
-        // additional entryPoint elements are appended as positional args
-        // before the user-supplied `command[]`, which matches how docker
-        // composes ENTRYPOINT + CMD at exec time.
-        if let Some(first) = entry_point.first() {
-            cmd.args(["--entrypoint", first]);
-        }
-        cmd.arg(&run_image);
-        for arg in entry_point.iter().skip(1) {
-            cmd.arg(arg);
-        }
-        for arg in &command {
-            cmd.arg(arg);
-        }
-        let run_out = cmd
-            .output()
-            .await
-            .map_err(|e| RuntimeError::ContainerStart(e.to_string()))?;
-        if !run_out.status.success() {
-            let err = String::from_utf8_lossy(&run_out.stderr).to_string();
-            return Err(RuntimeError::ContainerStart(err));
-        }
-        let container_id = String::from_utf8_lossy(&run_out.stdout).trim().to_string();
-        self.containers
-            .write()
-            .insert(task_id.to_string(), container_id.clone());
-        mark_running(
-            state,
-            account_id,
-            task_id,
-            &container_id,
-            &awslogs_container,
-        );
-        self.emit_state_change(state, account_id, task_id, "RUNNING", None);
-
-        // Wait for the container to exit. `docker wait` blocks until exit
-        // and prints the numeric exit code to stdout.
-        let wait_out = Command::new(&self.cli)
-            .args(["wait", &container_id])
-            .output()
-            .await
-            .map_err(|e| RuntimeError::Wait(e.to_string()))?;
-        if !wait_out.status.success() {
-            // `docker wait` itself failed — treat this as a Wait error so
-            // the task flips via `finalize_failure` rather than silently
-            // claiming the container exited normally.
-            let err = String::from_utf8_lossy(&wait_out.stderr).to_string();
-            return Err(RuntimeError::Wait(err));
-        }
-        let exit_code: i64 = String::from_utf8_lossy(&wait_out.stdout)
-            .trim()
-            .parse()
-            .unwrap_or(-1);
-
-        // Capture combined stdout+stderr via `docker logs`.
-        let logs_out = Command::new(&self.cli)
-            .args(["logs", &container_id])
-            .output()
-            .await
-            .map_err(|e| RuntimeError::Wait(e.to_string()))?;
+        // Capture combined stdout+stderr from every container so the
+        // introspection endpoint shows logs from sidecars too.
         let mut captured = String::new();
-        captured.push_str(&String::from_utf8_lossy(&logs_out.stdout));
-        captured.push_str(&String::from_utf8_lossy(&logs_out.stderr));
+        for rc in &started {
+            let logs_out = Command::new(&self.cli)
+                .args(["logs", &rc.container_id])
+                .output()
+                .await
+                .map_err(|e| RuntimeError::Wait(e.to_string()))?;
+            captured.push_str(&format!("[{}] ", rc.name));
+            captured.push_str(&String::from_utf8_lossy(&logs_out.stdout));
+            captured.push_str(&String::from_utf8_lossy(&logs_out.stderr));
+        }
 
-        // Best-effort cleanup; failures here shouldn't keep the task from
-        // transitioning to STOPPED.
-        let _ = Command::new(&self.cli)
-            .args(["rm", &container_id])
-            .output()
-            .await;
+        // Reap every container we own.
+        for rc in &started {
+            let _ = Command::new(&self.cli)
+                .args(["rm", "-f", &rc.container_id])
+                .output()
+                .await;
+        }
         self.containers.write().remove(task_id);
 
         // Forward logs BEFORE flipping the task to STOPPED so a client
-        // that polls DescribeTasks and immediately queries DescribeLogStreams
-        // can't observe the STOPPED transition before the awslogs group/stream
-        // has been materialised.
+        // that polls DescribeTasks and immediately queries
+        // DescribeLogStreams can't observe the STOPPED transition before
+        // the awslogs group/stream has been materialised.
         self.forward_awslogs_if_configured(state, account_id, task_id, &captured);
-        finalize_stopped(
+        let exit_code = wait_outcome.exit_code;
+        finalize_stopped_multi(
             state,
             account_id,
             task_id,
+            &final_containers,
             exit_code,
             &captured,
-            "EssentialContainerExited",
+            wait_outcome.stop_code,
             None,
         );
         self.emit_state_change(
@@ -428,12 +443,88 @@ impl EcsRuntime {
             account_id,
             task_id,
             "STOPPED",
-            Some((
-                "EssentialContainerExited",
-                format!("Exit code {}", exit_code),
-            )),
+            Some((wait_outcome.stop_code, format!("Exit code {}", exit_code))),
         );
         Ok(())
+    }
+
+    /// Wait for the task to reach a stop condition: any essential
+    /// container exits, or every container exits when none are essential.
+    /// Returns the index into `started` of the container whose exit
+    /// determined the task lifetime, its exit code, and the stopCode.
+    async fn wait_for_task_exit(
+        &self,
+        started: &[RunningContainer],
+    ) -> Result<TaskExitOutcome, RuntimeError> {
+        let any_essential = started.iter().any(|c| c.essential);
+        let mut working: Vec<RunningContainer> = started.to_vec();
+        let mut first_exited: Option<usize> = None;
+        loop {
+            for (i, rc) in started.iter().enumerate() {
+                if working[i].exit_code.is_some() {
+                    continue;
+                }
+                let inspect = Command::new(&self.cli)
+                    .args(["inspect", "-f", "{{.State.Running}}", &rc.container_id])
+                    .output()
+                    .await;
+                let running = match inspect {
+                    Ok(out) if out.status.success() => {
+                        String::from_utf8_lossy(&out.stdout).trim() == "true"
+                    }
+                    _ => false,
+                };
+                if running {
+                    continue;
+                }
+                let wait_out = Command::new(&self.cli)
+                    .args(["wait", &rc.container_id])
+                    .output()
+                    .await
+                    .map_err(|e| RuntimeError::Wait(e.to_string()))?;
+                if !wait_out.status.success() {
+                    let err = String::from_utf8_lossy(&wait_out.stderr).to_string();
+                    return Err(RuntimeError::Wait(err));
+                }
+                let exit_code: i64 = String::from_utf8_lossy(&wait_out.stdout)
+                    .trim()
+                    .parse()
+                    .unwrap_or(-1);
+                working[i].exit_code = Some(exit_code);
+                if first_exited.is_none() && (rc.essential || !any_essential) {
+                    first_exited = Some(i);
+                }
+            }
+            if task_should_stop(&working) {
+                let idx = first_exited
+                    .or_else(|| working.iter().position(|c| c.exit_code.is_some()))
+                    .unwrap_or(0);
+                let exit_code = working[idx].exit_code.unwrap_or(-1);
+                return Ok(TaskExitOutcome {
+                    exited_index: Some(idx),
+                    exit_code,
+                    stop_code: if any_essential {
+                        "EssentialContainerExited"
+                    } else {
+                        "TaskCompleted"
+                    },
+                });
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Best-effort cleanup of containers we already started when a later
+    /// container in the task failed to launch. Without this, half-launched
+    /// tasks leak docker containers.
+    fn cleanup_partial_start(&self, started: &[RunningContainer]) {
+        let cli = self.cli.clone();
+        let ids: Vec<String> = started.iter().map(|c| c.container_id.clone()).collect();
+        tokio::spawn(async move {
+            for id in ids {
+                let _ = Command::new(&cli).args(["rm", "-f", &id]).output().await;
+            }
+        });
     }
 
     /// Resolve a `secrets[].valueFrom` reference to the actual secret
@@ -569,20 +660,25 @@ impl EcsRuntime {
         );
     }
 
-    /// Kill the container behind a task (if any) with the configured stop
-    /// timeout. Returns true if a container was killed. Called synchronously
-    /// from `StopTask`; the wait loop in `run_task_inner` observes the
-    /// exit and transitions the task to `STOPPED`.
+    /// Kill every container behind a task with the configured stop
+    /// timeout. Returns true if at least one container was killed. Called
+    /// synchronously from `StopTask`; the wait loop in `run_task_inner`
+    /// observes the exits and transitions the task to `STOPPED`.
     pub async fn stop_task(&self, task_id: &str, reason: &str) -> bool {
-        let container_id = self.containers.read().get(task_id).cloned();
-        let Some(id) = container_id else {
+        let containers = self.containers.read().get(task_id).cloned();
+        let Some(list) = containers else {
             return false;
         };
+        if list.is_empty() {
+            return false;
+        }
         // `docker stop` sends SIGTERM then SIGKILL after a timeout.
-        let _ = Command::new(&self.cli)
-            .args(["stop", "--time", "10", &id])
-            .output()
-            .await;
+        for (_name, id) in &list {
+            let _ = Command::new(&self.cli)
+                .args(["stop", "--time", "10", id])
+                .output()
+                .await;
+        }
         tracing::info!(task = %task_id, reason = %reason, "ecs task stop requested");
         true
     }
@@ -591,13 +687,148 @@ impl EcsRuntime {
     /// shutdown so docker state matches fakecloud state after a fresh
     /// boot.
     pub async fn stop_all(&self) {
-        let ids: Vec<String> = self.containers.read().values().cloned().collect();
+        let ids: Vec<String> = self
+            .containers
+            .read()
+            .values()
+            .flat_map(|list| list.iter().map(|(_, id)| id.clone()))
+            .collect();
         for id in ids {
             let _ = Command::new(&self.cli).args(["kill", &id]).output().await;
             let _ = Command::new(&self.cli).args(["rm", &id]).output().await;
         }
         self.containers.write().clear();
     }
+}
+
+/// Per-container launch plan derived from a task definition.
+#[derive(Clone, Debug)]
+struct ContainerPlan {
+    container_name: String,
+    image: String,
+    env: Vec<(String, String)>,
+    entry_point: Vec<String>,
+    command: Vec<String>,
+    secrets_refs: Vec<(String, String)>,
+    essential: bool,
+    has_task_role: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedContainerPlan {
+    plan: ContainerPlan,
+    env: Vec<(String, String)>,
+}
+
+/// Result of waiting for a task's lifetime-determining container.
+#[derive(Clone, Debug)]
+struct TaskExitOutcome {
+    /// Index into the started-containers list of the container whose exit
+    /// closed out the task. `None` only in degenerate cases — kept as
+    /// `Option` so `final_containers` indexing stays explicit.
+    exited_index: Option<usize>,
+    exit_code: i64,
+    stop_code: &'static str,
+}
+
+/// Per-container record persisted on the task. Mirrors the AWS Container
+/// shape but tracks the docker-side container id alongside ECS metadata.
+#[derive(Clone, Debug)]
+pub(crate) struct RunningContainer {
+    pub(crate) name: String,
+    pub(crate) container_id: String,
+    pub(crate) essential: bool,
+    pub(crate) exit_code: Option<i64>,
+}
+
+/// Pure decision: does the current set of containers warrant stopping
+/// the task? Returns true when any essential container has exited, or
+/// when every container has exited (regardless of essential). Mirrors
+/// AWS ECS task lifetime semantics.
+pub(crate) fn task_should_stop(containers: &[RunningContainer]) -> bool {
+    if containers.is_empty() {
+        return true;
+    }
+    let any_essential_exited = containers
+        .iter()
+        .any(|c| c.essential && c.exit_code.is_some());
+    if any_essential_exited {
+        return true;
+    }
+    containers.iter().all(|c| c.exit_code.is_some())
+}
+
+fn build_container_plans(
+    state: &SharedEcsState,
+    account_id: &str,
+    task_id: &str,
+    _server_port: u16,
+) -> Result<Vec<ContainerPlan>, RuntimeError> {
+    let accounts = state.read();
+    let s = accounts
+        .get(account_id)
+        .ok_or_else(|| RuntimeError::ContainerStart("account missing".into()))?;
+    let task = s
+        .tasks
+        .get(task_id)
+        .ok_or_else(|| RuntimeError::ContainerStart("task missing".into()))?;
+    if task.containers.is_empty() {
+        return Err(RuntimeError::ContainerStart(
+            "task has no containers".into(),
+        ));
+    }
+    let has_task_role = task.task_role_arn.is_some();
+    let mut plans = Vec::with_capacity(task.containers.len());
+    for container in &task.containers {
+        let def = find_container_definition(s, &task.family, task.revision, &container.name);
+        let secrets_refs = def
+            .as_ref()
+            .and_then(|d| d.get("secrets").and_then(|v| v.as_array()).cloned())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| {
+                        let name = e.get("name").and_then(|v| v.as_str())?.to_string();
+                        let value_from = e.get("valueFrom").and_then(|v| v.as_str())?.to_string();
+                        Some((name, value_from))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let str_array = |key: &str| -> Vec<String> {
+            def.as_ref()
+                .and_then(|d| d.get(key).and_then(|v| v.as_array()).cloned())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let env = def
+            .as_ref()
+            .and_then(|d| d.get("environment").and_then(|v| v.as_array()).cloned())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| {
+                        let k = e.get("name").and_then(|v| v.as_str())?;
+                        let v = e.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                        Some((k.to_string(), v.to_string()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        plans.push(ContainerPlan {
+            container_name: container.name.clone(),
+            image: container.image.clone(),
+            env,
+            entry_point: str_array("entryPoint"),
+            command: str_array("command"),
+            secrets_refs,
+            essential: container.essential,
+            has_task_role,
+        });
+    }
+    Ok(plans)
 }
 
 struct TaskSnapshot {
@@ -713,12 +944,11 @@ fn mark_pull_stopped(state: &SharedEcsState, account_id: &str, task_id: &str) {
     }
 }
 
-fn mark_running(
+fn mark_running_multi(
     state: &SharedEcsState,
     account_id: &str,
     task_id: &str,
-    container_id: &str,
-    container_name: &str,
+    started: &[RunningContainer],
 ) {
     let mut accounts = state.write();
     let Some(s) = accounts.get_mut(account_id) else {
@@ -732,13 +962,11 @@ fn mark_running(
         task.connectivity = "CONNECTED".into();
         task.connectivity_at = Some(Utc::now());
         task.started_at = Some(Utc::now());
-        if let Some(c) = task
-            .containers
-            .iter_mut()
-            .find(|c| c.name == container_name)
-        {
-            c.runtime_id = Some(container_id.into());
-            c.last_status = "RUNNING".into();
+        for rc in started {
+            if let Some(c) = task.containers.iter_mut().find(|c| c.name == rc.name) {
+                c.runtime_id = Some(rc.container_id.clone());
+                c.last_status = "RUNNING".into();
+            }
         }
         if let Some(cluster) = s.clusters.get_mut(&task.cluster_name) {
             cluster.running_tasks_count += 1;
@@ -758,11 +986,13 @@ fn mark_running(
     });
 }
 
-fn finalize_stopped(
+#[allow(clippy::too_many_arguments)]
+fn finalize_stopped_multi(
     state: &SharedEcsState,
     account_id: &str,
     task_id: &str,
-    exit_code: i64,
+    final_containers: &[RunningContainer],
+    primary_exit_code: i64,
     captured: &str,
     stop_code: &str,
     stopped_reason: Option<String>,
@@ -780,12 +1010,16 @@ fn finalize_stopped(
         task.stopping_at = task.stopping_at.or(Some(Utc::now()));
         task.stopped_at = Some(Utc::now());
         task.stop_code = Some(stop_code.into());
-        task.stopped_reason = stopped_reason.or(Some(format!("Exit code {}", exit_code)));
+        task.stopped_reason = stopped_reason.or(Some(format!("Exit code {}", primary_exit_code)));
         task.captured_logs = captured.to_string();
         for c in task.containers.iter_mut() {
             c.last_status = "STOPPED".into();
             if c.exit_code.is_none() {
-                c.exit_code = Some(exit_code);
+                let mapped = final_containers
+                    .iter()
+                    .find(|r| r.name == c.name)
+                    .and_then(|r| r.exit_code);
+                c.exit_code = mapped.or(Some(primary_exit_code));
             }
         }
         if let Some(cluster) = s.clusters.get_mut(&task.cluster_name) {
@@ -802,7 +1036,7 @@ fn finalize_stopped(
         cluster_arn: Some(cluster_arn),
         last_status: Some("STOPPED".into()),
         detail: serde_json::json!({
-            "exitCode": exit_code,
+            "exitCode": primary_exit_code,
             "stopCode": stop_code,
         }),
     });
@@ -971,5 +1205,144 @@ mod tests {
             "captured_logs missing prefix: {:?}",
             task.captured_logs
         );
+    }
+
+    fn make_container(name: &str, essential: bool) -> crate::state::Container {
+        crate::state::Container {
+            container_arn: format!(
+                "arn:aws:ecs:us-east-1:000000000000:container/default/abc/{name}"
+            ),
+            name: name.into(),
+            image: "alpine".into(),
+            task_arn: "arn:aws:ecs:us-east-1:000000000000:task/default/abc".into(),
+            last_status: "RUNNING".into(),
+            exit_code: None,
+            reason: None,
+            runtime_id: Some(format!("dockerid-{name}")),
+            essential,
+            cpu: None,
+            memory: None,
+            memory_reservation: None,
+            network_bindings: Vec::new(),
+            network_interfaces: Vec::new(),
+            health_status: None,
+            managed_agents: None,
+        }
+    }
+
+    #[test]
+    fn task_should_stop_when_essential_exits() {
+        let containers = vec![
+            RunningContainer {
+                name: "app".into(),
+                container_id: "id-app".into(),
+                essential: true,
+                exit_code: Some(0),
+            },
+            RunningContainer {
+                name: "sidecar".into(),
+                container_id: "id-sc".into(),
+                essential: false,
+                exit_code: None,
+            },
+        ];
+        assert!(task_should_stop(&containers));
+    }
+
+    #[test]
+    fn task_keeps_running_when_only_non_essential_exits() {
+        let containers = vec![
+            RunningContainer {
+                name: "app".into(),
+                container_id: "id-app".into(),
+                essential: true,
+                exit_code: None,
+            },
+            RunningContainer {
+                name: "sidecar".into(),
+                container_id: "id-sc".into(),
+                essential: false,
+                exit_code: Some(0),
+            },
+        ];
+        assert!(!task_should_stop(&containers));
+    }
+
+    #[test]
+    fn task_stops_when_all_non_essentials_exit() {
+        let containers = vec![
+            RunningContainer {
+                name: "a".into(),
+                container_id: "id-a".into(),
+                essential: false,
+                exit_code: Some(0),
+            },
+            RunningContainer {
+                name: "b".into(),
+                container_id: "id-b".into(),
+                essential: false,
+                exit_code: Some(1),
+            },
+        ];
+        assert!(task_should_stop(&containers));
+    }
+
+    #[test]
+    fn finalize_stopped_multi_assigns_per_container_exit_codes() {
+        let mut accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
+        let acct = accounts.get_or_create("000000000000");
+        let mut t = make_task("t1");
+        t.containers = vec![
+            make_container("app", true),
+            make_container("sidecar", false),
+        ];
+        acct.tasks.insert("t1".into(), t);
+        let state: SharedEcsState = Arc::new(RwLock::new(accounts));
+
+        let final_containers = vec![
+            RunningContainer {
+                name: "app".into(),
+                container_id: "id-app".into(),
+                essential: true,
+                exit_code: Some(0),
+            },
+            RunningContainer {
+                name: "sidecar".into(),
+                container_id: "id-sc".into(),
+                essential: false,
+                exit_code: Some(137),
+            },
+        ];
+        finalize_stopped_multi(
+            &state,
+            "000000000000",
+            "t1",
+            &final_containers,
+            0,
+            "captured",
+            "EssentialContainerExited",
+            None,
+        );
+
+        let accounts = state.read();
+        let task = accounts
+            .get("000000000000")
+            .unwrap()
+            .tasks
+            .get("t1")
+            .unwrap();
+        assert_eq!(task.last_status, "STOPPED");
+        assert_eq!(task.stop_code.as_deref(), Some("EssentialContainerExited"));
+        let app = task.containers.iter().find(|c| c.name == "app").unwrap();
+        let sc = task
+            .containers
+            .iter()
+            .find(|c| c.name == "sidecar")
+            .unwrap();
+        assert_eq!(app.exit_code, Some(0));
+        assert_eq!(sc.exit_code, Some(137));
+        assert_eq!(app.last_status, "STOPPED");
+        assert_eq!(sc.last_status, "STOPPED");
     }
 }
