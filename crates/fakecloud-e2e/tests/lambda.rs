@@ -293,7 +293,9 @@ async fn lambda_add_get_remove_permission_roundtrip() {
     let statement: serde_json::Value = serde_json::from_str(statement_str).unwrap();
     assert_eq!(statement["Sid"], "events-invoke");
     assert_eq!(statement["Principal"]["Service"], "events.amazonaws.com");
-    assert_eq!(statement["Action"], "lambda:InvokeFunction");
+    // Action is stored verbatim — caller passed `InvokeFunction`, so
+    // the round-trip preserves that, matching real AWS behavior.
+    assert_eq!(statement["Action"], "InvokeFunction");
     assert_eq!(
         statement["Condition"]["ArnLike"]["aws:SourceArn"],
         "arn:aws:events:us-east-1:123456789012:rule/my-rule"
