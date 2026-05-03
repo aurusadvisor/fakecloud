@@ -148,6 +148,66 @@ fn service_credential_xml(c: &ServiceSpecificCredential, include_password: bool)
     )
 }
 
+/// Walk `ContextEntries.member.N` and route values into the right
+/// bucket on `ctx`. Tag-style keys (`aws:RequestTag/*`,
+/// `aws:ResourceTag/*`, `aws:PrincipalTag/*`) populate the typed maps
+/// the evaluator's tag operators read; everything else lands in
+/// `service_keys` (lowercased), which `ConditionContext::lookup` falls
+/// through to for unrecognized keys.
+fn apply_context_entries(req: &AwsRequest, ctx: &mut fakecloud_core::auth::ConditionContext) {
+    use std::collections::HashMap;
+    for i in 1..=128 {
+        let k = format!("ContextEntries.member.{i}.ContextKeyName");
+        let Some(name) = req.query_params.get(&k) else {
+            break;
+        };
+        let mut values: Vec<String> = Vec::new();
+        for j in 1..=32 {
+            let vk = format!("ContextEntries.member.{i}.ContextKeyValues.member.{j}");
+            if let Some(v) = req.query_params.get(&vk) {
+                values.push(v.clone());
+            } else {
+                break;
+            }
+        }
+        let lower = name.to_ascii_lowercase();
+        // Tag-key prefix lengths: aws:resourcetag/=16, aws:requesttag/=15,
+        // aws:principaltag/=17.
+        let single_value = || values.first().cloned().unwrap_or_default();
+        if let Some(rest) = name
+            .get(..16)
+            .filter(|p| p.eq_ignore_ascii_case("aws:ResourceTag/"))
+            .map(|_| &name[16..])
+        {
+            ctx.resource_tags
+                .get_or_insert_with(HashMap::new)
+                .insert(rest.to_string(), single_value());
+            continue;
+        }
+        if let Some(rest) = name
+            .get(..15)
+            .filter(|p| p.eq_ignore_ascii_case("aws:RequestTag/"))
+            .map(|_| &name[15..])
+        {
+            ctx.request_tags
+                .get_or_insert_with(HashMap::new)
+                .insert(rest.to_string(), single_value());
+            continue;
+        }
+        if let Some(rest) = name
+            .get(..17)
+            .filter(|p| p.eq_ignore_ascii_case("aws:PrincipalTag/"))
+            .map(|_| &name[17..])
+        {
+            ctx.principal_tags
+                .get_or_insert_with(HashMap::new)
+                .insert(rest.to_string(), single_value());
+            continue;
+        }
+        ctx.service_keys.insert(lower, values);
+    }
+}
+
 fn random_id(prefix: &str) -> String {
     format!(
         "{}{}",
@@ -688,7 +748,6 @@ impl IamService {
     ) -> Result<AwsResponse, AwsServiceError> {
         use crate::evaluator::{evaluate_with_gates, Decision, EvalRequest, PolicyDocument};
         use fakecloud_core::auth::{ConditionContext, Principal, PrincipalType};
-        use std::collections::BTreeMap;
 
         let actions = collect_member_list(req, "ActionNames.member.");
         if actions.is_empty() {
@@ -763,27 +822,6 @@ impl IamService {
             _ => {}
         }
 
-        // ContextEntries -> ConditionContext.service_keys (single
-        // bucket; populating typed fields requires per-key dispatch
-        // which the evaluator already handles via lookup).
-        let mut service_keys: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for i in 1..=128 {
-            let k = format!("ContextEntries.member.{i}.ContextKeyName");
-            let Some(name) = req.query_params.get(&k) else {
-                break;
-            };
-            let mut values: Vec<String> = Vec::new();
-            for j in 1..=32 {
-                let vk = format!("ContextEntries.member.{i}.ContextKeyValues.member.{j}");
-                if let Some(v) = req.query_params.get(&vk) {
-                    values.push(v.clone());
-                } else {
-                    break;
-                }
-            }
-            service_keys.insert(name.to_lowercase(), values);
-        }
-
         let principal_arn_str = caller_arn
             .clone()
             .unwrap_or_else(|| format!("arn:aws:iam::{}:root", req.account_id));
@@ -795,12 +833,18 @@ impl IamService {
             source_identity: None,
             tags: None,
         };
-        let ctx = ConditionContext {
+        let mut ctx = ConditionContext {
             aws_principal_arn: Some(principal_arn_str.clone()),
             aws_principal_account: Some(req.account_id.clone()),
-            service_keys,
             ..Default::default()
         };
+        // Route ContextEntries into the typed buckets the evaluator
+        // consults: aws:RequestTag/* / aws:ResourceTag/* /
+        // aws:PrincipalTag/* live in dedicated maps; everything else
+        // (service-specific keys + global scalars) lands in
+        // service_keys, which `ConditionContext::lookup` falls through
+        // to for any key it doesn't recognize.
+        apply_context_entries(req, &mut ctx);
 
         let mut members = String::new();
         for action_name in &actions {
@@ -819,7 +863,7 @@ impl IamService {
                     Decision::ExplicitDeny => "explicitDeny",
                 };
                 members.push_str(&format!(
-                    "<member><EvalActionName>{}</EvalActionName><EvalResourceName>{}</EvalResourceName><EvalDecision>{}</EvalDecision></member>",
+                    "<member><EvalActionName>{}</EvalActionName><EvalResourceName>{}</EvalResourceName><EvalDecision>{}</EvalDecision><MatchedStatements/><MissingContextValues/></member>",
                     xml_escape(action_name),
                     xml_escape(resource),
                     decision_str
