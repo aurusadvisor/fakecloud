@@ -655,6 +655,21 @@ impl ApiGatewayV2Client<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// List every live WebSocket connection currently registered with the
+    /// fakecloud API Gateway v2 data plane.
+    pub async fn get_connections(&self) -> Result<ApiGatewayV2ConnectionsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/apigatewayv2/connections",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }
 
 // ── Step Functions ──────────────────────────────────────────────────

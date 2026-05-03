@@ -557,6 +557,21 @@ type ApiGatewayV2RequestsResponse struct {
 	Requests []ApiGatewayV2Request `json:"requests"`
 }
 
+// ApiGatewayV2Connection describes a single live WebSocket connection.
+type ApiGatewayV2Connection struct {
+	ConnectionID  string `json:"connectionId"`
+	ApiID         string `json:"apiId"`
+	Stage         string `json:"stage"`
+	ConnectedAt   string `json:"connectedAt"`
+	LastActiveAt  string `json:"lastActiveAt"`
+	SourceIP      string `json:"sourceIp"`
+}
+
+// ApiGatewayV2ConnectionsResponse contains all live WebSocket connections.
+type ApiGatewayV2ConnectionsResponse struct {
+	Connections []ApiGatewayV2Connection `json:"connections"`
+}
+
 // ── ECR ────────────────────────────────────────────────────────────
 
 // ECRTag is a key/value tag attached to an ECR repository.

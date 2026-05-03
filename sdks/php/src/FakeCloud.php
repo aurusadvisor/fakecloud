@@ -448,6 +448,13 @@ final class ApiGatewayV2Client
             $this->http->get('/_fakecloud/apigatewayv2/requests')
         );
     }
+
+    public function getConnections(): ApiGatewayV2ConnectionsResponse
+    {
+        return ApiGatewayV2ConnectionsResponse::fromArray(
+            $this->http->get('/_fakecloud/apigatewayv2/connections')
+        );
+    }
 }
 
 final class StepFunctionsClient

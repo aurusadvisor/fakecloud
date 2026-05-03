@@ -1,5 +1,6 @@
 import type {
   CreateAdminResponse,
+  ApiGatewayV2ConnectionsResponse,
   ApiGatewayV2RequestsResponse,
   BedrockFaultRule,
   BedrockFaultsResponse,
@@ -375,6 +376,13 @@ export class ApiGatewayV2Client {
   async getRequests(): Promise<ApiGatewayV2RequestsResponse> {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/apigatewayv2/requests`,
+    );
+    return parse(resp);
+  }
+
+  async getConnections(): Promise<ApiGatewayV2ConnectionsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/apigatewayv2/connections`,
     );
     return parse(resp);
   }

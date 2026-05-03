@@ -1243,6 +1243,45 @@ final class ApiGatewayV2RequestsResponse
     }
 }
 
+final class ApiGatewayV2Connection
+{
+    public function __construct(
+        public readonly string $connectionId,
+        public readonly string $apiId,
+        public readonly string $stage,
+        public readonly string $connectedAt,
+        public readonly string $lastActiveAt,
+        public readonly string $sourceIp,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['connectionId'],
+            $data['apiId'],
+            $data['stage'],
+            $data['connectedAt'],
+            $data['lastActiveAt'],
+            $data['sourceIp'],
+        );
+    }
+}
+
+final class ApiGatewayV2ConnectionsResponse
+{
+    public function __construct(
+        /** @var ApiGatewayV2Connection[] */
+        public readonly array $connections,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            array_map(ApiGatewayV2Connection::fromArray(...), $data['connections'] ?? [])
+        );
+    }
+}
+
 // ── IAM ───────────────────────────────────────────────────────
 
 final class CreateAdminResponse

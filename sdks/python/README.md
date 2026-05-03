@@ -89,7 +89,7 @@ Access via properties on the main client:
 | `rds` | RDS | `get_instances()` |
 | `elasticache` | ElastiCache | `get_clusters()`, `get_replication_groups()`, `get_serverless_caches()` |
 | `stepfunctions` | Step Functions | `get_executions()` |
-| `apigatewayv2` | API Gateway v2 | `get_requests()` |
+| `apigatewayv2` | API Gateway v2 | `get_requests()`, `get_connections()` |
 | `bedrock` | Bedrock Runtime | `get_invocations()`, `set_model_response(model_id, text)`, `set_response_rules(model_id, rules)`, `clear_response_rules(model_id)`, `queue_fault(rule)`, `get_faults()`, `clear_faults()` |
 | `route53` | Route 53 | `set_health_check_status(id, status, reason=None)` — flip a health check between `Success` / `Failure` to drive failover routing in tests |
 

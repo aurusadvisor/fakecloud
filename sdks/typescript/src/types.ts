@@ -469,6 +469,19 @@ export interface ApiGatewayV2RequestsResponse {
   requests: ApiGatewayV2Request[];
 }
 
+export interface ApiGatewayV2Connection {
+  connectionId: string;
+  apiId: string;
+  stage: string;
+  connectedAt: string;
+  lastActiveAt: string;
+  sourceIp: string;
+}
+
+export interface ApiGatewayV2ConnectionsResponse {
+  connections: ApiGatewayV2Connection[];
+}
+
 // ── Scheduler (EventBridge Scheduler) ───────────────────────────────
 
 export interface SchedulerSchedule {

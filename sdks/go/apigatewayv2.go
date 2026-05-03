@@ -17,3 +17,13 @@ func (c *ApiGatewayV2Client) GetRequests(ctx context.Context) (*ApiGatewayV2Requ
 	}
 	return &out, nil
 }
+
+// GetConnections lists every live WebSocket connection currently registered
+// with the fakecloud API Gateway v2 data plane.
+func (c *ApiGatewayV2Client) GetConnections(ctx context.Context) (*ApiGatewayV2ConnectionsResponse, error) {
+	var out ApiGatewayV2ConnectionsResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/apigatewayv2/connections", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

@@ -1085,6 +1085,35 @@ class ApiGatewayV2RequestsResponse:
         )
 
 
+@dataclass
+class ApiGatewayV2Connection:
+    connection_id: str
+    api_id: str
+    stage: str
+    connected_at: str
+    last_active_at: str
+    source_ip: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ApiGatewayV2Connection:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
+class ApiGatewayV2ConnectionsResponse:
+    connections: List[ApiGatewayV2Connection]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ApiGatewayV2ConnectionsResponse:
+        return cls(
+            connections=[
+                ApiGatewayV2Connection.from_dict(c)
+                for c in data.get("connections", [])
+            ],
+        )
+
+
 # ── ECR ─────────────────────────────────────────────────────────────
 
 

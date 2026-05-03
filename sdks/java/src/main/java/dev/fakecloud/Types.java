@@ -401,6 +401,18 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ApiGatewayV2RequestsResponse(List<ApiGatewayV2Request> requests) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record ApiGatewayV2Connection(
+            String connectionId,
+            String apiId,
+            String stage,
+            String connectedAt,
+            String lastActiveAt,
+            String sourceIp) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record ApiGatewayV2ConnectionsResponse(List<ApiGatewayV2Connection> connections) {}
+
     // ── IAM ───────────────────────────────────────────────────────
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

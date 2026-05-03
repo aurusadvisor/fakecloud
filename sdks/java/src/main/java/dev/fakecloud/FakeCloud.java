@@ -2,6 +2,7 @@ package dev.fakecloud;
 
 import static dev.fakecloud.HttpTransport.encodePath;
 
+import dev.fakecloud.Types.ApiGatewayV2ConnectionsResponse;
 import dev.fakecloud.Types.ApiGatewayV2RequestsResponse;
 import dev.fakecloud.Types.AuthEventsResponse;
 import dev.fakecloud.Types.BedrockFaultRule;
@@ -454,6 +455,12 @@ public final class FakeCloud {
         public ApiGatewayV2RequestsResponse getRequests() {
             return http.get(
                     "/_fakecloud/apigatewayv2/requests", ApiGatewayV2RequestsResponse.class);
+        }
+
+        public ApiGatewayV2ConnectionsResponse getConnections() {
+            return http.get(
+                    "/_fakecloud/apigatewayv2/connections",
+                    ApiGatewayV2ConnectionsResponse.class);
         }
     }
 

@@ -7,6 +7,7 @@ from typing import Dict, Optional
 import httpx
 
 from fakecloud.types import (
+    ApiGatewayV2ConnectionsResponse,
     ApiGatewayV2RequestsResponse,
     AuthEventsResponse,
     BedrockFaultRule,
@@ -695,6 +696,13 @@ class ApiGatewayV2Client:
         resp = await self._client.get(f"{self._base}/_fakecloud/apigatewayv2/requests")
         _check(resp)
         return ApiGatewayV2RequestsResponse.from_dict(resp.json())
+
+    async def get_connections(self) -> ApiGatewayV2ConnectionsResponse:
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/apigatewayv2/connections"
+        )
+        _check(resp)
+        return ApiGatewayV2ConnectionsResponse.from_dict(resp.json())
 
 
 class StepFunctionsClient:
