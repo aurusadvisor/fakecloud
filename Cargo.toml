@@ -86,7 +86,8 @@ parking_lot = "0.12"
 md-5 = "0.10"
 rand = "0.8"
 rcgen = "0.13"
-rsa = { version = "0.9", features = ["sha2", "pem"] }
+rsa = { version = "0.9", features = ["sha2", "pem", "pkcs5"] }
+pkcs8 = { version = "0.10", features = ["encryption", "pem"] }
 sha1 = "0.10"
 sha2 = "0.10"
 hmac = "0.12"
