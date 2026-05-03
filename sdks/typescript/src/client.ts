@@ -667,6 +667,18 @@ export class Elbv2Client {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/elbv2/rules`);
     return parse(resp);
   }
+
+  /**
+   * Force every buffered ALB access-log + connection-log line to flush
+   * to S3 right now, bypassing the periodic 60-second timer. Useful in
+   * tests that need to assert log delivery without waiting.
+   */
+  async flushAccessLogs(): Promise<{ flushed: boolean }> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/elbv2/access-logs/flush`, {
+      method: "POST",
+    });
+    return parse(resp);
+  }
 }
 
 /** Body for `route53.setHealthCheckStatus`. */

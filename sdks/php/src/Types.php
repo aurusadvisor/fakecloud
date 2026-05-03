@@ -1712,3 +1712,15 @@ final class Elbv2RulesResponse
         return new self(array_map(Elbv2Rule::fromArray(...), $data['rules'] ?? []));
     }
 }
+
+final class Elbv2FlushAccessLogsResponse
+{
+    public function __construct(
+        public readonly bool $flushed,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self((bool) ($data['flushed'] ?? false));
+    }
+}

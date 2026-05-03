@@ -1,3 +1,4 @@
+pub mod accesslogs;
 pub mod dataplane;
 pub mod prober;
 pub mod router;

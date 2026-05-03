@@ -311,6 +311,14 @@ class Elbv2Client:
         _check(resp)
         return Elbv2RulesResponse.from_dict(resp.json())
 
+    async def flush_access_logs(self) -> dict:
+        """Force every buffered access-log + connection-log line to flush to S3."""
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/elbv2/access-logs/flush"
+        )
+        _check(resp)
+        return resp.json()
+
 
 class _SyncElbv2Client:
     """Sync ELBv2 introspection client."""
@@ -338,6 +346,14 @@ class _SyncElbv2Client:
         resp = self._client.get(f"{self._base}/_fakecloud/elbv2/rules")
         _check(resp)
         return Elbv2RulesResponse.from_dict(resp.json())
+
+    def flush_access_logs(self) -> dict:
+        """Force every buffered access-log + connection-log line to flush to S3."""
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/elbv2/access-logs/flush"
+        )
+        _check(resp)
+        return resp.json()
 
 
 class Route53Client:

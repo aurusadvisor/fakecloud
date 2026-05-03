@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use http::StatusCode;
 
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::query::{
     optional_query_param, query_metadata_only_xml, query_response_xml, required_query_param,
 };
@@ -79,6 +80,15 @@ const ELBV2_SUPPORTED_ACTIONS: &[&str] = &[
 pub struct Elbv2Service {
     state: SharedElbv2State,
     waf_state: Option<SharedWafv2State>,
+    /// Delivery bus used by the dataplane for cross-service writes
+    /// (currently: S3 access-log + connection-log delivery). When
+    /// `None`, the dataplane buffers no log lines and skips the S3
+    /// flush task.
+    delivery_bus: Option<Arc<DeliveryBus>>,
+    /// Handle on the access-log buffer once the dataplane has been
+    /// started — exposed so the introspection layer can flush
+    /// synchronously inside tests.
+    access_logger: parking_lot::Mutex<Option<Arc<crate::accesslogs::AccessLogger>>>,
     pub region: String,
 }
 
@@ -93,6 +103,8 @@ impl Elbv2Service {
         Self {
             state,
             waf_state: None,
+            delivery_bus: None,
+            access_logger: parking_lot::Mutex::new(None),
             region: "us-east-1".to_string(),
         }
     }
@@ -105,6 +117,8 @@ impl Elbv2Service {
         Self {
             state,
             waf_state: None,
+            delivery_bus: None,
+            access_logger: parking_lot::Mutex::new(None),
             region: "us-east-1".to_string(),
         }
     }
@@ -117,13 +131,36 @@ impl Elbv2Service {
         self
     }
 
+    /// Plug in the cross-service delivery bus so the ALB dataplane can
+    /// flush access-log + connection-log batches to S3.
+    pub fn with_delivery_bus(mut self, bus: Arc<DeliveryBus>) -> Self {
+        self.delivery_bus = Some(bus);
+        self
+    }
+
     /// Spawn the dataplane supervisor. Only needed when the service
     /// was built with [`Elbv2Service::new_without_dataplane`].
     pub fn start_dataplane(&self) {
-        crate::dataplane::spawn_dataplane(
+        let logger = crate::dataplane::spawn_dataplane_with_delivery(
             Arc::clone(&self.state),
             self.waf_state.as_ref().map(Arc::clone),
+            self.delivery_bus.as_ref().map(Arc::clone),
         );
+        *self.access_logger.lock() = logger;
+    }
+
+    /// Force every buffered access / connection log line to flush to
+    /// S3 right now, bypassing the periodic 60-second timer. Returns
+    /// `true` when a logger was wired and the flush ran. Used by the
+    /// `/_fakecloud/elbv2/access-logs/flush` admin endpoint and by
+    /// tests that need deterministic flush timing.
+    pub fn flush_access_logs(&self) -> bool {
+        if let Some(logger) = self.access_logger.lock().clone() {
+            logger.flush_all();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn shared_state(&self) -> SharedElbv2State {

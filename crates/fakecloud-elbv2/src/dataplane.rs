@@ -15,9 +15,11 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use chrono::Utc;
+use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_wafv2::evaluator::{
     evaluate_detailed as waf_evaluate_detailed, WafAction, WafRequest,
 };
@@ -33,6 +35,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 use uuid::Uuid;
 
+use crate::accesslogs::{AccessLogRecord, AccessLogger, LogType};
 use crate::router::select_actions;
 use crate::state::{Action, Listener, LoadBalancer, Rule, SharedElbv2State, TargetGroup};
 
@@ -67,6 +70,12 @@ struct DataPlane {
     /// against the WebACL associated with the load balancer (if any)
     /// before the listener-rule router runs.
     waf_state: Option<SharedWafv2State>,
+    /// Optional access-log buffer. When set, every served request
+    /// emits one access-log line (and one connection-log line if
+    /// connection_logs are enabled) into this in-memory buffer; the
+    /// flusher background task ships gzipped batches to S3 every
+    /// ~60 seconds or when the buffer fills.
+    access_logger: Option<Arc<AccessLogger>>,
     /// Count of WAF Count-action matches, keyed by `WebACL ARN | rule
     /// name`. Exposed for tests and future metrics scraping.
     waf_count_metrics: Arc<Mutex<BTreeMap<String, u64>>>,
@@ -78,9 +87,20 @@ struct DataPlane {
 }
 
 pub fn spawn_dataplane(state: SharedElbv2State, waf_state: Option<SharedWafv2State>) {
+    spawn_dataplane_with_delivery(state, waf_state, None);
+}
+
+/// Spawn the supervisor and (when a `delivery_bus` is wired) the
+/// access-log flusher. The flusher is a separate task so the per-
+/// request hot path only buffers; S3 puts run off the request thread.
+pub fn spawn_dataplane_with_delivery(
+    state: SharedElbv2State,
+    waf_state: Option<SharedWafv2State>,
+    delivery_bus: Option<Arc<DeliveryBus>>,
+) -> Option<Arc<AccessLogger>> {
     if !dataplane_enabled() {
         debug!("ELBv2 data plane disabled via {ENV_DISABLE}");
-        return;
+        return None;
     }
     let upstream = match reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -93,18 +113,26 @@ pub fn spawn_dataplane(state: SharedElbv2State, waf_state: Option<SharedWafv2Sta
         Ok(c) => c,
         Err(e) => {
             warn!("ELBv2 data plane: failed to build reqwest client: {e}");
-            return;
+            return None;
         }
     };
+    let access_logger = delivery_bus.map(|bus| {
+        let logger = Arc::new(AccessLogger::new(Arc::clone(&state), bus));
+        crate::accesslogs::spawn_flusher(Arc::clone(&logger));
+        logger
+    });
+    let logger_for_caller = access_logger.as_ref().map(Arc::clone);
     let dp = DataPlane {
         state,
         waf_state,
+        access_logger,
         waf_count_metrics: Arc::new(Mutex::new(BTreeMap::new())),
         rr_counters: Arc::new(Mutex::new(BTreeMap::new())),
         sticky_targets: Arc::new(Mutex::new(BTreeMap::new())),
         upstream,
     };
     tokio::spawn(supervisor_loop(dp));
+    logger_for_caller
 }
 
 async fn supervisor_loop(dp: DataPlane) {
@@ -236,6 +264,8 @@ async fn handle_request(
     peer_addr: SocketAddr,
     req: Request<Incoming>,
 ) -> Response<Full<Bytes>> {
+    let request_start = Instant::now();
+    let request_creation_time = Utc::now();
     // Read request fully into memory. Body sizes that matter for ALB
     // tests are small; the streaming-body refactor is its own batch.
     let (parts, body) = req.into_parts();
@@ -243,6 +273,16 @@ async fn handle_request(
         Ok(c) => c.to_bytes(),
         Err(_) => return canned(StatusCode::BAD_REQUEST, "Bad Request"),
     };
+    let received_bytes = body_bytes.len() as u64;
+    let user_agent = parts
+        .headers
+        .get(http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-")
+        .to_string();
+    let request_method = parts.method.to_string();
+    let request_uri_str = parts.uri.to_string();
+    let request_protocol = format!("{:?}", parts.version);
 
     let host = parts
         .headers
@@ -251,17 +291,43 @@ async fn handle_request(
         .unwrap_or("")
         .to_string();
 
+    let mut log_ctx = RequestLogContext {
+        request_creation_time,
+        request_start,
+        received_bytes,
+        user_agent,
+        request_method,
+        request_url: request_uri_str.clone(),
+        request_protocol,
+        host: host.clone(),
+        actions_executed: String::from("waf,forward"),
+        action_taken: ActionTaken::Unknown,
+        target_ip: None,
+        target_port: None,
+        target_group_arn: String::from("-"),
+        matched_rule_priority: String::from("-"),
+        target_status_code: None,
+        redirect_url: String::from("-"),
+        error_reason: String::from("-"),
+    };
+
     // Pick the listener for this connection. ALBs may have multiple
     // listeners (e.g. 80 + 443); we pick the first listener belonging
     // to this LB, since the in-process bind is single-port for now.
     let snap = match snapshot(dp, lb_arn) {
         Some(s) => s,
-        None => return canned(StatusCode::SERVICE_UNAVAILABLE, "LB removed"),
+        None => {
+            let resp = canned(StatusCode::SERVICE_UNAVAILABLE, "LB removed");
+            return finalize_response(dp, lb_arn, peer_addr, &mut log_ctx, resp);
+        }
     };
 
     let listener = match snap.listener_for_request(&parts.headers) {
         Some(l) => l,
-        None => return canned(StatusCode::BAD_GATEWAY, "No listener"),
+        None => {
+            let resp = canned(StatusCode::BAD_GATEWAY, "No listener");
+            return finalize_response(dp, lb_arn, peer_addr, &mut log_ctx, resp);
+        }
     };
 
     let listener_port: u16 = listener
@@ -282,7 +348,9 @@ async fn handle_request(
         &body_bytes,
         peer_addr,
     ) {
-        return waf_resp;
+        log_ctx.actions_executed = String::from("waf");
+        log_ctx.action_taken = ActionTaken::WafBlock;
+        return finalize_response(dp, lb_arn, peer_addr, &mut log_ctx, waf_resp);
     }
 
     let rules: Vec<&Rule> = snap.rules_for_listener(&listener.arn);
@@ -298,11 +366,17 @@ async fn handle_request(
 
     let action = match actions.iter().min_by_key(|a| a.order.unwrap_or(0)) {
         Some(a) => a.clone(),
-        None => return canned(StatusCode::BAD_GATEWAY, "No action"),
+        None => {
+            let resp = canned(StatusCode::BAD_GATEWAY, "No action");
+            return finalize_response(dp, lb_arn, peer_addr, &mut log_ctx, resp);
+        }
     };
+    log_ctx.matched_rule_priority = "0".to_string();
 
-    match action.action_type.to_lowercase().as_str() {
+    let resp = match action.action_type.to_lowercase().as_str() {
         "forward" => {
+            log_ctx.actions_executed = "forward".to_string();
+            log_ctx.action_taken = ActionTaken::Forward;
             forward_action(
                 dp,
                 &snap,
@@ -312,20 +386,165 @@ async fn handle_request(
                 parts.headers,
                 body_bytes,
                 listener_port,
+                &mut log_ctx,
             )
             .await
         }
-        "fixed-response" => fixed_response_action(&action),
-        "redirect" => redirect_action(&action, &host, &parts.uri),
-        "authenticate-oidc" | "authenticate-cognito" => canned(
-            StatusCode::NOT_IMPLEMENTED,
-            "OIDC/Cognito authenticate-action is on the next-batch ELBv2 list",
-        ),
-        other => canned(
-            StatusCode::BAD_GATEWAY,
-            &format!("Unsupported action: {other}"),
-        ),
-    }
+        "fixed-response" => {
+            log_ctx.actions_executed = "fixed-response".to_string();
+            log_ctx.action_taken = ActionTaken::FixedResponse;
+            fixed_response_action(&action)
+        }
+        "redirect" => {
+            log_ctx.actions_executed = "redirect".to_string();
+            log_ctx.action_taken = ActionTaken::Redirect;
+            let r = redirect_action(&action, &host, &parts.uri);
+            log_ctx.redirect_url = r
+                .headers()
+                .get(http::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+                .to_string();
+            r
+        }
+        "authenticate-oidc" | "authenticate-cognito" => {
+            log_ctx.actions_executed = "authenticate".to_string();
+            canned(
+                StatusCode::NOT_IMPLEMENTED,
+                "OIDC/Cognito authenticate-action is on the next-batch ELBv2 list",
+            )
+        }
+        other => {
+            log_ctx.actions_executed = other.to_string();
+            canned(
+                StatusCode::BAD_GATEWAY,
+                &format!("Unsupported action: {other}"),
+            )
+        }
+    };
+    finalize_response(dp, lb_arn, peer_addr, &mut log_ctx, resp)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionTaken {
+    Unknown,
+    Forward,
+    FixedResponse,
+    Redirect,
+    WafBlock,
+}
+
+/// Captured per-request fields used to build the access-log line.
+struct RequestLogContext {
+    request_creation_time: chrono::DateTime<chrono::Utc>,
+    request_start: Instant,
+    received_bytes: u64,
+    user_agent: String,
+    request_method: String,
+    request_url: String,
+    request_protocol: String,
+    host: String,
+    actions_executed: String,
+    action_taken: ActionTaken,
+    target_ip: Option<String>,
+    target_port: Option<u16>,
+    target_group_arn: String,
+    matched_rule_priority: String,
+    target_status_code: Option<u16>,
+    redirect_url: String,
+    error_reason: String,
+}
+
+/// Common tail of every code path: emit the response back to the
+/// caller and (when access logs are configured for the LB) buffer one
+/// access-log line and one connection-log line.
+fn finalize_response(
+    dp: &DataPlane,
+    lb_arn: &str,
+    peer_addr: SocketAddr,
+    ctx: &mut RequestLogContext,
+    resp: Response<Full<Bytes>>,
+) -> Response<Full<Bytes>> {
+    let Some(logger) = dp.access_logger.as_ref() else {
+        return resp;
+    };
+    // Cheap snapshot of response details before we hand the response
+    // back to hyper. `body.size_hint().exact()` is set because we
+    // construct every response with `Full<Bytes>`.
+    use hyper::body::Body as _;
+    let elb_status_code = resp.status().as_u16();
+    let sent_bytes = resp.body().size_hint().exact().unwrap_or(0);
+    let total_elapsed = ctx.request_start.elapsed().as_secs_f64();
+    let target_processing_time = match ctx.action_taken {
+        ActionTaken::Forward => total_elapsed,
+        _ => 0.0,
+    };
+    let request_processing_time = if matches!(ctx.action_taken, ActionTaken::Forward) {
+        0.0
+    } else {
+        total_elapsed
+    };
+
+    let elb_id = parse_lb_id(lb_arn).unwrap_or_else(|| lb_arn.to_string());
+    let target_port_list = match (ctx.target_ip.as_deref(), ctx.target_port) {
+        (Some(ip), Some(port)) => format!("{ip}:{port}"),
+        _ => "-".to_string(),
+    };
+    let target_status_code_list = ctx
+        .target_status_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    let access_record = AccessLogRecord {
+        log_type: LogType::Access,
+        timestamp: chrono::Utc::now(),
+        elb_id: elb_id.clone(),
+        client_ip: peer_addr.ip().to_string(),
+        client_port: peer_addr.port(),
+        target_ip: ctx.target_ip.clone(),
+        target_port: ctx.target_port,
+        request_processing_time,
+        target_processing_time,
+        response_processing_time: 0.0,
+        elb_status_code,
+        target_status_code: ctx.target_status_code,
+        received_bytes: ctx.received_bytes,
+        sent_bytes,
+        request_method: ctx.request_method.clone(),
+        request_url: ctx.request_url.clone(),
+        request_protocol: ctx.request_protocol.clone(),
+        user_agent: ctx.user_agent.clone(),
+        ssl_cipher: "-".to_string(),
+        ssl_protocol: "-".to_string(),
+        target_group_arn: ctx.target_group_arn.clone(),
+        trace_id: format!("Root=1-{:x}-{}", chrono::Utc::now().timestamp(), short_id()),
+        domain_name: ctx.host.clone(),
+        chosen_cert_arn: "-".to_string(),
+        matched_rule_priority: ctx.matched_rule_priority.clone(),
+        request_creation_time: ctx.request_creation_time,
+        actions_executed: ctx.actions_executed.clone(),
+        redirect_url: ctx.redirect_url.clone(),
+        error_reason: ctx.error_reason.clone(),
+        target_port_list,
+        target_status_code_list,
+        classification: "-".to_string(),
+        classification_reason: "-".to_string(),
+    };
+    logger.record(lb_arn, access_record.clone());
+    // Connection log: one line per established connection. AWS NLB +
+    // ALB connection logs share the same shape; we emit a parallel
+    // record so the connection_logs.s3.* path is exercised when set.
+    let mut conn_record = access_record;
+    conn_record.log_type = LogType::Connection;
+    logger.record(lb_arn, conn_record);
+    resp
+}
+
+/// Pull the `app/<name>/<suffix>` path out of an LB ARN — that's the
+/// `elb` field AWS uses in the access-log line.
+fn parse_lb_id(arn: &str) -> Option<String> {
+    let after_loadbalancer = arn.split(":loadbalancer/").nth(1)?;
+    Some(after_loadbalancer.to_string())
 }
 
 /// Snapshot of the rules/listeners/target-groups for one LB taken
@@ -661,6 +880,7 @@ async fn forward_action(
     headers: HeaderMap,
     body: Bytes,
     listener_port: u16,
+    log_ctx: &mut RequestLogContext,
 ) -> Response<Full<Bytes>> {
     // Prefer `forward.target_groups` (weighted), fall back to the
     // single `target_group_arn` field for legacy actions.
@@ -693,6 +913,7 @@ async fn forward_action(
     );
 
     let (tg_arn, _w) = target_groups[pick_idx].clone();
+    log_ctx.target_group_arn = tg_arn.clone();
     let tg = match snap.target_groups.get(&tg_arn) {
         Some(t) => t,
         None => return canned(StatusCode::SERVICE_UNAVAILABLE, "Target group not found"),
@@ -758,6 +979,8 @@ async fn forward_action(
         chosen.id.clone()
     };
     let upstream_port = chosen.port.or(tg.port).unwrap_or(80);
+    log_ctx.target_ip = Some(upstream_host.clone());
+    log_ctx.target_port = u16::try_from(upstream_port).ok();
     let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let upstream_url = format!("{scheme}://{upstream_host}:{upstream_port}{path_and_query}");
 
@@ -800,12 +1023,14 @@ async fn forward_action(
     let upstream_resp = match req_builder.send().await {
         Ok(r) => r,
         Err(e) => {
+            log_ctx.error_reason = format!("UpstreamError: {e}");
             return canned(StatusCode::BAD_GATEWAY, &format!("Upstream error: {e}"));
         }
     };
 
     let mut resp = Response::new(Full::new(Bytes::new()));
     *resp.status_mut() = upstream_resp.status();
+    log_ctx.target_status_code = Some(upstream_resp.status().as_u16());
     let upstream_headers = upstream_resp.headers().clone();
     for (k, v) in upstream_headers.iter() {
         if !is_hop_by_hop(k.as_str()) {

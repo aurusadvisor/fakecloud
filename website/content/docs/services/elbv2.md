@@ -98,6 +98,18 @@ Sticky sessions: when `ForwardConfig.Stickiness.Enabled=true`, the data plane se
 
 Set `FAKECLOUD_ELBV2_DISABLE_DATAPLANE=true` to turn off the data plane (the control plane keeps working; useful when you only need to assert API calls).
 
+## Access logs and connection logs
+
+When an ALB has `access_logs.s3.enabled=true` (and/or `connection_logs.s3.enabled=true`) plus `access_logs.s3.bucket` set on its attributes, the data plane records one log line per served request and one per established connection. Lines are buffered in memory and flushed to S3 either on a 60-second timer or when the buffer hits 1000 records, whichever comes first. The body is gzip-compressed; the object key follows the AWS pattern:
+
+```
+<prefix>/AWSLogs/<account>/elasticloadbalancing/<region>/YYYY/MM/DD/<account>_elasticloadbalancing_<region>_<lb-id>_<timestamp>_<ip>_<random>.log.gz
+```
+
+The line format approximates the AWS ALB access-log spec: space-delimited fields covering timestamp, ELB name, client `ip:port`, target `ip:port`, processing times, status codes, byte counts, the quoted request line, user-agent, SSL cipher/protocol, target group ARN, trace id, host, chosen cert, matched rule priority, request creation time, actions executed, redirect URL, error reason, target port list, target status code list, classification, and classification reason.
+
+Tests that need deterministic flush timing can `POST /_fakecloud/elbv2/access-logs/flush` to drain every buffered LB synchronously instead of waiting for the periodic flusher.
+
 ## Next-batch work items
 
 - **HTTPS/TLS termination.** Listeners with `Protocol=HTTPS` are stored exactly; the in-process bind is HTTP-only for now. ACM cert lookup + `rustls` termination + mTLS trust-store wiring lands in a follow-up.

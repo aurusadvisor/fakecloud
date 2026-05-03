@@ -2081,10 +2081,22 @@ async fn main() {
     registry.register(ecs_service);
 
     let elbv2_introspection_state = elbv2_state.clone();
-    let elbv2_service = Elbv2Service::new_without_dataplane(elbv2_state.clone())
-        .with_waf_state(wafv2_state.clone());
+    // Wire an S3-only delivery bus so the ALB dataplane can flush
+    // gzipped access-log + connection-log batches to the bucket
+    // referenced by the LB's `access_logs.s3.bucket` /
+    // `connection_logs.s3.bucket` attributes.
+    let s3_delivery_for_elbv2 = Arc::new(fakecloud_s3::delivery::S3DeliveryImpl::new(
+        s3_state.clone(),
+    ));
+    let elbv2_delivery_bus = Arc::new(DeliveryBus::new().with_s3(s3_delivery_for_elbv2));
+    let elbv2_service = Arc::new(
+        Elbv2Service::new_without_dataplane(elbv2_state.clone())
+            .with_waf_state(wafv2_state.clone())
+            .with_delivery_bus(elbv2_delivery_bus),
+    );
     elbv2_service.start_dataplane();
-    registry.register(Arc::new(elbv2_service));
+    let elbv2_service_for_admin = elbv2_service.clone();
+    registry.register(elbv2_service);
 
     let cloudfront_service = Arc::new(CloudFrontService::new(cloudfront_state.clone()));
     registry.register(cloudfront_service.clone());
@@ -4586,6 +4598,19 @@ async fn main() {
                         }
                         rules.sort_by(|a, b| a.arn.cmp(&b.arn));
                         axum::Json(types::Elbv2RulesResponse { rules })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/elbv2/access-logs/flush",
+            axum::routing::post({
+                let svc = elbv2_service_for_admin.clone();
+                move || {
+                    let svc = svc.clone();
+                    async move {
+                        let flushed = svc.flush_access_logs();
+                        axum::Json(serde_json::json!({ "flushed": flushed }))
                     }
                 }
             }),
