@@ -1299,6 +1299,8 @@ impl KmsService {
 pub(crate) mod asym;
 #[path = "asym_ecdsa.rs"]
 pub(crate) mod asym_ecdsa;
+#[path = "mac.rs"]
+pub(crate) mod mac;
 #[path = "service_aliases.rs"]
 mod service_aliases;
 #[path = "service_crypto.rs"]
