@@ -93,7 +93,7 @@ impl SesV2Service {
             return Some(Self::json_error(
                 StatusCode::BAD_REQUEST,
                 "AccountSendingPausedException",
-                "Email sending is disabled for your account.",
+                "Email sending for the account is paused.",
             ));
         }
         if let Some(name) = config_set_name {
@@ -102,12 +102,26 @@ impl SesV2Service {
                     return Some(Self::json_error(
                         StatusCode::BAD_REQUEST,
                         "ConfigurationSetSendingPausedException",
-                        &format!("Email sending is disabled for the configuration set {name}."),
+                        &format!("Email sending for the configuration set {name} is paused."),
                     ));
                 }
             }
         }
         None
+    }
+
+    /// Returns `true` if `address` (or its domain) is on the account's
+    /// suppression list. Mirrors SES behavior where suppression is keyed
+    /// by exact address; we don't currently honor per-config-set
+    /// suppression overrides because the underlying state only tracks
+    /// account-level suppression.
+    pub(super) fn address_is_suppressed(&self, account_id: &str, address: &str) -> bool {
+        let accounts = self.state.read();
+        let Some(state) = accounts.get(account_id) else {
+            return false;
+        };
+        let trimmed = address.trim();
+        state.suppressed_destinations.contains_key(trimmed)
     }
 
     /// Reject sends where the sender is not a verified identity. Mirrors
@@ -219,6 +233,19 @@ impl SesV2Service {
             .collect();
         if let Some(err) = self.reject_unverified_recipients(&req.account_id, &recipients) {
             return Ok(err);
+        }
+
+        // Single-recipient path: any suppressed recipient kills the send.
+        // Real SES surfaces this as `MessageRejected`.
+        for r in &recipients {
+            let addr = extract_email_address(r);
+            if self.address_is_suppressed(&req.account_id, addr) {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "MessageRejected",
+                    "Address is on the suppression list",
+                ));
+            }
         }
 
         let (subject, html_body, text_body, raw_data, template_name, template_data) =
@@ -347,6 +374,20 @@ impl SesV2Service {
                 results.push(json!({
                     "Status": "MESSAGE_REJECTED",
                     "Error": "Email address is not verified.",
+                }));
+                continue;
+            }
+
+            // Drop entries with any suppressed recipient. Mirrors SES,
+            // which fails the bulk entry rather than the whole batch.
+            let any_suppressed = recipients.iter().any(|r| {
+                let addr = extract_email_address(r);
+                self.address_is_suppressed(&req.account_id, addr)
+            });
+            if any_suppressed {
+                results.push(json!({
+                    "Status": "MESSAGE_REJECTED",
+                    "Error": "Address is on the suppression list",
                 }));
                 continue;
             }
