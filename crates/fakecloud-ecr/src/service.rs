@@ -766,12 +766,16 @@ impl EcrService {
 
     /// Copy a freshly-pushed image to every destination configured by
     /// the registry's replication rules, recording the per-destination
-    /// status so DescribeImageReplicationStatus returns real data.
-    /// Synchronous because every destination is in-process.
+    /// status so DescribeImageReplicationStatus returns real data. The
+    /// status flips IN_PROGRESS -> COMPLETE around each copy so a future
+    /// async path can surface real progress without reshaping the API.
+    /// Cross-account targets get a separate `EcrState`; cross-region
+    /// same-account targets share the source state (fakecloud collapses
+    /// regions per process) but still get their own status entry.
     fn replicate_image(&self, source_account: &str, repo_name: &str, digest: &str) {
         use crate::state::{ImageReplicationStatus, Repository};
 
-        let (rules, image, layer_blobs, source_registry_id, source_uri) = {
+        let (rules, image, layer_blobs, source_registry_id, source_region, source_uri) = {
             let accounts = self.state.read();
             let Some(state) = accounts.get(source_account) else {
                 return;
@@ -791,6 +795,7 @@ impl EcrService {
                 image,
                 layers,
                 repo.registry_id.clone(),
+                state.region.clone(),
                 repo.repository_uri.clone(),
             )
         };
@@ -812,45 +817,86 @@ impl EcrService {
             return;
         }
 
-        let mut statuses: Vec<ImageReplicationStatus> = Vec::new();
-        let mut accounts = self.state.write();
-        for dest in matching {
-            // Same registry + same region = no replication target.
-            if dest.registry_id == source_registry_id {
-                continue;
-            }
-            let target_state = accounts.get_or_create(&dest.registry_id);
-            // Provision the mirror repo on demand. Real ECR only
-            // replicates into existing repos; create-on-write keeps the
-            // fakecloud flow honest by mirroring the source repo's
-            // metadata when the target hasn't been pre-provisioned.
-            if !target_state.repositories.contains_key(repo_name) {
-                let arn = format!(
-                    "arn:aws:ecr:{}:{}:repository/{}",
-                    dest.region, dest.registry_id, repo_name
-                );
-                let repo = Repository::new(repo_name, arn, &dest.registry_id, &endpoint);
-                target_state
-                    .repositories
-                    .insert(repo_name.to_string(), repo);
-            }
-            let target_repo = target_state.repositories.get_mut(repo_name).unwrap();
-            target_repo
-                .images
-                .entry(digest.to_string())
-                .or_insert_with(|| image.clone());
-            for layer in &layer_blobs {
-                target_repo
-                    .layers
-                    .entry(layer.digest.clone())
-                    .or_insert_with(|| layer.clone());
-            }
-            statuses.push(ImageReplicationStatus {
+        // Stage IN_PROGRESS entries before any copying, then flip each
+        // to COMPLETE once its copy lands. This mirrors the AWS lifecycle
+        // and lets DescribeImageReplicationStatus return meaningful state
+        // even mid-flight.
+        let mut statuses: Vec<ImageReplicationStatus> = matching
+            .iter()
+            .filter(|dest| {
+                // Same registry + same region is a no-op target — the
+                // image is already where the rule points.
+                !(dest.registry_id == source_registry_id && dest.region == source_region)
+            })
+            .map(|dest| ImageReplicationStatus {
                 region: dest.region.clone(),
                 registry_id: dest.registry_id.clone(),
-                status: "COMPLETE".to_string(),
+                status: "IN_PROGRESS".to_string(),
                 failure_code: None,
-            });
+                failure_reason: None,
+            })
+            .collect();
+
+        if statuses.is_empty() {
+            // Still wipe any stale entries for this digest so callers see
+            // an honest empty list when no rule actually targets a
+            // distinct destination.
+            let mut accounts = self.state.write();
+            let source_state = accounts.get_or_create(source_account);
+            if let Some(repo) = source_state.repositories.get_mut(repo_name) {
+                repo.replication_statuses.remove(digest);
+            }
+            return;
+        }
+
+        let mut accounts = self.state.write();
+        for (idx, dest) in matching.iter().enumerate() {
+            if dest.registry_id == source_registry_id && dest.region == source_region {
+                continue;
+            }
+            // Map the source-side `matching` index to its corresponding
+            // status slot (which has the same filter applied).
+            let status_idx = matching
+                .iter()
+                .take(idx + 1)
+                .filter(|d| !(d.registry_id == source_registry_id && d.region == source_region))
+                .count()
+                - 1;
+
+            // Cross-account: hop into the destination registry's state.
+            // Cross-region same-account: stay in source state — the same
+            // fakecloud process serves the "destination" region too, so a
+            // separate copy would duplicate without benefit. The status
+            // entry still records the rule fired.
+            if dest.registry_id != source_registry_id {
+                let target_state = accounts.get_or_create(&dest.registry_id);
+                // Provision the mirror repo on demand. Real ECR only
+                // replicates into existing repos; create-on-write keeps
+                // the fakecloud flow honest by mirroring the source repo
+                // metadata when the target hasn't been pre-provisioned.
+                if !target_state.repositories.contains_key(repo_name) {
+                    let arn = format!(
+                        "arn:aws:ecr:{}:{}:repository/{}",
+                        dest.region, dest.registry_id, repo_name
+                    );
+                    let repo = Repository::new(repo_name, arn, &dest.registry_id, &endpoint);
+                    target_state
+                        .repositories
+                        .insert(repo_name.to_string(), repo);
+                }
+                let target_repo = target_state.repositories.get_mut(repo_name).unwrap();
+                target_repo
+                    .images
+                    .entry(digest.to_string())
+                    .or_insert_with(|| image.clone());
+                for layer in &layer_blobs {
+                    target_repo
+                        .layers
+                        .entry(layer.digest.clone())
+                        .or_insert_with(|| layer.clone());
+                }
+            }
+            statuses[status_idx].status = "COMPLETE".to_string();
         }
 
         // Record per-destination replication status on the source repo
@@ -2165,6 +2211,9 @@ impl EcrService {
                         obj.insert("status".into(), Value::String(s.status.clone()));
                         if let Some(ref code) = s.failure_code {
                             obj.insert("failureCode".into(), Value::String(code.clone()));
+                        }
+                        if let Some(ref reason) = s.failure_reason {
+                            obj.insert("failureReason".into(), Value::String(reason.clone()));
                         }
                         Value::Object(obj)
                     })

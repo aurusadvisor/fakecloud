@@ -150,13 +150,17 @@ pub struct Repository {
 }
 
 /// Outcome of replicating one image to one destination registry/region.
-/// Surfaced through `DescribeImageReplicationStatus`.
+/// Surfaced through `DescribeImageReplicationStatus`. AWS returns both
+/// `failureCode` and `failureReason`; we keep them as Options because
+/// they're only set when `status == "FAILED"`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImageReplicationStatus {
     pub region: String,
     pub registry_id: String,
     pub status: String,
     pub failure_code: Option<String>,
+    #[serde(default)]
+    pub failure_reason: Option<String>,
 }
 
 impl Repository {
