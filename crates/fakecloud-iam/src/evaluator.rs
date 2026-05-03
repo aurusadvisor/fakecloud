@@ -385,6 +385,18 @@ pub fn evaluate(policies: &[PolicyDocument], request: &EvalRequest<'_>) -> Decis
     evaluate_with_gates(policies, None, None, request)
 }
 
+/// Evaluate `request` against a single resource-style policy in
+/// isolation — no identity-side gating. Use this for trust policies
+/// (the only thing that gates `sts:AssumeRole`) and any other
+/// scenario where the policy itself is the sole authorization source
+/// and `Principal` matching is meaningful.
+pub fn evaluate_resource_policy_only(
+    policy: &PolicyDocument,
+    request: &EvalRequest<'_>,
+) -> Decision {
+    evaluate_inner(std::slice::from_ref(policy), request, true)
+}
+
 /// Evaluate `request` against a principal's identity policies plus
 /// optional permission-boundary, session-policy, and SCP layers.
 ///
