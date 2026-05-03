@@ -635,12 +635,27 @@ impl KmsService {
             ));
         }
 
-        // Generate fake MAC
-        let mac_data = format!(
-            "fakecloud-mac:{}:{}:{}",
-            key.key_id, mac_algorithm, message_b64
-        );
-        let mac_b64 = base64::engine::general_purpose::STANDARD.encode(mac_data.as_bytes());
+        // Real HMAC over the message keyed by master_key_bytes. The
+        // legacy fake-bytes path is gone; tampering with either the
+        // mac, key, or message no longer round-trips.
+        let message_bytes = base64::engine::general_purpose::STANDARD
+            .decode(message_b64)
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Message is not valid base64",
+                )
+            })?;
+        let mac_bytes = super::mac::compute(&mac_algorithm, &key.private_key_seed, &message_bytes)
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("GenerateMac failed: {e}"),
+                )
+            })?;
+        let mac_b64 = base64::engine::general_purpose::STANDARD.encode(&mac_bytes);
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -690,15 +705,40 @@ impl KmsService {
             ));
         }
 
-        // Check if MAC matches
-        let expected_mac_data = format!(
-            "fakecloud-mac:{}:{}:{}",
-            key.key_id, mac_algorithm, message_b64
-        );
-        let expected_mac_b64 =
-            base64::engine::general_purpose::STANDARD.encode(expected_mac_data.as_bytes());
-
-        let mac_valid = mac_b64 == expected_mac_b64;
+        // Real HMAC verify with constant-time comparison via the
+        // hmac crate's verify_slice. Replaces the legacy stringified
+        // expected-bytes equality compare.
+        let message_bytes = base64::engine::general_purpose::STANDARD
+            .decode(message_b64)
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Message is not valid base64",
+                )
+            })?;
+        let supplied_mac_bytes = base64::engine::general_purpose::STANDARD
+            .decode(mac_b64)
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Mac is not valid base64",
+                )
+            })?;
+        let mac_valid = super::mac::verify(
+            &mac_algorithm,
+            &key.private_key_seed,
+            &message_bytes,
+            &supplied_mac_bytes,
+        )
+        .map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!("VerifyMac failed: {e}"),
+            )
+        })?;
 
         if !mac_valid {
             return Err(AwsServiceError::aws_error(

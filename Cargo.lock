@@ -3181,6 +3181,7 @@ dependencies = [
  "fakecloud-aws",
  "fakecloud-core",
  "fakecloud-persistence",
+ "hmac 0.12.1",
  "http 1.4.0",
  "k256",
  "p256 0.13.2",
