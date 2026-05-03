@@ -187,6 +187,7 @@ pub(crate) async fn proxy_manifest(
     repo_name: &str,
     reference: &str,
     caller_arn: Option<&str>,
+    count_as_pull: bool,
 ) -> Option<Result<ProxiedManifest, AwsServiceError>> {
     let rules = rules_for_account(service, account_id);
     let (rule, upstream_path) = match_rule(&rules, repo_name)?;
@@ -235,6 +236,7 @@ pub(crate) async fn proxy_manifest(
         &media_type,
         &digest,
         caller_arn,
+        count_as_pull,
     );
     Some(Ok(ProxiedManifest {
         bytes,
@@ -297,6 +299,7 @@ fn cache_manifest(
     media_type: &str,
     digest: &str,
     caller_arn: Option<&str>,
+    count_as_pull: bool,
 ) {
     let mut accounts = service.state_handle().write();
     let state = accounts.get_or_create(account_id);
@@ -304,12 +307,13 @@ fn cache_manifest(
     let region = state.region.clone();
     // Honour pull-time exclusions: an excluded principal that triggers
     // a proxy-cache should not bump the in-use counter on the freshly
-    // cached image.
+    // cached image. HEAD requests also opt out via `count_as_pull=false`
+    // — they are existence checks, not pulls.
     let excluded = caller_arn
         .map(|a| state.pull_time_exclusions.contains_key(a))
         .unwrap_or(false);
     let now = Utc::now();
-    let (last_pull, last_in_use, in_use_count) = if excluded {
+    let (last_pull, last_in_use, in_use_count) = if !count_as_pull || excluded {
         (None, None, 0)
     } else {
         (Some(now), Some(now), 1)

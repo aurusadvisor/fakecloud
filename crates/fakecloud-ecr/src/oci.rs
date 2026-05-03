@@ -943,6 +943,9 @@ async fn manifest_head(
         name,
         reference,
         request.principal.as_ref().map(|p| p.arn.as_str()),
+        // HEAD is an existence check, not a pull — don't bump pull
+        // counters on the freshly cached image.
+        false,
     )
     .await
     {
@@ -1009,6 +1012,8 @@ async fn manifest_get(
         name,
         reference,
         request.principal.as_ref().map(|p| p.arn.as_str()),
+        // GET is a pull — bump in-use counters on the freshly cached image.
+        true,
     )
     .await
     {
