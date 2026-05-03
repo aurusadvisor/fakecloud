@@ -425,9 +425,11 @@ fn eval_condition_expr(
         return Ok(false);
     }
     if let Some(arr) = map.get("Fn::Not").and_then(|v| v.as_array()) {
-        let arg = arr.first().ok_or("Fn::Not requires exactly 1 argument")?;
+        if arr.len() != 1 {
+            return Err("Fn::Not requires exactly 1 argument".to_string());
+        }
         return Ok(!eval_condition_expr(
-            arg,
+            &arr[0],
             conds,
             parameters,
             memo,
@@ -559,13 +561,24 @@ pub fn resolve_resource_properties_with_attrs(
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
-    let resolved = resolve_refs(
+    // Re-evaluate Conditions / Mappings on every resolve so Fn::If picks
+    // the right branch and AWS::NoValue still strips at incremental
+    // provisioning time. Without this, the sentinel would leak into the
+    // provisioned property map.
+    let conditions = evaluate_conditions(&value, parameters)?;
+    let mappings = parse_mappings(&value);
+    let raw_props = apply_mappings(&raw_props, parameters, &mappings);
+
+    let resolved = resolve_refs_full(
         &raw_props,
         parameters,
         resources_obj,
         resource_physical_ids,
         resource_attributes,
+        &BTreeMap::new(),
+        &conditions,
     );
+    let resolved = strip_no_value(resolved);
 
     Ok(ResourceDefinition {
         logical_id: resource.logical_id.clone(),
@@ -645,7 +658,9 @@ fn strip_no_value(value: Value) -> Value {
 
 /// Resolve `Ref`, `Fn::GetAtt`, `Fn::Join`, and `Fn::Sub` in property
 /// values. Cross-stack `Fn::ImportValue` is not consulted; use
-/// `resolve_refs_with_imports` for that.
+/// `resolve_refs_with_imports` for that. Test-only after the
+/// resource-properties path moved to `resolve_refs_full`.
+#[cfg(test)]
 fn resolve_refs(
     value: &Value,
     parameters: &BTreeMap<String, String>,
@@ -2065,5 +2080,112 @@ Resources:
         params.insert("Env".to_string(), "prod".to_string());
         let parsed = parse_template(template, &params).unwrap();
         assert_eq!(parsed.resources.len(), 1);
+    }
+
+    #[test]
+    fn fn_not_rejects_multiple_arguments() {
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}},
+            "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+                "Bad": {"Fn::Not": [
+                    {"Condition": "IsProd"},
+                    {"Condition": "IsProd"}
+                ]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "Bad",
+                    "Properties": {"QueueName": "q"}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "prod".to_string());
+        let err = parse_template(template, &params).unwrap_err();
+        assert!(err.contains("Fn::Not"), "got: {err}");
+    }
+
+    #[test]
+    fn fn_not_rejects_zero_arguments() {
+        let template = r#"{
+            "Conditions": {
+                "Bad": {"Fn::Not": []}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "Bad",
+                    "Properties": {"QueueName": "q"}
+                }
+            }
+        }"#;
+        let err = parse_template(template, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("Fn::Not"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_resource_properties_strips_no_value_at_provision_time() {
+        // Mirrors the incremental-provisioning code path which calls
+        // resolve_resource_properties_with_attrs after the initial parse.
+        // The sentinel must not leak into the resolved properties even
+        // when re-resolved with updated physical IDs.
+        let template = r#"{
+            "Parameters": {"WantTags": {"Type": "String"}},
+            "Conditions": {
+                "HasTags": {"Fn::Equals": [{"Ref": "WantTags"}, "yes"]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": "q",
+                        "Tags": {"Fn::If": [
+                            "HasTags",
+                            [{"Key": "a", "Value": "b"}],
+                            {"Ref": "AWS::NoValue"}
+                        ]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("WantTags".to_string(), "no".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        let resource = parsed
+            .resources
+            .iter()
+            .find(|r| r.logical_id == "Q")
+            .unwrap();
+        // First parse already strips Tags.
+        assert!(!resource
+            .properties
+            .as_object()
+            .unwrap()
+            .contains_key("Tags"));
+
+        // Re-resolve with empty physical IDs (mid-provisioning). The
+        // sentinel must still be stripped — no `__fakecloud_aws_no_value__`
+        // marker should reach the caller.
+        let reresolved = resolve_resource_properties_with_attrs(
+            resource,
+            template,
+            &params,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let props = reresolved.properties.as_object().unwrap();
+        assert!(
+            !props.contains_key("Tags"),
+            "Tags should be stripped on re-resolve, got: {props:?}"
+        );
+        // Sanity: serialized form must not contain the sentinel key.
+        let serialized = serde_json::to_string(&reresolved.properties).unwrap();
+        assert!(
+            !serialized.contains(NO_VALUE_SENTINEL_KEY),
+            "sentinel leaked: {serialized}"
+        );
     }
 }
