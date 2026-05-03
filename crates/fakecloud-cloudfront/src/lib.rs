@@ -15,6 +15,7 @@ pub mod fle;
 pub mod fle_service;
 pub mod functions;
 pub mod functions_service;
+pub(crate) mod js_runtime;
 pub mod model;
 pub mod policies;
 pub mod policies_service;

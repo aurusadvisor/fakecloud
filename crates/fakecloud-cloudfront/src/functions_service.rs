@@ -251,32 +251,54 @@ impl CloudFrontService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = route_id(route, "Function")?;
         let if_match = require_if_match(req)?;
+        let parsed: TestFunctionRequest = xml_io::from_xml_root(&req.body)
+            .map_err(|e| invalid_argument(format!("invalid TestFunctionRequest XML: {e}")))?;
+        let event_bytes = base64::engine::general_purpose::STANDARD
+            .decode(parsed.event_object.trim().as_bytes())
+            .map_err(|e| invalid_argument(format!("EventObject is not valid base64: {e}")))?;
+
         let state = self.state.read();
         let f = state
             .accounts
             .get(DEFAULT_ACCOUNT)
             .and_then(|a| a.functions.get(&name).cloned())
-            .ok_or_else(|| not_found("Function", &name))?;
+            .ok_or_else(|| {
+                aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NoSuchFunctionExists",
+                    format!("The specified function does not exist: {name}"),
+                )
+            })?;
         drop(state);
         if f.etag != if_match {
             return Err(precondition_failed());
         }
 
-        let mut body = String::with_capacity(512);
+        let code_bytes = base64::engine::general_purpose::STANDARD
+            .decode(f.function_code.as_bytes())
+            .unwrap_or_else(|_| f.function_code.as_bytes().to_vec());
+        let code = String::from_utf8(code_bytes)
+            .map_err(|e| invalid_argument(format!("function code is not valid UTF-8: {e}")))?;
+        let exec = crate::js_runtime::run_handler(&code, &event_bytes);
+
+        let mut body = String::with_capacity(1024);
         body.push_str(XML_DECL);
         body.push_str(&format!("<TestResult xmlns=\"{NS}\">"));
-        body.push_str("<TestFunctionResult>");
-        body.push_str(&format!(
-            "<FunctionSummary>{}</FunctionSummary>",
-            render_function_summary_inner(&f)
-                .replacen("<FunctionSummary>", "", 1)
-                .replacen("</FunctionSummary>", "", 1)
-        ));
+        body.push_str(&render_function_summary_inner(&f));
         body.push_str("<ComputeUtilization>0</ComputeUtilization>");
-        body.push_str("<FunctionExecutionLogs></FunctionExecutionLogs>");
-        body.push_str("<FunctionErrorMessage></FunctionErrorMessage>");
-        body.push_str("<FunctionOutput>{}</FunctionOutput>");
-        body.push_str("</TestFunctionResult>");
+        body.push_str("<FunctionExecutionLogs>");
+        for line in &exec.logs {
+            body.push_str(&format!("<member>{}</member>", esc(line)));
+        }
+        body.push_str("</FunctionExecutionLogs>");
+        body.push_str(&format!(
+            "<FunctionErrorMessage>{}</FunctionErrorMessage>",
+            esc(exec.error.as_deref().unwrap_or(""))
+        ));
+        body.push_str(&format!(
+            "<FunctionOutput>{}</FunctionOutput>",
+            esc(exec.output.as_deref().unwrap_or(""))
+        ));
         body.push_str("</TestResult>");
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }
@@ -1031,6 +1053,16 @@ struct UpdateFunctionRequest {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
+struct TestFunctionRequest {
+    #[serde(default)]
+    event_object: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    stage: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
 struct CreateKeyValueStoreRequest {
     name: String,
     #[serde(default)]
@@ -1242,4 +1274,162 @@ fn render_monitoring(m: &StoredMonitoringSubscription) -> String {
     out.push_str("</RealtimeMetricsSubscriptionConfig>");
     out.push_str("</MonitoringSubscription>");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::CloudFrontService;
+    use crate::state::CloudFrontAccounts;
+    use bytes::Bytes;
+    use fakecloud_core::service::AwsService;
+    use http::HeaderValue;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    fn svc() -> CloudFrontService {
+        CloudFrontService::new(Arc::new(RwLock::new(CloudFrontAccounts::new())))
+    }
+
+    fn req(method: http::Method, path: &str, body: &str, if_match: Option<&str>) -> AwsRequest {
+        let mut headers = HeaderMap::new();
+        if let Some(v) = if_match {
+            headers.insert(http::header::IF_MATCH, HeaderValue::from_str(v).unwrap());
+        }
+        AwsRequest {
+            service: "cloudfront".into(),
+            action: String::new(),
+            region: "us-east-1".into(),
+            account_id: DEFAULT_ACCOUNT.into(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            headers,
+            query_params: std::collections::HashMap::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            body: Bytes::from(body.to_string()),
+            path_segments: path
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+            raw_path: path.into(),
+            raw_query: String::new(),
+            method,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    async fn create_function(svc: &CloudFrontService, name: &str, code: &str) -> String {
+        let code_b64 = base64::engine::general_purpose::STANDARD.encode(code.as_bytes());
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<CreateFunctionRequest xmlns="{NS}">
+  <Name>{name}</Name>
+  <FunctionConfig>
+    <Comment>t</Comment>
+    <Runtime>cloudfront-js-2.0</Runtime>
+  </FunctionConfig>
+  <FunctionCode>{code_b64}</FunctionCode>
+</CreateFunctionRequest>"#
+        );
+        let resp = svc
+            .handle(req(http::Method::POST, "/2020-05-31/function", &body, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::CREATED);
+        resp.headers
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn test_function_request_xml(event_json: &str) -> String {
+        let event_b64 = base64::engine::general_purpose::STANDARD.encode(event_json.as_bytes());
+        format!(
+            r#"<?xml version="1.0"?>
+<TestFunctionRequest xmlns="{NS}">
+  <Stage>DEVELOPMENT</Stage>
+  <EventObject>{event_b64}</EventObject>
+</TestFunctionRequest>"#
+        )
+    }
+
+    #[tokio::test]
+    async fn test_function_executes_handler_and_returns_result() {
+        let svc = svc();
+        let etag = create_function(
+            &svc,
+            "fn-ok",
+            r#"function handler(event) { event.headers.x = "y"; return event; }"#,
+        )
+        .await;
+        let body = test_function_request_xml(r#"{"headers":{}}"#);
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/function/fn-ok/test",
+                &body,
+                Some(&etag),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let xml = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(
+            xml.contains("&quot;x&quot;:&quot;y&quot;"),
+            "expected x:y in FunctionOutput, got {xml}"
+        );
+        assert!(xml.contains("<FunctionErrorMessage></FunctionErrorMessage>"));
+    }
+
+    #[tokio::test]
+    async fn test_function_propagates_js_error_into_message() {
+        let svc = svc();
+        let etag = create_function(
+            &svc,
+            "fn-err",
+            r#"function handler() { throw new Error("boom"); }"#,
+        )
+        .await;
+        let body = test_function_request_xml("{}");
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/function/fn-err/test",
+                &body,
+                Some(&etag),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let xml = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        assert!(
+            xml.contains("boom"),
+            "expected boom in error msg, got {xml}"
+        );
+        assert!(xml.contains("<FunctionOutput></FunctionOutput>"));
+    }
+
+    #[tokio::test]
+    async fn test_function_unknown_name_returns_error() {
+        let svc = svc();
+        let body = test_function_request_xml("{}");
+        let err = match svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/function/missing/test",
+                &body,
+                Some("E0"),
+            ))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("expected NoSuchFunctionExists, got Ok"),
+        };
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.code(), "NoSuchFunctionExists");
+    }
 }
