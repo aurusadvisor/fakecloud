@@ -922,20 +922,13 @@ impl CloudFormationService {
                 let accounts = self.state.read();
                 let mut entries = String::new();
                 if let Some(state) = accounts.get(&aid) {
-                    for stack in state.stacks.values() {
-                        if stack.status == "DELETE_COMPLETE" {
-                            continue;
-                        }
-                        for output in &stack.outputs {
-                            if let Some(export) = &output.export_name {
-                                entries.push_str(&format!(
-                                    "      <member>\n        <ExportingStackId>{}</ExportingStackId>\n        <Name>{}</Name>\n        <Value>{}</Value>\n      </member>\n",
-                                    xml_escape(&stack.stack_id),
-                                    xml_escape(export),
-                                    xml_escape(&output.value),
-                                ));
-                            }
-                        }
+                    for (name, export) in &state.exports {
+                        entries.push_str(&format!(
+                            "      <member>\n        <ExportingStackId>{}</ExportingStackId>\n        <Name>{}</Name>\n        <Value>{}</Value>\n      </member>\n",
+                            xml_escape(&export.exporting_stack_id),
+                            xml_escape(name),
+                            xml_escape(&export.value),
+                        ));
                     }
                 }
                 let inner = if entries.is_empty() {
@@ -953,22 +946,11 @@ impl CloudFormationService {
                 let accounts = self.state.read();
                 let mut entries = String::new();
                 if let Some(state) = accounts.get(&aid) {
-                    for stack in state.stacks.values() {
-                        if stack.status == "DELETE_COMPLETE" {
-                            continue;
-                        }
-                        // A stack imports the export if its raw template
-                        // text references `Fn::ImportValue` with that name
-                        // (string-match keeps us protocol-light).
-                        let needle_a = format!("\"{}\"", export_name);
-                        let needle_b = format!("'{}'", export_name);
-                        if stack.template.contains("ImportValue")
-                            && (stack.template.contains(&needle_a)
-                                || stack.template.contains(&needle_b))
-                        {
+                    if let Some(consumers) = state.imports.get(&export_name) {
+                        for stack_name in consumers {
                             entries.push_str(&format!(
                                 "      <member>{}</member>\n",
-                                xml_escape(&stack.name)
+                                xml_escape(stack_name)
                             ));
                         }
                     }

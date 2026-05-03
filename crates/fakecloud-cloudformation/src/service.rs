@@ -355,9 +355,10 @@ impl CloudFormationService {
         }
     }
 
-    /// Build a Fn::ImportValue lookup map across every stack in the
-    /// account: each stack's exported outputs map their `ExportName` to
-    /// the resolved value.
+    /// Build a Fn::ImportValue lookup map from the account-level
+    /// `state.exports` registry. `skip_stack` removes any export owned by
+    /// the named stack — used during update so a stack doesn't import its
+    /// own previous-revision export.
     fn collect_account_imports(
         state: &SharedCloudFormationState,
         account_id: &str,
@@ -368,20 +369,97 @@ impl CloudFormationService {
         let Some(state) = accounts.get(account_id) else {
             return imports;
         };
-        for stack in state.stacks.values() {
-            if matches!(skip_stack, Some(skip) if skip == stack.name) {
+        for (name, export) in &state.exports {
+            if matches!(skip_stack, Some(skip) if skip == export.exporting_stack_name) {
                 continue;
             }
-            if stack.status == "DELETE_COMPLETE" {
-                continue;
-            }
-            for output in &stack.outputs {
-                if let Some(export) = &output.export_name {
-                    imports.insert(export.clone(), output.value.clone());
-                }
-            }
+            imports.insert(name.clone(), export.value.clone());
         }
         imports
+    }
+
+    /// Pre-validate every `Fn::ImportValue` site in `template_body` —
+    /// return a `ValidationError` listing any export names that aren't
+    /// known in the account. Mirrors CloudFormation's behavior of
+    /// failing the create/update before any resource is provisioned.
+    fn validate_import_values(
+        state: &SharedCloudFormationState,
+        account_id: &str,
+        stack_name: &str,
+        template_body: &str,
+        parameters: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>, AwsServiceError> {
+        let value: serde_json::Value = if template_body.trim_start().starts_with('{') {
+            match serde_json::from_str(template_body) {
+                Ok(v) => v,
+                Err(_) => return Ok(Vec::new()),
+            }
+        } else {
+            match serde_yaml::from_str(template_body) {
+                Ok(v) => v,
+                Err(_) => return Ok(Vec::new()),
+            }
+        };
+        let names = template::collect_import_value_names(&value, parameters);
+        let known = Self::collect_account_imports(state, account_id, Some(stack_name));
+        for n in &names {
+            if !known.contains_key(n) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!("No export named {n} found."),
+                ));
+            }
+        }
+        Ok(names)
+    }
+
+    /// Sync `state.exports` and `state.imports` after a stack create or
+    /// update. Removes any exports / imports the stack used to own and
+    /// re-adds the current-revision set.
+    fn sync_exports_imports(
+        state: &mut CloudFormationState,
+        stack_id: &str,
+        stack_name: &str,
+        outputs: &[state::StackOutput],
+        imported_names: &[String],
+    ) {
+        // 1. Drop any prior exports owned by this stack.
+        let stale_exports: Vec<String> = state
+            .exports
+            .iter()
+            .filter(|(_, e)| e.exporting_stack_name == stack_name)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in stale_exports {
+            state.exports.remove(&k);
+        }
+        // 2. Drop any prior imports recorded against this stack.
+        for entries in state.imports.values_mut() {
+            entries.retain(|s| s != stack_name);
+        }
+        state.imports.retain(|_, v| !v.is_empty());
+
+        // 3. Re-register exports.
+        for o in outputs {
+            if let Some(export) = &o.export_name {
+                state.exports.insert(
+                    export.clone(),
+                    state::StackExport {
+                        value: o.value.clone(),
+                        exporting_stack_id: stack_id.to_string(),
+                        exporting_stack_name: stack_name.to_string(),
+                    },
+                );
+            }
+        }
+        // 4. Re-register imports.
+        for name in imported_names {
+            let entry = state.imports.entry(name.clone()).or_default();
+            if !entry.iter().any(|s| s == stack_name) {
+                entry.push(stack_name.to_string());
+            }
+        }
     }
 
     /// Resolve every `Outputs.*` entry in `template_body` after the stack
@@ -424,15 +502,8 @@ impl CloudFormationService {
             // Walk every account so cross-stack imports work even if
             // future use-cases serve mixed accounts.
             for (_account, st) in accounts.iter() {
-                for stack in st.stacks.values() {
-                    if stack.status == "DELETE_COMPLETE" {
-                        continue;
-                    }
-                    for o in &stack.outputs {
-                        if let Some(export) = &o.export_name {
-                            out.insert(export.clone(), o.value.clone());
-                        }
-                    }
+                for (name, export) in &st.exports {
+                    out.insert(name.clone(), export.value.clone());
                 }
             }
             out
@@ -553,6 +624,17 @@ impl CloudFormationService {
             AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
         })?;
 
+        // Refuse if any Fn::ImportValue references an unknown export. CFN
+        // checks this before provisioning; we mirror that so callers get
+        // a clean error instead of half-built resources.
+        let imported_names = Self::validate_import_values(
+            &self.state,
+            &req.account_id,
+            stack_name,
+            template_body,
+            &parameters,
+        )?;
+
         let provisioner = self.provisioner(&stack_id, &req.account_id, &req.region);
         let resources =
             provision_stack_resources(&provisioner, &parsed.resources, template_body, &parameters)?;
@@ -574,13 +656,14 @@ impl CloudFormationService {
             updated_at: None,
             description: parsed.description,
             notification_arns: notification_arns.clone(),
-            outputs,
+            outputs: outputs.clone(),
         };
 
         {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
             state.stacks.insert(stack_name.clone(), stack);
+            Self::sync_exports_imports(state, &stack_id, stack_name, &outputs, &imported_names);
         }
 
         Self::send_stack_notification(
@@ -620,6 +703,34 @@ impl CloudFormationService {
             let notification_arns = stack.notification_arns.clone();
             let resources: Vec<_> = stack.resources.clone();
 
+            // Block delete if any of this stack's exports are still
+            // imported by another live stack. Mirrors real CFN.
+            let owned_exports: Vec<String> = state
+                .exports
+                .iter()
+                .filter(|(_, e)| e.exporting_stack_name == stack_name_for_notif)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for export in &owned_exports {
+                if let Some(consumers) = state.imports.get(export) {
+                    let consumers: Vec<&String> = consumers
+                        .iter()
+                        .filter(|c| **c != stack_name_for_notif)
+                        .collect();
+                    if !consumers.is_empty() {
+                        let names: Vec<&str> = consumers.iter().map(|s| s.as_str()).collect();
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ValidationError",
+                            format!(
+                                "Export {export} cannot be deleted as it is in use by {}",
+                                names.join(", ")
+                            ),
+                        ));
+                    }
+                }
+            }
+
             // Build the provisioner while we still have the stack_id
             // Drop the write lock temporarily so the provisioner can read state
             drop(accounts);
@@ -636,7 +747,22 @@ impl CloudFormationService {
             if let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id) {
                 stack.status = "DELETE_COMPLETE".to_string();
                 stack.resources.clear();
+                stack.outputs.clear();
             }
+            // Drop this stack's exports + import-consumer entries.
+            let stale_exports: Vec<String> = state
+                .exports
+                .iter()
+                .filter(|(_, e)| e.exporting_stack_name == stack_name_for_notif)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in stale_exports {
+                state.exports.remove(&k);
+            }
+            for entries in state.imports.values_mut() {
+                entries.retain(|s| s != &stack_name_for_notif);
+            }
+            state.imports.retain(|_, v| !v.is_empty());
             drop(accounts);
 
             Self::send_stack_notification(
@@ -826,6 +952,14 @@ impl CloudFormationService {
                 AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", e)
             })?;
 
+        let imported_names = Self::validate_import_values(
+            &self.state,
+            &req.account_id,
+            &input.stack_name,
+            &input.template_body,
+            &input.parameters,
+        )?;
+
         let provisioner = self.provisioner(&found_stack_id, &req.account_id, &req.region);
 
         let mut accounts = self.state.write();
@@ -909,8 +1043,15 @@ impl CloudFormationService {
                 .values_mut()
                 .find(|s| s.stack_id == stack_id && s.status != "DELETE_COMPLETE")
             {
-                stack.outputs = outputs;
+                stack.outputs = outputs.clone();
             }
+            Self::sync_exports_imports(
+                state,
+                &stack_id,
+                &input.stack_name,
+                &outputs,
+                &imported_names,
+            );
         }
 
         Self::send_stack_notification(
@@ -1765,5 +1906,104 @@ mod tests {
             .get("consumer")
             .unwrap();
         assert_eq!(cons.outputs[0].value, prod_url);
+    }
+
+    #[test]
+    fn create_stack_records_export_in_state_registry() {
+        let svc = make_service();
+        let template = r#"{
+            "Resources": {"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"reg-q"}}},
+            "Outputs": {"Url":{"Value":{"Ref":"Q"},"Export":{"Name":"reg-url"}}}
+        }"#;
+        let mut params = HashMap::new();
+        params.insert("StackName".to_string(), "reg".to_string());
+        params.insert("TemplateBody".to_string(), template.to_string());
+        svc.create_stack(&make_request("CreateStack", params))
+            .expect("create");
+
+        let accounts = svc.state.read();
+        let state = accounts.get("123456789012").unwrap();
+        let export = state
+            .exports
+            .get("reg-url")
+            .expect("export registered in state.exports");
+        assert_eq!(export.exporting_stack_name, "reg");
+        assert!(!export.value.is_empty());
+        assert!(export.exporting_stack_id.contains("reg"));
+    }
+
+    #[test]
+    fn import_value_with_unknown_export_errors() {
+        let svc = make_service();
+        let consumer_tpl = r#"{
+            "Resources": {"Q":{"Type":"AWS::SQS::Queue","Properties":{
+                "QueueName": {"Fn::ImportValue":"missing-export"}
+            }}}
+        }"#;
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), "bad-consumer".to_string());
+        p.insert("TemplateBody".to_string(), consumer_tpl.to_string());
+        match svc.create_stack(&make_request("CreateStack", p)) {
+            Ok(_) => panic!("expected ValidationError for unknown export"),
+            Err(e) => {
+                let msg = format!("{e:?}");
+                assert!(msg.contains("No export named missing-export"), "got {msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn delete_stack_blocked_when_export_in_use_and_unblocked_after_consumer_delete() {
+        let svc = make_service();
+
+        let producer_tpl = r#"{
+            "Resources": {"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"prod"}}},
+            "Outputs": {"Out":{"Value":{"Ref":"Q"},"Export":{"Name":"my-arn"}}}
+        }"#;
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), "producer".to_string());
+        p.insert("TemplateBody".to_string(), producer_tpl.to_string());
+        svc.create_stack(&make_request("CreateStack", p))
+            .expect("producer");
+
+        let consumer_tpl = r#"{
+            "Resources": {"Q2":{"Type":"AWS::SQS::Queue","Properties":{
+                "QueueName": "cons-q",
+                "Tags": [{"Key":"k","Value":{"Fn::ImportValue":"my-arn"}}]
+            }}}
+        }"#;
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), "consumer".to_string());
+        p.insert("TemplateBody".to_string(), consumer_tpl.to_string());
+        svc.create_stack(&make_request("CreateStack", p))
+            .expect("consumer");
+
+        // Producer delete must fail while consumer still imports.
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), "producer".to_string());
+        match svc.delete_stack(&make_request("DeleteStack", p)) {
+            Ok(_) => panic!("delete must fail while imports exist"),
+            Err(e) => {
+                let msg = format!("{e:?}");
+                assert!(msg.contains("Export my-arn cannot be deleted"), "got {msg}");
+            }
+        }
+
+        // Delete consumer first.
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), "consumer".to_string());
+        svc.delete_stack(&make_request("DeleteStack", p))
+            .expect("consumer delete");
+
+        // Now producer delete succeeds.
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), "producer".to_string());
+        svc.delete_stack(&make_request("DeleteStack", p))
+            .expect("producer delete after consumer gone");
+
+        let accounts = svc.state.read();
+        let state = accounts.get("123456789012").unwrap();
+        assert!(state.exports.is_empty(), "exports cleared after delete");
+        assert!(state.imports.is_empty(), "imports cleared after delete");
     }
 }

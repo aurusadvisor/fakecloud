@@ -149,6 +149,75 @@ pub fn parse_template_with_resolution(
     })
 }
 
+/// Walk every `Fn::ImportValue` site in the parsed template (Resources +
+/// Outputs) and collect the static export names it references. Names that
+/// can only be resolved at runtime (e.g. `{ "Fn::Sub": "${Env}-arn" }`)
+/// resolve against `parameters` first; if they still aren't strings,
+/// they're skipped — the runtime resolver will surface the gap then.
+pub fn collect_import_value_names(
+    template: &Value,
+    parameters: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    collect_imports_walk(template, parameters, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_imports_walk(
+    value: &Value,
+    parameters: &BTreeMap<String, String>,
+    out: &mut Vec<String>,
+) {
+    match value {
+        Value::Object(map) => {
+            if let Some(arg) = map.get("Fn::ImportValue") {
+                if let Some(name) = static_import_name(arg, parameters) {
+                    out.push(name);
+                } else {
+                    // Recurse into the arg in case it contains nested ImportValues.
+                    collect_imports_walk(arg, parameters, out);
+                }
+            }
+            for (k, v) in map {
+                if k == "Fn::ImportValue" {
+                    continue;
+                }
+                collect_imports_walk(v, parameters, out);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                collect_imports_walk(v, parameters, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn static_import_name(value: &Value, parameters: &BTreeMap<String, String>) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(m) => {
+            if let Some(name) = m.get("Ref").and_then(|v| v.as_str()) {
+                return parameters.get(name).cloned();
+            }
+            if let Some(s) = m.get("Fn::Sub").and_then(|v| v.as_str()) {
+                let mut result = s.to_string();
+                for (k, v) in parameters {
+                    result = result.replace(&format!("${{{k}}}"), v);
+                }
+                if !result.contains("${") {
+                    return Some(result);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Parse the template's `Outputs` block into resolved entries. Each
 /// `Value` is fully resolved (Ref / GetAtt / Sub / Join / Fn::ImportValue)
 /// to a string. Imports use `imports` for cross-stack lookups.
@@ -165,8 +234,16 @@ pub fn parse_outputs(
         None => return Vec::new(),
     };
 
+    let conditions = evaluate_conditions(template, parameters);
     let mut out = Vec::new();
     for (logical_id, body) in outputs_obj {
+        // Skip outputs gated on a Condition that resolves false. CFN
+        // simply omits these from the resolved Outputs set.
+        if let Some(cond_name) = body.get("Condition").and_then(|v| v.as_str()) {
+            if !conditions.get(cond_name).copied().unwrap_or(false) {
+                continue;
+            }
+        }
         let raw_value = match body.get("Value") {
             Some(v) => v,
             None => continue,
@@ -178,7 +255,7 @@ pub fn parse_outputs(
             resource_physical_ids,
             resource_attributes,
             imports,
-            &BTreeMap::new(),
+            &conditions,
         );
         let value = match resolved {
             Value::String(s) => s,
@@ -196,7 +273,7 @@ pub fn parse_outputs(
                 resource_physical_ids,
                 resource_attributes,
                 imports,
-                &BTreeMap::new(),
+                &conditions,
             );
             match resolved {
                 Value::String(s) => s,
