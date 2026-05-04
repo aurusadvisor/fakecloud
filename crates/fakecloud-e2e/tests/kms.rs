@@ -406,6 +406,11 @@ async fn kms_derive_shared_secret() {
 
 #[tokio::test]
 async fn kms_import_key_material_lifecycle() {
+    // After G7, ImportKeyMaterial does a real RSA-OAEP-SHA256 unwrap
+    // against the public key issued by GetParametersForImport. Wrap a
+    // 32-byte AES-256 sized payload with that key.
+    use rsa::pkcs8::DecodePublicKey;
+
     let server = TestServer::start().await;
     let client = server.kms_client().await;
 
@@ -432,13 +437,21 @@ async fn kms_import_key_material_lifecycle() {
     assert!(params.public_key().is_some());
     assert!(params.parameters_valid_to().is_some());
 
-    // Import key material
+    // Wrap a 32-byte payload with the server-issued public key.
     let import_token = params.import_token().unwrap().clone();
+    let public_key_der = params.public_key().unwrap().clone();
+    let public = rsa::RsaPublicKey::from_public_key_der(public_key_der.as_ref()).unwrap();
+    let material = [0u8; 32];
+    let mut rng = rand::thread_rng();
+    let wrapped = public
+        .encrypt(&mut rng, rsa::Oaep::new::<rsa::sha2::Sha256>(), &material)
+        .unwrap();
+
     client
         .import_key_material()
         .key_id(&key_id)
         .import_token(import_token)
-        .encrypted_key_material(Blob::new(vec![0u8; 32]))
+        .encrypted_key_material(Blob::new(wrapped))
         .expiration_model(aws_sdk_kms::types::ExpirationModelType::KeyMaterialDoesNotExpire)
         .send()
         .await
