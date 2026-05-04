@@ -21,6 +21,7 @@ import dev.fakecloud.Types.EcrImagesResponse;
 import dev.fakecloud.Types.EcrPullThroughRulesResponse;
 import dev.fakecloud.Types.EcrRepositoriesResponse;
 import dev.fakecloud.Types.EcsClustersResponse;
+import dev.fakecloud.Types.Elbv2FlushAccessLogsResponse;
 import dev.fakecloud.Types.Elbv2ListenersResponse;
 import dev.fakecloud.Types.Elbv2LoadBalancersResponse;
 import dev.fakecloud.Types.Elbv2RulesResponse;

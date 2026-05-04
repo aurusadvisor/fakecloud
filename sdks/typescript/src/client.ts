@@ -674,9 +674,12 @@ export class Elbv2Client {
    * tests that need to assert log delivery without waiting.
    */
   async flushAccessLogs(): Promise<{ flushed: boolean }> {
-    const resp = await fetch(`${this.baseUrl}/_fakecloud/elbv2/access-logs/flush`, {
-      method: "POST",
-    });
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/elbv2/access-logs/flush`,
+      {
+        method: "POST",
+      },
+    );
     return parse(resp);
   }
 }
