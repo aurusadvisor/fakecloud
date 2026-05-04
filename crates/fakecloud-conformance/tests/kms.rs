@@ -1033,6 +1033,12 @@ async fn kms_generate_data_key_pair_without_plaintext() {
 #[test_action("kms", "DeleteImportedKeyMaterial", checksum = "5f65bfcd")]
 #[tokio::test]
 async fn kms_import_key_material_lifecycle() {
+    // After G7, ImportKeyMaterial does a real RSA-OAEP-SHA256 unwrap
+    // against the public key issued by GetParametersForImport. We now
+    // wrap a 32-byte AES-256 sized payload with that key and pass the
+    // server-issued ImportToken back, which is what the API expects.
+    use rsa::pkcs8::DecodePublicKey;
+
     let server = TestServer::start().await;
     let client = server.kms_client().await;
     let key = client
@@ -1041,27 +1047,36 @@ async fn kms_import_key_material_lifecycle() {
         .send()
         .await
         .unwrap();
-    let key_id = key.key_metadata().unwrap().key_id();
+    let key_id = key.key_metadata().unwrap().key_id().to_string();
     let params = client
         .get_parameters_for_import()
-        .key_id(key_id)
+        .key_id(&key_id)
         .wrapping_algorithm(aws_sdk_kms::types::AlgorithmSpec::RsaesOaepSha256)
         .wrapping_key_spec(aws_sdk_kms::types::WrappingKeySpec::Rsa2048)
         .send()
         .await
         .unwrap();
-    assert!(params.import_token().is_some());
+    let import_token = params.import_token().unwrap().clone();
+    let public_key_der = params.public_key().unwrap().clone();
+    let public = rsa::RsaPublicKey::from_public_key_der(public_key_der.as_ref()).unwrap();
+    let material = [0u8; 32];
+    let mut rng = rand::thread_rng();
+    let wrapped = public
+        .encrypt(&mut rng, rsa::Oaep::new::<rsa::sha2::Sha256>(), &material)
+        .unwrap();
+    // SDK Blob is base64-encoded by the JSON protocol on the wire;
+    // the server base64-decodes back to raw bytes for the OAEP unwrap.
     client
         .import_key_material()
-        .key_id(key_id)
-        .import_token(aws_sdk_kms::primitives::Blob::new(b"token"))
-        .encrypted_key_material(aws_sdk_kms::primitives::Blob::new(b"material"))
+        .key_id(&key_id)
+        .import_token(import_token)
+        .encrypted_key_material(aws_sdk_kms::primitives::Blob::new(wrapped))
         .send()
         .await
         .unwrap();
     client
         .delete_imported_key_material()
-        .key_id(key_id)
+        .key_id(&key_id)
         .send()
         .await
         .unwrap();

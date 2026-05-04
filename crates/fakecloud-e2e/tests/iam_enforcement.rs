@@ -1194,7 +1194,10 @@ async fn seed_function_with_permission(
         .add_permission()
         .function_name(name)
         .statement_id(statement_id)
-        .action("InvokeFunction")
+        // Post-D3 the action is stored verbatim; the IAM evaluator
+        // matches `Action` patterns against the request's qualified
+        // `lambda:InvokeFunction`, so callers must qualify here too.
+        .action("lambda:InvokeFunction")
         .principal(principal_arn)
         .send()
         .await
@@ -1331,7 +1334,7 @@ async fn lambda_function_policy_source_arn_condition_gates_grant() {
         .add_permission()
         .function_name("lam-src-arn-fn")
         .statement_id("gated")
-        .action("InvokeFunction")
+        .action("lambda:InvokeFunction")
         .principal("arn:aws:iam::123456789012:user/lam_src_arn")
         .source_arn("arn:aws:events:us-east-1:123456789012:rule/my-rule")
         .send()

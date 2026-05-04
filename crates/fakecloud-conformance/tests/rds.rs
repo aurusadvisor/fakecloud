@@ -1199,6 +1199,27 @@ async fn rds_post(server: &TestServer, action: &str, params: &[(&str, &str)]) ->
         .unwrap()
 }
 
+/// Assert the action was dispatched to a real handler (not a 501
+/// `InvalidAction`). Real M-phase handlers validate inputs and may
+/// return 4xx for unknown identifiers; we treat that as "route exists"
+/// because the dispatch table found the operation. Only `501
+/// NotImplemented` / `InvalidAction` indicates the route is missing.
+async fn assert_route_exists(resp: reqwest::Response, action: &str) {
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_IMPLEMENTED {
+        let text = resp.text().await.unwrap_or_default();
+        panic!("RDS route missing for {action}: 501 NotImplemented; body={text}");
+    }
+    let text = resp.text().await.unwrap_or_default();
+    if text.contains("InvalidAction") {
+        panic!("RDS dispatcher reported InvalidAction for {action}; body={text}");
+    }
+}
+
+async fn rds_route(server: &TestServer, action: &str, params: &[(&str, &str)]) {
+    assert_route_exists(rds_post(server, action, params).await, action).await;
+}
+
 #[test_action("rds", "AddRoleToDBCluster", checksum = "77b9ae59")]
 #[test_action("rds", "AddRoleToDBInstance", checksum = "03acdc74")]
 #[test_action("rds", "AddSourceIdentifierToSubscription", checksum = "f6f5fd6c")]
@@ -1356,730 +1377,530 @@ async fn rds_closure_routes_exist() {
     let server = TestServer::start().await;
 
     // Clusters
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateDBCluster",
         &[
             ("DBClusterIdentifier", "c1"),
             ("Engine", "aurora-postgresql"),
             ("MasterUsername", "u"),
-            ("MasterUserPassword", "x")
-        ]
+            ("MasterUserPassword", "x"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBClusters", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(
-        rds_post(&server, "ModifyDBCluster", &[("DBClusterIdentifier", "c1")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(
-        rds_post(&server, "RebootDBCluster", &[("DBClusterIdentifier", "c1")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(
-        rds_post(&server, "StartDBCluster", &[("DBClusterIdentifier", "c1")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(
-        rds_post(&server, "StopDBCluster", &[("DBClusterIdentifier", "c1")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBClusters", &[]).await;
+    rds_route(&server, "ModifyDBCluster", &[("DBClusterIdentifier", "c1")]).await;
+    rds_route(&server, "RebootDBCluster", &[("DBClusterIdentifier", "c1")]).await;
+    rds_route(&server, "StartDBCluster", &[("DBClusterIdentifier", "c1")]).await;
+    rds_route(&server, "StopDBCluster", &[("DBClusterIdentifier", "c1")]).await;
+    rds_route(
         &server,
         "FailoverDBCluster",
-        &[("DBClusterIdentifier", "c1")]
+        &[("DBClusterIdentifier", "c1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "BacktrackDBCluster",
         &[
             ("DBClusterIdentifier", "c1"),
-            ("BacktrackTo", "2026-01-01T00:00:00Z")
-        ]
+            ("BacktrackTo", "2026-01-01T00:00:00Z"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "PromoteReadReplicaDBCluster",
-        &[("DBClusterIdentifier", "c1")]
+        &[("DBClusterIdentifier", "c1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(
-        rds_post(&server, "DeleteDBCluster", &[("DBClusterIdentifier", "c1")])
-            .await
-            .status()
-            .is_success()
-    );
+    .await;
+    rds_route(&server, "DeleteDBCluster", &[("DBClusterIdentifier", "c1")]).await;
 
     // Cluster snapshots + cluster automated backups + backtracks
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateDBClusterSnapshot",
         &[
             ("DBClusterSnapshotIdentifier", "cs1"),
-            ("DBClusterIdentifier", "c1")
-        ]
+            ("DBClusterIdentifier", "c1"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBClusterSnapshots", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBClusterSnapshots", &[]).await;
+    rds_route(
         &server,
         "CopyDBClusterSnapshot",
         &[
             ("SourceDBClusterSnapshotIdentifier", "cs1"),
-            ("TargetDBClusterSnapshotIdentifier", "cs2")
-        ]
+            ("TargetDBClusterSnapshotIdentifier", "cs2"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DescribeDBClusterSnapshotAttributes",
-        &[("DBClusterSnapshotIdentifier", "cs1")]
+        &[("DBClusterSnapshotIdentifier", "cs1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "ModifyDBClusterSnapshotAttribute",
         &[
             ("DBClusterSnapshotIdentifier", "cs1"),
-            ("AttributeName", "restore")
-        ]
+            ("AttributeName", "restore"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBClusterAutomatedBackups", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBClusterAutomatedBackups", &[]).await;
+    rds_route(
         &server,
         "DeleteDBClusterAutomatedBackup",
-        &[("DbClusterResourceId", "x")]
+        &[("DbClusterResourceId", "x")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DescribeDBClusterBacktracks",
-        &[("DBClusterIdentifier", "c1")]
+        &[("DBClusterIdentifier", "c1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DeleteDBClusterSnapshot",
-        &[("DBClusterSnapshotIdentifier", "cs1")]
+        &[("DBClusterSnapshotIdentifier", "cs1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Cluster parameter groups
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateDBClusterParameterGroup",
         &[
             ("DBClusterParameterGroupName", "cpg1"),
             ("DBParameterGroupFamily", "aurora-postgresql15"),
-            ("Description", "x")
-        ]
+            ("Description", "x"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBClusterParameterGroups", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBClusterParameterGroups", &[]).await;
+    rds_route(
         &server,
         "DescribeDBClusterParameters",
-        &[("DBClusterParameterGroupName", "cpg1")]
+        &[("DBClusterParameterGroupName", "cpg1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DescribeEngineDefaultClusterParameters",
-        &[("DBParameterGroupFamily", "aurora-postgresql15")]
+        &[("DBParameterGroupFamily", "aurora-postgresql15")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "ModifyDBClusterParameterGroup",
-        &[("DBClusterParameterGroupName", "cpg1")]
+        &[("DBClusterParameterGroupName", "cpg1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "ResetDBClusterParameterGroup",
-        &[("DBClusterParameterGroupName", "cpg1")]
+        &[("DBClusterParameterGroupName", "cpg1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "CopyDBClusterParameterGroup",
         &[
             ("SourceDBClusterParameterGroupIdentifier", "cpg1"),
             ("TargetDBClusterParameterGroupIdentifier", "cpg2"),
-            ("TargetDBClusterParameterGroupDescription", "x")
-        ]
+            ("TargetDBClusterParameterGroupDescription", "x"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DeleteDBClusterParameterGroup",
-        &[("DBClusterParameterGroupName", "cpg1")]
+        &[("DBClusterParameterGroupName", "cpg1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Cluster endpoints
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateDBClusterEndpoint",
         &[
             ("DBClusterEndpointIdentifier", "ce1"),
             ("DBClusterIdentifier", "c1"),
-            ("EndpointType", "READER")
-        ]
+            ("EndpointType", "READER"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBClusterEndpoints", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBClusterEndpoints", &[]).await;
+    rds_route(
         &server,
         "ModifyDBClusterEndpoint",
-        &[("DBClusterEndpointIdentifier", "ce1")]
+        &[("DBClusterEndpointIdentifier", "ce1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DeleteDBClusterEndpoint",
-        &[("DBClusterEndpointIdentifier", "ce1")]
+        &[("DBClusterEndpointIdentifier", "ce1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Proxies + endpoints + targets
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateDBProxy",
-        &[("DBProxyName", "p1"), ("EngineFamily", "POSTGRESQL")]
+        &[("DBProxyName", "p1"), ("EngineFamily", "POSTGRESQL")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBProxies", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(&server, "ModifyDBProxy", &[("DBProxyName", "p1")])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBProxies", &[]).await;
+    rds_route(&server, "ModifyDBProxy", &[("DBProxyName", "p1")]).await;
+    rds_route(
         &server,
         "CreateDBProxyEndpoint",
         &[
             ("DBProxyName", "p1"),
             ("DBProxyEndpointName", "pe1"),
-            ("VpcSubnetIds.member.1", "s1")
-        ]
+            ("VpcSubnetIds.member.1", "s1"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBProxyEndpoints", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBProxyEndpoints", &[]).await;
+    rds_route(
         &server,
         "ModifyDBProxyEndpoint",
-        &[("DBProxyEndpointName", "pe1")]
+        &[("DBProxyEndpointName", "pe1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DescribeDBProxyTargetGroups",
-        &[("DBProxyName", "p1")]
+        &[("DBProxyName", "p1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(
-        rds_post(&server, "DescribeDBProxyTargets", &[("DBProxyName", "p1")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBProxyTargets", &[("DBProxyName", "p1")]).await;
+    rds_route(
         &server,
         "ModifyDBProxyTargetGroup",
-        &[("DBProxyName", "p1"), ("TargetGroupName", "default")]
+        &[("DBProxyName", "p1"), ("TargetGroupName", "default")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(
-        rds_post(&server, "RegisterDBProxyTargets", &[("DBProxyName", "p1")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "RegisterDBProxyTargets", &[("DBProxyName", "p1")]).await;
+    rds_route(
         &server,
         "DeregisterDBProxyTargets",
-        &[("DBProxyName", "p1")]
+        &[("DBProxyName", "p1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DeleteDBProxyEndpoint",
-        &[("DBProxyEndpointName", "pe1")]
+        &[("DBProxyEndpointName", "pe1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DeleteDBProxy", &[("DBProxyName", "p1")])
-        .await
-        .status()
-        .is_success());
+    .await;
+    rds_route(&server, "DeleteDBProxy", &[("DBProxyName", "p1")]).await;
 
     // Security groups
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateDBSecurityGroup",
         &[
             ("DBSecurityGroupName", "sg1"),
-            ("DBSecurityGroupDescription", "x")
-        ]
+            ("DBSecurityGroupDescription", "x"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "AuthorizeDBSecurityGroupIngress",
-        &[("DBSecurityGroupName", "sg1")]
+        &[("DBSecurityGroupName", "sg1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "RevokeDBSecurityGroupIngress",
-        &[("DBSecurityGroupName", "sg1")]
+        &[("DBSecurityGroupName", "sg1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBSecurityGroups", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBSecurityGroups", &[]).await;
+    rds_route(
         &server,
         "DeleteDBSecurityGroup",
-        &[("DBSecurityGroupName", "sg1")]
+        &[("DBSecurityGroupName", "sg1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Option groups
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateOptionGroup",
         &[
             ("OptionGroupName", "og1"),
             ("EngineName", "mysql"),
             ("MajorEngineVersion", "8.0"),
-            ("OptionGroupDescription", "x")
-        ]
+            ("OptionGroupDescription", "x"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeOptionGroups", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeOptionGroups", &[]).await;
+    rds_route(
         &server,
         "DescribeOptionGroupOptions",
-        &[("EngineName", "mysql")]
+        &[("EngineName", "mysql")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(
-        rds_post(&server, "ModifyOptionGroup", &[("OptionGroupName", "og1")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "ModifyOptionGroup", &[("OptionGroupName", "og1")]).await;
+    rds_route(
         &server,
         "CopyOptionGroup",
         &[
             ("SourceOptionGroupIdentifier", "og1"),
             ("TargetOptionGroupIdentifier", "og2"),
-            ("TargetOptionGroupDescription", "x")
-        ]
+            ("TargetOptionGroupDescription", "x"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(
-        rds_post(&server, "DeleteOptionGroup", &[("OptionGroupName", "og1")])
-            .await
-            .status()
-            .is_success()
-    );
+    .await;
+    rds_route(&server, "DeleteOptionGroup", &[("OptionGroupName", "og1")]).await;
 
     // Event subscriptions
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateEventSubscription",
         &[
             ("SubscriptionName", "es1"),
-            ("SnsTopicArn", "arn:aws:sns:us-east-1:000:t")
-        ]
+            ("SnsTopicArn", "arn:aws:sns:us-east-1:000:t"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeEventSubscriptions", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeEventSubscriptions", &[]).await;
+    rds_route(
         &server,
         "ModifyEventSubscription",
-        &[("SubscriptionName", "es1")]
+        &[("SubscriptionName", "es1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "AddSourceIdentifierToSubscription",
-        &[("SubscriptionName", "es1"), ("SourceIdentifier", "s1")]
+        &[("SubscriptionName", "es1"), ("SourceIdentifier", "s1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "RemoveSourceIdentifierFromSubscription",
-        &[("SubscriptionName", "es1"), ("SourceIdentifier", "s1")]
+        &[("SubscriptionName", "es1"), ("SourceIdentifier", "s1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DeleteEventSubscription",
-        &[("SubscriptionName", "es1")]
+        &[("SubscriptionName", "es1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Global clusters
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateGlobalCluster",
-        &[("GlobalClusterIdentifier", "gc1")]
+        &[("GlobalClusterIdentifier", "gc1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeGlobalClusters", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeGlobalClusters", &[]).await;
+    rds_route(
         &server,
         "ModifyGlobalCluster",
-        &[("GlobalClusterIdentifier", "gc1")]
+        &[("GlobalClusterIdentifier", "gc1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "FailoverGlobalCluster",
         &[
             ("GlobalClusterIdentifier", "gc1"),
-            ("TargetDbClusterIdentifier", "x")
-        ]
+            ("TargetDbClusterIdentifier", "x"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "SwitchoverGlobalCluster",
         &[
             ("GlobalClusterIdentifier", "gc1"),
-            ("TargetDbClusterIdentifier", "x")
-        ]
+            ("TargetDbClusterIdentifier", "x"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "RemoveFromGlobalCluster",
         &[
             ("GlobalClusterIdentifier", "gc1"),
-            ("DbClusterIdentifier", "x")
-        ]
+            ("DbClusterIdentifier", "x"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DeleteGlobalCluster",
-        &[("GlobalClusterIdentifier", "gc1")]
+        &[("GlobalClusterIdentifier", "gc1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Integrations
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateIntegration",
         &[
             ("IntegrationName", "i1"),
             ("SourceArn", "x"),
-            ("TargetArn", "y")
-        ]
+            ("TargetArn", "y"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeIntegrations", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeIntegrations", &[]).await;
+    rds_route(
         &server,
         "ModifyIntegration",
-        &[("IntegrationIdentifier", "i1")]
+        &[("IntegrationIdentifier", "i1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DeleteIntegration",
-        &[("IntegrationIdentifier", "i1")]
+        &[("IntegrationIdentifier", "i1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
-    // Blue/Green
-    assert!(rds_post(
+    // Blue/Green — post-M9 the handler validates that the source
+    // DB exists. The earlier `c1` cluster was deleted, so seed a
+    // fresh `bg-src` cluster (BG accepts cluster sources too). The
+    // CreateBlueGreen call generates a `bgd-<rand>` id, so capture
+    // it from the response and pass it through to Switchover/Delete.
+    rds_route(
+        &server,
+        "CreateDBCluster",
+        &[
+            ("DBClusterIdentifier", "bg-src"),
+            ("Engine", "aurora-postgresql"),
+            ("MasterUsername", "u"),
+            ("MasterUserPassword", "x"),
+        ],
+    )
+    .await;
+    let bg_create = rds_post(
         &server,
         "CreateBlueGreenDeployment",
         &[
             ("BlueGreenDeploymentName", "bg1"),
-            ("Source", "arn:aws:rds:us-east-1:000:cluster:c1")
-        ]
+            ("Source", "arn:aws:rds:us-east-1:000:cluster:bg-src"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeBlueGreenDeployments", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    assert!(bg_create.status().is_success());
+    let bg_body = bg_create.text().await.unwrap();
+    let bg_id = bg_body
+        .split("<BlueGreenDeploymentIdentifier>")
+        .nth(1)
+        .and_then(|s| s.split("</BlueGreenDeploymentIdentifier>").next())
+        .expect("id in response")
+        .to_string();
+    rds_route(&server, "DescribeBlueGreenDeployments", &[]).await;
+    rds_route(
         &server,
         "SwitchoverBlueGreenDeployment",
-        &[("BlueGreenDeploymentIdentifier", "bg1")]
+        &[("BlueGreenDeploymentIdentifier", &bg_id)],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DeleteBlueGreenDeployment",
-        &[("BlueGreenDeploymentIdentifier", "bg1")]
+        &[("BlueGreenDeploymentIdentifier", &bg_id)],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Shard groups
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateDBShardGroup",
         &[
             ("DBShardGroupIdentifier", "sg1"),
             ("DBClusterIdentifier", "c1"),
-            ("MaxACU", "1024")
-        ]
+            ("MaxACU", "1024"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBShardGroups", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBShardGroups", &[]).await;
+    rds_route(
         &server,
         "ModifyDBShardGroup",
-        &[("DBShardGroupIdentifier", "sg1")]
+        &[("DBShardGroupIdentifier", "sg1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "RebootDBShardGroup",
-        &[("DBShardGroupIdentifier", "sg1")]
+        &[("DBShardGroupIdentifier", "sg1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DeleteDBShardGroup",
-        &[("DBShardGroupIdentifier", "sg1")]
+        &[("DBShardGroupIdentifier", "sg1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Custom engine versions
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateCustomDBEngineVersion",
-        &[("Engine", "custom-oracle-ee"), ("EngineVersion", "1.0")]
+        &[("Engine", "custom-oracle-ee"), ("EngineVersion", "1.0")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "ModifyCustomDBEngineVersion",
-        &[("Engine", "custom-oracle-ee"), ("EngineVersion", "1.0")]
+        &[("Engine", "custom-oracle-ee"), ("EngineVersion", "1.0")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DeleteCustomDBEngineVersion",
-        &[("Engine", "custom-oracle-ee"), ("EngineVersion", "1.0")]
+        &[("Engine", "custom-oracle-ee"), ("EngineVersion", "1.0")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Tenant DBs
-    assert!(rds_post(
+    rds_route(
         &server,
         "CreateTenantDatabase",
         &[
             ("TenantDBName", "t1"),
             ("DBInstanceIdentifier", "i1"),
             ("MasterUsername", "u"),
-            ("MasterUserPassword", "p")
-        ]
+            ("MasterUserPassword", "p"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeTenantDatabases", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeTenantDatabases", &[]).await;
+    rds_route(
         &server,
         "ModifyTenantDatabase",
-        &[("TenantDBName", "t1"), ("DBInstanceIdentifier", "i1")]
+        &[("TenantDBName", "t1"), ("DBInstanceIdentifier", "i1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBSnapshotTenantDatabases", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBSnapshotTenantDatabases", &[]).await;
+    rds_route(
         &server,
         "DeleteTenantDatabase",
-        &[("TenantDBName", "t1"), ("DBInstanceIdentifier", "i1")]
+        &[("TenantDBName", "t1"), ("DBInstanceIdentifier", "i1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Export tasks
-    assert!(rds_post(
+    rds_route(
         &server,
         "StartExportTask",
         &[
@@ -2087,198 +1908,162 @@ async fn rds_closure_routes_exist() {
             ("SourceArn", "x"),
             ("S3BucketName", "b"),
             ("IamRoleArn", "r"),
-            ("KmsKeyId", "k")
-        ]
+            ("KmsKeyId", "k"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeExportTasks", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeExportTasks", &[]).await;
+    rds_route(
         &server,
         "CancelExportTask",
-        &[("ExportTaskIdentifier", "ex1")]
+        &[("ExportTaskIdentifier", "ex1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Activity stream
-    assert!(rds_post(
+    rds_route(
         &server,
         "StartActivityStream",
-        &[("ResourceArn", "x"), ("Mode", "sync"), ("KmsKeyId", "k")]
+        &[("ResourceArn", "x"), ("Mode", "sync"), ("KmsKeyId", "k")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(
-        rds_post(&server, "ModifyActivityStream", &[("ResourceArn", "x")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(
-        rds_post(&server, "StopActivityStream", &[("ResourceArn", "x")])
-            .await
-            .status()
-            .is_success()
-    );
+    .await;
+    rds_route(&server, "ModifyActivityStream", &[("ResourceArn", "x")]).await;
+    rds_route(&server, "StopActivityStream", &[("ResourceArn", "x")]).await;
 
     // Roles
-    assert!(rds_post(
+    rds_route(
         &server,
         "AddRoleToDBCluster",
-        &[("DBClusterIdentifier", "c1"), ("RoleArn", "r")]
+        &[("DBClusterIdentifier", "c1"), ("RoleArn", "r")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "RemoveRoleFromDBCluster",
-        &[("DBClusterIdentifier", "c1"), ("RoleArn", "r")]
+        &[("DBClusterIdentifier", "c1"), ("RoleArn", "r")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "AddRoleToDBInstance",
         &[
             ("DBInstanceIdentifier", "i1"),
             ("RoleArn", "r"),
-            ("FeatureName", "S3")
-        ]
+            ("FeatureName", "S3"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "RemoveRoleFromDBInstance",
         &[
             ("DBInstanceIdentifier", "i1"),
             ("RoleArn", "r"),
-            ("FeatureName", "S3")
-        ]
+            ("FeatureName", "S3"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Pending maintenance + reserved
-    assert!(rds_post(
+    rds_route(
         &server,
         "ApplyPendingMaintenanceAction",
         &[
             ("ResourceIdentifier", "x"),
             ("ApplyAction", "system-update"),
-            ("OptInType", "immediate")
-        ]
+            ("OptInType", "immediate"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribePendingMaintenanceActions", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribePendingMaintenanceActions", &[]).await;
+    rds_route(
         &server,
         "PurchaseReservedDBInstancesOffering",
-        &[("ReservedDBInstancesOfferingId", "o1")]
+        &[("ReservedDBInstancesOfferingId", "o1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeReservedDBInstances", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(
-        rds_post(&server, "DescribeReservedDBInstancesOfferings", &[])
-            .await
-            .status()
-            .is_success()
-    );
+    .await;
+    rds_route(&server, "DescribeReservedDBInstances", &[]).await;
+    rds_route(&server, "DescribeReservedDBInstancesOfferings", &[]).await;
 
     // Snapshots / restores / parameters / engine defaults
-    assert!(rds_post(
+    rds_route(
         &server,
         "CopyDBSnapshot",
         &[
             ("SourceDBSnapshotIdentifier", "s1"),
-            ("TargetDBSnapshotIdentifier", "s2")
-        ]
+            ("TargetDBSnapshotIdentifier", "s2"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    // Real M-phase parameter-group ops (Describe/Copy/Reset) require
+    // the source group to exist; seed `p1` and `default` first.
+    rds_route(
+        &server,
+        "CreateDBParameterGroup",
+        &[
+            ("DBParameterGroupName", "p1"),
+            ("DBParameterGroupFamily", "postgres15"),
+            ("Description", "x"),
+        ],
+    )
+    .await;
+    rds_route(
+        &server,
+        "CreateDBParameterGroup",
+        &[
+            ("DBParameterGroupName", "default"),
+            ("DBParameterGroupFamily", "postgres15"),
+            ("Description", "x"),
+        ],
+    )
+    .await;
+    rds_route(
         &server,
         "CopyDBParameterGroup",
         &[
             ("SourceDBParameterGroupIdentifier", "p1"),
             ("TargetDBParameterGroupIdentifier", "p2"),
-            ("TargetDBParameterGroupDescription", "x")
-        ]
+            ("TargetDBParameterGroupDescription", "x"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DescribeDBParameters",
-        &[("DBParameterGroupName", "default")]
+        &[("DBParameterGroupName", "default")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "ResetDBParameterGroup",
-        &[("DBParameterGroupName", "p1")]
+        &[("DBParameterGroupName", "p1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DescribeEngineDefaultParameters",
-        &[("DBParameterGroupFamily", "postgres15")]
+        &[("DBParameterGroupFamily", "postgres15")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DescribeDBSnapshotAttributes",
-        &[("DBSnapshotIdentifier", "s1")]
+        &[("DBSnapshotIdentifier", "s1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "ModifyDBSnapshot",
-        &[("DBSnapshotIdentifier", "s1")]
+        &[("DBSnapshotIdentifier", "s1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "ModifyDBSnapshotAttribute",
-        &[("DBSnapshotIdentifier", "s1"), ("AttributeName", "restore")]
+        &[("DBSnapshotIdentifier", "s1"), ("AttributeName", "restore")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "RestoreDBClusterFromS3",
         &[
@@ -2289,36 +2074,30 @@ async fn rds_closure_routes_exist() {
             ("SourceEngine", "mysql"),
             ("SourceEngineVersion", "8.0"),
             ("S3BucketName", "b"),
-            ("S3IngestionRoleArn", "r")
-        ]
+            ("S3IngestionRoleArn", "r"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "RestoreDBClusterFromSnapshot",
         &[
             ("DBClusterIdentifier", "c2"),
             ("SnapshotIdentifier", "s1"),
-            ("Engine", "aurora-mysql")
-        ]
+            ("Engine", "aurora-mysql"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "RestoreDBClusterToPointInTime",
         &[
             ("DBClusterIdentifier", "c2"),
-            ("SourceDBClusterIdentifier", "c1")
-        ]
+            ("SourceDBClusterIdentifier", "c1"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "RestoreDBInstanceFromS3",
         &[
@@ -2331,175 +2110,108 @@ async fn rds_closure_routes_exist() {
             ("SourceEngine", "mysql"),
             ("SourceEngineVersion", "8.0"),
             ("S3BucketName", "b"),
-            ("S3IngestionRoleArn", "r")
-        ]
+            ("S3IngestionRoleArn", "r"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "RestoreDBInstanceToPointInTime",
         &[
             ("SourceDBInstanceIdentifier", "i1"),
-            ("TargetDBInstanceIdentifier", "i2")
-        ]
+            ("TargetDBInstanceIdentifier", "i2"),
+        ],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Recommendations
-    assert!(rds_post(&server, "DescribeDBRecommendations", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    rds_route(&server, "DescribeDBRecommendations", &[]).await;
+    rds_route(
         &server,
         "ModifyDBRecommendation",
-        &[("RecommendationId", "r1")]
+        &[("RecommendationId", "r1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Certificates
-    assert!(rds_post(&server, "DescribeCertificates", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    rds_route(&server, "DescribeCertificates", &[]).await;
+    rds_route(
         &server,
         "ModifyCertificates",
-        &[("CertificateIdentifier", "rds-ca-2019")]
+        &[("CertificateIdentifier", "rds-ca-2019")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Read replicas
-    assert!(rds_post(
+    rds_route(
         &server,
         "PromoteReadReplica",
-        &[("DBInstanceIdentifier", "i1")]
+        &[("DBInstanceIdentifier", "i1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "StartDBInstance",
-        &[("DBInstanceIdentifier", "i1")]
+        &[("DBInstanceIdentifier", "i1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(
-        rds_post(&server, "StopDBInstance", &[("DBInstanceIdentifier", "i1")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "StopDBInstance", &[("DBInstanceIdentifier", "i1")]).await;
+    rds_route(
         &server,
         "StartDBInstanceAutomatedBackupsReplication",
-        &[("SourceDBInstanceArn", "arn:aws:rds:us-east-1:000:db:i1")]
+        &[("SourceDBInstanceArn", "arn:aws:rds:us-east-1:000:db:i1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "StopDBInstanceAutomatedBackupsReplication",
-        &[("SourceDBInstanceArn", "arn:aws:rds:us-east-1:000:db:i1")]
+        &[("SourceDBInstanceArn", "arn:aws:rds:us-east-1:000:db:i1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DeleteDBInstanceAutomatedBackup",
-        &[("DbiResourceId", "x")]
+        &[("DbiResourceId", "x")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBInstanceAutomatedBackups", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBInstanceAutomatedBackups", &[]).await;
+    rds_route(
         &server,
         "SwitchoverReadReplica",
-        &[("DBInstanceIdentifier", "i1")]
+        &[("DBInstanceIdentifier", "i1")],
     )
-    .await
-    .status()
-    .is_success());
+    .await;
 
     // Account / events / regions / log files / capacity / http
-    assert!(rds_post(&server, "DescribeAccountAttributes", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(&server, "DescribeEventCategories", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(&server, "DescribeEvents", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(&server, "DescribeSourceRegions", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    rds_route(&server, "DescribeAccountAttributes", &[]).await;
+    rds_route(&server, "DescribeEventCategories", &[]).await;
+    rds_route(&server, "DescribeEvents", &[]).await;
+    rds_route(&server, "DescribeSourceRegions", &[]).await;
+    rds_route(
         &server,
         "DescribeDBLogFiles",
-        &[("DBInstanceIdentifier", "i1")]
+        &[("DBInstanceIdentifier", "i1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "DownloadDBLogFilePortion",
-        &[("DBInstanceIdentifier", "i1"), ("LogFileName", "log")]
+        &[("DBInstanceIdentifier", "i1"), ("LogFileName", "log")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(&server, "DescribeDBMajorEngineVersions", &[])
-        .await
-        .status()
-        .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(&server, "DescribeDBMajorEngineVersions", &[]).await;
+    rds_route(
         &server,
         "DescribeValidDBInstanceModifications",
-        &[("DBInstanceIdentifier", "i1")]
+        &[("DBInstanceIdentifier", "i1")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(rds_post(
+    .await;
+    rds_route(
         &server,
         "ModifyCurrentDBClusterCapacity",
-        &[("DBClusterIdentifier", "c1"), ("Capacity", "4")]
+        &[("DBClusterIdentifier", "c1"), ("Capacity", "4")],
     )
-    .await
-    .status()
-    .is_success());
-    assert!(
-        rds_post(&server, "DisableHttpEndpoint", &[("ResourceArn", "x")])
-            .await
-            .status()
-            .is_success()
-    );
-    assert!(
-        rds_post(&server, "EnableHttpEndpoint", &[("ResourceArn", "x")])
-            .await
-            .status()
-            .is_success()
-    );
+    .await;
+    rds_route(&server, "DisableHttpEndpoint", &[("ResourceArn", "x")]).await;
+    rds_route(&server, "EnableHttpEndpoint", &[("ResourceArn", "x")]).await;
 }
