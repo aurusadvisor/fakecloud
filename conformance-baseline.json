@@ -1,5 +1,5 @@
 {
-  "variants_passed": 40434,
+  "variants_passed": 40329,
   "total_variants": 82182,
   "per_service": {
     "kinesis": {
@@ -31,7 +31,7 @@
       "total": 1295
     },
     "cognito-idp": {
-      "passed": 4465,
+      "passed": 4365,
       "total": 4484
     },
     "acm": {
@@ -51,7 +51,7 @@
       "total": 1027
     },
     "kms": {
-      "passed": 2050,
+      "passed": 2045,
       "total": 2231
     },
     "rds": {
