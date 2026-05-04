@@ -403,7 +403,7 @@ def _acm_id(arn_or_id: str) -> str:
     marker = "certificate/"
     idx = arn_or_id.rfind(marker)
     if idx >= 0:
-        return arn_or_id[idx + len(marker):]
+        return arn_or_id[idx + len(marker) :]
     return arn_or_id
 
 

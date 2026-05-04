@@ -1,5 +1,5 @@
 {
-  "variants_passed": 40314,
+  "variants_passed": 40284,
   "total_variants": 82182,
   "per_service": {
     "kinesis": {
@@ -51,7 +51,7 @@
       "total": 1027
     },
     "kms": {
-      "passed": 2030,
+      "passed": 2000,
       "total": 2231
     },
     "rds": {

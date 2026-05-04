@@ -269,6 +269,7 @@ def test_sns_messages(fc: FakeCloudSync, fakecloud_url: str) -> None:
 
 def test_ses_emails(fc: FakeCloudSync, fakecloud_url: str) -> None:
     sesv2 = boto3.client("sesv2", **_boto_kwargs(fakecloud_url))
+    sesv2.create_email_identity(EmailIdentity="sender@example.com")
     sesv2.send_email(
         FromEmailAddress="sender@example.com",
         Destination={"ToAddresses": ["recipient@example.com"]},
@@ -603,9 +604,7 @@ def test_scheduler_fire_schedule(fc: FakeCloudSync, fakecloud_url: str) -> None:
 # ── Route 53 admin ────────────────────────────────────────────────────
 
 
-def test_route53_set_health_check_status(
-    fc: FakeCloudSync, fakecloud_url: str
-) -> None:
+def test_route53_set_health_check_status(fc: FakeCloudSync, fakecloud_url: str) -> None:
     r53 = boto3.client("route53", **_boto_kwargs(fakecloud_url))
     created = r53.create_health_check(
         CallerReference="py-sdk-route53-flip",

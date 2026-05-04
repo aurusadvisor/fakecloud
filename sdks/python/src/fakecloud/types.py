@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
 
@@ -298,6 +298,9 @@ class SentEmail:
     template_name: Optional[str] = None
     template_data: Optional[str] = None
     timestamp: str = ""
+    dkim_signature: Optional[str] = None
+    dkim_domain: Optional[str] = None
+    dkim_selector: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SentEmail:
@@ -306,6 +309,9 @@ class SentEmail:
         if "from" in data:
             d["from_addr"] = data["from"]
         d.pop("from", None)
+        # Drop unknown fields the server might add to keep the SDK forward-compatible.
+        known = {f.name for f in fields(cls)}
+        d = {k: v for k, v in d.items() if k in known}
         return cls(**d)
 
 
