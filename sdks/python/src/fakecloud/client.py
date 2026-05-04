@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 import httpx
 
@@ -311,13 +311,13 @@ class Elbv2Client:
         _check(resp)
         return Elbv2RulesResponse.from_dict(resp.json())
 
-    async def flush_access_logs(self) -> dict:
+    async def flush_access_logs(self) -> dict[str, Any]:
         """Force every buffered access-log + connection-log line to flush to S3."""
         resp = await self._client.post(
             f"{self._base}/_fakecloud/elbv2/access-logs/flush"
         )
         _check(resp)
-        return resp.json()
+        return cast("dict[str, Any]", resp.json())
 
 
 class _SyncElbv2Client:
@@ -347,13 +347,11 @@ class _SyncElbv2Client:
         _check(resp)
         return Elbv2RulesResponse.from_dict(resp.json())
 
-    def flush_access_logs(self) -> dict:
+    def flush_access_logs(self) -> dict[str, Any]:
         """Force every buffered access-log + connection-log line to flush to S3."""
-        resp = self._client.post(
-            f"{self._base}/_fakecloud/elbv2/access-logs/flush"
-        )
+        resp = self._client.post(f"{self._base}/_fakecloud/elbv2/access-logs/flush")
         _check(resp)
-        return resp.json()
+        return cast("dict[str, Any]", resp.json())
 
 
 class Route53Client:
