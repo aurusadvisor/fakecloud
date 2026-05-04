@@ -100,11 +100,31 @@ async fn sts_get_access_key_info() {
 #[test_action("sts", "DecodeAuthorizationMessage", checksum = "4573ceaa")]
 #[tokio::test]
 async fn sts_decode_authorization_message() {
+    // F4 turned this into a real round-trip on tokens produced by
+    // `fakecloud_iam::auth_message::encode_deny`. Mint a valid
+    // zlib+base64 token here so the decoder has something to chew on.
+    use base64::Engine;
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
     let server = TestServer::start().await;
     let client = server.sts_client().await;
+
+    let payload = serde_json::json!({
+        "allowed": false,
+        "explicitDeny": true,
+        "matchedStatements": { "items": [] },
+    });
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(&serde_json::to_vec(&payload).unwrap())
+        .unwrap();
+    let token = base64::engine::general_purpose::STANDARD.encode(encoder.finish().unwrap());
+
     let result = client
         .decode_authorization_message()
-        .encoded_message("encoded-test-message")
+        .encoded_message(&token)
         .send()
         .await
         .unwrap();

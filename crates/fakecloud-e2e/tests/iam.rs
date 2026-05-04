@@ -402,12 +402,34 @@ async fn sts_get_caller_identity_cli() {
 
 #[tokio::test]
 async fn sts_decode_authorization_message() {
+    // After F4, DecodeAuthorizationMessage does a real round-trip on
+    // tokens produced by `fakecloud_iam::auth_message::encode_deny`
+    // (zlib-compressed JSON, base64-encoded). Garbage input now
+    // returns InvalidAuthorizationMessageException, so we mint a
+    // valid token here and check the decoder hands it back as the
+    // documented JSON shape (`allowed` + `matchedStatements`).
+    use base64::Engine;
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
     let server = TestServer::start().await;
     let client = server.sts_client().await;
 
+    let payload = serde_json::json!({
+        "allowed": false,
+        "explicitDeny": true,
+        "matchedStatements": { "items": [{"sourcePolicyId": "PolicyA"}] },
+    });
+    let json_bytes = serde_json::to_vec(&payload).unwrap();
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&json_bytes).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let token = base64::engine::general_purpose::STANDARD.encode(compressed);
+
     let resp = client
         .decode_authorization_message()
-        .encoded_message("some-encoded-authorization-message")
+        .encoded_message(&token)
         .send()
         .await
         .unwrap();

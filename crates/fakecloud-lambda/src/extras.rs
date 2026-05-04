@@ -1743,11 +1743,14 @@ impl LambdaService {
                     .collect()
             })
             .unwrap_or_default();
-        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
+        // SDKs URL-encode `:` in the path so the ARN arrives as
+        // `arn%3Aaws%3Alambda%3A...`; decode before parsing.
+        let resource_arn_decoded = decode_query_segment(resource_arn);
+        let name = function_name_from_arn(&resource_arn_decoded).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterValueException",
-                format!("Resource ARN is not a Lambda function: {resource_arn}"),
+                format!("Resource ARN is not a Lambda function: {resource_arn_decoded}"),
             )
         })?;
         let mut accounts = self.state.write();
@@ -1783,11 +1786,12 @@ impl LambdaService {
                 keys.push(v);
             }
         }
-        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
+        let resource_arn_decoded = decode_query_segment(resource_arn);
+        let name = function_name_from_arn(&resource_arn_decoded).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterValueException",
-                format!("Resource ARN is not a Lambda function: {resource_arn}"),
+                format!("Resource ARN is not a Lambda function: {resource_arn_decoded}"),
             )
         })?;
         let mut accounts = self.state.write();
@@ -1810,11 +1814,12 @@ impl LambdaService {
         resource_arn: &str,
         account_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = function_name_from_arn(resource_arn).ok_or_else(|| {
+        let resource_arn_decoded = decode_query_segment(resource_arn);
+        let name = function_name_from_arn(&resource_arn_decoded).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterValueException",
-                format!("Resource ARN is not a Lambda function: {resource_arn}"),
+                format!("Resource ARN is not a Lambda function: {resource_arn_decoded}"),
             )
         })?;
         let region = self.region_for(account_id);

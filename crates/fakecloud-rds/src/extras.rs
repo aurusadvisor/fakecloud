@@ -824,8 +824,19 @@ impl RdsService {
                     state.db_instance_arn(&source_id)
                 };
                 let target_arn = state.db_instance_arn(&target_id);
-                let exists = state.instances.contains_key(&source_id);
-                if !exists {
+                // AWS accepts either a DBInstance ARN or an Aurora
+                // DBCluster ARN as the BG source. Look up under both
+                // the real instance store and the cluster map under
+                // `state.extras["clusters"]`; absent both, surface
+                // DBInstanceNotFound (matching what AWS emits for the
+                // more common DBInstance source).
+                let instance_exists = state.instances.contains_key(&source_id);
+                let cluster_exists = state
+                    .extras
+                    .get("clusters")
+                    .map(|m| m.contains_key(&source_id))
+                    .unwrap_or(false);
+                if !instance_exists && !cluster_exists {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::NOT_FOUND,
                         "DBInstanceNotFound",
