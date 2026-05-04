@@ -61,6 +61,11 @@ fn repo_with_images(entries: &[(&str, &[&str], i64)]) -> Repository {
                 image_size_in_bytes: 0,
                 image_pushed_at: pushed,
                 last_recorded_pull_time: None,
+                image_status: "ACTIVE".to_string(),
+                last_archived_at: None,
+                last_activated_at: None,
+                last_in_use_at: None,
+                in_use_count: 0,
             },
         );
         for t in *tags {
@@ -324,6 +329,11 @@ fn replicate_image_copies_to_destination_account() {
             image_size_in_bytes: 0,
             image_pushed_at: chrono::Utc::now(),
             last_recorded_pull_time: None,
+            image_status: "ACTIVE".to_string(),
+            last_archived_at: None,
+            last_activated_at: None,
+            last_in_use_at: None,
+            in_use_count: 0,
         },
     );
     source_state.repositories.insert("app".to_string(), repo);
@@ -472,6 +482,11 @@ mod replication_tests {
                 image_size_in_bytes: 0,
                 image_pushed_at: chrono::Utc::now(),
                 last_recorded_pull_time: None,
+                image_status: "ACTIVE".to_string(),
+                last_archived_at: None,
+                last_activated_at: None,
+                last_in_use_at: None,
+                in_use_count: 0,
             },
         );
     }
@@ -646,6 +661,11 @@ mod repo_policy_enforcement_tests {
                 image_size_in_bytes: 0,
                 image_pushed_at: chrono::Utc::now(),
                 last_recorded_pull_time: None,
+                image_status: "ACTIVE".to_string(),
+                last_archived_at: None,
+                last_activated_at: None,
+                last_in_use_at: None,
+                in_use_count: 0,
             },
         );
         repo.image_tags
@@ -1005,6 +1025,11 @@ mod lifecycle_timestamp_tests {
                 image_size_in_bytes: 0,
                 image_pushed_at: chrono::Utc::now() - chrono::Duration::days(30),
                 last_recorded_pull_time: None,
+                image_status: "ACTIVE".to_string(),
+                last_archived_at: None,
+                last_activated_at: None,
+                last_in_use_at: None,
+                in_use_count: 0,
             },
         );
         repo.image_tags
@@ -1121,6 +1146,11 @@ mod lifecycle_timestamp_tests {
                     image_size_in_bytes: 0,
                     image_pushed_at: chrono::Utc::now() - chrono::Duration::days(60),
                     last_recorded_pull_time: None,
+                    image_status: "ACTIVE".to_string(),
+                    last_archived_at: None,
+                    last_activated_at: None,
+                    last_in_use_at: None,
+                    in_use_count: 0,
                 },
             );
         }
@@ -1149,5 +1179,473 @@ mod lifecycle_timestamp_tests {
             !repo.images.contains_key("sha256:older"),
             "tick should have pruned the 60-day-old image"
         );
+    }
+}
+
+// ── P5: pull-time exclusions, storage class, referrers, in-use tracking ──
+#[cfg(test)]
+mod p5_polish_tests {
+    use super::super::EcrService;
+    use crate::state::{EcrState, Image, Repository, SharedEcrState};
+    use bytes::Bytes;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::service::AwsRequest;
+    use http::{HeaderMap, Method};
+    use parking_lot::RwLock;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const ACCOUNT: &str = "111111111111";
+
+    fn make_request(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "ecr".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: ACCOUNT.into(),
+            request_id: "req-1".into(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn fixture() -> (EcrService, SharedEcrState) {
+        let mut mas: MultiAccountState<EcrState> =
+            MultiAccountState::new(ACCOUNT, "us-east-1", "http://fakecloud:4566");
+        let state = mas.get_or_create(ACCOUNT);
+        let arn = state.repository_arn("app");
+        let repo = Repository::new("app", arn, ACCOUNT, "fakecloud:4566");
+        state.repositories.insert("app".to_string(), repo);
+        let shared: SharedEcrState = Arc::new(RwLock::new(mas));
+        let svc = EcrService::new(shared.clone());
+        (svc, shared)
+    }
+
+    fn seed_image(state: &SharedEcrState, digest: &str, manifest: &str) {
+        let mut accounts = state.write();
+        let s = accounts.get_mut(ACCOUNT).unwrap();
+        let repo = s.repositories.get_mut("app").unwrap();
+        repo.images.insert(
+            digest.to_string(),
+            Image {
+                image_digest: digest.to_string(),
+                image_manifest: manifest.to_string(),
+                image_manifest_media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                artifact_media_type: None,
+                image_size_in_bytes: manifest.len() as u64,
+                image_pushed_at: chrono::Utc::now(),
+                last_recorded_pull_time: None,
+                image_status: "ACTIVE".to_string(),
+                last_archived_at: None,
+                last_activated_at: None,
+                last_in_use_at: None,
+                in_use_count: 0,
+            },
+        );
+    }
+
+    // ── PullTimeUpdateExclusion round-trip ────────────────────────
+    #[test]
+    fn pull_time_exclusion_register_list_deregister_round_trip() {
+        let (svc, _state) = fixture();
+        let arn = "arn:aws:iam::111111111111:role/ci-puller";
+
+        let req = make_request(
+            "RegisterPullTimeUpdateExclusion",
+            json!({ "principalArn": arn }),
+        );
+        let resp = svc.register_pull_time_update_exclusion(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["principalArn"], arn);
+
+        let req = make_request("ListPullTimeUpdateExclusions", json!({}));
+        let resp = svc.list_pull_time_update_exclusions(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let list = body["pullTimeUpdateExclusions"].as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["principalArn"], arn);
+
+        let req = make_request(
+            "DeregisterPullTimeUpdateExclusion",
+            json!({ "principalArn": arn }),
+        );
+        svc.deregister_pull_time_update_exclusion(&req).unwrap();
+
+        let req = make_request("ListPullTimeUpdateExclusions", json!({}));
+        let resp = svc.list_pull_time_update_exclusions(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert!(body["pullTimeUpdateExclusions"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    // ── UpdateImageStorageClass: ARCHIVE then STANDARD round-trip ─
+    #[test]
+    fn update_image_storage_class_archive_then_restore_persists() {
+        let (svc, state) = fixture();
+        seed_image(&state, "sha256:abc", "{}");
+
+        let req = make_request(
+            "UpdateImageStorageClass",
+            json!({
+                "repositoryName": "app",
+                "imageId": { "imageDigest": "sha256:abc" },
+                "targetStorageClass": "ARCHIVE",
+            }),
+        );
+        let resp = svc.update_image_storage_class(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["imageStatus"], "ARCHIVED");
+
+        // DescribeImages reflects the archive.
+        let req = make_request(
+            "DescribeImages",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:abc" }],
+            }),
+        );
+        let resp = svc.describe_images(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let detail = &body["imageDetails"][0];
+        assert_eq!(detail["imageStatus"], "ARCHIVED");
+        assert!(detail["lastArchivedAt"].is_i64());
+        assert!(detail.get("lastActivatedAt").is_none());
+
+        // Restore.
+        let req = make_request(
+            "UpdateImageStorageClass",
+            json!({
+                "repositoryName": "app",
+                "imageId": { "imageDigest": "sha256:abc" },
+                "targetStorageClass": "STANDARD",
+            }),
+        );
+        let resp = svc.update_image_storage_class(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["imageStatus"], "ACTIVE");
+
+        let req = make_request(
+            "DescribeImages",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:abc" }],
+            }),
+        );
+        let resp = svc.describe_images(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let detail = &body["imageDetails"][0];
+        assert_eq!(detail["imageStatus"], "ACTIVE");
+        assert!(detail["lastActivatedAt"].is_i64());
+    }
+
+    #[test]
+    fn update_image_storage_class_rejects_unknown_class() {
+        let (svc, state) = fixture();
+        seed_image(&state, "sha256:abc", "{}");
+        let req = make_request(
+            "UpdateImageStorageClass",
+            json!({
+                "repositoryName": "app",
+                "imageId": { "imageDigest": "sha256:abc" },
+                "targetStorageClass": "GLACIER",
+            }),
+        );
+        let err = svc
+            .update_image_storage_class(&req)
+            .err()
+            .expect("GLACIER must be rejected");
+        match err {
+            fakecloud_core::service::AwsServiceError::AwsError { status, code, .. } => {
+                assert_eq!(code, "InvalidParameterException");
+                assert!(status.is_client_error());
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    // ── ListImageReferrers walks the manifest subject graph ───────
+    #[test]
+    fn list_image_referrers_returns_images_with_matching_subject() {
+        let (svc, state) = fixture();
+        // Subject image.
+        seed_image(&state, "sha256:subject", "{}");
+        // Referrer with subject pointing at sha256:subject (signature artifact).
+        let referrer_manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "artifactType": "application/vnd.dev.cosign.artifact.sig.v1+json",
+            "config": { "mediaType": "application/vnd.oci.empty.v1+json" },
+            "subject": {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": "sha256:subject",
+                "size": 2,
+            },
+            "annotations": { "org.opencontainers.image.created": "2026-05-03T00:00:00Z" },
+            "layers": [],
+        })
+        .to_string();
+        seed_image(&state, "sha256:sig", &referrer_manifest);
+        // Unrelated image (different subject) — must not appear.
+        let other_manifest = serde_json::json!({
+            "subject": { "digest": "sha256:other" },
+        })
+        .to_string();
+        seed_image(&state, "sha256:other-ref", &other_manifest);
+
+        let req = make_request(
+            "ListImageReferrers",
+            json!({
+                "repositoryName": "app",
+                "subjectId": { "imageDigest": "sha256:subject" },
+            }),
+        );
+        let resp = svc.list_image_referrers(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let referrers = body["referrers"].as_array().unwrap();
+        assert_eq!(referrers.len(), 1, "exactly one matching referrer");
+        assert_eq!(referrers[0]["digest"], "sha256:sig");
+        assert_eq!(
+            referrers[0]["artifactType"],
+            "application/vnd.dev.cosign.artifact.sig.v1+json"
+        );
+        assert_eq!(referrers[0]["artifactStatus"], "ACTIVE");
+        assert!(referrers[0]["annotations"]["org.opencontainers.image.created"].is_string());
+    }
+
+    #[test]
+    fn list_image_referrers_filters_by_artifact_type() {
+        let (svc, state) = fixture();
+        seed_image(&state, "sha256:subject", "{}");
+        let sig_manifest = serde_json::json!({
+            "artifactType": "cosign.sig",
+            "subject": { "digest": "sha256:subject" },
+        })
+        .to_string();
+        seed_image(&state, "sha256:sig", &sig_manifest);
+        let sbom_manifest = serde_json::json!({
+            "artifactType": "cyclonedx.sbom",
+            "subject": { "digest": "sha256:subject" },
+        })
+        .to_string();
+        seed_image(&state, "sha256:sbom", &sbom_manifest);
+
+        let req = make_request(
+            "ListImageReferrers",
+            json!({
+                "repositoryName": "app",
+                "subjectId": { "imageDigest": "sha256:subject" },
+                "filter": { "artifactTypes": ["cosign.sig"] },
+            }),
+        );
+        let resp = svc.list_image_referrers(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let referrers = body["referrers"].as_array().unwrap();
+        assert_eq!(referrers.len(), 1);
+        assert_eq!(referrers[0]["digest"], "sha256:sig");
+    }
+
+    #[test]
+    fn list_image_referrers_rejects_missing_subject_image() {
+        let (svc, _state) = fixture();
+        let req = make_request(
+            "ListImageReferrers",
+            json!({
+                "repositoryName": "app",
+                "subjectId": { "imageDigest": "sha256:nope" },
+            }),
+        );
+        let err = svc
+            .list_image_referrers(&req)
+            .err()
+            .expect("missing subject image must error");
+        match err {
+            fakecloud_core::service::AwsServiceError::AwsError { code, .. } => {
+                assert_eq!(code, "ImageNotFoundException");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    // ── DescribeImages: lastInUseAt + inUseCount track BatchGetImage ─
+    #[test]
+    fn describe_images_reflects_in_use_after_batch_get_image() {
+        let (svc, state) = fixture();
+        seed_image(&state, "sha256:hot", "{}");
+
+        // Before any pull: counter is 0, lastInUseAt absent.
+        let req = make_request(
+            "DescribeImages",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:hot" }],
+            }),
+        );
+        let resp = svc.describe_images(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let detail = &body["imageDetails"][0];
+        assert_eq!(detail["inUseCount"], 0);
+        assert!(detail.get("lastInUseAt").is_none());
+
+        // Two BatchGetImage calls bump the counter to 2.
+        for _ in 0..2 {
+            let req = make_request(
+                "BatchGetImage",
+                json!({
+                    "repositoryName": "app",
+                    "imageIds": [{ "imageDigest": "sha256:hot" }],
+                }),
+            );
+            svc.batch_get_image(&req).unwrap();
+        }
+
+        let req = make_request(
+            "DescribeImages",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:hot" }],
+            }),
+        );
+        let resp = svc.describe_images(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let detail = &body["imageDetails"][0];
+        assert_eq!(detail["inUseCount"], 2);
+        assert!(detail["lastInUseAt"].is_i64());
+        // lastRecordedPullTime is touched in lockstep so existing
+        // SDK callers see consistent timestamps.
+        assert!(detail["lastRecordedPullTime"].is_i64());
+    }
+
+    // ── DescribeImages: subjectManifestDigest is surfaced for referrers ─
+    #[test]
+    fn describe_images_includes_subject_manifest_digest_for_referrers() {
+        let (svc, state) = fixture();
+        let manifest = serde_json::json!({
+            "subject": { "digest": "sha256:parent" },
+        })
+        .to_string();
+        seed_image(&state, "sha256:child", &manifest);
+
+        let req = make_request(
+            "DescribeImages",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:child" }],
+            }),
+        );
+        let resp = svc.describe_images(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let detail = &body["imageDetails"][0];
+        assert_eq!(detail["subjectManifestDigest"], "sha256:parent");
+    }
+
+    // ── Pull-time exclusion suppresses in-use bookkeeping ─────────
+    #[test]
+    fn batch_get_image_skips_pull_metadata_for_excluded_principal() {
+        use fakecloud_core::auth::{Principal, PrincipalType};
+
+        let (svc, state) = fixture();
+        seed_image(&state, "sha256:hot", "{}");
+
+        let role_arn = "arn:aws:iam::111111111111:role/ci-puller";
+        let req = make_request(
+            "RegisterPullTimeUpdateExclusion",
+            json!({ "principalArn": role_arn }),
+        );
+        svc.register_pull_time_update_exclusion(&req).unwrap();
+
+        let mut req = make_request(
+            "BatchGetImage",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:hot" }],
+            }),
+        );
+        req.principal = Some(Principal {
+            arn: role_arn.to_string(),
+            user_id: "AROAEXCLUDED".to_string(),
+            account_id: ACCOUNT.to_string(),
+            principal_type: PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        });
+        svc.batch_get_image(&req).unwrap();
+
+        let req = make_request(
+            "DescribeImages",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:hot" }],
+            }),
+        );
+        let resp = svc.describe_images(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let detail = &body["imageDetails"][0];
+        assert_eq!(
+            detail["inUseCount"], 0,
+            "excluded principal must not bump inUseCount"
+        );
+        assert!(
+            detail.get("lastInUseAt").is_none(),
+            "excluded principal must not set lastInUseAt"
+        );
+    }
+
+    // ── Non-excluded principals still bump after a registration ───
+    #[test]
+    fn batch_get_image_still_tracks_other_principals_after_exclusion() {
+        use fakecloud_core::auth::{Principal, PrincipalType};
+
+        let (svc, state) = fixture();
+        seed_image(&state, "sha256:hot", "{}");
+
+        let excluded_arn = "arn:aws:iam::111111111111:role/excluded";
+        let active_arn = "arn:aws:iam::111111111111:role/active";
+        let req = make_request(
+            "RegisterPullTimeUpdateExclusion",
+            json!({ "principalArn": excluded_arn }),
+        );
+        svc.register_pull_time_update_exclusion(&req).unwrap();
+
+        let mut req = make_request(
+            "BatchGetImage",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:hot" }],
+            }),
+        );
+        req.principal = Some(Principal {
+            arn: active_arn.to_string(),
+            user_id: "AROAACTIVE".to_string(),
+            account_id: ACCOUNT.to_string(),
+            principal_type: PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        });
+        svc.batch_get_image(&req).unwrap();
+
+        let req = make_request(
+            "DescribeImages",
+            json!({
+                "repositoryName": "app",
+                "imageIds": [{ "imageDigest": "sha256:hot" }],
+            }),
+        );
+        let resp = svc.describe_images(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let detail = &body["imageDetails"][0];
+        assert_eq!(detail["inUseCount"], 1);
+        assert!(detail["lastInUseAt"].is_i64());
     }
 }

@@ -146,6 +146,11 @@ mod tests {
                 // Pushed 30 days ago.
                 image_pushed_at: Utc::now() - ChronoDuration::days(30),
                 last_recorded_pull_time: None,
+                image_status: "ACTIVE".to_string(),
+                last_archived_at: None,
+                last_activated_at: None,
+                last_in_use_at: None,
+                in_use_count: 0,
             },
         );
         repo.image_tags

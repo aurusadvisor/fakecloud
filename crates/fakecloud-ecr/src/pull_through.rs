@@ -186,6 +186,8 @@ pub(crate) async fn proxy_manifest(
     account_id: &str,
     repo_name: &str,
     reference: &str,
+    caller_arn: Option<&str>,
+    count_as_pull: bool,
 ) -> Option<Result<ProxiedManifest, AwsServiceError>> {
     let rules = rules_for_account(service, account_id);
     let (rule, upstream_path) = match_rule(&rules, repo_name)?;
@@ -233,6 +235,8 @@ pub(crate) async fn proxy_manifest(
         &bytes,
         &media_type,
         &digest,
+        caller_arn,
+        count_as_pull,
     );
     Some(Ok(ProxiedManifest {
         bytes,
@@ -285,6 +289,7 @@ pub(crate) async fn proxy_blob(
     Some(Ok(ProxiedBlob { bytes, media_type }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cache_manifest(
     service: &EcrService,
     account_id: &str,
@@ -293,11 +298,26 @@ fn cache_manifest(
     bytes: &[u8],
     media_type: &str,
     digest: &str,
+    caller_arn: Option<&str>,
+    count_as_pull: bool,
 ) {
     let mut accounts = service.state_handle().write();
     let state = accounts.get_or_create(account_id);
     let account_id = state.account_id.clone();
     let region = state.region.clone();
+    // Honour pull-time exclusions: an excluded principal that triggers
+    // a proxy-cache should not bump the in-use counter on the freshly
+    // cached image. HEAD requests also opt out via `count_as_pull=false`
+    // — they are existence checks, not pulls.
+    let excluded = caller_arn
+        .map(|a| state.pull_time_exclusions.contains_key(a))
+        .unwrap_or(false);
+    let now = Utc::now();
+    let (last_pull, last_in_use, in_use_count) = if !count_as_pull || excluded {
+        (None, None, 0)
+    } else {
+        (Some(now), Some(now), 1)
+    };
     let repo = state
         .repositories
         .entry(repo_name.to_string())
@@ -323,8 +343,13 @@ fn cache_manifest(
             image_manifest_media_type: media_type.to_string(),
             artifact_media_type: None,
             image_size_in_bytes: bytes.len() as u64,
-            image_pushed_at: Utc::now(),
-            last_recorded_pull_time: Some(Utc::now()),
+            image_pushed_at: now,
+            last_recorded_pull_time: last_pull,
+            image_status: "ACTIVE".to_string(),
+            last_archived_at: None,
+            last_activated_at: None,
+            last_in_use_at: last_in_use,
+            in_use_count,
         },
     );
     // A reference can be a tag (alphanumeric) or a digest. Only store
