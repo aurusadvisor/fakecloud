@@ -1,6 +1,14 @@
 use base64::Engine;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Internal sentinel emitted whenever a CFN value resolves to
+/// `AWS::NoValue`. After resolution finishes, [`strip_no_value`] walks
+/// the result and removes any object entry / array slot whose value is
+/// this marker, matching CloudFormation's "drop the property" semantics
+/// (e.g. inside an `Fn::If` branch). Picked so it cannot collide with
+/// any real CFN property.
+const NO_VALUE_SENTINEL_KEY: &str = "__fakecloud_aws_no_value__";
 
 /// A parsed CloudFormation template.
 #[derive(Debug, Clone)]
@@ -83,7 +91,7 @@ pub fn parse_template_with_resolution(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let conditions = evaluate_conditions(&value, parameters);
+    let conditions = evaluate_conditions(&value, parameters)?;
     let mappings = parse_mappings(&value);
 
     let resources_obj = value
@@ -125,6 +133,7 @@ pub fn parse_template_with_resolution(
             &BTreeMap::new(),
             &conditions,
         );
+        let resolved = strip_no_value(resolved);
 
         resources.push(ResourceDefinition {
             logical_id: logical_id.clone(),
@@ -140,7 +149,7 @@ pub fn parse_template_with_resolution(
         resource_physical_ids,
         resource_attributes,
         &BTreeMap::new(),
-    );
+    )?;
 
     Ok(ParsedTemplate {
         description,
@@ -228,13 +237,13 @@ pub fn parse_outputs(
     resource_physical_ids: &BTreeMap<String, String>,
     resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
     imports: &BTreeMap<String, String>,
-) -> Vec<TemplateOutput> {
+) -> Result<Vec<TemplateOutput>, String> {
     let outputs_obj = match template.get("Outputs").and_then(|v| v.as_object()) {
         Some(o) => o,
-        None => return Vec::new(),
+        None => return Ok(Vec::new()),
     };
 
-    let conditions = evaluate_conditions(template, parameters);
+    let conditions = evaluate_conditions(template, parameters)?;
     let mut out = Vec::new();
     for (logical_id, body) in outputs_obj {
         // Skip outputs gated on a Condition that resolves false. CFN
@@ -257,6 +266,7 @@ pub fn parse_outputs(
             imports,
             &conditions,
         );
+        let resolved = strip_no_value(resolved);
         let value = match resolved {
             Value::String(s) => s,
             other => other.to_string(),
@@ -287,36 +297,54 @@ pub fn parse_outputs(
             export_name,
         });
     }
-    out
+    Ok(out)
 }
 
 /// Walk the top-level `Conditions` block and evaluate each entry to a
-/// boolean. Real CFN allows conditions to reference each other, so a
-/// single bottom-up pass with re-evaluation handles forward references.
+/// boolean. Conditions can reference each other; we evaluate
+/// recursively with memoization plus an `in_progress` set to surface a
+/// clear error on cycles (`A` -> `B` -> `A`).
 fn evaluate_conditions(
     template: &Value,
     parameters: &BTreeMap<String, String>,
-) -> BTreeMap<String, bool> {
-    let mut out: BTreeMap<String, bool> = BTreeMap::new();
+) -> Result<BTreeMap<String, bool>, String> {
+    let mut memo: BTreeMap<String, bool> = BTreeMap::new();
     let Some(conds) = template.get("Conditions").and_then(|v| v.as_object()) else {
-        return out;
+        return Ok(memo);
     };
-    for _ in 0..conds.len().max(1) {
-        let mut progress = false;
-        for (name, expr) in conds {
-            if out.contains_key(name) {
-                continue;
-            }
-            if let Some(b) = eval_condition_expr(expr, parameters, &out) {
-                out.insert(name.clone(), b);
-                progress = true;
-            }
-        }
-        if !progress {
-            break;
-        }
+    let mut in_progress: BTreeSet<String> = BTreeSet::new();
+    let names: Vec<String> = conds.keys().cloned().collect();
+    for name in names {
+        evaluate_condition_named(&name, conds, parameters, &mut memo, &mut in_progress)?;
     }
-    out
+    Ok(memo)
+}
+
+/// Resolve a single named condition, recursively walking its expression
+/// tree. Memoizes into `memo`, tracks in-flight names in `in_progress`
+/// to detect cycles. `Condition: <name>` references trigger recursion.
+fn evaluate_condition_named(
+    name: &str,
+    conds: &serde_json::Map<String, Value>,
+    parameters: &BTreeMap<String, String>,
+    memo: &mut BTreeMap<String, bool>,
+    in_progress: &mut BTreeSet<String>,
+) -> Result<bool, String> {
+    if let Some(b) = memo.get(name) {
+        return Ok(*b);
+    }
+    if !in_progress.insert(name.to_string()) {
+        return Err(format!(
+            "Circular reference in Conditions: '{name}' transitively references itself"
+        ));
+    }
+    let expr = conds.get(name).ok_or_else(|| {
+        format!("Condition '{name}' is referenced but not defined in Conditions block")
+    })?;
+    let result = eval_condition_expr(expr, conds, parameters, memo, in_progress)?;
+    in_progress.remove(name);
+    memo.insert(name.to_string(), result);
+    Ok(result)
 }
 
 type Mappings = BTreeMap<String, BTreeMap<String, BTreeMap<String, Value>>>;
@@ -349,50 +377,69 @@ fn parse_mappings(template: &Value) -> Mappings {
     out
 }
 
+/// Evaluate a single condition expression node. Operators short-circuit
+/// where it matters (`Fn::And` stops on first false, `Fn::Or` stops on
+/// first true). Named-condition references recurse via
+/// `evaluate_condition_named` so cycles are caught at the named layer.
 fn eval_condition_expr(
     expr: &Value,
+    conds: &serde_json::Map<String, Value>,
     parameters: &BTreeMap<String, String>,
-    conditions: &BTreeMap<String, bool>,
-) -> Option<bool> {
-    let Some(map) = expr.as_object() else {
-        return expr.as_bool();
-    };
+    memo: &mut BTreeMap<String, bool>,
+    in_progress: &mut BTreeSet<String>,
+) -> Result<bool, String> {
+    if let Some(b) = expr.as_bool() {
+        return Ok(b);
+    }
+    let map = expr
+        .as_object()
+        .ok_or_else(|| format!("Invalid condition expression: {expr}"))?;
     if let Some(args) = map.get("Fn::Equals").and_then(|v| v.as_array()) {
-        if args.len() == 2 {
-            let a = stringify_value(&args[0], parameters);
-            let b = stringify_value(&args[1], parameters);
-            return Some(a == b);
+        if args.len() != 2 {
+            return Err("Fn::Equals requires exactly 2 arguments".to_string());
         }
+        let a = stringify_value(&args[0], parameters);
+        let b = stringify_value(&args[1], parameters);
+        return Ok(a == b);
     }
     if let Some(args) = map.get("Fn::And").and_then(|v| v.as_array()) {
-        let mut all = true;
+        if !(1..=10).contains(&args.len()) {
+            return Err("Fn::And requires between 1 and 10 conditions".to_string());
+        }
         for a in args {
-            match eval_condition_expr(a, parameters, conditions) {
-                Some(b) => all &= b,
-                None => return None,
+            if !eval_condition_expr(a, conds, parameters, memo, in_progress)? {
+                return Ok(false);
             }
         }
-        return Some(all);
+        return Ok(true);
     }
     if let Some(args) = map.get("Fn::Or").and_then(|v| v.as_array()) {
-        let mut any = false;
+        if !(1..=10).contains(&args.len()) {
+            return Err("Fn::Or requires between 1 and 10 conditions".to_string());
+        }
         for a in args {
-            match eval_condition_expr(a, parameters, conditions) {
-                Some(b) => any |= b,
-                None => return None,
+            if eval_condition_expr(a, conds, parameters, memo, in_progress)? {
+                return Ok(true);
             }
         }
-        return Some(any);
+        return Ok(false);
     }
     if let Some(arr) = map.get("Fn::Not").and_then(|v| v.as_array()) {
-        if let Some(arg) = arr.first() {
-            return eval_condition_expr(arg, parameters, conditions).map(|b| !b);
+        if arr.len() != 1 {
+            return Err("Fn::Not requires exactly 1 argument".to_string());
         }
+        return Ok(!eval_condition_expr(
+            &arr[0],
+            conds,
+            parameters,
+            memo,
+            in_progress,
+        )?);
     }
     if let Some(name) = map.get("Condition").and_then(|v| v.as_str()) {
-        return conditions.get(name).copied();
+        return evaluate_condition_named(name, conds, parameters, memo, in_progress);
     }
-    None
+    Err(format!("Unknown condition operator in expression: {expr}"))
 }
 
 /// Render a CFN intrinsic value (Ref to a parameter, plain string, etc.)
@@ -514,13 +561,24 @@ pub fn resolve_resource_properties_with_attrs(
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
-    let resolved = resolve_refs(
+    // Re-evaluate Conditions / Mappings on every resolve so Fn::If picks
+    // the right branch and AWS::NoValue still strips at incremental
+    // provisioning time. Without this, the sentinel would leak into the
+    // provisioned property map.
+    let conditions = evaluate_conditions(&value, parameters)?;
+    let mappings = parse_mappings(&value);
+    let raw_props = apply_mappings(&raw_props, parameters, &mappings);
+
+    let resolved = resolve_refs_full(
         &raw_props,
         parameters,
         resources_obj,
         resource_physical_ids,
         resource_attributes,
+        &BTreeMap::new(),
+        &conditions,
     );
+    let resolved = strip_no_value(resolved);
 
     Ok(ResourceDefinition {
         logical_id: resource.logical_id.clone(),
@@ -543,17 +601,66 @@ fn pseudo_value(name: &str, parameters: &BTreeMap<String, String>) -> Option<Val
         "AWS::Region" => Some(Value::String("us-east-1".to_string())),
         // NotificationARNs is an array; default to empty.
         "AWS::NotificationARNs" => Some(Value::Array(Vec::new())),
-        // NoValue is sentinel - emit an explicit JSON null so callers can
-        // treat it as "drop this property". CloudFormation strips it from
-        // the resolved object; we leave that responsibility to consumers.
-        "AWS::NoValue" => Some(Value::Null),
+        // NoValue is a sentinel: emit a private marker object so the
+        // post-resolution `strip_no_value` walk can drop the parent
+        // property entirely. CloudFormation removes the key from the
+        // resolved object rather than leaving a JSON null behind.
+        "AWS::NoValue" => Some(no_value_sentinel()),
         _ => None,
+    }
+}
+
+/// Build a fresh `AWS::NoValue` sentinel object. See
+/// [`NO_VALUE_SENTINEL_KEY`].
+fn no_value_sentinel() -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert(NO_VALUE_SENTINEL_KEY.to_string(), Value::Bool(true));
+    Value::Object(m)
+}
+
+/// Return true when `value` is the `AWS::NoValue` sentinel emitted by
+/// `pseudo_value` (or by an `Fn::If` branch that resolved to it).
+fn is_no_value(value: &Value) -> bool {
+    value
+        .as_object()
+        .map(|m| m.len() == 1 && m.contains_key(NO_VALUE_SENTINEL_KEY))
+        .unwrap_or(false)
+}
+
+/// Recursively walk `value` and drop any object entry / array slot
+/// whose resolved content is the `AWS::NoValue` sentinel. A top-level
+/// `AWS::NoValue` collapses to `Value::Null` so the caller can detect
+/// the empty case (CFN's behavior is to omit the property entirely).
+fn strip_no_value(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            if is_no_value(&Value::Object(map.clone())) {
+                return Value::Null;
+            }
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                if is_no_value(&v) {
+                    continue;
+                }
+                out.insert(k, strip_no_value(v));
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(
+            arr.into_iter()
+                .filter(|v| !is_no_value(v))
+                .map(strip_no_value)
+                .collect(),
+        ),
+        other => other,
     }
 }
 
 /// Resolve `Ref`, `Fn::GetAtt`, `Fn::Join`, and `Fn::Sub` in property
 /// values. Cross-stack `Fn::ImportValue` is not consulted; use
-/// `resolve_refs_with_imports` for that.
+/// `resolve_refs_with_imports` for that. Test-only after the
+/// resource-properties path moved to `resolve_refs_full`.
+#[cfg(test)]
 fn resolve_refs(
     value: &Value,
     parameters: &BTreeMap<String, String>,
@@ -1688,5 +1795,397 @@ Resources:
         assert!(parsed.resources[0].properties["ImageId"]
             .as_object()
             .is_some());
+    }
+
+    // ── Conditions: cycle detection + AWS::NoValue removal ──
+
+    #[test]
+    fn cyclic_conditions_self_reference_errors() {
+        let template = r#"{
+            "Conditions": {
+                "A": {"Condition": "A"}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "A",
+                    "Properties": {"QueueName": "q"}
+                }
+            }
+        }"#;
+        let err = parse_template(template, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("Circular reference"), "got: {err}");
+        assert!(err.contains("'A'"), "got: {err}");
+    }
+
+    #[test]
+    fn cyclic_conditions_two_step_errors() {
+        let template = r#"{
+            "Conditions": {
+                "A": {"Condition": "B"},
+                "B": {"Condition": "A"}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "A",
+                    "Properties": {"QueueName": "q"}
+                }
+            }
+        }"#;
+        let err = parse_template(template, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("Circular reference"), "got: {err}");
+    }
+
+    #[test]
+    fn condition_referencing_undefined_name_errors() {
+        let template = r#"{
+            "Conditions": {
+                "A": {"Condition": "DoesNotExist"}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "A",
+                    "Properties": {"QueueName": "q"}
+                }
+            }
+        }"#;
+        let err = parse_template(template, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("DoesNotExist"), "got: {err}");
+    }
+
+    #[test]
+    fn fn_if_no_value_removes_property_from_parent_map() {
+        let template = r#"{
+            "Parameters": {"WantTags": {"Type": "String"}},
+            "Conditions": {
+                "HasTags": {"Fn::Equals": [{"Ref": "WantTags"}, "yes"]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": "q",
+                        "Tags": {"Fn::If": [
+                            "HasTags",
+                            [{"Key": "a", "Value": "b"}],
+                            {"Ref": "AWS::NoValue"}
+                        ]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("WantTags".to_string(), "no".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        let props = parsed.resources[0].properties.as_object().unwrap();
+        assert!(
+            !props.contains_key("Tags"),
+            "Tags should be omitted when AWS::NoValue picked, got: {props:?}"
+        );
+        assert_eq!(
+            props.get("QueueName"),
+            Some(&Value::String("q".to_string()))
+        );
+    }
+
+    #[test]
+    fn fn_if_no_value_keeps_property_when_branch_concrete() {
+        let template = r#"{
+            "Parameters": {"WantTags": {"Type": "String"}},
+            "Conditions": {
+                "HasTags": {"Fn::Equals": [{"Ref": "WantTags"}, "yes"]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": "q",
+                        "Tags": {"Fn::If": [
+                            "HasTags",
+                            [{"Key": "a", "Value": "b"}],
+                            {"Ref": "AWS::NoValue"}
+                        ]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("WantTags".to_string(), "yes".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        let tags = &parsed.resources[0].properties["Tags"];
+        assert_eq!(
+            tags,
+            &serde_json::json!([{"Key": "a", "Value": "b"}]),
+            "tags should be the true branch's array"
+        );
+    }
+
+    #[test]
+    fn fn_if_no_value_in_array_drops_element() {
+        let template = r#"{
+            "Parameters": {"Extra": {"Type": "String"}},
+            "Conditions": {
+                "HasExtra": {"Fn::Equals": [{"Ref": "Extra"}, "yes"]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "Items": [
+                            "first",
+                            {"Fn::If": ["HasExtra", "second", {"Ref": "AWS::NoValue"}]},
+                            "third"
+                        ]
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Extra".to_string(), "no".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["Items"],
+            serde_json::json!(["first", "third"])
+        );
+    }
+
+    #[test]
+    fn condition_skips_output_when_false() {
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}},
+            "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"QueueName": "q"}
+                }
+            },
+            "Outputs": {
+                "ProdName": {
+                    "Condition": "IsProd",
+                    "Value": "prod-only"
+                },
+                "Always": {
+                    "Value": "shown"
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "dev".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        let names: Vec<&str> = parsed
+            .outputs
+            .iter()
+            .map(|o| o.logical_id.as_str())
+            .collect();
+        assert!(names.contains(&"Always"));
+        assert!(!names.contains(&"ProdName"));
+    }
+
+    #[test]
+    fn fn_and_short_circuits_on_false() {
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}},
+            "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+                "Combined": {"Fn::And": [
+                    {"Condition": "IsProd"},
+                    {"Fn::Equals": [{"Ref": "Env"}, "prod"]}
+                ]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "Combined",
+                    "Properties": {"QueueName": "q"}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "dev".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(parsed.resources.len(), 0);
+    }
+
+    #[test]
+    fn fn_or_short_circuits_on_true() {
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}},
+            "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+                "AnyEnv": {"Fn::Or": [
+                    {"Condition": "IsProd"},
+                    {"Fn::Equals": [{"Ref": "Env"}, "dev"]},
+                    {"Fn::Equals": [{"Ref": "Env"}, "stage"]}
+                ]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "AnyEnv",
+                    "Properties": {"QueueName": "q"}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "stage".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(parsed.resources.len(), 1);
+    }
+
+    #[test]
+    fn fn_and_rejects_arity_outside_1_to_10() {
+        let template = r#"{
+            "Conditions": {
+                "Empty": {"Fn::And": []}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "Empty",
+                    "Properties": {"QueueName": "q"}
+                }
+            }
+        }"#;
+        let err = parse_template(template, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("Fn::And"), "got: {err}");
+    }
+
+    #[test]
+    fn condition_evaluation_memoizes_complex_expression() {
+        // Both `Outer` branches reuse `Inner`. With memoization the
+        // inner condition only resolves once; without it, this would
+        // still pass — but the test guards against regressions where
+        // re-evaluation triggers double Fn::Equals work.
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}},
+            "Conditions": {
+                "Inner": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+                "OuterA": {"Fn::And": [{"Condition": "Inner"}, {"Condition": "Inner"}]},
+                "OuterB": {"Fn::Or": [{"Condition": "Inner"}, {"Condition": "OuterA"}]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "OuterB",
+                    "Properties": {"QueueName": "q"}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "prod".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(parsed.resources.len(), 1);
+    }
+
+    #[test]
+    fn fn_not_rejects_multiple_arguments() {
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}},
+            "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+                "Bad": {"Fn::Not": [
+                    {"Condition": "IsProd"},
+                    {"Condition": "IsProd"}
+                ]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "Bad",
+                    "Properties": {"QueueName": "q"}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "prod".to_string());
+        let err = parse_template(template, &params).unwrap_err();
+        assert!(err.contains("Fn::Not"), "got: {err}");
+    }
+
+    #[test]
+    fn fn_not_rejects_zero_arguments() {
+        let template = r#"{
+            "Conditions": {
+                "Bad": {"Fn::Not": []}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Condition": "Bad",
+                    "Properties": {"QueueName": "q"}
+                }
+            }
+        }"#;
+        let err = parse_template(template, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("Fn::Not"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_resource_properties_strips_no_value_at_provision_time() {
+        // Mirrors the incremental-provisioning code path which calls
+        // resolve_resource_properties_with_attrs after the initial parse.
+        // The sentinel must not leak into the resolved properties even
+        // when re-resolved with updated physical IDs.
+        let template = r#"{
+            "Parameters": {"WantTags": {"Type": "String"}},
+            "Conditions": {
+                "HasTags": {"Fn::Equals": [{"Ref": "WantTags"}, "yes"]}
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": "q",
+                        "Tags": {"Fn::If": [
+                            "HasTags",
+                            [{"Key": "a", "Value": "b"}],
+                            {"Ref": "AWS::NoValue"}
+                        ]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("WantTags".to_string(), "no".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        let resource = parsed
+            .resources
+            .iter()
+            .find(|r| r.logical_id == "Q")
+            .unwrap();
+        // First parse already strips Tags.
+        assert!(!resource
+            .properties
+            .as_object()
+            .unwrap()
+            .contains_key("Tags"));
+
+        // Re-resolve with empty physical IDs (mid-provisioning). The
+        // sentinel must still be stripped — no `__fakecloud_aws_no_value__`
+        // marker should reach the caller.
+        let reresolved = resolve_resource_properties_with_attrs(
+            resource,
+            template,
+            &params,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let props = reresolved.properties.as_object().unwrap();
+        assert!(
+            !props.contains_key("Tags"),
+            "Tags should be stripped on re-resolve, got: {props:?}"
+        );
+        // Sanity: serialized form must not contain the sentinel key.
+        let serialized = serde_json::to_string(&reresolved.properties).unwrap();
+        assert!(
+            !serialized.contains(NO_VALUE_SENTINEL_KEY),
+            "sentinel leaked: {serialized}"
+        );
     }
 }
