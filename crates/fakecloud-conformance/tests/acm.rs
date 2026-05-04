@@ -88,12 +88,25 @@ async fn acm_import_certificate() {
 #[test_action("acm", "ExportCertificate", checksum = "0d462416")]
 #[tokio::test]
 async fn acm_export_certificate() {
+    use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+    use rsa::RsaPrivateKey;
+
     let server = TestServer::start().await;
     let acm = server.acm_client().await;
+    // ExportCertificate wraps the private key in a passphrase-encrypted
+    // PKCS#8 v2 envelope, so import a real RSA-2048 PKCS#8 PEM (the
+    // FAKE_KEY_PEM placeholder is not valid DER and would fail the
+    // PKCS#8 parse step on export).
+    let mut rng = rand::thread_rng();
+    let key_pem = RsaPrivateKey::new(&mut rng, 2048)
+        .expect("rsa keygen")
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("pkcs8 pem")
+        .to_string();
     let arn = acm
         .import_certificate()
         .certificate(Blob::new(FAKE_CERT_PEM.as_bytes().to_vec()))
-        .private_key(Blob::new(FAKE_KEY_PEM.as_bytes().to_vec()))
+        .private_key(Blob::new(key_pem.into_bytes()))
         .send()
         .await
         .unwrap()

@@ -147,13 +147,26 @@ async fn reimporting_certificate_overwrites_domain_metadata() {
 
 #[tokio::test]
 async fn import_then_export_certificate_roundtrips_pem() {
+    use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
+    use rsa::RsaPrivateKey;
+
     let server = TestServer::start().await;
     let acm = server.acm_client().await;
+
+    // Generate a real RSA-2048 key in PKCS#8 PEM so ExportCertificate
+    // can wrap it in a `BEGIN ENCRYPTED PRIVATE KEY` envelope (the
+    // format real ACM returns when a passphrase is supplied).
+    let mut rng = rand::thread_rng();
+    let key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
+    let key_pem = key
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("pkcs8 pem encode")
+        .to_string();
 
     let imported = acm
         .import_certificate()
         .certificate(Blob::new(SAMPLE_CERT_PEM.as_bytes().to_vec()))
-        .private_key(Blob::new(SAMPLE_KEY_PEM.as_bytes().to_vec()))
+        .private_key(Blob::new(key_pem.into_bytes()))
         .send()
         .await
         .expect("import");
@@ -171,10 +184,11 @@ async fn import_then_export_certificate_roundtrips_pem() {
     assert_eq!(described.r#type().unwrap().as_str(), "IMPORTED");
     assert_eq!(described.status(), Some(&CertificateStatus::Issued));
 
+    let passphrase = b"hunter2";
     let exported = acm
         .export_certificate()
         .certificate_arn(&arn)
-        .passphrase(Blob::new(b"hunter2".to_vec()))
+        .passphrase(Blob::new(passphrase.to_vec()))
         .send()
         .await
         .expect("export");
@@ -182,10 +196,52 @@ async fn import_then_export_certificate_roundtrips_pem() {
         .certificate()
         .unwrap()
         .contains("BEGIN CERTIFICATE"));
-    assert!(exported
-        .private_key()
-        .unwrap()
-        .contains("BEGIN RSA PRIVATE KEY"));
+    let exported_key = exported.private_key().unwrap();
+    assert!(
+        exported_key.contains("BEGIN ENCRYPTED PRIVATE KEY"),
+        "expected PKCS#8 v2 PEM, got {exported_key}"
+    );
+
+    // Round-trip: parse the exported PEM with the same passphrase via
+    // the rsa crate and confirm we get back the key we imported.
+    let recovered =
+        RsaPrivateKey::from_pkcs8_encrypted_pem(exported_key, passphrase).expect("decrypt");
+    assert_eq!(recovered, key);
+}
+
+#[tokio::test]
+async fn export_certificate_without_passphrase_returns_plain_pem() {
+    use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+    use rsa::RsaPrivateKey;
+
+    let server = TestServer::start().await;
+    let acm = server.acm_client().await;
+
+    let mut rng = rand::thread_rng();
+    let key = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
+    let key_pem = key
+        .to_pkcs8_pem(LineEnding::LF)
+        .expect("pkcs8 pem encode")
+        .to_string();
+    let imported = acm
+        .import_certificate()
+        .certificate(Blob::new(SAMPLE_CERT_PEM.as_bytes().to_vec()))
+        .private_key(Blob::new(key_pem.clone().into_bytes()))
+        .send()
+        .await
+        .expect("import");
+    let arn = imported.certificate_arn().unwrap().to_string();
+
+    let exported = acm
+        .export_certificate()
+        .certificate_arn(&arn)
+        .send()
+        .await
+        .expect("export without passphrase");
+    let exported_key = exported.private_key().unwrap();
+    assert!(exported_key.contains("BEGIN PRIVATE KEY"));
+    assert!(!exported_key.contains("ENCRYPTED PRIVATE KEY"));
+    assert_eq!(exported_key, key_pem);
 }
 
 #[tokio::test]
