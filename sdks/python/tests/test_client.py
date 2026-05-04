@@ -604,9 +604,7 @@ def test_scheduler_fire_schedule(fc: FakeCloudSync, fakecloud_url: str) -> None:
 # ── Route 53 admin ────────────────────────────────────────────────────
 
 
-def test_route53_set_health_check_status(
-    fc: FakeCloudSync, fakecloud_url: str
-) -> None:
+def test_route53_set_health_check_status(fc: FakeCloudSync, fakecloud_url: str) -> None:
     r53 = boto3.client("route53", **_boto_kwargs(fakecloud_url))
     created = r53.create_health_check(
         CallerReference="py-sdk-route53-flip",
