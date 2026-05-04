@@ -737,7 +737,8 @@ export class AcmClient {
     req: SetCertificateStatusRequest,
   ): Promise<void> {
     const idx = arnOrId.lastIndexOf("certificate/");
-    const id = idx >= 0 ? arnOrId.substring(idx + "certificate/".length) : arnOrId;
+    const id =
+      idx >= 0 ? arnOrId.substring(idx + "certificate/".length) : arnOrId;
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/acm/certificates/${encodeURIComponent(id)}/status`,
       {
