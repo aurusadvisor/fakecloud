@@ -4895,17 +4895,19 @@ async fn cognito_oauth2_token_client_credentials_grant() {
 
     let http = reqwest::Client::new();
     let url = format!("{}/oauth2/token", server.endpoint());
-    // Use reqwest's form helper so client_secret + scope get URL-encoded;
-    // raw client_secret contains '+'/'/'/'=' from base64 which would
-    // otherwise break form-decoding on the server.
+    // URL-encode the secret (contains '+'/'/'/'=' from base64) so form
+    // decoding on the server gets the right value.
+    let body = serde_urlencoded::to_string([
+        ("grant_type", "client_credentials"),
+        ("client_id", client_id.as_str()),
+        ("client_secret", client_secret.as_str()),
+        ("scope", "api/read"),
+    ])
+    .unwrap();
     let resp = http
         .post(&url)
-        .form(&[
-            ("grant_type", "client_credentials"),
-            ("client_id", &client_id),
-            ("client_secret", &client_secret),
-            ("scope", "api/read"),
-        ])
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
         .send()
         .await
         .unwrap();
