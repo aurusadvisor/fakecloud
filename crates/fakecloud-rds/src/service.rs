@@ -919,9 +919,8 @@ impl RdsService {
         let apply_immediately =
             parse_optional_bool(optional_query_param(request, "ApplyImmediately").as_deref())?;
 
-        // Fields AWS always applies immediately (i.e. ApplyImmediately is
-        // ignored). Mirrors the RDS API guide; per AWS docs none of these
-        // require a downtime window so they land on the live struct.
+        // Parse every Modify input up front; routing into the always-
+        // immediate or ApplyImmediately-gated path happens further down.
         let deletion_protection =
             parse_optional_bool(optional_query_param(request, "DeletionProtection").as_deref())?;
         let backup_retention_period =
@@ -969,8 +968,6 @@ impl RdsService {
             optional_query_param(request, "RotateMasterUserPassword").as_deref(),
         )?;
 
-        // Fields gated on ApplyImmediately. None or true = immediate;
-        // false stages to pending_modified_values.
         let db_instance_class = optional_query_param(request, "DBInstanceClass");
         let master_user_password = optional_query_param(request, "MasterUserPassword");
         let engine_version = optional_query_param(request, "EngineVersion");

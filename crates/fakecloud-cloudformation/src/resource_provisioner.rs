@@ -7020,7 +7020,15 @@ impl ResourceProvisioner {
             delete_automated_backups: props
                 .get("DeleteAutomatedBackups")
                 .and_then(|v| v.as_bool()),
-            db_security_groups: Vec::new(),
+            db_security_groups: props
+                .get("DBSecurityGroups")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
             domain: props
                 .get("Domain")
                 .and_then(|v| v.as_str())
@@ -7041,7 +7049,15 @@ impl ResourceProvisioner {
                 .get("DomainAuthSecretArn")
                 .and_then(|v| v.as_str())
                 .map(String::from),
-            domain_dns_ips: Vec::new(),
+            domain_dns_ips: props
+                .get("DomainDnsIps")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
         let endpoint = inst.endpoint_address.clone();
         let endpoint_port = inst.port;
