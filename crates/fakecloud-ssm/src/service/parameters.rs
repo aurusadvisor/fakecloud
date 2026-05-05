@@ -596,12 +596,15 @@ fn apply_overwrite(
     if input.data_type_explicit {
         existing.data_type = input.data_type;
     }
-    // Always replace the policy list on overwrite. AWS treats Policies
-    // as a wholesale property of the current value: passing a fresh
-    // array swaps them out, omitting it clears them. Reset the
-    // emitted-event flags so updated policies and the new value each
-    // get a fresh notification window.
-    existing.policies = input.policies;
+    // Replace the policy list whenever the caller explicitly passed
+    // Policies. Omitting Policies on overwrite preserves whatever was
+    // already attached (matches the SDK behavior of treating policies
+    // as an independent property). Reset the emitted-event flags so
+    // updated policies and the new value each get a fresh notification
+    // window.
+    if input.policies.is_some() {
+        existing.policies = input.policies;
+    }
     existing.expiration_notified = false;
     existing.no_change_notified = false;
 
