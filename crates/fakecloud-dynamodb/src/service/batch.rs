@@ -836,20 +836,93 @@ impl DynamoDbService {
             )
         })?;
 
-        // Snapshot every account state on the default account up-front
-        // so we can revert in one shot if any statement fails. Cheap
-        // because PartiQL targets the default account only (PartiQL has
-        // no per-account scoping), and atomicity is required by the
-        // spec.
+        // Acquire the write lock once for the whole batch — DDB
+        // ExecuteTransaction is all-or-nothing so we cannot release
+        // the lock between phases or another writer could observe
+        // partial state.
         let mut accounts = self.state.write();
         let state = accounts.default_mut();
-        let snapshot_tables = state.tables.clone();
 
         let region = req.region.clone();
-        let mut responses: Vec<Value> = Vec::with_capacity(transact_statements.len());
+
+        // Phase 1: validate every statement against a cloned state.
+        // Cloning the tables map (Vec<HashMap<...>> per table) is
+        // cheap for typical transaction sizes (<=25 items per AWS
+        // limits) and lets us collect a CancellationReason per
+        // statement without mutating real state. Each clone-write
+        // within this phase is discarded — we only keep the
+        // per-statement reason so phase 2 can replay against the
+        // real state.
+        let mut clone_state = state.clone();
+
+        let mut cancellation_reasons: Vec<Value> = Vec::with_capacity(transact_statements.len());
+        let mut any_failed = false;
+
+        for stmt_obj in transact_statements.iter() {
+            let statement = stmt_obj["Statement"].as_str().unwrap_or_default();
+            let parameters = stmt_obj["Parameters"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+
+            match execute_partiql_in_state(&mut clone_state, statement, &parameters) {
+                Ok(_) => {
+                    cancellation_reasons.push(json!({ "Code": "None" }));
+                }
+                Err(e) => {
+                    any_failed = true;
+                    let dbg = format!("{e:?}");
+                    let code = if dbg.contains("ConditionalCheckFailed") {
+                        "ConditionalCheckFailed"
+                    } else if dbg.contains("DuplicateItemException") {
+                        "DuplicateItem"
+                    } else if dbg.contains("ResourceNotFoundException") {
+                        "ResourceNotFound"
+                    } else {
+                        "ValidationError"
+                    };
+                    cancellation_reasons.push(json!({
+                        "Code": code,
+                        "Message": e.to_string(),
+                    }));
+                }
+            }
+        }
+
+        if any_failed {
+            // Build the dedup'd code list real DDB embeds in the
+            // top-level message so SDKs that match on `[Code, ...]`
+            // still work.
+            let mut seen: Vec<String> = Vec::new();
+            for r in &cancellation_reasons {
+                if let Some(code) = r.get("Code").and_then(|c| c.as_str()) {
+                    if code != "None" && !seen.iter().any(|s| s == code) {
+                        seen.push(code.to_string());
+                    }
+                }
+            }
+            let codes_str = seen.join(", ");
+            let error_body = json!({
+                "__type": "TransactionCanceledException",
+                "message": format!("Transaction cancelled, please refer cancellation reasons for specific reasons [{codes_str}]"),
+                "CancellationReasons": cancellation_reasons,
+            });
+            return Ok(AwsResponse::json(
+                StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&error_body).unwrap(),
+            ));
+        }
+
+        // Phase 2: apply for real. We replay every statement against
+        // the live tables map. By construction the validation pass
+        // succeeded against the cloned state so this should not fail,
+        // but if a statement does fail (defensive), we still revert
+        // by snapshotting before we begin and restoring on error.
+        let snapshot_tables = state.tables.clone();
         let mut pending_stream: Vec<(String, crate::state::StreamRecord)> = Vec::new();
         let mut pending_kinesis: Vec<PendingKinesis> = Vec::new();
-        let mut failure: Option<(usize, String)> = None;
+        let mut apply_failure: Option<(usize, String)> = None;
+        let mut applied_responses: Vec<Value> = Vec::with_capacity(transact_statements.len());
 
         for (i, stmt_obj) in transact_statements.iter().enumerate() {
             let statement = stmt_obj["Statement"].as_str().unwrap_or_default();
@@ -860,7 +933,7 @@ impl DynamoDbService {
 
             match execute_partiql_in_state(state, statement, &parameters) {
                 Ok(outcome) => {
-                    responses.push(outcome.response);
+                    applied_responses.push(outcome.response);
                     let table_name = match outcome.table_name {
                         Some(n) => n,
                         None => continue,
@@ -893,22 +966,21 @@ impl DynamoDbService {
                     }
                 }
                 Err(e) => {
-                    failure = Some((i, e.to_string()));
+                    apply_failure = Some((i, e.to_string()));
                     break;
                 }
             }
         }
 
-        if let Some((failed_idx, msg)) = failure {
-            // Revert: replace the tables map with the pre-transaction
-            // snapshot so all earlier statements in this transaction
-            // are undone.
+        if let Some((failed_idx, msg)) = apply_failure {
+            // Revert to pre-apply snapshot — drops every partial
+            // write from earlier statements in this transaction.
             state.tables = snapshot_tables;
             let reasons: Vec<Value> = (0..transact_statements.len())
                 .map(|i| {
                     if i == failed_idx {
                         json!({
-                            "Code": "ValidationException",
+                            "Code": "ValidationError",
                             "Message": msg.clone(),
                         })
                     } else {
@@ -918,8 +990,8 @@ impl DynamoDbService {
                 .collect();
             let error_body = json!({
                 "__type": "TransactionCanceledException",
-                "message": "Transaction cancelled due to validation errors",
-                "CancellationReasons": reasons
+                "message": "Transaction cancelled, please refer cancellation reasons for specific reasons [ValidationError]",
+                "CancellationReasons": reasons,
             });
             return Ok(AwsResponse::json(
                 StatusCode::BAD_REQUEST,
@@ -927,13 +999,18 @@ impl DynamoDbService {
             ));
         }
 
-        // Append pending stream records under each table's lock.
+        // Append pending stream records under each table's lock so
+        // observers (DescribeStream/GetRecords) only see them once
+        // the transaction has fully committed.
         for (table_name, record) in pending_stream {
             if let Some(table) = state.tables.get_mut(&table_name) {
                 crate::streams::add_stream_record(table, record);
             }
         }
 
+        // Drop the write lock before firing kinesis deliveries so
+        // the delivery bus (which may take a read lock to look up
+        // the target stream) doesn't deadlock against us.
         drop(accounts);
         for (target, event_name, keys, old_image, new_image) in pending_kinesis {
             self.deliver_to_kinesis_destinations(
@@ -945,7 +1022,7 @@ impl DynamoDbService {
             );
         }
 
-        Self::ok_json(json!({ "Responses": responses }))
+        Self::ok_json(json!({ "Responses": applied_responses }))
     }
 }
 
@@ -1413,5 +1490,103 @@ mod tests {
             0,
             "first INSERT must be reverted when the second statement fails"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_transaction_three_writes_middle_fails_reverts_all() {
+        // L3 spec: 3 writes where #2 fails (duplicate-key on a seeded
+        // item) — all 3 must be reverted, no stream records emitted,
+        // CancellationReasons array length 3 with #2 marked.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        // Pre-seed pk=b so the 2nd INSERT in the transaction collides.
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'b'}"}),
+        ))
+        .unwrap();
+        // Reset stream records so we only count what the txn emits.
+        {
+            let accts = state.read();
+            let s = accts.get("123456789012").unwrap();
+            let table = s.tables.get("Widgets").unwrap();
+            table.stream_records.write().clear();
+        }
+
+        let req = req_for(
+            "ExecuteTransaction",
+            json!({
+                "TransactStatements": [
+                    {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}"},
+                    {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'b'}"}, // dup
+                    {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'c'}"},
+                ]
+            }),
+        );
+        let resp = svc.execute_transaction(&req).unwrap();
+        assert_eq!(resp.status, http::StatusCode::BAD_REQUEST);
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            body["__type"].as_str().unwrap(),
+            "TransactionCanceledException"
+        );
+        let reasons = body["CancellationReasons"].as_array().unwrap();
+        assert_eq!(reasons.len(), 3, "one CancellationReason per statement");
+        assert_eq!(reasons[0]["Code"].as_str().unwrap(), "None");
+        assert_eq!(reasons[1]["Code"].as_str().unwrap(), "DuplicateItem");
+        assert_eq!(reasons[2]["Code"].as_str().unwrap(), "None");
+
+        let accts = state.read();
+        let s = accts.get("123456789012").unwrap();
+        let table = s.tables.get("Widgets").unwrap();
+        // Only the pre-seed should remain — neither 'a' nor 'c' from
+        // the rolled-back txn must persist.
+        let pks: Vec<String> = table
+            .items
+            .iter()
+            .map(|i| i["pk"]["S"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(pks, vec!["b".to_string()], "all 3 statements reverted");
+        // No stream records should have been emitted from the failed
+        // txn — the apply phase never ran.
+        assert_eq!(
+            table.stream_records.read().len(),
+            0,
+            "no stream records on failed txn"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_transaction_happy_path_commits_and_emits_per_write() {
+        // L3 spec: happy-path commits all + each write emits a stream
+        // record. Mirrors items.rs::put_item per-write hook semantics.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        let req = req_for(
+            "ExecuteTransaction",
+            json!({
+                "TransactStatements": [
+                    {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}"},
+                    {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'b'}"},
+                    {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'c'}"},
+                ]
+            }),
+        );
+        let resp = svc.execute_transaction(&req).unwrap();
+        assert_eq!(resp.status, http::StatusCode::OK);
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["Responses"].as_array().unwrap().len(), 3);
+
+        let accts = state.read();
+        let s = accts.get("123456789012").unwrap();
+        let table = s.tables.get("Widgets").unwrap();
+        assert_eq!(table.items.len(), 3);
+        let records = table.stream_records.read();
+        assert_eq!(records.len(), 3, "one stream record per write");
+        assert!(records.iter().all(|r| r.event_name == "INSERT"));
     }
 }

@@ -643,6 +643,11 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
         ),
         None => String::new(),
     };
+    // SecurityGroups is a list of SecurityGroupMembership keyed on the
+    // generic `member` wrapper element — not `<SecurityGroupMembership>`
+    // — per the Smithy `SecurityGroupMembershipList$member` shape. The
+    // SDK XML deserializer drops anything else, so each entry must be
+    // wrapped in `<member>`.
     let security_groups_xml = if cluster.security_group_ids.is_empty() {
         "<SecurityGroups/>".to_string()
     } else {
