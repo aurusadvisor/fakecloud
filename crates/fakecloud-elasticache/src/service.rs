@@ -2476,6 +2476,22 @@ impl ElastiCacheService {
         let new_transit_encryption_enabled = parse_optional_bool(
             optional_query_param(request, "TransitEncryptionEnabled").as_deref(),
         )?;
+        let new_transit_encryption_mode = optional_query_param(request, "TransitEncryptionMode");
+        if let Some(ref mode) = new_transit_encryption_mode {
+            if mode != "preferred" && mode != "required" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "Invalid value for TransitEncryptionMode: '{mode}'. Valid values: preferred, required."
+                    ),
+                ));
+            }
+        }
+        let new_at_rest_encryption_enabled = parse_optional_bool(
+            optional_query_param(request, "AtRestEncryptionEnabled").as_deref(),
+        )?;
+        let new_kms_key_id = optional_query_param(request, "KmsKeyId");
         let new_multi_az_enabled =
             parse_optional_bool(optional_query_param(request, "MultiAZEnabled").as_deref())?;
         let remove_user_groups =
@@ -2486,7 +2502,50 @@ impl ElastiCacheService {
                 k.starts_with("LogDeliveryConfigurations.LogDeliveryConfigurationRequest.")
             });
         let new_ip_discovery = optional_query_param(request, "IpDiscovery");
+        if let Some(ref ip) = new_ip_discovery {
+            if ip != "ipv4" && ip != "ipv6" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("Invalid value for IpDiscovery: '{ip}'. Valid values: ipv4, ipv6."),
+                ));
+            }
+        }
         let new_network_type = optional_query_param(request, "NetworkType");
+        if let Some(ref nt) = new_network_type {
+            if nt != "ipv4" && nt != "ipv6" && nt != "dual_stack" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "Invalid value for NetworkType: '{nt}'. Valid values: ipv4, ipv6, dual_stack."
+                    ),
+                ));
+            }
+        }
+        let new_cluster_mode = optional_query_param(request, "ClusterMode");
+        if let Some(ref cm) = new_cluster_mode {
+            if cm != "compatible" && cm != "enabled" && cm != "disabled" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "Invalid value for ClusterMode: '{cm}'. Valid values: compatible, enabled, disabled."
+                    ),
+                ));
+            }
+        }
+        let new_preferred_maintenance_window =
+            optional_query_param(request, "PreferredMaintenanceWindow");
+        let new_cache_parameter_group_name =
+            optional_query_param(request, "CacheParameterGroupName");
+        let new_auto_minor_version_upgrade = parse_optional_bool(
+            optional_query_param(request, "AutoMinorVersionUpgrade").as_deref(),
+        )?;
+        // ApplyImmediately is parsed for wire compatibility but fakecloud always
+        // applies modifications synchronously since there's no reboot window.
+        let _apply_immediately =
+            parse_optional_bool(optional_query_param(request, "ApplyImmediately").as_deref())?;
         let new_notification_topic_arn = optional_query_param(request, "NotificationTopicArn");
         let new_notification_topic_status =
             optional_query_param(request, "NotificationTopicStatus");
@@ -2526,6 +2585,15 @@ impl ElastiCacheService {
         if let Some(transit) = new_transit_encryption_enabled {
             group.transit_encryption_enabled = transit;
         }
+        if let Some(mode) = new_transit_encryption_mode {
+            group.transit_encryption_mode = Some(mode);
+        }
+        if let Some(at_rest) = new_at_rest_encryption_enabled {
+            group.at_rest_encryption_enabled = at_rest;
+        }
+        if let Some(kms) = new_kms_key_id {
+            group.kms_key_id = Some(kms);
+        }
         if let Some(multi_az) = new_multi_az_enabled {
             group.multi_az_enabled = multi_az;
         }
@@ -2535,6 +2603,22 @@ impl ElastiCacheService {
         if let Some(network_type) = new_network_type {
             group.network_type = Some(network_type);
         }
+        if let Some(cluster_mode) = new_cluster_mode {
+            // ClusterMode "enabled"/"compatible" both flip cluster_enabled true;
+            // "disabled" turns it off. Mirrors create_replication_group semantics.
+            let enabled = cluster_mode == "enabled" || cluster_mode == "compatible";
+            group.cluster_enabled = enabled;
+            group.cluster_mode = Some(cluster_mode);
+        }
+        if let Some(window) = new_preferred_maintenance_window {
+            group.preferred_maintenance_window = Some(window);
+        }
+        if let Some(name) = new_cache_parameter_group_name {
+            group.cache_parameter_group_name = Some(name);
+        }
+        if let Some(amvu) = new_auto_minor_version_upgrade {
+            group.auto_minor_version_upgrade = amvu;
+        }
         if let Some(arn) = new_notification_topic_arn {
             group.notification_topic_arn = Some(arn);
         }
@@ -2542,10 +2626,24 @@ impl ElastiCacheService {
             group.notification_topic_status = Some(status);
         }
         if has_log_delivery_input {
+            // AWS replaces the full log-delivery configuration set per call;
+            // disabled entries (Enabled=false) are dropped from state.
             group.log_delivery_configurations = new_log_delivery_configurations;
         }
         if remove_user_groups == Some(true) {
             group.user_group_ids.clear();
+        }
+        // Add / remove user-group ids on the replication group itself.
+        // Skipped when RemoveUserGroups already cleared the list above only
+        // for removes; adds still apply because AWS lets a single call clear
+        // and then re-attach. Dedup on add to match AWS idempotency.
+        for ug_id in &user_group_ids_to_add {
+            if !group.user_group_ids.contains(ug_id) {
+                group.user_group_ids.push(ug_id.clone());
+            }
+        }
+        for ug_id in &user_group_ids_to_remove {
+            group.user_group_ids.retain(|id| id != ug_id);
         }
         // AuthToken rotation: SET / ROTATE store the new token, DELETE clears
         // it. Default strategy is SET when AuthToken is supplied without one.
@@ -2577,7 +2675,8 @@ impl ElastiCacheService {
             }
         }
 
-        // Associate/disassociate user groups
+        // Mirror the membership change onto the user-group side so
+        // DescribeUserGroups reflects which RGs each group covers.
         for ug_id in &user_group_ids_to_add {
             if let Some(ug) = state.user_groups.get_mut(ug_id) {
                 if !ug.replication_groups.contains(&replication_group_id) {
