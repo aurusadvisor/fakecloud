@@ -67,6 +67,8 @@ impl CloudFrontService {
             last_modified_time: now,
             config: parsed.function_config,
             function_code: parsed.function_code,
+            // No published snapshot until PublishFunction is called.
+            live_function_code: None,
         };
         account
             .functions
@@ -238,6 +240,11 @@ impl CloudFrontService {
         f.status = "DEPLOYED".to_string();
         f.stage = "LIVE".to_string();
         f.last_modified_time = Utc::now();
+        // Freeze the current development code as the LIVE snapshot.
+        // Subsequent UpdateFunction calls mutate `function_code` but
+        // leave this alone, so `TestFunction(Stage=LIVE)` keeps running
+        // the published version until the next Publish.
+        f.live_function_code = Some(f.function_code.clone());
         let snap = f.clone();
         drop(state);
         let body = render_function_summary(&snap, "PublishFunctionResult");
@@ -274,9 +281,21 @@ impl CloudFrontService {
             return Err(precondition_failed());
         }
 
+        // AWS lets callers pick which version to run. DEVELOPMENT (the
+        // default) is the latest CreateFunction / UpdateFunction body;
+        // LIVE is the snapshot taken at PublishFunction. Falling back to
+        // DEVELOPMENT when no snapshot exists matches the AWS error
+        // shape ("function not yet published") less closely, but is
+        // strictly nicer for tests against unpublished functions.
+        let stage = parsed.stage.as_deref().unwrap_or("DEVELOPMENT");
+        let source_b64 = if stage.eq_ignore_ascii_case("LIVE") {
+            f.live_function_code.as_deref().unwrap_or(&f.function_code)
+        } else {
+            f.function_code.as_str()
+        };
         let code_bytes = base64::engine::general_purpose::STANDARD
-            .decode(f.function_code.as_bytes())
-            .unwrap_or_else(|_| f.function_code.as_bytes().to_vec());
+            .decode(source_b64.as_bytes())
+            .unwrap_or_else(|_| source_b64.as_bytes().to_vec());
         let code = String::from_utf8(code_bytes)
             .map_err(|e| invalid_argument(format!("function code is not valid UTF-8: {e}")))?;
         let exec = crate::js_runtime::run_handler(&code, &event_bytes);
@@ -1060,7 +1079,6 @@ struct TestFunctionRequest {
     #[serde(default)]
     event_object: String,
     #[serde(default)]
-    #[allow(dead_code)]
     stage: Option<String>,
 }
 
@@ -1350,14 +1368,72 @@ mod tests {
     }
 
     fn test_function_request_xml(event_json: &str) -> String {
+        test_function_request_xml_with_stage(event_json, "DEVELOPMENT")
+    }
+
+    fn test_function_request_xml_with_stage(event_json: &str, stage: &str) -> String {
         let event_b64 = base64::engine::general_purpose::STANDARD.encode(event_json.as_bytes());
         format!(
             r#"<?xml version="1.0"?>
 <TestFunctionRequest xmlns="{NS}">
-  <Stage>DEVELOPMENT</Stage>
+  <Stage>{stage}</Stage>
   <EventObject>{event_b64}</EventObject>
 </TestFunctionRequest>"#
         )
+    }
+
+    async fn update_function(
+        svc: &CloudFrontService,
+        name: &str,
+        code: &str,
+        if_match: &str,
+    ) -> String {
+        let code_b64 = base64::engine::general_purpose::STANDARD.encode(code.as_bytes());
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<UpdateFunctionRequest xmlns="{NS}">
+  <FunctionConfig>
+    <Comment>t</Comment>
+    <Runtime>cloudfront-js-2.0</Runtime>
+  </FunctionConfig>
+  <FunctionCode>{code_b64}</FunctionCode>
+</UpdateFunctionRequest>"#
+        );
+        let resp = svc
+            .handle(req(
+                http::Method::PUT,
+                &format!("/2020-05-31/function/{name}"),
+                &body,
+                Some(if_match),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        resp.headers
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn publish_function(svc: &CloudFrontService, name: &str, if_match: &str) -> String {
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                &format!("/2020-05-31/function/{name}/publish"),
+                "",
+                Some(if_match),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        resp.headers
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
     }
 
     #[tokio::test]
@@ -1511,6 +1587,89 @@ mod tests {
         let cu_close = xml.find("</ComputeUtilization>").unwrap();
         let pct: u32 = xml[cu_open..cu_close].parse().unwrap();
         assert!(pct > 100, "expected pct > 100 on error, got {pct}");
+    }
+
+    #[tokio::test]
+    async fn test_function_stage_selects_published_or_development_code() {
+        // Publish freezes a copy of the code; subsequent UpdateFunction
+        // mutates DEVELOPMENT but leaves LIVE pinned to the published
+        // snapshot. Each stage's TestFunction must run the matching
+        // version.
+        let svc = svc();
+        let etag =
+            create_function(&svc, "fn-stage", r#"function handler() { return "v1"; }"#).await;
+        let pub_etag = publish_function(&svc, "fn-stage", &etag).await;
+        let _new_etag = update_function(
+            &svc,
+            "fn-stage",
+            r#"function handler() { return "v2"; }"#,
+            &pub_etag,
+        )
+        .await;
+
+        // DEVELOPMENT runs v2 (the latest update body).
+        let dev_body = test_function_request_xml_with_stage("{}", "DEVELOPMENT");
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/function/fn-stage/test",
+                &dev_body,
+                Some("E_NOT_MATCHING"),
+            ))
+            .await;
+        // We deliberately allow stale If-Match here so we exercise the
+        // stage path; the precondition fires before we get to JS, so
+        // grab the latest etag and retry.
+        assert!(resp.is_err(), "stale If-Match must be rejected");
+        let described = svc
+            .handle(req(
+                http::Method::GET,
+                "/2020-05-31/function/fn-stage",
+                "",
+                None,
+            ))
+            .await
+            .unwrap();
+        let live_etag = described
+            .headers
+            .get(http::header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let dev_resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/function/fn-stage/test",
+                &dev_body,
+                Some(&live_etag),
+            ))
+            .await
+            .unwrap();
+        let dev_xml = std::str::from_utf8(dev_resp.body.expect_bytes()).unwrap();
+        assert!(
+            dev_xml.contains("&quot;v2&quot;"),
+            "DEVELOPMENT should run latest update (v2), got {dev_xml}"
+        );
+
+        // LIVE runs v1 (the published snapshot, not affected by the
+        // post-publish update).
+        let live_body = test_function_request_xml_with_stage("{}", "LIVE");
+        let live_resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/function/fn-stage/test",
+                &live_body,
+                Some(&live_etag),
+            ))
+            .await
+            .unwrap();
+        let live_xml = std::str::from_utf8(live_resp.body.expect_bytes()).unwrap();
+        assert!(
+            live_xml.contains("&quot;v1&quot;"),
+            "LIVE should run published snapshot (v1), got {live_xml}"
+        );
     }
 
     #[tokio::test]

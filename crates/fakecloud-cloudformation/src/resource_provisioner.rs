@@ -9361,6 +9361,7 @@ impl ResourceProvisioner {
                 key_value_store_associations: None,
             },
             function_code,
+            live_function_code: None,
         };
 
         let mut accounts = self.cloudfront_state.write();

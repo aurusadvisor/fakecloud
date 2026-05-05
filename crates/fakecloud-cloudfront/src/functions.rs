@@ -54,7 +54,16 @@ pub struct StoredFunction {
     pub last_modified_time: DateTime<Utc>,
     pub config: FunctionConfig,
     /// Function source code (base64-encoded as the API receives it).
+    /// This is the DEVELOPMENT-stage code: it tracks the latest
+    /// CreateFunction / UpdateFunction body and is the version that
+    /// `TestFunction(Stage=DEVELOPMENT)` runs against.
     pub function_code: String,
+    /// Snapshot of `function_code` taken when the function is published.
+    /// `TestFunction(Stage=LIVE)` (and the corresponding distribution
+    /// data plane, once wired) reads from here so the published
+    /// behaviour stays stable while DEVELOPMENT keeps mutating.
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub live_function_code: Option<String>,
 }
 
 // ─── Public Key ───────────────────────────────────────────────────────
