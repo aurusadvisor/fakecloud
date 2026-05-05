@@ -4241,3 +4241,268 @@ async fn dynamodb_put_item_omits_item_collection_metrics_without_lsi() {
         "Tables without LSI must omit ItemCollectionMetrics"
     );
 }
+
+/// `ExecuteTransaction` is the PartiQL counterpart to
+/// `TransactWriteItems`. It must be all-or-nothing: a happy-path
+/// commits every statement and emits one Streams record per write,
+/// while a mid-batch failure rolls back every earlier statement and
+/// emits no records — matching real DDB's atomic semantics.
+#[tokio::test]
+async fn dynamodb_execute_transaction_happy_path_commits_and_emits_streams() {
+    use aws_sdk_dynamodb::types::ParameterizedStatement;
+
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let streams = server.dynamodb_streams_client().await;
+
+    let table_name = "PartiqlTxnHappy";
+    ddb.create_table()
+        .table_name(table_name)
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .stream_specification(
+            StreamSpecification::builder()
+                .stream_enabled(true)
+                .stream_view_type(StreamViewType::NewAndOldImages)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let stream_arn = ddb
+        .describe_table()
+        .table_name(table_name)
+        .send()
+        .await
+        .unwrap()
+        .table()
+        .unwrap()
+        .latest_stream_arn()
+        .unwrap()
+        .to_string();
+
+    // Three INSERTs in one transaction.
+    ddb.execute_transaction()
+        .transact_statements(
+            ParameterizedStatement::builder()
+                .statement(format!("INSERT INTO \"{table_name}\" VALUE {{'pk': 'a'}}"))
+                .build()
+                .unwrap(),
+        )
+        .transact_statements(
+            ParameterizedStatement::builder()
+                .statement(format!("INSERT INTO \"{table_name}\" VALUE {{'pk': 'b'}}"))
+                .build()
+                .unwrap(),
+        )
+        .transact_statements(
+            ParameterizedStatement::builder()
+                .statement(format!("INSERT INTO \"{table_name}\" VALUE {{'pk': 'c'}}"))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // All three rows committed.
+    let scan = ddb.scan().table_name(table_name).send().await.unwrap();
+    assert_eq!(scan.items().len(), 3, "all 3 INSERTs must commit");
+
+    // One stream record per write.
+    let desc = streams
+        .describe_stream()
+        .stream_arn(&stream_arn)
+        .send()
+        .await
+        .unwrap();
+    let shard_id = desc
+        .stream_description()
+        .unwrap()
+        .shards()
+        .first()
+        .unwrap()
+        .shard_id()
+        .unwrap()
+        .to_string();
+    let it = streams
+        .get_shard_iterator()
+        .stream_arn(&stream_arn)
+        .shard_id(&shard_id)
+        .shard_iterator_type(aws_sdk_dynamodbstreams::types::ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+    let r = streams
+        .get_records()
+        .shard_iterator(it.shard_iterator().unwrap())
+        .send()
+        .await
+        .unwrap();
+    let records = r.records();
+    assert_eq!(
+        records.len(),
+        3,
+        "ExecuteTransaction must emit one stream record per write"
+    );
+    assert!(records
+        .iter()
+        .all(|rec| rec.event_name().unwrap().as_str() == "INSERT"));
+}
+
+/// Mid-batch failure inside `ExecuteTransaction` rolls back every
+/// earlier statement. The DuplicateItemException on statement #2 must
+/// abort the transaction so neither #1 nor #3 commit, and no Streams
+/// records leak out.
+#[tokio::test]
+async fn dynamodb_execute_transaction_three_writes_middle_fails_reverts_all() {
+    use aws_sdk_dynamodb::types::ParameterizedStatement;
+
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let streams = server.dynamodb_streams_client().await;
+
+    let table_name = "PartiqlTxnRollback";
+    ddb.create_table()
+        .table_name(table_name)
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .stream_specification(
+            StreamSpecification::builder()
+                .stream_enabled(true)
+                .stream_view_type(StreamViewType::NewAndOldImages)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let stream_arn = ddb
+        .describe_table()
+        .table_name(table_name)
+        .send()
+        .await
+        .unwrap()
+        .table()
+        .unwrap()
+        .latest_stream_arn()
+        .unwrap()
+        .to_string();
+
+    // Pre-seed pk=b so the second INSERT collides.
+    ddb.put_item()
+        .table_name(table_name)
+        .item("pk", AttributeValue::S("b".into()))
+        .send()
+        .await
+        .unwrap();
+
+    let err = ddb
+        .execute_transaction()
+        .transact_statements(
+            ParameterizedStatement::builder()
+                .statement(format!("INSERT INTO \"{table_name}\" VALUE {{'pk': 'a'}}"))
+                .build()
+                .unwrap(),
+        )
+        .transact_statements(
+            ParameterizedStatement::builder()
+                .statement(format!("INSERT INTO \"{table_name}\" VALUE {{'pk': 'b'}}"))
+                .build()
+                .unwrap(),
+        )
+        .transact_statements(
+            ParameterizedStatement::builder()
+                .statement(format!("INSERT INTO \"{table_name}\" VALUE {{'pk': 'c'}}"))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect_err("transaction must fail");
+
+    let cancelled = match err.into_service_error() {
+        aws_sdk_dynamodb::operation::execute_transaction::ExecuteTransactionError::TransactionCanceledException(e) => e,
+        other => panic!("expected TransactionCanceledException, got {other:?}"),
+    };
+    let reasons = cancelled.cancellation_reasons();
+    assert_eq!(reasons.len(), 3, "one CancellationReason per statement");
+    assert_eq!(reasons[0].code(), Some("None"));
+    assert_eq!(reasons[1].code(), Some("DuplicateItem"));
+    assert_eq!(reasons[2].code(), Some("None"));
+
+    // Only the pre-seed must remain.
+    let scan = ddb.scan().table_name(table_name).send().await.unwrap();
+    let pks: Vec<String> = scan
+        .items()
+        .iter()
+        .map(|i| i.get("pk").unwrap().as_s().unwrap().to_string())
+        .collect();
+    assert_eq!(pks, vec!["b".to_string()], "all 3 statements reverted");
+
+    // Only the seed put's INSERT — no stream records from the failed
+    // transaction.
+    let desc = streams
+        .describe_stream()
+        .stream_arn(&stream_arn)
+        .send()
+        .await
+        .unwrap();
+    let shard_id = desc
+        .stream_description()
+        .unwrap()
+        .shards()
+        .first()
+        .unwrap()
+        .shard_id()
+        .unwrap()
+        .to_string();
+    let it = streams
+        .get_shard_iterator()
+        .stream_arn(&stream_arn)
+        .shard_id(&shard_id)
+        .shard_iterator_type(aws_sdk_dynamodbstreams::types::ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+    let r = streams
+        .get_records()
+        .shard_iterator(it.shard_iterator().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.records().len(),
+        1,
+        "only the pre-seed INSERT should be on the stream — failed txn emits nothing"
+    );
+}
