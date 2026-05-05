@@ -411,6 +411,147 @@ pub struct DbParameterGroup {
     pub tags: Vec<RdsTag>,
 }
 
+/// Static metadata for an engine-default parameter, used by
+/// `DescribeDBParameters`/`DescribeDBClusterParameters`/`DescribeEngineDefaultParameters`
+/// to surface a baseline set of parameters when no user override exists.
+///
+/// The seed below is intentionally small (a handful of common knobs per
+/// engine family). Real RDS exposes hundreds of parameters per family;
+/// callers needing comprehensive coverage should add entries to
+/// [`engine_default_parameters`] as needs arise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineDefaultParameter {
+    pub name: &'static str,
+    pub value: &'static str,
+    pub apply_type: &'static str,
+    pub data_type: &'static str,
+    pub allowed_values: &'static str,
+    pub is_modifiable: bool,
+}
+
+/// Return a small, representative set of engine-default parameters for the
+/// given parameter group family (e.g. `postgres16`, `mysql8.0`,
+/// `aurora-postgresql15`). The list is not comprehensive — real RDS
+/// exposes hundreds of parameters; we ship just enough to make callers
+/// that round-trip `DescribeDBParameters` with `Source=engine-default`
+/// see meaningful entries. Unknown families fall through to an empty list.
+pub fn engine_default_parameters(family: &str) -> &'static [EngineDefaultParameter] {
+    if family.starts_with("postgres") || family.starts_with("aurora-postgresql") {
+        POSTGRES_DEFAULT_PARAMETERS
+    } else if family.starts_with("mysql") || family.starts_with("aurora-mysql") {
+        MYSQL_DEFAULT_PARAMETERS
+    } else if family.starts_with("mariadb") {
+        MARIADB_DEFAULT_PARAMETERS
+    } else {
+        &[]
+    }
+}
+
+const POSTGRES_DEFAULT_PARAMETERS: &[EngineDefaultParameter] = &[
+    EngineDefaultParameter {
+        name: "max_connections",
+        value: "LEAST({DBInstanceClassMemory/9531392},5000)",
+        apply_type: "static",
+        data_type: "integer",
+        allowed_values: "6-8388607",
+        is_modifiable: true,
+    },
+    EngineDefaultParameter {
+        name: "shared_buffers",
+        value: "{DBInstanceClassMemory/32768}",
+        apply_type: "static",
+        data_type: "integer",
+        allowed_values: "16-1073741823",
+        is_modifiable: true,
+    },
+    EngineDefaultParameter {
+        name: "work_mem",
+        value: "4096",
+        apply_type: "dynamic",
+        data_type: "integer",
+        allowed_values: "64-2147483647",
+        is_modifiable: true,
+    },
+    EngineDefaultParameter {
+        name: "maintenance_work_mem",
+        value: "GREATEST({DBInstanceClassMemory/63963136*1024},65536)",
+        apply_type: "dynamic",
+        data_type: "integer",
+        allowed_values: "1024-2147483647",
+        is_modifiable: true,
+    },
+    EngineDefaultParameter {
+        name: "effective_cache_size",
+        value: "{DBInstanceClassMemory/16384}",
+        apply_type: "dynamic",
+        data_type: "integer",
+        allowed_values: "1-2147483647",
+        is_modifiable: true,
+    },
+];
+
+const MYSQL_DEFAULT_PARAMETERS: &[EngineDefaultParameter] = &[
+    EngineDefaultParameter {
+        name: "max_connections",
+        value: "{DBInstanceClassMemory/12582880}",
+        apply_type: "dynamic",
+        data_type: "integer",
+        allowed_values: "1-100000",
+        is_modifiable: true,
+    },
+    EngineDefaultParameter {
+        name: "innodb_buffer_pool_size",
+        value: "{DBInstanceClassMemory*3/4}",
+        apply_type: "static",
+        data_type: "integer",
+        allowed_values: "5242880-2147483648",
+        is_modifiable: true,
+    },
+    EngineDefaultParameter {
+        name: "max_allowed_packet",
+        value: "67108864",
+        apply_type: "dynamic",
+        data_type: "integer",
+        allowed_values: "1024-1073741824",
+        is_modifiable: true,
+    },
+    EngineDefaultParameter {
+        name: "character_set_server",
+        value: "utf8mb4",
+        apply_type: "dynamic",
+        data_type: "string",
+        allowed_values: "utf8,utf8mb4,latin1",
+        is_modifiable: true,
+    },
+];
+
+const MARIADB_DEFAULT_PARAMETERS: &[EngineDefaultParameter] = &[
+    EngineDefaultParameter {
+        name: "max_connections",
+        value: "{DBInstanceClassMemory/12582880}",
+        apply_type: "dynamic",
+        data_type: "integer",
+        allowed_values: "1-100000",
+        is_modifiable: true,
+    },
+    EngineDefaultParameter {
+        name: "innodb_buffer_pool_size",
+        value: "{DBInstanceClassMemory*3/4}",
+        apply_type: "static",
+        data_type: "integer",
+        allowed_values: "5242880-2147483648",
+        is_modifiable: true,
+    },
+    EngineDefaultParameter {
+        name: "max_allowed_packet",
+        value: "67108864",
+        apply_type: "dynamic",
+        data_type: "integer",
+        allowed_values: "1024-1073741824",
+        is_modifiable: true,
+    },
+];
+
 impl RdsState {
     pub fn new(account_id: &str, region: &str) -> Self {
         Self {

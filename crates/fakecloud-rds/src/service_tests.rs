@@ -1291,12 +1291,15 @@ fn describe_db_parameters_returns_user_set_values() {
 fn describe_db_parameters_with_engine_default_source_omits_user_params() {
     let svc = make_service();
     create_param_group(&svc, "pg1");
+    // Modify a parameter that is NOT seeded as an engine default so the
+    // `engine-default` source filter has a clean way to demonstrate it
+    // skips user-only parameters.
     let req = request(
         "ModifyDBParameterGroup",
         &[
             ("DBParameterGroupName", "pg1"),
-            ("Parameters.member.1.ParameterName", "max_connections"),
-            ("Parameters.member.1.ParameterValue", "200"),
+            ("Parameters.member.1.ParameterName", "user_only_knob"),
+            ("Parameters.member.1.ParameterValue", "42"),
         ],
     );
     svc.modify_db_parameter_group(&req).unwrap();
@@ -1310,7 +1313,42 @@ fn describe_db_parameters_with_engine_default_source_omits_user_params() {
     );
     let resp = svc.describe_db_parameters_real(&req).unwrap();
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
-    assert!(!body.contains("max_connections"));
+    // User-only parameter is hidden when filtering on engine defaults.
+    assert!(!body.contains("user_only_knob"));
+    // Engine defaults still surface (postgres16 seeds `max_connections`).
+    assert!(body.contains("max_connections"));
+    assert!(body.contains("<Source>engine-default</Source>"));
+    assert!(!body.contains("<Source>user</Source>"));
+}
+
+#[test]
+fn describe_db_parameters_with_no_source_returns_user_and_engine_defaults() {
+    let svc = make_service();
+    create_param_group(&svc, "pg1");
+    let req = request(
+        "ModifyDBParameterGroup",
+        &[
+            ("DBParameterGroupName", "pg1"),
+            ("Parameters.member.1.ParameterName", "max_connections"),
+            ("Parameters.member.1.ParameterValue", "200"),
+        ],
+    );
+    svc.modify_db_parameter_group(&req).unwrap();
+
+    let req = request("DescribeDBParameters", &[("DBParameterGroupName", "pg1")]);
+    let resp = svc.describe_db_parameters_real(&req).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    // User override of `max_connections` shadows the engine default so
+    // the parameter appears exactly once with `Source=user`.
+    assert_eq!(
+        body.matches("<ParameterName>max_connections</ParameterName>")
+            .count(),
+        1
+    );
+    assert!(body.contains("<ParameterValue>200</ParameterValue>"));
+    // Other engine defaults (e.g. work_mem) still come through.
+    assert!(body.contains("<ParameterName>work_mem</ParameterName>"));
+    assert!(body.contains("<Source>engine-default</Source>"));
 }
 
 #[test]
