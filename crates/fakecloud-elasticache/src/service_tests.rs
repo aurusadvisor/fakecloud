@@ -2833,7 +2833,7 @@ async fn create_replication_group_rejects_num_node_groups_out_of_range() {
         fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
     ));
     let svc = ElastiCacheService::new(shared);
-    // Cap at 500 to bound XML allocation, matching AWS's documented limit.
+    // Default Redis 7.1 caps at 500; reject anything above.
     let req = request(
         "CreateReplicationGroup",
         &[
@@ -2858,6 +2858,56 @@ async fn create_replication_group_rejects_num_node_groups_out_of_range() {
     match svc.create_replication_group(&req).await {
         Ok(_) => panic!("expected NumNodeGroups=0 to be rejected"),
         Err(e) => assert_eq!(e.status(), http::StatusCode::BAD_REQUEST),
+    }
+}
+
+#[test]
+fn max_node_groups_matches_engine_version() {
+    // Redis < 5.0.6 was capped at 90 shards. Reject the request the same
+    // way real AWS would for callers pinning to those legacy versions.
+    assert_eq!(super::max_node_groups_for("redis", "3.2.10"), 90);
+    assert_eq!(super::max_node_groups_for("redis", "5.0.0"), 90);
+    assert_eq!(super::max_node_groups_for("redis", "5.0.5"), 90);
+    // 5.0.6 is the threshold where AWS lifted the cap.
+    assert_eq!(super::max_node_groups_for("redis", "5.0.6"), 500);
+    assert_eq!(super::max_node_groups_for("redis", "6.2"), 500);
+    assert_eq!(super::max_node_groups_for("redis", "7.1"), 500);
+    // Valkey is unaffected; cap is always 500.
+    assert_eq!(super::max_node_groups_for("valkey", "7.0"), 500);
+    assert_eq!(super::max_node_groups_for("valkey", "8.0"), 500);
+    // Memcached doesn't have replication groups, but the helper is total.
+    assert_eq!(super::max_node_groups_for("memcached", "1.6.22"), 500);
+    // Unparseable versions fall back to the safe modern ceiling.
+    assert_eq!(super::max_node_groups_for("redis", "garbage"), 500);
+}
+
+#[tokio::test]
+async fn create_replication_group_rejects_num_node_groups_above_legacy_redis_cap() {
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let svc = ElastiCacheService::new(shared);
+    // 100 shards on Redis 5.0.5 must be rejected (90 ceiling), but allowed
+    // on Redis 7.1 (500 ceiling) so we know the cap is engine-version-aware.
+    let req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "legacy-rg"),
+            ("ReplicationGroupDescription", "legacy redis"),
+            ("EngineVersion", "5.0.5"),
+            ("NumNodeGroups", "100"),
+        ],
+    );
+    match svc.create_replication_group(&req).await {
+        Ok(_) => panic!("Redis 5.0.5 should cap NumNodeGroups at 90"),
+        Err(e) => {
+            assert_eq!(e.status(), http::StatusCode::BAD_REQUEST);
+            assert!(
+                e.message().contains("90"),
+                "error must mention engine-specific cap, got: {}",
+                e.message()
+            );
+        }
     }
 }
 

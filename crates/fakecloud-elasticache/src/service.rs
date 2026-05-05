@@ -53,6 +53,33 @@ fn reject_memcached_for(engine: &str, feature: &str) -> Result<(), AwsServiceErr
     }
     Ok(())
 }
+
+/// Engine + version-dependent ceiling on NumNodeGroups for cluster-mode
+/// replication groups, mirroring AWS's documented limits. Redis prior to
+/// 5.0.6 was capped at 90 shards; 5.0.6+ and Valkey raised the ceiling to
+/// 500. Memcached has no replication groups (rejected upstream) but
+/// returning the modern 500 here makes the function total. Unparseable
+/// version strings fall through to the modern ceiling because fakecloud
+/// only ships the redis 7.x / valkey 8.x backing images today; treating
+/// unknown versions as "legacy" would surprise callers passing odd
+/// strings like the engine label `Redis`.
+fn max_node_groups_for(engine: &str, engine_version: &str) -> i32 {
+    if engine == ENGINE_REDIS {
+        // Parse "MAJOR.MINOR.PATCH" or "MAJOR.MINOR" and only flip to the
+        // legacy 90-shard cap when we successfully parsed a major version.
+        let mut parts = engine_version.split('.').map(|p| p.parse::<u32>().ok());
+        if let Some(Some(major)) = parts.next() {
+            let minor = parts.next().flatten().unwrap_or(0);
+            let patch = parts.next().flatten().unwrap_or(0);
+            // 5.0.6 is the threshold. Anything strictly earlier is capped at 90.
+            let pre_506 = major < 5 || (major == 5 && minor == 0 && patch < 6);
+            if pre_506 {
+                return 90;
+            }
+        }
+    }
+    500
+}
 const SUPPORTED_ACTIONS: &[&str] = &[
     "AddTagsToResource",
     "CreateCacheCluster",
@@ -1184,6 +1211,7 @@ impl ElastiCacheService {
         let auth_token_enabled = auth_token.is_some();
         let kms_key_id = optional_query_param(request, "KmsKeyId");
         let user_group_ids = parse_query_list_param(request, "UserGroupIds", "UserGroupId");
+        let max_node_groups = max_node_groups_for(&engine, &engine_version);
         let num_node_groups = match optional_query_param(request, "NumNodeGroups") {
             Some(v) => {
                 let n = v.parse::<i32>().map_err(|_| {
@@ -1193,13 +1221,16 @@ impl ElastiCacheService {
                         format!("Invalid value for NumNodeGroups: '{v}'"),
                     )
                 })?;
-                // AWS caps Redis cluster mode at 500 shards. Reject anything
-                // outside [1, 500] to prevent unbounded server-side allocation.
-                if !(1..=500).contains(&n) {
+                // AWS shard cap depends on engine + version: pre-5.0.6 Redis is
+                // 90, 5.0.6+ / Valkey is 500. Reject anything outside the engine
+                // ceiling to prevent unbounded server-side allocation.
+                if !(1..=max_node_groups).contains(&n) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "InvalidParameterValue",
-                        format!("NumNodeGroups must be between 1 and 500, got {n}"),
+                        format!(
+                            "NumNodeGroups must be between 1 and {max_node_groups} for {engine} {engine_version}, got {n}"
+                        ),
                     ));
                 }
                 n
