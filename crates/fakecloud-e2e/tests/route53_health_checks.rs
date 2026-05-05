@@ -379,10 +379,18 @@ async fn admin_endpoint_flips_health_check_status_and_reason() {
         .await
         .expect("status before flip");
     let observations = initial.health_check_observations();
-    assert!(!observations.is_empty());
+    assert_eq!(
+        observations.len(),
+        8,
+        "expected 8 region observations, got {}",
+        observations.len()
+    );
     for obs in observations {
         let status = obs.status_report().unwrap().status().unwrap();
-        assert_eq!(status, "Success", "expected Success before admin flip");
+        assert_eq!(
+            status, "Success: HTTP Status Code 200",
+            "expected AWS-style success status before admin flip"
+        );
     }
 
     let code = server
@@ -432,7 +440,7 @@ async fn admin_endpoint_flips_health_check_status_and_reason() {
         .expect("status after recovery");
     for obs in recovered.health_check_observations() {
         let status = obs.status_report().unwrap().status().unwrap();
-        assert_eq!(status, "Success");
+        assert_eq!(status, "Success: HTTP Status Code 200");
     }
 }
 
@@ -443,4 +451,129 @@ async fn admin_endpoint_returns_404_for_unknown_health_check() {
         .set_route53_health_check_status("ghost-hc", "Failure", Some("missing"))
         .await;
     assert_eq!(code, 404);
+}
+
+#[tokio::test]
+async fn admin_endpoint_supports_timeout_dns_unknown_and_insufficient_data() {
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+
+    let id = r53
+        .create_health_check()
+        .caller_reference("hc-extended-states")
+        .health_check_config(
+            HealthCheckConfig::builder()
+                .r#type(HealthCheckType::Http)
+                .ip_address("203.0.113.60")
+                .port(80)
+                .resource_path("/")
+                .request_interval(30)
+                .failure_threshold(3)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create")
+        .health_check()
+        .unwrap()
+        .id()
+        .to_string();
+
+    // Timeout without explicit reason -> canned descriptor.
+    assert_eq!(
+        server
+            .set_route53_health_check_status(&id, "Timeout", None)
+            .await,
+        204
+    );
+    let after_timeout = r53
+        .get_health_check_status()
+        .health_check_id(&id)
+        .send()
+        .await
+        .expect("status after timeout");
+    for obs in after_timeout.health_check_observations() {
+        let status = obs.status_report().unwrap().status().unwrap();
+        assert_eq!(status, "Failure: Connection timed out");
+    }
+
+    // DnsError with explicit reason -> reason is preserved verbatim.
+    assert_eq!(
+        server
+            .set_route53_health_check_status(&id, "DnsError", Some("NXDOMAIN for endpoint"))
+            .await,
+        204
+    );
+    let after_dns = r53
+        .get_health_check_status()
+        .health_check_id(&id)
+        .send()
+        .await
+        .expect("status after dns");
+    for obs in after_dns.health_check_observations() {
+        let status = obs.status_report().unwrap().status().unwrap();
+        assert_eq!(status, "Failure: NXDOMAIN for endpoint");
+    }
+    let last_dns = r53
+        .get_health_check_last_failure_reason()
+        .health_check_id(&id)
+        .send()
+        .await
+        .expect("last failure after dns");
+    assert!(!last_dns.health_check_observations().is_empty());
+    for obs in last_dns.health_check_observations() {
+        let s = obs.status_report().unwrap().status().unwrap();
+        assert_eq!(s, "NXDOMAIN for endpoint");
+    }
+
+    // InsufficientDataPoints emits the literal AWS string.
+    assert_eq!(
+        server
+            .set_route53_health_check_status(&id, "InsufficientDataPoints", None)
+            .await,
+        204
+    );
+    let after_insuff = r53
+        .get_health_check_status()
+        .health_check_id(&id)
+        .send()
+        .await
+        .expect("status after insufficient");
+    for obs in after_insuff.health_check_observations() {
+        let status = obs.status_report().unwrap().status().unwrap();
+        assert_eq!(status, "InsufficientDataPoints");
+    }
+
+    // Unknown collapses to the literal "Unknown" string.
+    assert_eq!(
+        server
+            .set_route53_health_check_status(&id, "Unknown", None)
+            .await,
+        204
+    );
+    let after_unknown = r53
+        .get_health_check_status()
+        .health_check_id(&id)
+        .send()
+        .await
+        .expect("status after unknown");
+    for obs in after_unknown.health_check_observations() {
+        let status = obs.status_report().unwrap().status().unwrap();
+        assert_eq!(status, "Unknown");
+    }
+
+    // Even after switching to a non-failure status, the historical DNS
+    // failure reason is still surfaced by GetHealthCheckLastFailureReason.
+    let last_after_unknown = r53
+        .get_health_check_last_failure_reason()
+        .health_check_id(&id)
+        .send()
+        .await
+        .expect("last failure after unknown");
+    assert!(!last_after_unknown.health_check_observations().is_empty());
+    for obs in last_after_unknown.health_check_observations() {
+        let s = obs.status_report().unwrap().status().unwrap();
+        assert_eq!(s, "NXDOMAIN for endpoint");
+    }
 }

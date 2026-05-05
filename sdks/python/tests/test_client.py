@@ -627,7 +627,7 @@ def test_route53_set_health_check_status(fc: FakeCloudSync, fakecloud_url: str) 
     fc.route53.set_health_check_status(hc_id, "Success")
     after = r53.get_health_check_status(HealthCheckId=hc_id)
     for obs in after["HealthCheckObservations"]:
-        assert obs["StatusReport"]["Status"] == "Success"
+        assert obs["StatusReport"]["Status"] == "Success: HTTP Status Code 200"
 
 
 def test_route53_set_health_check_status_unknown_id(fc: FakeCloudSync) -> None:

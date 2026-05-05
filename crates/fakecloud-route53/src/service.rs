@@ -1158,9 +1158,10 @@ impl Route53Service {
     /// When `status = Success`, `last_failure_reason` is ignored and
     /// any prior reason is preserved so a later read of
     /// `GetHealthCheckLastFailureReason` still surfaces the historical
-    /// observation. When `status = Failure` and `last_failure_reason`
-    /// is `Some`, the stored reason is overwritten; `None` leaves the
-    /// prior reason untouched.
+    /// observation. When `status` is one of the failure-flavoured
+    /// variants (`Failure`, `Timeout`, `DnsError`) and
+    /// `last_failure_reason` is `Some`, the stored reason is
+    /// overwritten; `None` leaves the prior reason untouched.
     pub fn set_health_check_status(
         &self,
         id: &str,
@@ -1175,7 +1176,11 @@ impl Route53Service {
             return false;
         };
         hc.status = status;
-        if status == HealthCheckStatus::Failure && last_failure_reason.is_some() {
+        let is_failure_flavoured = matches!(
+            status,
+            HealthCheckStatus::Failure | HealthCheckStatus::Timeout | HealthCheckStatus::DnsError
+        );
+        if is_failure_flavoured && last_failure_reason.is_some() {
             hc.last_failure_reason = last_failure_reason;
         }
         true
@@ -3133,7 +3138,10 @@ mod tests {
         let body = std::str::from_utf8(resp.body.expect_bytes())
             .unwrap()
             .to_string();
-        assert!(body.contains("<Status>Success</Status>"), "body: {body}");
+        assert!(
+            body.contains("<Status>Success: HTTP Status Code 200</Status>"),
+            "body: {body}"
+        );
     }
 
     #[test]
@@ -3168,7 +3176,7 @@ mod tests {
     }
 
     #[test]
-    fn get_health_check_status_failure_without_reason_renders_bare_failure() {
+    fn get_health_check_status_failure_without_reason_renders_canned_descriptor() {
         let svc = svc_with_health_check("hc-bare");
         {
             let mut state = svc.state.write();
@@ -3192,7 +3200,110 @@ mod tests {
         let body = std::str::from_utf8(resp.body.expect_bytes())
             .unwrap()
             .to_string();
-        assert!(body.contains("<Status>Failure</Status>"), "body: {body}");
+        assert!(
+            body.contains("<Status>Failure: Endpoint unreachable</Status>"),
+            "body: {body}"
+        );
+    }
+
+    #[test]
+    fn get_health_check_status_renders_timeout_dns_insufficient_unknown() {
+        let svc = svc_with_health_check("hc-flavours");
+        let cases = [
+            (
+                HealthCheckStatus::Timeout,
+                None,
+                "<Status>Failure: Connection timed out</Status>",
+            ),
+            (
+                HealthCheckStatus::Timeout,
+                Some("custom timeout msg".to_string()),
+                "<Status>Failure: custom timeout msg</Status>",
+            ),
+            (
+                HealthCheckStatus::DnsError,
+                None,
+                "<Status>Failure: DNS resolution failed</Status>",
+            ),
+            (
+                HealthCheckStatus::InsufficientDataPoints,
+                None,
+                "<Status>InsufficientDataPoints</Status>",
+            ),
+            (HealthCheckStatus::Unknown, None, "<Status>Unknown</Status>"),
+        ];
+        for (status, reason, expected) in cases {
+            {
+                let mut state = svc.state.write();
+                let hc = state
+                    .accounts
+                    .get_mut(DEFAULT_ACCOUNT)
+                    .unwrap()
+                    .health_checks
+                    .get_mut("hc-flavours")
+                    .unwrap();
+                hc.status = status;
+                hc.last_failure_reason = reason.clone();
+            }
+            let route = crate::router::route(
+                &http::Method::GET,
+                "/2013-04-01/healthcheck/hc-flavours/status",
+                "",
+            )
+            .unwrap();
+            let resp = svc.get_health_check_status(&route).unwrap();
+            let body = std::str::from_utf8(resp.body.expect_bytes())
+                .unwrap()
+                .to_string();
+            assert!(
+                body.contains(expected),
+                "status={status:?} reason={reason:?} body: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_health_check_status_records_reason_for_timeout_and_dns_error() {
+        let svc = svc_with_health_check("hc-flav");
+        assert!(svc.set_health_check_status(
+            "hc-flav",
+            HealthCheckStatus::Timeout,
+            Some("upstream silent".to_string()),
+        ));
+        {
+            let st = svc.state.read();
+            let hc = &st.accounts.get(DEFAULT_ACCOUNT).unwrap().health_checks["hc-flav"];
+            assert_eq!(hc.status, HealthCheckStatus::Timeout);
+            assert_eq!(
+                hc.last_failure_reason.as_deref().unwrap(),
+                "upstream silent"
+            );
+        }
+        assert!(svc.set_health_check_status(
+            "hc-flav",
+            HealthCheckStatus::DnsError,
+            Some("NXDOMAIN".to_string()),
+        ));
+        {
+            let st = svc.state.read();
+            let hc = &st.accounts.get(DEFAULT_ACCOUNT).unwrap().health_checks["hc-flav"];
+            assert_eq!(hc.status, HealthCheckStatus::DnsError);
+            assert_eq!(hc.last_failure_reason.as_deref().unwrap(), "NXDOMAIN");
+        }
+        // InsufficientDataPoints / Unknown must not clobber prior reason
+        // even when a reason is supplied (those flavours aren't
+        // failure-flavoured).
+        assert!(svc.set_health_check_status(
+            "hc-flav",
+            HealthCheckStatus::InsufficientDataPoints,
+            Some("ignored".to_string()),
+        ));
+        {
+            let st = svc.state.read();
+            let hc = &st.accounts.get(DEFAULT_ACCOUNT).unwrap().health_checks["hc-flav"];
+            assert_eq!(hc.status, HealthCheckStatus::InsufficientDataPoints);
+            assert_eq!(hc.last_failure_reason.as_deref().unwrap(), "NXDOMAIN");
+        }
     }
 
     // ─── TestDNSAnswer routing-policy E2E tests (U2) ──────────────────

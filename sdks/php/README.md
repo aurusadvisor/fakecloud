@@ -168,7 +168,7 @@ $fc = new FakeCloud('http://localhost:4566'); // explicit base URL
 
 | Method                                              | Description                                                                                                                                       |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `setHealthCheckStatus($id, $status, $reason)`       | Flip a health check between `Success` / `Failure` to drive failover routing in tests; reason is appended to the `<Status>` element on failure (omit for null) |
+| `setHealthCheckStatus($id, $status, $reason)`       | Flip a health check between `Success` / `Failure` / `Timeout` / `DnsError` / `InsufficientDataPoints` / `Unknown` to drive failover routing in tests; reason is appended to the `<Status>` element for failure-flavoured statuses (omit for null) |
 
 #### Full test loop — asserting on Bedrock calls
 

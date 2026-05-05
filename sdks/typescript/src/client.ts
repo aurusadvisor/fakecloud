@@ -686,9 +686,22 @@ export class Elbv2Client {
 
 /** Body for `route53.setHealthCheckStatus`. */
 export interface SetHealthCheckStatusRequest {
-  /** "Success" or "Failure". */
-  status: "Success" | "Failure";
-  /** Optional reason appended to the `<Status>` element on Failure. */
+  /**
+   * One of `"Success"`, `"Failure"`, `"Timeout"`, `"DnsError"`,
+   * `"InsufficientDataPoints"`, `"Unknown"`.
+   */
+  status:
+    | "Success"
+    | "Failure"
+    | "Timeout"
+    | "DnsError"
+    | "InsufficientDataPoints"
+    | "Unknown";
+  /**
+   * Optional reason appended to the `<Status>` element for
+   * failure-flavoured statuses (`Failure`, `Timeout`, `DnsError`).
+   * Ignored for `Success`, `InsufficientDataPoints`, `Unknown`.
+   */
   reason?: string;
 }
 

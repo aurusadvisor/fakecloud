@@ -256,9 +256,11 @@ impl TestServer {
 
     /// Flip a Route 53 health check's reported status via
     /// `POST /_fakecloud/route53/health-checks/{id}/status`. `status`
-    /// is `"Success"` or `"Failure"`. `reason` (optional) is appended
-    /// to the `<Status>` element when `status = Failure`. Returns the
-    /// HTTP status code so tests can assert 204 vs 404.
+    /// is one of `"Success"`, `"Failure"`, `"Timeout"`, `"DnsError"`,
+    /// `"InsufficientDataPoints"`, `"Unknown"`. `reason` (optional) is
+    /// appended to the `<Status>` element for failure-flavoured
+    /// statuses (`Failure`, `Timeout`, `DnsError`); ignored otherwise.
+    /// Returns the HTTP status code so tests can assert 204 vs 404.
     pub async fn set_route53_health_check_status(
         &self,
         id: &str,

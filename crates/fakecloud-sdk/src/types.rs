@@ -1135,13 +1135,16 @@ pub struct CreateAdminResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Route53HealthCheckStatusRequest {
-    /// New status reported by `GetHealthCheckStatus`. `"Success"` or
-    /// `"Failure"`.
+    /// New status reported by `GetHealthCheckStatus`. One of
+    /// `"Success"`, `"Failure"`, `"Timeout"`, `"DnsError"`,
+    /// `"InsufficientDataPoints"`, `"Unknown"`.
     pub status: Route53HealthCheckStatusValue,
     /// Optional last-failure observation surfaced by
     /// `GetHealthCheckLastFailureReason` and appended to the
-    /// `<Status>` element when `status = Failure`. Ignored when
-    /// `status = Success`. `None` leaves the prior value intact.
+    /// `<Status>` element for failure-flavoured statuses (`Failure`,
+    /// `Timeout`, `DnsError`). Ignored when `status` is `Success`,
+    /// `InsufficientDataPoints`, or `Unknown`. `None` leaves the prior
+    /// value intact.
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -1153,6 +1156,10 @@ pub struct Route53HealthCheckStatusRequest {
 pub enum Route53HealthCheckStatusValue {
     Success,
     Failure,
+    Timeout,
+    DnsError,
+    InsufficientDataPoints,
+    Unknown,
 }
 
 /// Body for `POST /_fakecloud/acm/certificates/{arn-or-id}/status`. The

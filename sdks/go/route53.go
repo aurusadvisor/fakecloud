@@ -16,9 +16,10 @@ type Route53Client struct {
 
 // SetHealthCheckStatusRequest is the JSON body sent to the admin endpoint.
 //
-// Status is "Success" or "Failure". Reason is appended to the <Status>
-// element returned by GetHealthCheckStatus when Status is "Failure";
-// ignored when "Success".
+// Status is one of "Success", "Failure", "Timeout", "DnsError",
+// "InsufficientDataPoints", "Unknown". Reason is appended to the <Status>
+// element returned by GetHealthCheckStatus for failure-flavoured statuses
+// (Failure, Timeout, DnsError); ignored otherwise.
 type SetHealthCheckStatusRequest struct {
 	Status string `json:"status"`
 	Reason string `json:"reason,omitempty"`
