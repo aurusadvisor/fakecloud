@@ -248,8 +248,16 @@ pub(crate) fn build_sns_lambda_event(input: &SnsLambdaEventInput<'_>) -> String 
 
 /// Build an SNS SubscriptionConfirmation envelope as a JSON string.
 /// AWS POSTs this to HTTP/HTTPS endpoints right after Subscribe so the
-/// subscriber can echo the Token back via ConfirmSubscription.
-pub(crate) fn build_subscription_confirmation_envelope(topic_arn: &str, token: &str) -> String {
+/// subscriber can echo the Token back via ConfirmSubscription. The
+/// `server_endpoint` is the public URL of this fakecloud instance and
+/// is used to build a SubscribeURL the subscriber can actually GET to
+/// confirm — pointing at sns.amazonaws.com would defeat the purpose of
+/// running locally.
+pub(crate) fn build_subscription_confirmation_envelope(
+    topic_arn: &str,
+    token: &str,
+    server_endpoint: &str,
+) -> String {
     let mut map = serde_json::Map::new();
     map.insert(
         "Type".to_string(),
@@ -267,10 +275,11 @@ pub(crate) fn build_subscription_confirmation_envelope(topic_arn: &str, token: &
             "You have chosen to subscribe to the topic {topic_arn}.\nTo confirm the subscription, visit the SubscribeURL included in this message."
         )),
     );
+    let base = server_endpoint.trim_end_matches('/');
     map.insert(
         "SubscribeURL".to_string(),
         Value::String(format!(
-            "https://sns.amazonaws.com/?Action=ConfirmSubscription&TopicArn={topic_arn}&Token={token}"
+            "{base}/?Action=ConfirmSubscription&TopicArn={topic_arn}&Token={token}"
         )),
     );
     map.insert(
@@ -281,7 +290,26 @@ pub(crate) fn build_subscription_confirmation_envelope(topic_arn: &str, token: &
         "SignatureVersion".to_string(),
         Value::String("1".to_string()),
     );
+    map.insert(
+        "SigningCertURL".to_string(),
+        Value::String(format!("{base}/SimpleNotificationService.pem")),
+    );
+    map.insert(
+        "Signature".to_string(),
+        Value::String(crate::signing::sign(&format!(
+            "Message\n{topic_arn}\nSubscriptionConfirmation\n{token}\n"
+        ))),
+    );
     Value::Object(map).to_string()
+}
+
+/// Generate a 256-character alphanumeric token for SNS subscription
+/// confirmation. AWS issues opaque base64 tokens of similar length;
+/// matching the shape keeps client libraries that validate token
+/// length happy.
+pub(crate) fn generate_confirmation_token() -> String {
+    use rand::distributions::{Alphanumeric, DistString};
+    Alphanumeric.sample_string(&mut rand::thread_rng(), 256)
 }
 
 /// Build an SNS notification envelope as JSON string.
@@ -1296,23 +1324,53 @@ pub(crate) fn validate_numeric_filter(arr: &[Value]) -> Result<(), AwsServiceErr
 
 #[cfg(test)]
 mod confirmation_envelope_tests {
-    use super::build_subscription_confirmation_envelope;
+    use super::{build_subscription_confirmation_envelope, generate_confirmation_token};
     use serde_json::Value;
 
     #[test]
     fn envelope_carries_token_and_subscribe_url() {
         let topic = "arn:aws:sns:us-east-1:123456789012:test-topic";
         let token = "tok-abc";
-        let body = build_subscription_confirmation_envelope(topic, token);
+        let server = "http://localhost:4566";
+        let body = build_subscription_confirmation_envelope(topic, token, server);
         let parsed: Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(parsed["Type"], "SubscriptionConfirmation");
         assert_eq!(parsed["TopicArn"], topic);
         assert_eq!(parsed["Token"], token);
         let url = parsed["SubscribeURL"].as_str().unwrap();
+        assert!(url.starts_with(server));
         assert!(url.contains("Action=ConfirmSubscription"));
         assert!(url.contains(token));
         assert!(url.contains(topic));
         assert!(parsed["Timestamp"].is_string());
         assert!(parsed["MessageId"].is_string());
+        assert_eq!(parsed["SignatureVersion"], "1");
+        assert!(!parsed["Signature"].as_str().unwrap().is_empty());
+        assert!(parsed["SigningCertURL"]
+            .as_str()
+            .unwrap()
+            .starts_with(server));
+    }
+
+    #[test]
+    fn envelope_trims_trailing_slash() {
+        let body = build_subscription_confirmation_envelope(
+            "arn:aws:sns:us-east-1:123456789012:t",
+            "tok",
+            "http://localhost:4566/",
+        );
+        let parsed: Value = serde_json::from_str(&body).expect("valid JSON");
+        let url = parsed["SubscribeURL"].as_str().unwrap();
+        assert!(!url.contains("//?"), "must not double-up the slash: {url}");
+    }
+
+    #[test]
+    fn confirmation_token_is_256_alphanumeric() {
+        let t = generate_confirmation_token();
+        assert_eq!(t.len(), 256);
+        assert!(t.chars().all(|c| c.is_ascii_alphanumeric()));
+        // Two calls should differ.
+        let t2 = generate_confirmation_token();
+        assert_ne!(t, t2);
     }
 }
