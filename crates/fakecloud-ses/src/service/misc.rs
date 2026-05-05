@@ -406,15 +406,19 @@ impl SesV2Service {
             }
         };
 
-        // Verify template exists
-        {
+        // Verify template exists, then gate on the template's
+        // FromEmailAddress matching a verified identity. Real SES v2
+        // raises `MailFromDomainNotVerifiedException` from the
+        // SendCustomVerificationEmail action when the from-address has
+        // no matching verified email/domain identity.
+        let from_email = {
             let accounts = self.state.read();
             let empty = SesState::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty);
-            if !state
+            let Some(tmpl) = state
                 .custom_verification_email_templates
-                .contains_key(&template_name)
-            {
+                .get(&template_name)
+            else {
                 return Ok(Self::json_error(
                     StatusCode::NOT_FOUND,
                     "NotFoundException",
@@ -423,7 +427,12 @@ impl SesV2Service {
                         template_name
                     ),
                 ));
-            }
+            };
+            tmpl.from_email_address.clone()
+        };
+
+        if let Some(err) = self.reject_unverified_sender(&req.account_id, &from_email) {
+            return Ok(err);
         }
 
         let message_id = uuid::Uuid::new_v4().to_string();
@@ -431,7 +440,7 @@ impl SesV2Service {
         // Store as a sent email for introspection
         let sent = SentEmail {
             message_id: message_id.clone(),
-            from: String::new(),
+            from: from_email,
             to: vec![email_address],
             cc: Vec::new(),
             bcc: Vec::new(),

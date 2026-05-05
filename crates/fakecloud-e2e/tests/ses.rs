@@ -1585,6 +1585,16 @@ async fn ses_send_custom_verification_email() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;
 
+    // Verify the from-domain so the verified-identity gate lets the send
+    // through. Real SES rejects SendCustomVerificationEmail with
+    // `MailFromDomainNotVerifiedException` otherwise.
+    client
+        .create_email_identity()
+        .email_identity("example.com")
+        .send()
+        .await
+        .unwrap();
+
     // Create template first
     client
         .create_custom_verification_email_template()
@@ -1607,6 +1617,38 @@ async fn ses_send_custom_verification_email() {
         .await
         .unwrap();
     assert!(resp.message_id().is_some());
+}
+
+#[tokio::test]
+async fn ses_send_custom_verification_email_unverified_sender() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    // Template's FromEmailAddress has no matching verified identity.
+    client
+        .create_custom_verification_email_template()
+        .template_name("send-verify-unverified")
+        .from_email_address("noone@unverified.test")
+        .template_subject("Verify")
+        .template_content("content")
+        .success_redirection_url("https://ok")
+        .failure_redirection_url("https://fail")
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .send_custom_verification_email()
+        .email_address("user@example.com")
+        .template_name("send-verify-unverified")
+        .send()
+        .await
+        .unwrap_err();
+    let dbg = format!("{err:?}");
+    assert!(
+        dbg.contains("MailFromDomainNotVerifiedException"),
+        "expected MailFromDomainNotVerifiedException, got {dbg}"
+    );
 }
 
 // --- Group 4: TestRenderEmailTemplate ---
