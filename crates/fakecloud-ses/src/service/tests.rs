@@ -791,6 +791,61 @@ async fn send_email_v2_accepts_verified_domain_when_from_uses_subdomain_or_addre
 }
 
 #[tokio::test]
+async fn send_email_v2_accepts_simulator_recipients_in_sandbox() {
+    // Real SES treats `*@simulator.amazonses.com` as always-verified so
+    // bounce/complaint/suppression flows can be exercised from sandbox
+    // accounts without registering the domain as a verified identity.
+    let state = make_state();
+    disable_production_access(&state);
+    seed_identity(&state, "sender@example.com");
+    let svc = SesV2Service::new(state);
+
+    for recipient in [
+        "bounce@simulator.amazonses.com",
+        "complaint@simulator.amazonses.com",
+        "success@simulator.amazonses.com",
+        "suppressionlist@simulator.amazonses.com",
+    ] {
+        let body = format!(
+            r#"{{
+                "FromEmailAddress": "sender@example.com",
+                "Destination": {{"ToAddresses": ["{recipient}"]}},
+                "Content": {{"Simple": {{"Subject": {{"Data": "S"}}, "Body": {{"Text": {{"Data": "B"}}}}}}}}
+            }}"#
+        );
+        let req = make_request(Method::POST, "/v2/email/outbound-emails", &body);
+        let resp = svc.handle(req).await.unwrap();
+        assert_eq!(
+            resp.status,
+            StatusCode::OK,
+            "simulator recipient {recipient} should bypass the gate"
+        );
+    }
+}
+
+#[tokio::test]
+async fn send_email_v2_accepts_simulator_sender_without_verified_identity() {
+    // Sending from the simulator domain itself should succeed even with no
+    // verified identities on the account — matches AWS docs that call out
+    // the domain as "always verified" for both sender and recipient.
+    let state = make_state();
+    disable_production_access(&state);
+    let svc = SesV2Service::new(state);
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-emails",
+        r#"{
+            "FromEmailAddress": "ooto@simulator.amazonses.com",
+            "Destination": {"ToAddresses": ["bounce@simulator.amazonses.com"]},
+            "Content": {"Simple": {"Subject": {"Data": "S"}, "Body": {"Text": {"Data": "B"}}}}
+        }"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn test_send_bulk_email_empty_entries() {
     let state = make_state();
     let svc = SesV2Service::new(state);

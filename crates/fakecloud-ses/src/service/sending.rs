@@ -21,9 +21,27 @@ fn extract_email_address(from: &str) -> &str {
     from.trim()
 }
 
+/// Real SES treats every address on the mailbox simulator domain as
+/// implicitly verified, both for senders and (in sandbox accounts) for
+/// recipients. The well-known mailboxes are
+/// `bounce@simulator.amazonses.com`, `complaint@simulator.amazonses.com`,
+/// `success@simulator.amazonses.com`, `suppressionlist@simulator.amazonses.com`,
+/// and `ooto@simulator.amazonses.com`, plus the auto-responder
+/// `*@simulator.amazonses.com` form (e.g. `auto-responder-N@`). We accept
+/// the whole domain instead of hard-coding a list — AWS docs explicitly
+/// say the domain itself bypasses the verification gate.
+pub(super) fn is_simulator_address(email: &str) -> bool {
+    matches!(email.split_once('@'), Some((_, "simulator.amazonses.com")))
+}
+
 /// Match an email against verified identities: exact email or matching
 /// verified-domain. Shared between sender + sandbox-recipient gates.
+/// Mailbox-simulator addresses bypass the gate (real SES treats them as
+/// always-verified).
 pub(super) fn identity_is_verified(state: &crate::state::SesState, email: &str) -> bool {
+    if is_simulator_address(email) {
+        return true;
+    }
     if state
         .identities
         .get(email)
