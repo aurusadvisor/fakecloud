@@ -868,21 +868,65 @@ pub fn resolve_resource_properties_with_attrs(
 /// caller hasn't supplied a value, fall back to the canonical default
 /// for that parameter (commercial partition / us-east-1 / empty list).
 fn pseudo_value(name: &str, parameters: &BTreeMap<String, String>) -> Option<Value> {
+    // AWS::NotificationARNs is array-typed; the seed encodes it as a
+    // JSON array string so it round-trips through the string-keyed
+    // parameters map cleanly. Falls back to the default empty list when
+    // the seed is missing or malformed.
+    if name == "AWS::NotificationARNs" {
+        if let Some(raw) = parameters.get(name) {
+            if let Ok(parsed) = serde_json::from_str::<Vec<String>>(raw) {
+                return Some(Value::Array(
+                    parsed.into_iter().map(Value::String).collect(),
+                ));
+            }
+        }
+        return Some(Value::Array(Vec::new()));
+    }
     if let Some(v) = parameters.get(name) {
         return Some(Value::String(v.clone()));
     }
+    let region = parameters
+        .get("AWS::Region")
+        .map(String::as_str)
+        .unwrap_or("us-east-1");
     match name {
-        "AWS::Partition" => Some(Value::String("aws".to_string())),
-        "AWS::URLSuffix" => Some(Value::String("amazonaws.com".to_string())),
-        "AWS::Region" => Some(Value::String("us-east-1".to_string())),
-        // NotificationARNs is an array; default to empty.
-        "AWS::NotificationARNs" => Some(Value::Array(Vec::new())),
+        // Partition + URLSuffix mirror real CFN: derive from the request
+        // region so a stack in `cn-north-1` lands `aws-cn` /
+        // `amazonaws.com.cn`, and `us-gov-west-1` lands `aws-us-gov`.
+        "AWS::Partition" => Some(Value::String(partition_for_region(region).to_string())),
+        "AWS::URLSuffix" => Some(Value::String(url_suffix_for_region(region).to_string())),
+        "AWS::Region" => Some(Value::String(region.to_string())),
         // NoValue is a sentinel: emit a private marker object so the
         // post-resolution `strip_no_value` walk can drop the parent
         // property entirely. CloudFormation removes the key from the
         // resolved object rather than leaving a JSON null behind.
         "AWS::NoValue" => Some(no_value_sentinel()),
         _ => None,
+    }
+}
+
+/// Map an AWS region to its IAM/ARN partition. China regions land on
+/// `aws-cn`, GovCloud on `aws-us-gov`, everything else on `aws`. Used
+/// by both `AWS::Partition` resolution and the URL-suffix derivation
+/// below so partition decisions stay consistent.
+pub(crate) fn partition_for_region(region: &str) -> &'static str {
+    if region.starts_with("cn-") {
+        "aws-cn"
+    } else if region.starts_with("us-gov-") {
+        "aws-us-gov"
+    } else {
+        "aws"
+    }
+}
+
+/// Map an AWS region to its DNS URL suffix. China regions use
+/// `amazonaws.com.cn`; every other partition (commercial + GovCloud)
+/// uses `amazonaws.com`, matching the real CFN `AWS::URLSuffix`.
+pub(crate) fn url_suffix_for_region(region: &str) -> &'static str {
+    if region.starts_with("cn-") {
+        "amazonaws.com.cn"
+    } else {
+        "amazonaws.com"
     }
 }
 
@@ -994,25 +1038,28 @@ fn resolve_refs_full(
         Value::Object(map) => {
             if let Some(ref_val) = map.get("Ref") {
                 if let Some(ref_name) = ref_val.as_str() {
-                    // 1. Check explicit parameters first
-                    if let Some(param_val) = parameters.get(ref_name) {
-                        return Value::String(param_val.clone());
-                    }
-                    // 2. Check already-provisioned resource physical IDs
-                    if let Some(physical_id) = resource_physical_ids.get(ref_name) {
-                        return Value::String(physical_id.clone());
-                    }
-                    // 3. Substitute pseudo-references with their stack-context
-                    //    value (or a sane default for shape-only parity).
+                    // 1. Pseudo-references go through `pseudo_value`
+                    //    first — `AWS::NotificationARNs` is array-typed
+                    //    and would otherwise fall through to the
+                    //    string-only parameter path and leak its JSON
+                    //    encoding into the resolved value.
                     if PSEUDO_REFS.contains(&ref_name) {
                         if let Some(v) = pseudo_value(ref_name, parameters) {
                             return v;
                         }
                         return Value::String(ref_name.to_string());
                     }
-                    // 4. If it's a known logical resource in the template but not yet
-                    //    provisioned, return the logical ID (will be resolved later
-                    //    during incremental provisioning)
+                    // 2. Explicit template parameters.
+                    if let Some(param_val) = parameters.get(ref_name) {
+                        return Value::String(param_val.clone());
+                    }
+                    // 3. Already-provisioned resource physical IDs.
+                    if let Some(physical_id) = resource_physical_ids.get(ref_name) {
+                        return Value::String(physical_id.clone());
+                    }
+                    // 4. Known logical resource in the template but
+                    //    not yet provisioned: return the logical ID and
+                    //    let incremental provisioning rewrite it.
                     if _resources.contains_key(ref_name) {
                         return Value::String(ref_name.to_string());
                     }
@@ -1260,16 +1307,89 @@ fn resolve_refs_full(
                 }
             }
             if let Some(sub_val) = map.get("Fn::Sub") {
-                if let Some(s) = sub_val.as_str() {
+                // Two CFN-supported shapes:
+                //   "Fn::Sub": "literal-${Var}"
+                //   "Fn::Sub": ["literal-${Var}", { "Var": <intrinsic> }]
+                // The array form lets the template author bind extra
+                // variables that aren't template parameters or resource
+                // logical IDs. We resolve each binding through
+                // `resolve_refs_full` so nested `Ref` / `Fn::GetAtt`
+                // works inside the map.
+                let (template_str, extra_vars): (Option<&str>, BTreeMap<String, String>) =
+                    if let Some(s) = sub_val.as_str() {
+                        (Some(s), BTreeMap::new())
+                    } else if let Some(arr) = sub_val.as_array() {
+                        let str_part = arr.first().and_then(|v| v.as_str());
+                        let mut bindings: BTreeMap<String, String> = BTreeMap::new();
+                        if let Some(obj) = arr.get(1).and_then(|v| v.as_object()) {
+                            for (k, v) in obj {
+                                let resolved = resolve_refs_full(
+                                    v,
+                                    parameters,
+                                    _resources,
+                                    resource_physical_ids,
+                                    resource_attributes,
+                                    imports,
+                                    conditions,
+                                );
+                                let s = match resolved {
+                                    Value::String(s) => s,
+                                    other => other.to_string(),
+                                };
+                                bindings.insert(k.clone(), s);
+                            }
+                        }
+                        (str_part, bindings)
+                    } else {
+                        (None, BTreeMap::new())
+                    };
+                if let Some(s) = template_str {
                     let mut result = s.to_string();
+                    // 1. Bindings from the array form take precedence —
+                    //    AWS docs spell this out: explicit map wins over
+                    //    template parameters with the same name.
+                    for (k, v) in &extra_vars {
+                        result = result.replace(&format!("${{{k}}}"), v);
+                    }
+                    // 2. Pseudo-parameters: handle AWS::NoValue by
+                    //    swapping in the sentinel string so the surrounding
+                    //    string literal still resolves cleanly. The walker
+                    //    `strip_no_value` only acts on object/array
+                    //    children, so a Fn::Sub that hard-references
+                    //    `${AWS::NoValue}` is best-effort: we drop the
+                    //    token from the rendered string. Other AWS::*
+                    //    pseudo-params resolve via `pseudo_value` with
+                    //    region-aware partition/URLSuffix derivation.
+                    for pseudo in PSEUDO_REFS {
+                        let token = format!("${{{pseudo}}}");
+                        if !result.contains(&token) {
+                            continue;
+                        }
+                        if *pseudo == "AWS::NoValue" {
+                            // Inside a string, NoValue collapses to empty
+                            // — there's no JSON-level key to drop.
+                            result = result.replace(&token, "");
+                            continue;
+                        }
+                        if let Some(v) = pseudo_value(pseudo, parameters) {
+                            let s = match v {
+                                Value::String(s) => s,
+                                other => other.to_string(),
+                            };
+                            result = result.replace(&token, &s);
+                        }
+                    }
+                    // 3. Template parameters (including AWS::Region etc.
+                    //    if the caller seeded them).
                     for (k, v) in parameters {
                         result = result.replace(&format!("${{{k}}}"), v);
                     }
-                    // Also substitute resource physical IDs in Fn::Sub
+                    // 4. Resource physical IDs from already-provisioned
+                    //    siblings.
                     for (k, v) in resource_physical_ids {
                         result = result.replace(&format!("${{{k}}}"), v);
                     }
-                    // GetAtt-style substitutions: ${LogicalId.AttrName}
+                    // 5. GetAtt-style substitutions: ${LogicalId.AttrName}
                     for (logical, attrs) in resource_attributes {
                         for (attr, value) in attrs {
                             result = result.replace(&format!("${{{logical}.{attr}}}"), value);
@@ -1572,6 +1692,236 @@ Resources:
             parsed.resources[0].properties["QueueName"],
             Value::String("AWS::StackName".to_string())
         );
+    }
+
+    // ── BB6: pseudo-parameter coverage ────────────────────────────
+
+    #[test]
+    fn bb6_ref_aws_region_returns_seeded_region() {
+        let template = r#"{
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"Region": {"Ref": "AWS::Region"}}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("AWS::Region".to_string(), "us-east-1".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["Region"],
+            Value::String("us-east-1".to_string())
+        );
+    }
+
+    #[test]
+    fn bb6_fn_sub_substitutes_aws_account_id() {
+        let template = r#"{
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "Owner": {"Fn::Sub": "owner-${AWS::AccountId}"}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("AWS::AccountId".to_string(), "123456789012".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["Owner"],
+            Value::String("owner-123456789012".to_string())
+        );
+    }
+
+    #[test]
+    fn bb6_partition_for_china_region_is_aws_cn() {
+        // Caller seeds region but no explicit partition; pseudo_value
+        // should derive `aws-cn` for cn-* regions.
+        let template = r#"{
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"P": {"Ref": "AWS::Partition"}}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("AWS::Region".to_string(), "cn-north-1".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["P"],
+            Value::String("aws-cn".to_string())
+        );
+    }
+
+    #[test]
+    fn bb6_partition_for_govcloud_region_is_aws_us_gov() {
+        let template = r#"{
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"P": {"Ref": "AWS::Partition"}}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("AWS::Region".to_string(), "us-gov-west-1".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["P"],
+            Value::String("aws-us-gov".to_string())
+        );
+    }
+
+    #[test]
+    fn bb6_url_suffix_for_china_is_amazonaws_com_cn() {
+        let template = r#"{
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"S": {"Ref": "AWS::URLSuffix"}}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("AWS::Region".to_string(), "cn-north-1".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["S"],
+            Value::String("amazonaws.com.cn".to_string())
+        );
+    }
+
+    #[test]
+    fn bb6_url_suffix_for_govcloud_stays_amazonaws_com() {
+        // GovCloud keeps the standard suffix — only China switches.
+        let template = r#"{
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"S": {"Ref": "AWS::URLSuffix"}}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("AWS::Region".to_string(), "us-gov-east-1".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["S"],
+            Value::String("amazonaws.com".to_string())
+        );
+    }
+
+    #[test]
+    fn bb6_no_value_omits_property_from_resource_input() {
+        // Direct Ref to AWS::NoValue (no Fn::If wrapper) must still
+        // drop the property from the resolved resource map.
+        let template = r#"{
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": "q",
+                        "OptionalProp": {"Ref": "AWS::NoValue"}
+                    }
+                }
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        let props = parsed.resources[0].properties.as_object().unwrap();
+        assert!(
+            !props.contains_key("OptionalProp"),
+            "OptionalProp should be omitted, got: {props:?}"
+        );
+        assert_eq!(
+            props.get("QueueName"),
+            Some(&Value::String("q".to_string()))
+        );
+    }
+
+    #[test]
+    fn bb6_notification_arns_returns_seeded_array() {
+        // Pseudo-parameter `AWS::NotificationARNs` resolves to an array
+        // sourced from the JSON-encoded seed (matching the wiring in
+        // service::create_stack).
+        let template = r#"{
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"Targets": {"Ref": "AWS::NotificationARNs"}}
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert(
+            "AWS::NotificationARNs".to_string(),
+            r#"["arn:aws:sns:us-east-1:111122223333:topic"]"#.to_string(),
+        );
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["Targets"],
+            serde_json::json!(["arn:aws:sns:us-east-1:111122223333:topic"])
+        );
+    }
+
+    #[test]
+    fn bb6_notification_arns_defaults_to_empty_array() {
+        let template = r#"{
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"Targets": {"Ref": "AWS::NotificationARNs"}}
+                }
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["Targets"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn bb6_fn_sub_array_form_substitutes_extra_vars() {
+        // The array form `Fn::Sub: ["literal", {Var: ...}]` lets the
+        // template pass extra bindings; pseudo-params still resolve.
+        let template = r#"{
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "Path": {"Fn::Sub": ["${AWS::Region}/${Suffix}", {"Suffix": "tail"}]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("AWS::Region".to_string(), "eu-west-1".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["Path"],
+            Value::String("eu-west-1/tail".to_string())
+        );
+    }
+
+    #[test]
+    fn bb6_partition_helper_classifies_regions() {
+        assert_eq!(partition_for_region("us-east-1"), "aws");
+        assert_eq!(partition_for_region("eu-central-1"), "aws");
+        assert_eq!(partition_for_region("cn-north-1"), "aws-cn");
+        assert_eq!(partition_for_region("cn-northwest-1"), "aws-cn");
+        assert_eq!(partition_for_region("us-gov-west-1"), "aws-us-gov");
+        assert_eq!(partition_for_region("us-gov-east-1"), "aws-us-gov");
+    }
+
+    #[test]
+    fn bb6_url_suffix_helper_classifies_regions() {
+        assert_eq!(url_suffix_for_region("us-east-1"), "amazonaws.com");
+        assert_eq!(url_suffix_for_region("us-gov-west-1"), "amazonaws.com");
+        assert_eq!(url_suffix_for_region("cn-north-1"), "amazonaws.com.cn");
     }
 
     #[test]
