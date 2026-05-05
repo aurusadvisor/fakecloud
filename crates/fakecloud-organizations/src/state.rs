@@ -297,12 +297,18 @@ impl OrganizationState {
         }
     }
 
-    /// Synchronously create a new member account under the root and
-    /// record an `IN_PROGRESS` `CreateAccountStatus`. The status is
-    /// flipped to `SUCCEEDED` on the next `DescribeCreateAccountStatus`
-    /// (matching the typical poll-then-observe AWS shape) so callers
-    /// see both phases.
-    pub fn create_account(
+    /// Begin a `CreateAccount` (or `CreateGovCloudAccount`) request.
+    /// Reserves the new 12-digit account id and records an
+    /// `IN_PROGRESS` `CreateAccountStatus` keyed by request id, but does
+    /// NOT enroll the account into `self.accounts` yet — that happens
+    /// when `complete_create_account` runs (mirroring AWS's async
+    /// CreateAccount where the account only appears in `ListAccounts`
+    /// after the status flips to `SUCCEEDED`).
+    ///
+    /// The caller is expected to spawn a background task that calls
+    /// `complete_create_account(request_id)` after a synthetic delay so
+    /// pollers can observe the IN_PROGRESS -> SUCCEEDED transition.
+    pub fn begin_create_account(
         &mut self,
         email: &str,
         name: &str,
@@ -311,22 +317,6 @@ impl OrganizationState {
         let now = Utc::now();
         let request_id = format!("car-{}", random_id(20));
         let new_account_id = self.next_account_id();
-        let arn = format!(
-            "arn:aws:organizations::{}:account/{}/{}",
-            self.management_account_id, self.org_id, new_account_id
-        );
-        let account = MemberAccount {
-            id: new_account_id.clone(),
-            arn,
-            email: email.to_string(),
-            name: name.to_string(),
-            status: "ACTIVE".to_string(),
-            joined_method: "CREATED".to_string(),
-            joined_timestamp: now,
-            parent_id: self.root_id.clone(),
-        };
-        self.accounts.insert(new_account_id.clone(), account);
-
         let status = CreateAccountStatus {
             id: request_id.clone(),
             account_id: Some(new_account_id),
@@ -336,10 +326,99 @@ impl OrganizationState {
             completed_timestamp: None,
             failure_reason: None,
             gov_cloud_account_id: gov_cloud_paired_id,
+            pending_email: Some(email.to_string()),
         };
         self.create_account_requests
             .insert(request_id, status.clone());
         status
+    }
+
+    /// Flip an `IN_PROGRESS` request to `SUCCEEDED` and enroll the
+    /// reserved account id into `self.accounts` (plus the GovCloud
+    /// paired id, if any). Idempotent: if the request is already
+    /// terminal this is a no-op. Returns the updated status, or `None`
+    /// if `request_id` is unknown.
+    pub fn complete_create_account(&mut self, request_id: &str) -> Option<CreateAccountStatus> {
+        let now = Utc::now();
+        let (account_id, account_name, email, gov_cloud_id) = {
+            let status = self.create_account_requests.get(request_id)?;
+            if status.state != "IN_PROGRESS" {
+                return Some(status.clone());
+            }
+            (
+                status.account_id.clone()?,
+                status.account_name.clone(),
+                status.pending_email.clone().unwrap_or_default(),
+                status.gov_cloud_account_id.clone(),
+            )
+        };
+
+        // Enroll the commercial account.
+        let arn = format!(
+            "arn:aws:organizations::{}:account/{}/{}",
+            self.management_account_id, self.org_id, account_id
+        );
+        self.accounts.insert(
+            account_id.clone(),
+            MemberAccount {
+                id: account_id.clone(),
+                arn,
+                email: email.clone(),
+                name: account_name.clone(),
+                status: "ACTIVE".to_string(),
+                joined_method: "CREATED".to_string(),
+                joined_timestamp: now,
+                parent_id: self.root_id.clone(),
+            },
+        );
+
+        // Enroll the GovCloud paired account too. Real AWS creates a
+        // mirror in the GovCloud partition; we keep the paired id
+        // visible in `ListAccounts` so callers can see both.
+        if let Some(gov_id) = &gov_cloud_id {
+            let gov_arn = format!(
+                "arn:aws-us-gov:organizations::{}:account/{}/{}",
+                self.management_account_id, self.org_id, gov_id
+            );
+            self.accounts.insert(
+                gov_id.clone(),
+                MemberAccount {
+                    id: gov_id.clone(),
+                    arn: gov_arn,
+                    email,
+                    name: account_name,
+                    status: "ACTIVE".to_string(),
+                    joined_method: "CREATED".to_string(),
+                    joined_timestamp: now,
+                    parent_id: self.root_id.clone(),
+                },
+            );
+        }
+
+        let status = self.create_account_requests.get_mut(request_id)?;
+        status.state = "SUCCEEDED".to_string();
+        status.completed_timestamp = Some(now);
+        status.pending_email = None;
+        Some(status.clone())
+    }
+
+    /// Mark an `IN_PROGRESS` request as `FAILED` with the given reason.
+    /// Used for synthetic failure injection in tests; real AWS sets a
+    /// reason like `EMAIL_ALREADY_EXISTS`. No accounts are enrolled.
+    pub fn fail_create_account(
+        &mut self,
+        request_id: &str,
+        reason: &str,
+    ) -> Option<CreateAccountStatus> {
+        let status = self.create_account_requests.get_mut(request_id)?;
+        if status.state != "IN_PROGRESS" {
+            return Some(status.clone());
+        }
+        status.state = "FAILED".to_string();
+        status.completed_timestamp = Some(Utc::now());
+        status.failure_reason = Some(reason.to_string());
+        status.pending_email = None;
+        Some(status.clone())
     }
 
     /// Issue a new pending invitation handshake to `target_account_id`.
@@ -569,19 +648,12 @@ impl OrganizationState {
         out
     }
 
-    /// Look up a `CreateAccountStatus` by its `car-...` id. If still
-    /// `IN_PROGRESS`, flip it to `SUCCEEDED` and stamp the completion
-    /// timestamp before returning. Returns `None` if no such request.
-    pub fn complete_or_describe_create_account(
-        &mut self,
-        request_id: &str,
-    ) -> Option<CreateAccountStatus> {
-        let status = self.create_account_requests.get_mut(request_id)?;
-        if status.state == "IN_PROGRESS" {
-            status.state = "SUCCEEDED".to_string();
-            status.completed_timestamp = Some(Utc::now());
-        }
-        Some(status.clone())
+    /// Look up a `CreateAccountStatus` by its `car-...` id without
+    /// mutating it. The deferred completion is driven by a background
+    /// tokio task in `OrganizationsService::create_account`, not by
+    /// `DescribeCreateAccountStatus`, so this is a pure read.
+    pub fn describe_create_account(&self, request_id: &str) -> Option<CreateAccountStatus> {
+        self.create_account_requests.get(request_id).cloned()
     }
 
     /// Mark `account_id` as `SUSPENDED` (mirrors `CloseAccount`). The
@@ -1034,6 +1106,13 @@ pub struct CreateAccountStatus {
     pub failure_reason: Option<String>,
     #[serde(default)]
     pub gov_cloud_account_id: Option<String>,
+    /// Email captured by `BeginCreateAccount`. Held here only while the
+    /// request is `IN_PROGRESS` so the deferred completion task can
+    /// stamp the right email on the resulting `MemberAccount`. Cleared
+    /// when the status flips to a terminal state. Not part of the
+    /// public API surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_email: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
