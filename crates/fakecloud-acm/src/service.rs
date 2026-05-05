@@ -16,8 +16,8 @@ use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
 use crate::state::{
-    AccountState, AcmAccounts, CertificateOptions, DomainValidation, SharedAcmState,
-    StoredCertificate,
+    AccountState, AcmAccounts, CertificateOptions, DomainValidation, RenewalSummary,
+    SharedAcmState, StoredCertificate,
 };
 
 const SUPPORTED_ACTIONS: &[&str] = &[
@@ -43,19 +43,35 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 pub struct AcmService {
     state: SharedAcmState,
     /// How long the auto-issue tick sleeps before flipping a freshly
-    /// requested DNS / EMAIL cert from `PENDING_VALIDATION` to `ISSUED`.
-    /// Real ACM takes minutes; the default of 2s keeps SDK-driven
-    /// integration tests fast while still simulating the async
-    /// transition. Tests can shrink it via
+    /// requested DNS cert from `PENDING_VALIDATION` to `ISSUED`. Real
+    /// ACM takes minutes; the default of 5s keeps SDK-driven integration
+    /// tests fast while still simulating the async transition. EMAIL
+    /// certs do **not** auto-issue — they wait for the admin
+    /// `/_fakecloud/acm/certificates/{arn}/approve` endpoint. Tests can
+    /// shrink the delay via the env var `FAKECLOUD_ACM_AUTO_ISSUE_SECS`
+    /// (read at construction time) or via
     /// [`AcmService::with_pending_validation_delay`].
     pending_validation_delay: std::time::Duration,
+}
+
+/// Default DNS auto-issue delay when `FAKECLOUD_ACM_AUTO_ISSUE_SECS` is
+/// unset. Five seconds is short enough to keep most real-world SDK
+/// flows snappy without making race-prone tests pass by accident.
+const DEFAULT_AUTO_ISSUE_SECS: u64 = 5;
+
+fn auto_issue_delay_from_env() -> std::time::Duration {
+    let secs = std::env::var("FAKECLOUD_ACM_AUTO_ISSUE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_AUTO_ISSUE_SECS);
+    std::time::Duration::from_secs(secs)
 }
 
 impl AcmService {
     pub fn new(state: SharedAcmState) -> Self {
         Self {
             state,
-            pending_validation_delay: std::time::Duration::from_secs(2),
+            pending_validation_delay: auto_issue_delay_from_env(),
         }
     }
 
@@ -69,6 +85,18 @@ impl AcmService {
     pub fn with_pending_validation_delay(mut self, delay: std::time::Duration) -> Self {
         self.pending_validation_delay = delay;
         self
+    }
+
+    /// Synchronously approve a `PENDING_VALIDATION` certificate.
+    /// Mirrors the admin endpoint
+    /// `POST /_fakecloud/acm/certificates/{arn-or-id}/approve` — equivalent
+    /// to the user clicking the approval link in the validation email
+    /// (or in the case of DNS, the validation record landing). Returns
+    /// `false` if no certificate matches `arn_or_id` across any
+    /// account. Already-issued certs are left alone (returns `true`)
+    /// so the endpoint is idempotent.
+    pub fn approve_certificate(&self, arn_or_id: &str) -> bool {
+        self.set_certificate_status(arn_or_id, "ISSUED", None)
     }
 
     /// Flip a stored certificate's status (and optionally a failure
@@ -98,11 +126,24 @@ impl AcmService {
                     cert.status = status.to_string();
                     match status {
                         "ISSUED" => {
-                            cert.issued_at = Some(Utc::now());
+                            let now = Utc::now();
+                            cert.issued_at = Some(now);
                             for dv in cert.domain_validation.iter_mut() {
                                 dv.validation_status = "SUCCESS".to_string();
                             }
                             cert.failure_reason = None;
+                            // AMAZON_ISSUED certs become renewal-eligible
+                            // and gain a fresh RenewalSummary the moment
+                            // they reach ISSUED, matching real ACM.
+                            if cert.cert_type == "AMAZON_ISSUED" {
+                                cert.renewal_eligibility = "ELIGIBLE".to_string();
+                                cert.renewal_summary = Some(RenewalSummary {
+                                    renewal_status: "PENDING_AUTO_RENEWAL".to_string(),
+                                    domain_validation: cert.domain_validation.clone(),
+                                    renewal_status_reason: None,
+                                    updated_at: now,
+                                });
+                            }
                         }
                         "FAILED" | "VALIDATION_TIMED_OUT" => {
                             for dv in cert.domain_validation.iter_mut() {
@@ -267,65 +308,71 @@ impl AcmService {
             in_use_by: Vec::new(),
             describe_read_count: 0,
             failure_reason: None,
+            renewal_summary: None,
         };
         account.certificates.insert(arn.clone(), cert);
         drop(state);
 
-        // Auto-issue tick: real ACM transitions DNS / EMAIL certs from
-        // PENDING_VALIDATION to ISSUED asynchronously over minutes once
-        // the validation record / approval lands. fakecloud fires the
-        // same flip after `pending_validation_delay` so SDK-driven tests
-        // can observe the transition without waiting on a control plane.
-        // EMAIL certs would normally need manual approval, but for test
-        // ergonomics we treat them the same. ImportCertificate stays
-        // ISSUED-on-arrival (its own code path never enters this branch).
-        let state_for_tick = Arc::clone(&self.state);
-        let arn_for_tick = arn.clone();
-        let account_for_tick = req.account_id.clone();
-        let delay = self.pending_validation_delay;
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            let mut state = state_for_tick.write();
-            if let Some(account) = state.accounts.get_mut(&account_for_tick) {
-                if let Some(cert) = account.certificates.get_mut(&arn_for_tick) {
-                    if cert.status == "PENDING_VALIDATION" && cert.cert_type == "AMAZON_ISSUED" {
-                        cert.status = "ISSUED".to_string();
-                        cert.issued_at = Some(Utc::now());
-                        for dv in cert.domain_validation.iter_mut() {
-                            dv.validation_status = "SUCCESS".to_string();
+        // Auto-issue tick: real ACM transitions DNS-validated certs
+        // from PENDING_VALIDATION to ISSUED asynchronously once the
+        // validation record lands. fakecloud fires the same flip after
+        // `pending_validation_delay` (default 5s, configurable via
+        // `FAKECLOUD_ACM_AUTO_ISSUE_SECS`) so SDK-driven tests can
+        // observe the transition without standing up a real DNS
+        // resolver. EMAIL certs intentionally stay PENDING — real AWS
+        // sends a confirmation email; tests drive the approval via
+        // `POST /_fakecloud/acm/certificates/{arn}/approve`.
+        // ImportCertificate stays ISSUED-on-arrival (its own code path
+        // never enters this branch).
+        if validation_method == "DNS" {
+            let state_for_tick = Arc::clone(&self.state);
+            let arn_for_tick = arn.clone();
+            let account_for_tick = req.account_id.clone();
+            let delay = self.pending_validation_delay;
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let mut state = state_for_tick.write();
+                if let Some(account) = state.accounts.get_mut(&account_for_tick) {
+                    if let Some(cert) = account.certificates.get_mut(&arn_for_tick) {
+                        if cert.status == "PENDING_VALIDATION" && cert.cert_type == "AMAZON_ISSUED"
+                        {
+                            let now = Utc::now();
+                            cert.status = "ISSUED".to_string();
+                            cert.issued_at = Some(now);
+                            cert.renewal_eligibility = "ELIGIBLE".to_string();
+                            for dv in cert.domain_validation.iter_mut() {
+                                dv.validation_status = "SUCCESS".to_string();
+                            }
+                            cert.renewal_summary = Some(RenewalSummary {
+                                renewal_status: "PENDING_AUTO_RENEWAL".to_string(),
+                                domain_validation: cert.domain_validation.clone(),
+                                renewal_status_reason: None,
+                                updated_at: now,
+                            });
                         }
                     }
                 }
-            }
-        });
+            });
+        }
 
         Ok(AwsResponse::ok_json(json!({ "CertificateArn": arn })))
     }
 
     fn describe_certificate(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let arn = require_certificate_arn(req)?;
-        let mut state = self.state.write();
+        let state = self.state.read();
         let cert = state
             .accounts
-            .get_mut(&req.account_id)
-            .and_then(|a| a.certificates.get_mut(&arn))
-            .ok_or_else(|| no_such_certificate(&arn))?;
-        // Flip PENDING_VALIDATION → ISSUED after a small number of reads
-        // so tests can observe the transition without waiting on
-        // wall-clock minutes. Imported certs (non-AMAZON_ISSUED) skip
-        // this — they're "issued" the moment they land.
-        const VALIDATION_READS: u32 = 3;
-        if cert.status == "PENDING_VALIDATION" && cert.cert_type == "AMAZON_ISSUED" {
-            cert.describe_read_count = cert.describe_read_count.saturating_add(1);
-            if cert.describe_read_count >= VALIDATION_READS {
-                cert.status = "ISSUED".to_string();
-                cert.issued_at = Some(Utc::now());
-                for dv in cert.domain_validation.iter_mut() {
-                    dv.validation_status = "SUCCESS".to_string();
-                }
-            }
-        }
-        let cert = cert.clone();
+            .get(&req.account_id)
+            .and_then(|a| a.certificates.get(&arn))
+            .ok_or_else(|| no_such_certificate(&arn))?
+            .clone();
+        // Status / NotBefore / NotAfter / RenewalEligibility /
+        // RenewalSummary / DomainValidationOptions[].ValidationStatus
+        // all come straight from the stored cert; the auto-issue tick
+        // (DNS) and admin `/approve` endpoint (EMAIL) mutate them
+        // out-of-band so successive describes naturally observe the
+        // transition.
         Ok(AwsResponse::ok_json(json!({
             "Certificate": certificate_detail_json(&cert),
         })))
@@ -507,6 +554,7 @@ impl AcmService {
                     in_use_by: Vec::new(),
                     describe_read_count: 0,
                     failure_reason: None,
+                    renewal_summary: None,
                 };
                 account.certificates.insert(arn.clone(), cert);
                 arn
@@ -612,11 +660,27 @@ impl AcmService {
                 "Imported certificates cannot be renewed via ACM",
             ));
         }
+        // Renewal: flip to ISSUED from any prior state, refresh the
+        // validity window, mark domain validation SUCCESS, and refresh
+        // RenewalSummary. Real ACM kicks off a managed-renewal
+        // background job; fakecloud collapses that to an immediate
+        // success since there's nothing to actually validate.
         let now = Utc::now();
         cert.not_before = now;
         cert.not_after = now + Duration::days(395);
         cert.issued_at = Some(now);
         cert.status = "ISSUED".to_string();
+        cert.renewal_eligibility = "ELIGIBLE".to_string();
+        cert.failure_reason = None;
+        for dv in cert.domain_validation.iter_mut() {
+            dv.validation_status = "SUCCESS".to_string();
+        }
+        cert.renewal_summary = Some(RenewalSummary {
+            renewal_status: "SUCCESS".to_string(),
+            domain_validation: cert.domain_validation.clone(),
+            renewal_status_reason: None,
+            updated_at: now,
+        });
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -1220,6 +1284,26 @@ fn certificate_detail_json(c: &StoredCertificate) -> Value {
             .unwrap()
             .insert("FailureReason".to_string(), json!(fr));
     }
+    if let Some(rs) = &c.renewal_summary {
+        let mut summary = json!({
+            "RenewalStatus": rs.renewal_status,
+            "DomainValidationOptions": rs
+                .domain_validation
+                .iter()
+                .map(domain_validation_json)
+                .collect::<Vec<_>>(),
+            "UpdatedAt": rs.updated_at.timestamp() as f64,
+        });
+        if let Some(reason) = &rs.renewal_status_reason {
+            summary
+                .as_object_mut()
+                .unwrap()
+                .insert("RenewalStatusReason".to_string(), json!(reason));
+        }
+        d.as_object_mut()
+            .unwrap()
+            .insert("RenewalSummary".to_string(), summary);
+    }
     d
 }
 
@@ -1616,8 +1700,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn describe_certificate_flips_pending_to_issued_after_reads() {
-        let svc = AcmService::default();
+    async fn describe_certificate_observes_auto_issue_transition() {
+        // After the auto-issue tick fires, successive describes should
+        // pick up Status=ISSUED, IssuedAt, RenewalEligibility=ELIGIBLE,
+        // and a populated RenewalSummary without any extra prodding.
+        let svc = AcmService::default()
+            .with_pending_validation_delay(std::time::Duration::from_millis(50));
         let resp = svc
             .handle(make_req(
                 "RequestCertificate",
@@ -1628,8 +1716,24 @@ mod tests {
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         let arn = body["CertificateArn"].as_str().unwrap().to_string();
 
-        let mut last_status = String::new();
-        for _ in 0..6 {
+        // Immediate describe sees PENDING_VALIDATION + ELIGIBILITY
+        // INELIGIBLE.
+        let early = svc
+            .handle(make_req(
+                "DescribeCertificate",
+                json!({"CertificateArn": arn}),
+            ))
+            .await
+            .unwrap();
+        let early: Value = serde_json::from_slice(early.body.expect_bytes()).unwrap();
+        assert_eq!(early["Certificate"]["Status"], "PENDING_VALIDATION");
+        assert_eq!(early["Certificate"]["RenewalEligibility"], "INELIGIBLE");
+        assert!(early["Certificate"].get("RenewalSummary").is_none());
+
+        // Poll up to 2s for the auto-issue tick.
+        let mut last: Value = Value::Null;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let resp = svc
                 .handle(make_req(
                     "DescribeCertificate",
@@ -1638,12 +1742,16 @@ mod tests {
                 .await
                 .unwrap();
             let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-            last_status = body["Certificate"]["Status"].as_str().unwrap().to_string();
-            if last_status == "ISSUED" {
+            if body["Certificate"]["Status"] == "ISSUED" {
+                last = body;
                 break;
             }
         }
-        assert_eq!(last_status, "ISSUED");
+        assert_eq!(last["Certificate"]["Status"], "ISSUED");
+        assert_eq!(last["Certificate"]["RenewalEligibility"], "ELIGIBLE");
+        let rs = &last["Certificate"]["RenewalSummary"];
+        assert_eq!(rs["RenewalStatus"], "PENDING_AUTO_RENEWAL");
+        assert!(rs["UpdatedAt"].as_f64().unwrap() > 0.0);
     }
 
     #[tokio::test]
@@ -1810,6 +1918,114 @@ mod tests {
             .unwrap();
         assert_eq!(cert.status, "ISSUED");
         assert!(cert.issued_at.is_some());
+        assert_eq!(cert.renewal_eligibility, "ELIGIBLE");
+        let rs = cert.renewal_summary.as_ref().expect("renewal summary set");
+        assert_eq!(rs.renewal_status, "PENDING_AUTO_RENEWAL");
+    }
+
+    #[tokio::test]
+    async fn email_validation_stays_pending_until_approve() {
+        // EMAIL certs intentionally do NOT trigger the auto-issue tick:
+        // real ACM only flips them once the user clicks the approval
+        // link. fakecloud routes the approval through
+        // `approve_certificate`.
+        let svc = AcmService::default()
+            .with_pending_validation_delay(std::time::Duration::from_millis(20));
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({
+                    "DomainName": "email.example.com",
+                    "ValidationMethod": "EMAIL",
+                }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+
+        // Wait well past the DNS auto-issue delay; EMAIL must stay
+        // PENDING_VALIDATION because no tick was scheduled.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        {
+            let st = svc.state.read();
+            let cert = st
+                .accounts
+                .get("123456789012")
+                .unwrap()
+                .certificates
+                .get(&arn)
+                .unwrap();
+            assert_eq!(cert.status, "PENDING_VALIDATION");
+            assert!(cert.issued_at.is_none());
+            assert!(cert.renewal_summary.is_none());
+        }
+
+        assert!(svc.approve_certificate(&arn));
+        let st = svc.state.read();
+        let cert = st
+            .accounts
+            .get("123456789012")
+            .unwrap()
+            .certificates
+            .get(&arn)
+            .unwrap();
+        assert_eq!(cert.status, "ISSUED");
+        assert_eq!(cert.renewal_eligibility, "ELIGIBLE");
+        for dv in &cert.domain_validation {
+            assert_eq!(dv.validation_status, "SUCCESS");
+        }
+        assert!(cert.renewal_summary.is_some());
+    }
+
+    #[tokio::test]
+    async fn renew_certificate_refreshes_renewal_summary() {
+        let svc = AcmService::default()
+            .with_pending_validation_delay(std::time::Duration::from_millis(20));
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({"DomainName": "renew.example.com", "ValidationMethod": "DNS"}),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let resp = svc
+            .handle(make_req("RenewCertificate", json!({"CertificateArn": arn})))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, http::StatusCode::OK);
+
+        let st = svc.state.read();
+        let cert = st
+            .accounts
+            .get("123456789012")
+            .unwrap()
+            .certificates
+            .get(&arn)
+            .unwrap();
+        assert_eq!(cert.status, "ISSUED");
+        let rs = cert.renewal_summary.as_ref().expect("renewal summary set");
+        assert_eq!(rs.renewal_status, "SUCCESS");
+        assert_eq!(rs.domain_validation.len(), cert.domain_validation.len());
+    }
+
+    #[test]
+    fn auto_issue_delay_default_when_env_unset() {
+        // Other tests don't touch FAKECLOUD_ACM_AUTO_ISSUE_SECS, so
+        // reading it here while running serially with `cargo test`
+        // returns the documented default. We use a constant to guard
+        // against accidental drift in `DEFAULT_AUTO_ISSUE_SECS`.
+        if std::env::var("FAKECLOUD_ACM_AUTO_ISSUE_SECS").is_err() {
+            assert_eq!(
+                auto_issue_delay_from_env(),
+                std::time::Duration::from_secs(DEFAULT_AUTO_ISSUE_SECS),
+            );
+        }
     }
 
     #[tokio::test]

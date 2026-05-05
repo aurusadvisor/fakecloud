@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use fakecloud_acm::{
     CertificateOptions as AcmCertificateOptions, DomainValidation as AcmDomainValidation,
-    SharedAcmState, StoredCertificate as AcmStoredCertificate,
+    RenewalSummary as AcmRenewalSummary, SharedAcmState, StoredCertificate as AcmStoredCertificate,
 };
 use fakecloud_apigateway::{
     make_id as apigw_make_id, ApiKey as ApiGwApiKey, Authorizer as ApiGwAuthorizer,
@@ -7608,8 +7608,23 @@ impl ResourceProvisioner {
         // blocks until validation completes, but fakecloud doesn't run
         // a DNS server, so leaving the cert PENDING_VALIDATION would
         // wedge dependent resources (CloudFront/ELBv2) forever. The
-        // runtime RequestCertificate path stays on the read-count flip
-        // dance for parity with ACM's async behaviour.
+        // runtime RequestCertificate path uses the async auto-issue
+        // tick (DNS) or admin `/approve` endpoint (EMAIL) for parity
+        // with ACM's async behaviour.
+        let domain_validation: Vec<AcmDomainValidation> =
+            synth_acm_domain_validation(&domain_name, &sans, &validation_method)
+                .into_iter()
+                .map(|mut dv| {
+                    dv.validation_status = "SUCCESS".to_string();
+                    dv
+                })
+                .collect();
+        let renewal_summary = Some(AcmRenewalSummary {
+            renewal_status: "PENDING_AUTO_RENEWAL".to_string(),
+            domain_validation: domain_validation.clone(),
+            renewal_status_reason: None,
+            updated_at: now,
+        });
         let cert = AcmStoredCertificate {
             arn: arn.clone(),
             domain_name: domain_name.clone(),
@@ -7634,18 +7649,19 @@ impl ResourceProvisioner {
             // 13 months (matches real ACM issued-cert lifetime).
             not_after: now + chrono::Duration::days(395),
             validation_method: Some(validation_method.clone()),
-            domain_validation: synth_acm_domain_validation(&domain_name, &sans, &validation_method),
+            domain_validation,
             options: AcmCertificateOptions {
                 certificate_transparency_logging_preference: cert_transparency,
                 export: "DISABLED".to_string(),
             },
-            renewal_eligibility: "INELIGIBLE".to_string(),
+            renewal_eligibility: "ELIGIBLE".to_string(),
             managed_by: None,
             certificate_authority_arn: ca_arn,
             tags,
             in_use_by: Vec::new(),
             describe_read_count: 0,
             failure_reason: None,
+            renewal_summary,
         };
 
         let mut accounts = self.acm_state.write();

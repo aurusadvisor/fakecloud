@@ -5325,6 +5325,22 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/acm/certificates/{arn_or_id}/approve",
+            axum::routing::post({
+                let svc = acm_service.clone();
+                move |axum::extract::Path(arn_or_id): axum::extract::Path<String>| {
+                    let svc = svc.clone();
+                    async move {
+                        if svc.approve_certificate(&arn_or_id) {
+                            axum::http::StatusCode::NO_CONTENT
+                        } else {
+                            axum::http::StatusCode::NOT_FOUND
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/cloudfront/distributions/{id}/status",
             axum::routing::post({
                 let svc = cloudfront_service.clone();
