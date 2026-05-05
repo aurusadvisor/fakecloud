@@ -263,6 +263,42 @@ pub struct ReplicationGroup {
     /// call. Defaults to `active` when emitting describe XML if unset.
     #[serde(default)]
     pub notification_topic_status: Option<String>,
+    /// `CacheParameterGroupName` from the create / modify request.
+    /// Echoed via `<CacheParameterGroup>` in describe XML.
+    #[serde(default)]
+    pub cache_parameter_group_name: Option<String>,
+    /// `CacheSubnetGroupName` from the create request. Persisted so
+    /// `ModifyReplicationGroup` and tooling like terraform plan diff
+    /// can recover the original placement.
+    #[serde(default)]
+    pub cache_subnet_group_name: Option<String>,
+    /// VPC security group ids attached at create / modify time. AWS
+    /// echoes these via `<SecurityGroups>` once the underlying clusters
+    /// land, so we persist them on the replication group as well.
+    #[serde(default)]
+    pub security_group_ids: Vec<String>,
+    /// `PreferredMaintenanceWindow` from the request, e.g.
+    /// `sun:23:00-mon:01:30`. Round-tripped onto member clusters and
+    /// echoed where AWS does.
+    #[serde(default)]
+    pub preferred_maintenance_window: Option<String>,
+    /// `SnapshotName` — replication-group snapshot used to seed the
+    /// new group. Stored verbatim for restore lineage; not echoed on
+    /// describe since AWS only emits `SnapshottingClusterId`.
+    #[serde(default)]
+    pub snapshot_name: Option<String>,
+    /// `SnapshotArns.member.N` — RDB seed snapshot S3 ARNs (redis only).
+    #[serde(default)]
+    pub snapshot_arns: Vec<String>,
+    /// `AutoMinorVersionUpgrade` toggle. AWS always emits this on the
+    /// describe response (default `true`) — tracked so ModifyReplicationGroup
+    /// can flip it.
+    #[serde(default = "default_auto_minor_version_upgrade")]
+    pub auto_minor_version_upgrade: bool,
+}
+
+fn default_auto_minor_version_upgrade() -> bool {
+    true
 }
 
 /// AWS's LogDeliveryConfiguration shape, retained verbatim so we can
@@ -1238,6 +1274,13 @@ mod tests {
                 cluster_mode: None,
                 data_tiering_enabled: None,
                 notification_topic_status: None,
+                cache_parameter_group_name: None,
+                cache_subnet_group_name: None,
+                security_group_ids: Vec::new(),
+                preferred_maintenance_window: None,
+                snapshot_name: None,
+                snapshot_arns: Vec::new(),
+                auto_minor_version_upgrade: true,
             },
         );
         assert_eq!(state.replication_groups.len(), 1);

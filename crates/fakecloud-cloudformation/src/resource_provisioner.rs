@@ -8327,6 +8327,44 @@ impl ResourceProvisioner {
                 .map(String::from),
             data_tiering_enabled: props.get("DataTieringEnabled").and_then(|v| v.as_bool()),
             notification_topic_status: None,
+            cache_parameter_group_name: props
+                .get("CacheParameterGroupName")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            cache_subnet_group_name: props
+                .get("CacheSubnetGroupName")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            security_group_ids: props
+                .get("SecurityGroupIds")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            preferred_maintenance_window: props
+                .get("PreferredMaintenanceWindow")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            snapshot_name: props
+                .get("SnapshotName")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            snapshot_arns: props
+                .get("SnapshotArns")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            auto_minor_version_upgrade: props
+                .get("AutoMinorVersionUpgrade")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
         };
         state.replication_groups.insert(id.clone(), group);
 

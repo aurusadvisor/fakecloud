@@ -1208,6 +1208,23 @@ impl ElastiCacheService {
         let port = optional_query_param(request, "Port")
             .and_then(|v| v.parse::<u16>().ok())
             .unwrap_or(6379);
+        let cache_parameter_group_name = optional_query_param(request, "CacheParameterGroupName");
+        let cache_subnet_group_name = optional_query_param(request, "CacheSubnetGroupName");
+        let security_group_ids =
+            parse_query_list_param(request, "SecurityGroupIds", "SecurityGroupId");
+        let preferred_maintenance_window =
+            optional_query_param(request, "PreferredMaintenanceWindow");
+        let snapshot_name = optional_query_param(request, "SnapshotName");
+        let snapshot_arns = parse_query_list_param(request, "SnapshotArns", "SnapshotArn");
+        let snapshot_retention_limit =
+            optional_non_negative_i32_param(request, "SnapshotRetentionLimit")?.unwrap_or(0);
+        let snapshot_window = optional_query_param(request, "SnapshotWindow")
+            .unwrap_or_else(|| "05:00-09:00".to_string());
+        let auto_minor_version_upgrade = parse_optional_bool(
+            optional_query_param(request, "AutoMinorVersionUpgrade").as_deref(),
+        )?
+        .unwrap_or(true);
+        let tags = parse_tags(request)?;
         // Reserve the ID under a write lock before starting the container.
         {
             let mut accounts = self.state.write();
@@ -1218,6 +1235,16 @@ impl ElastiCacheService {
                     "ReplicationGroupAlreadyExistsFault",
                     format!("ReplicationGroup {replication_group_id} already exists."),
                 ));
+            }
+            if let Some(ref subnet_group_name) = cache_subnet_group_name {
+                if !state.subnet_groups.contains_key(subnet_group_name) {
+                    state.cancel_replication_group_creation(&replication_group_id);
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "CacheSubnetGroupNotFoundFault",
+                        format!("Cache subnet group {subnet_group_name} not found."),
+                    ));
+                }
             }
         }
 
@@ -1273,13 +1300,13 @@ impl ElastiCacheService {
             automatic_failover_enabled: automatic_failover,
             endpoint_address: "127.0.0.1".to_string(),
             endpoint_port: running.host_port,
-            arn,
+            arn: arn.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
             container_id: running.container_id,
             host_port: running.host_port,
             member_clusters,
-            snapshot_retention_limit: 0,
-            snapshot_window: "05:00-09:00".to_string(),
+            snapshot_retention_limit,
+            snapshot_window,
             transit_encryption_enabled,
             at_rest_encryption_enabled,
             cluster_enabled,
@@ -1310,13 +1337,24 @@ impl ElastiCacheService {
             cluster_mode,
             data_tiering_enabled,
             notification_topic_status: None,
+            cache_parameter_group_name,
+            cache_subnet_group_name,
+            security_group_ids,
+            preferred_maintenance_window,
+            snapshot_name,
+            snapshot_arns,
+            auto_minor_version_upgrade,
         };
 
         let xml = replication_group_xml(&group, &region);
-        self.state
-            .write()
-            .get_or_create(&request.account_id)
-            .finish_replication_group_creation(group);
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            state.finish_replication_group_creation(group);
+            if !tags.is_empty() {
+                merge_tags(state.tags.entry(arn).or_default(), &tags);
+            }
+        }
 
         Ok(AwsResponse::xml(
             StatusCode::OK,

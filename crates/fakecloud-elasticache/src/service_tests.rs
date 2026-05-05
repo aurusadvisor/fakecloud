@@ -941,6 +941,13 @@ fn add_cluster_to_replication_group_updates_members_and_count() {
             cluster_mode: None,
             data_tiering_enabled: None,
             notification_topic_status: None,
+            cache_parameter_group_name: None,
+            cache_subnet_group_name: None,
+            security_group_ids: Vec::new(),
+            preferred_maintenance_window: None,
+            snapshot_name: None,
+            snapshot_arns: Vec::new(),
+            auto_minor_version_upgrade: true,
         },
     );
 
@@ -1007,6 +1014,13 @@ async fn delete_cache_cluster_removes_cluster_from_replication_group() {
                 cluster_mode: None,
                 data_tiering_enabled: None,
                 notification_topic_status: None,
+                cache_parameter_group_name: None,
+                cache_subnet_group_name: None,
+                security_group_ids: Vec::new(),
+                preferred_maintenance_window: None,
+                snapshot_name: None,
+                snapshot_arns: Vec::new(),
+                auto_minor_version_upgrade: true,
             },
         );
     }
@@ -1098,6 +1112,13 @@ fn service_with_replication_group(group_id: &str, num_clusters: i32) -> ElastiCa
                 cluster_mode: None,
                 data_tiering_enabled: None,
                 notification_topic_status: None,
+                cache_parameter_group_name: None,
+                cache_subnet_group_name: None,
+                security_group_ids: Vec::new(),
+                preferred_maintenance_window: None,
+                snapshot_name: None,
+                snapshot_arns: Vec::new(),
+                auto_minor_version_upgrade: true,
             },
         );
     }
@@ -1367,6 +1388,13 @@ fn replication_group_xml_emits_dynamic_encryption_and_kms() {
             cluster_mode: Some("enabled".to_string()),
             data_tiering_enabled: Some(false),
             notification_topic_status: None,
+            cache_parameter_group_name: Some("default.redis7".to_string()),
+            cache_subnet_group_name: Some("default".to_string()),
+            security_group_ids: vec!["sg-aaaa".to_string()],
+            preferred_maintenance_window: Some("sun:23:00-mon:01:30".to_string()),
+            snapshot_name: None,
+            snapshot_arns: Vec::new(),
+            auto_minor_version_upgrade: true,
         },
     );
     let xml =
@@ -2900,6 +2928,17 @@ fn replication_group_from_request(req: &AwsRequest) -> crate::state::Replication
         cluster_mode,
         data_tiering_enabled,
         notification_topic_status: None,
+        cache_parameter_group_name: optional_query_param(req, "CacheParameterGroupName"),
+        cache_subnet_group_name: optional_query_param(req, "CacheSubnetGroupName"),
+        security_group_ids: parse_query_list_param(req, "SecurityGroupIds", "SecurityGroupId"),
+        preferred_maintenance_window: optional_query_param(req, "PreferredMaintenanceWindow"),
+        snapshot_name: optional_query_param(req, "SnapshotName"),
+        snapshot_arns: parse_query_list_param(req, "SnapshotArns", "SnapshotArn"),
+        auto_minor_version_upgrade: parse_optional_bool(
+            optional_query_param(req, "AutoMinorVersionUpgrade").as_deref(),
+        )
+        .unwrap()
+        .unwrap_or(true),
     }
 }
 
