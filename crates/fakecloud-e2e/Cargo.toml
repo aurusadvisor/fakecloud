@@ -65,6 +65,7 @@ fakecloud-sdk = { path = "../fakecloud-sdk" }
 fakecloud-testkit = { path = "../fakecloud-testkit", features = ["sdk-clients"] }
 tempfile = { workspace = true }
 sha2 = { workspace = true }
+md-5 = { workspace = true }
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 mail-parser = "0.10"
 rsa = { workspace = true }

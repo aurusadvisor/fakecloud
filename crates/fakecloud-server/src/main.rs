@@ -2564,7 +2564,8 @@ async fn main() {
     let lifecycle_processor = fakecloud_s3::lifecycle::LifecycleProcessor::new(s3_state.clone());
     tokio::spawn(lifecycle_processor.run());
 
-    let mut sqs_lambda_poller = SqsLambdaPoller::new(sqs_state.clone(), lambda_state.clone());
+    let mut sqs_lambda_poller = SqsLambdaPoller::new(sqs_state.clone(), lambda_state.clone())
+        .with_kms_hook(kms_hook_for_services.clone());
     if let Some(ref ld) = lambda_delivery {
         sqs_lambda_poller = sqs_lambda_poller.with_lambda_delivery(ld.clone());
     }

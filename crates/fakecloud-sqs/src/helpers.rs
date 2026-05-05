@@ -1,5 +1,31 @@
 use super::*;
 
+/// Heuristic: does this body look like a fakecloud-kms envelope produced
+/// by `KmsServiceHook::encrypt`?
+///
+/// Two encodings are recognized:
+///  - The current AWS-shaped binary blob: base64 of bytes starting with
+///    the four-byte version header `0x01 0x02 0x02 0x00`.
+///  - The legacy textual envelope `fakecloud-kms:<key>:<base64>` (kept
+///    around for back-compat with older snapshots).
+///
+/// Any other body is treated as plaintext and the SQS receive path skips
+/// the KMS hook entirely. This is what lets cross-service deliveries
+/// (SNS fanout, EventBridge target, S3 / DDB notifications) survive on a
+/// queue with `SqsManagedSseEnabled=true` — they bypass the SQS service
+/// and write plaintext directly, so insisting on a successful decrypt
+/// would silently drop every notification.
+pub(crate) fn looks_like_fakecloud_envelope(body: &str) -> bool {
+    use base64::Engine;
+    if body.starts_with("fakecloud-kms:") {
+        return true;
+    }
+    match base64::engine::general_purpose::STANDARD.decode(body) {
+        Ok(bytes) => bytes.starts_with(&[0x01, 0x02, 0x02, 0x00]),
+        Err(_) => false,
+    }
+}
+
 /// Validate DelaySeconds (0–900) and MaximumMessageSize (1024–1 MiB) if
 /// present in the caller-supplied queue attributes. Both match AWS's
 /// documented ranges; we return the same error code/message the real
@@ -1256,4 +1282,39 @@ pub(crate) fn parse_numbered_params(body: &Value, prefix: &str) -> Vec<String> {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::looks_like_fakecloud_envelope;
+    use base64::Engine;
+
+    #[test]
+    fn plaintext_body_is_not_an_envelope() {
+        assert!(!looks_like_fakecloud_envelope("hello world"));
+        assert!(!looks_like_fakecloud_envelope(
+            r#"{"Message":"msg-0","Type":"Notification"}"#
+        ));
+        assert!(!looks_like_fakecloud_envelope(""));
+    }
+
+    #[test]
+    fn legacy_textual_envelope_is_detected() {
+        assert!(looks_like_fakecloud_envelope("fakecloud-kms:abc:dGVzdA=="));
+    }
+
+    #[test]
+    fn aws_shaped_binary_envelope_is_detected() {
+        let mut blob = vec![0x01, 0x02, 0x02, 0x00];
+        blob.extend_from_slice(&[0u8; 32]);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
+        assert!(looks_like_fakecloud_envelope(&b64));
+    }
+
+    #[test]
+    fn random_base64_with_wrong_header_is_not_an_envelope() {
+        let blob = vec![0xff, 0xff, 0xff, 0xff, 0u8, 0u8, 0u8, 0u8];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
+        assert!(!looks_like_fakecloud_envelope(&b64));
+    }
 }
