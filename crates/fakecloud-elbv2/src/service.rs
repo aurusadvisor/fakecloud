@@ -1174,9 +1174,11 @@ impl Elbv2Service {
 
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
-        if !st.load_balancers.contains_key(&lb_arn) {
-            return Err(lb_not_found(&lb_arn));
-        }
+        let lb_type = match st.load_balancers.get(&lb_arn) {
+            Some(lb) => lb.lb_type.clone(),
+            None => return Err(lb_not_found(&lb_arn)),
+        };
+        validate_listener_protocol_port_for_lb_type(&lb_type, protocol.as_deref(), port)?;
         // Validate referenced target groups exist (forward action targets).
         for action in &actions {
             if let Some(tg_arn) = &action.target_group_arn {
@@ -1267,21 +1269,55 @@ impl Elbv2Service {
 
     fn modify_listener(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let arn = required_query_param(req, "ListenerArn")?;
+        // Pre-parse + validate the standalone shapes before grabbing
+        // the write lock so we don't have to juggle the borrow against
+        // the load-balancer lookup the per-LB-type matrix needs.
+        let new_port = match optional_query_param(req, "Port") {
+            Some(s) => {
+                let parsed: i32 = s
+                    .parse()
+                    .map_err(|_| invalid_param(format!("Port '{s}' must be a number")))?;
+                validate_listener_port(parsed)?;
+                Some(parsed)
+            }
+            None => None,
+        };
+        let new_protocol = match optional_query_param(req, "Protocol") {
+            Some(p) => {
+                validate_listener_protocol(&p)?;
+                Some(p)
+            }
+            None => None,
+        };
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
+        let lb_arn = st
+            .listeners
+            .get(&arn)
+            .map(|l| l.load_balancer_arn.clone())
+            .ok_or_else(|| listener_not_found(&arn))?;
+        let lb_type = st
+            .load_balancers
+            .get(&lb_arn)
+            .map(|lb| lb.lb_type.clone())
+            .unwrap_or_default();
+        // Run the per-LB-type matrix against the *resulting* shape:
+        // for ALB, e.g., changing only the port still has to satisfy
+        // the protocol matrix even if the protocol field is omitted.
+        let listener_for_check = st.listeners.get(&arn).expect("checked above");
+        let effective_protocol = new_protocol
+            .as_deref()
+            .or(listener_for_check.protocol.as_deref());
+        let effective_port = new_port.or(listener_for_check.port);
+        validate_listener_protocol_port_for_lb_type(&lb_type, effective_protocol, effective_port)?;
         let listener = st
             .listeners
             .get_mut(&arn)
             .ok_or_else(|| listener_not_found(&arn))?;
-        if let Some(s) = optional_query_param(req, "Port") {
-            let parsed: i32 = s
-                .parse()
-                .map_err(|_| invalid_param(format!("Port '{s}' must be a number")))?;
-            validate_listener_port(parsed)?;
-            listener.port = Some(parsed);
+        if let Some(p) = new_port {
+            listener.port = Some(p);
         }
-        if let Some(p) = optional_query_param(req, "Protocol") {
-            validate_listener_protocol(&p)?;
+        if let Some(p) = new_protocol {
             listener.protocol = Some(p);
         }
         if let Some(p) = optional_query_param(req, "SslPolicy") {
@@ -1613,6 +1649,14 @@ impl Elbv2Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let arn = required_query_param(req, "LoadBalancerArn")?;
         let new_attrs = parse_attributes(req);
+        // Validate the bool-ish attributes up front so the caller
+        // can't smuggle a bogus value past us - AWS returns a
+        // ValidationError before the attribute is persisted.
+        for (k, v) in &new_attrs {
+            if k == "ipv6.enable_prefix_for_source_nat" {
+                validate_ipv6_source_nat_value(v)?;
+            }
+        }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let lb = st

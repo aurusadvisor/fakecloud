@@ -362,13 +362,10 @@ async fn create_listener_rejects_port_above_65535() {
 }
 
 #[tokio::test]
-async fn create_listener_accepts_valid_protocols() {
+async fn create_listener_accepts_alb_protocols() {
     let svc = svc();
     let (lb_arn, tg_arn) = create_lb_and_tg_for_listener_test(&svc).await;
-    for proto in ["HTTP", "HTTPS", "TCP", "UDP", "TCP_UDP", "TLS", "GENEVE"] {
-        // Only HTTP/HTTPS work with the default ALB; for the test we just
-        // need protocol validation to pass, even if downstream rejects.
-        // We assert no ValidationError on the protocol token itself.
+    for proto in ["HTTP", "HTTPS"] {
         let res = svc
             .handle(req(
                 "CreateListener",
@@ -382,11 +379,210 @@ async fn create_listener_accepts_valid_protocols() {
             ))
             .await;
         if let Err(e) = res {
-            assert!(
-                !format!("{e:?}").contains("not valid"),
-                "protocol {proto} should be accepted: {e:?}"
-            );
+            panic!("protocol {proto} should be accepted on an ALB: {e:?}");
         }
+    }
+}
+
+async fn create_typed_lb(svc: &Elbv2Service, name: &str, lb_type: &str) -> String {
+    svc.handle(req(
+        "CreateLoadBalancer",
+        &[
+            ("Name", name),
+            ("Type", lb_type),
+            ("Subnets.member.1", "subnet-1"),
+        ],
+    ))
+    .await
+    .unwrap();
+    let st = svc.state.read();
+    st.get("123456789012")
+        .unwrap()
+        .load_balancers
+        .values()
+        .find(|lb| lb.name == name)
+        .map(|lb| lb.arn.clone())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn create_listener_alb_rejects_tcp() {
+    let svc = svc();
+    let (lb_arn, tg_arn) = create_lb_and_tg_for_listener_test(&svc).await;
+    let err = svc
+        .handle(req(
+            "CreateListener",
+            &[
+                ("LoadBalancerArn", &lb_arn),
+                ("Protocol", "TCP"),
+                ("Port", "80"),
+                ("DefaultActions.member.1.Type", "forward"),
+                ("DefaultActions.member.1.TargetGroupArn", &tg_arn),
+            ],
+        ))
+        .await
+        .err()
+        .expect("TCP should be rejected on an ALB");
+    assert_eq!(err.code(), "ValidationError");
+    assert!(format!("{err:?}").contains("application"));
+}
+
+#[tokio::test]
+async fn create_listener_nlb_rejects_http() {
+    let svc = svc();
+    let lb_arn = create_typed_lb(&svc, "nlb", "network").await;
+    let err = svc
+        .handle(req(
+            "CreateListener",
+            &[
+                ("LoadBalancerArn", &lb_arn),
+                ("Protocol", "HTTP"),
+                ("Port", "80"),
+                ("DefaultActions.member.1.Type", "fixed-response"),
+                (
+                    "DefaultActions.member.1.FixedResponseConfig.StatusCode",
+                    "200",
+                ),
+            ],
+        ))
+        .await
+        .err()
+        .expect("HTTP should be rejected on an NLB");
+    assert_eq!(err.code(), "ValidationError");
+}
+
+#[tokio::test]
+async fn create_listener_nlb_accepts_tcp_and_udp() {
+    let svc = svc();
+    let lb_arn = create_typed_lb(&svc, "nlb-ok", "network").await;
+    for proto in ["TCP", "UDP", "TCP_UDP", "TLS"] {
+        let res = svc
+            .handle(req(
+                "CreateListener",
+                &[
+                    ("LoadBalancerArn", &lb_arn),
+                    ("Protocol", proto),
+                    ("Port", "443"),
+                    ("DefaultActions.member.1.Type", "fixed-response"),
+                    (
+                        "DefaultActions.member.1.FixedResponseConfig.StatusCode",
+                        "200",
+                    ),
+                ],
+            ))
+            .await;
+        if let Err(e) = res {
+            panic!("protocol {proto} should be accepted on an NLB: {e:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn create_listener_gwlb_requires_geneve_on_6081() {
+    let svc = svc();
+    let lb_arn = create_typed_lb(&svc, "gwlb", "gateway").await;
+    // Wrong protocol on GWLB.
+    let err = svc
+        .handle(req(
+            "CreateListener",
+            &[
+                ("LoadBalancerArn", &lb_arn),
+                ("Protocol", "TCP"),
+                ("Port", "6081"),
+                ("DefaultActions.member.1.Type", "fixed-response"),
+                (
+                    "DefaultActions.member.1.FixedResponseConfig.StatusCode",
+                    "200",
+                ),
+            ],
+        ))
+        .await
+        .err()
+        .expect("TCP should be rejected on a GWLB");
+    assert_eq!(err.code(), "ValidationError");
+    // GENEVE but wrong port.
+    let err = svc
+        .handle(req(
+            "CreateListener",
+            &[
+                ("LoadBalancerArn", &lb_arn),
+                ("Protocol", "GENEVE"),
+                ("Port", "443"),
+                ("DefaultActions.member.1.Type", "fixed-response"),
+                (
+                    "DefaultActions.member.1.FixedResponseConfig.StatusCode",
+                    "200",
+                ),
+            ],
+        ))
+        .await
+        .err()
+        .expect("GENEVE on port 443 should be rejected on a GWLB");
+    assert_eq!(err.code(), "ValidationError");
+    // GENEVE on 6081 succeeds.
+    let res = svc
+        .handle(req(
+            "CreateListener",
+            &[
+                ("LoadBalancerArn", &lb_arn),
+                ("Protocol", "GENEVE"),
+                ("Port", "6081"),
+                ("DefaultActions.member.1.Type", "fixed-response"),
+                (
+                    "DefaultActions.member.1.FixedResponseConfig.StatusCode",
+                    "200",
+                ),
+            ],
+        ))
+        .await;
+    if let Err(e) = res {
+        panic!("GENEVE on 6081 should succeed: {e:?}");
+    }
+}
+
+#[tokio::test]
+async fn modify_load_balancer_attributes_validates_ipv6_source_nat_value() {
+    let svc = svc();
+    let lb_arn = create_typed_lb(&svc, "snat-lb", "network").await;
+    let err = svc
+        .handle(req(
+            "ModifyLoadBalancerAttributes",
+            &[
+                ("LoadBalancerArn", &lb_arn),
+                (
+                    "Attributes.member.1.Key",
+                    "ipv6.enable_prefix_for_source_nat",
+                ),
+                ("Attributes.member.1.Value", "yes"),
+            ],
+        ))
+        .await
+        .err()
+        .expect("non-bool ipv6 SNAT value should be rejected");
+    assert_eq!(err.code(), "ValidationError");
+    // All four supported values round-trip without error.
+    for v in ["true", "false", "on", "off"] {
+        let res = svc
+            .handle(req(
+                "ModifyLoadBalancerAttributes",
+                &[
+                    ("LoadBalancerArn", &lb_arn),
+                    (
+                        "Attributes.member.1.Key",
+                        "ipv6.enable_prefix_for_source_nat",
+                    ),
+                    ("Attributes.member.1.Value", v),
+                ],
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("ipv6 SNAT value {v} should be accepted: {e:?}"));
+        let body = body_string(&res);
+        assert!(
+            body.contains(&format!(
+                "<Key>ipv6.enable_prefix_for_source_nat</Key><Value>{v}</Value>"
+            )),
+            "round-trip should echo {v} verbatim: {body}"
+        );
     }
 }
 
