@@ -3721,6 +3721,118 @@ fn simulate_principal_policy_blocked_by_permission_boundary() {
 }
 
 #[test]
+fn simulate_principal_policy_unions_group_policies() {
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "carol")]))
+        .unwrap();
+    svc.create_group(&make_request("CreateGroup", vec![("GroupName", "ops")]))
+        .unwrap();
+    svc.add_user_to_group(&make_request(
+        "AddUserToGroup",
+        vec![("UserName", "carol"), ("GroupName", "ops")],
+    ))
+    .unwrap();
+    // Group inline policy grants s3:GetObject — the user has no
+    // identity-side policies of their own.
+    let inline_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+    svc.put_group_policy(&make_request(
+        "PutGroupPolicy",
+        vec![
+            ("GroupName", "ops"),
+            ("PolicyName", "InlineRead"),
+            ("PolicyDocument", inline_doc),
+        ],
+    ))
+    .unwrap();
+
+    let resp = svc
+        .simulate_principal_policy(&make_request(
+            "SimulatePrincipalPolicy",
+            vec![
+                ("PolicySourceArn", "arn:aws:iam::123456789012:user/carol"),
+                ("ActionNames.member.1", "s3:GetObject"),
+                ("ResourceArns.member.1", "arn:aws:s3:::b/k"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>allowed</EvalDecision>"),
+        "expected allowed via group inline policy, body: {body}"
+    );
+}
+
+#[test]
+fn simulate_principal_policy_unions_attached_group_managed_policy() {
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "dave")]))
+        .unwrap();
+    svc.create_group(&make_request("CreateGroup", vec![("GroupName", "admins")]))
+        .unwrap();
+    svc.add_user_to_group(&make_request(
+        "AddUserToGroup",
+        vec![("UserName", "dave"), ("GroupName", "admins")],
+    ))
+    .unwrap();
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}"#;
+    svc.create_policy(&make_request(
+        "CreatePolicy",
+        vec![("PolicyName", "GroupPut"), ("PolicyDocument", policy_doc)],
+    ))
+    .unwrap();
+    svc.attach_group_policy(&make_request(
+        "AttachGroupPolicy",
+        vec![
+            ("GroupName", "admins"),
+            ("PolicyArn", "arn:aws:iam::123456789012:policy/GroupPut"),
+        ],
+    ))
+    .unwrap();
+
+    let resp = svc
+        .simulate_principal_policy(&make_request(
+            "SimulatePrincipalPolicy",
+            vec![
+                ("PolicySourceArn", "arn:aws:iam::123456789012:user/dave"),
+                ("ActionNames.member.1", "s3:PutObject"),
+                ("ResourceArns.member.1", "arn:aws:s3:::b/k"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<EvalDecision>allowed</EvalDecision>"),
+        "expected allowed via attached group managed policy, body: {body}"
+    );
+}
+
+#[test]
+fn simulate_custom_policy_reports_missing_context_values() {
+    let svc = make_service();
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Condition":{"StringEquals":{"aws:RequestTag/team":"red"}}}]}"#;
+    let resp = svc
+        .simulate_custom_policy(&make_request(
+            "SimulateCustomPolicy",
+            vec![
+                ("PolicyInputList.member.1", policy),
+                ("ActionNames.member.1", "s3:GetObject"),
+                ("ResourceArns.member.1", "arn:aws:s3:::b/k"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    // Caller didn't pass aws:RequestTag/team — should appear under
+    // MissingContextValues, and the eval should implicitly deny.
+    assert!(
+        body.contains(
+            "<MissingContextValues><member>aws:RequestTag/team</member></MissingContextValues>"
+        ),
+        "expected missing context key reported, body: {body}"
+    );
+    assert!(body.contains("<EvalDecision>implicitDeny</EvalDecision>"));
+}
+
+#[test]
 fn misc_extras_smoke() {
     let svc = make_service();
     svc.create_user(&make_request("CreateUser", vec![("UserName", "u1")]))

@@ -52,7 +52,9 @@ fn collect_member_list(req: &AwsRequest, prefix: &str) -> Vec<String> {
 
 /// Resolve an IAM principal ARN (user or role) to its full identity
 /// policy set: managed policies (default version) plus inline
-/// policies. Returns an empty vec if the ARN doesn't resolve.
+/// policies. For users this also unions every policy attached to the
+/// groups they belong to, matching AWS's `SimulatePrincipalPolicy`
+/// semantics. Returns an empty vec if the ARN doesn't resolve.
 fn collect_principal_policies(
     state: &IamState,
     source_arn: &str,
@@ -90,6 +92,26 @@ fn collect_principal_policies(
     }
     for doc in inline.values() {
         out.push(PolicyDocument::parse(doc));
+    }
+    // Users inherit every policy attached to a group they belong to —
+    // both managed and inline. Roles can't be group members so this
+    // step is user-only.
+    if matches!(kind, PrincipalKind::User) {
+        for group in state.groups.values() {
+            if !group.members.iter().any(|m| m == name) {
+                continue;
+            }
+            for arn in &group.attached_policies {
+                if let Some(policy) = state.policies.get(arn) {
+                    if let Some(v) = policy.versions.iter().find(|v| v.is_default) {
+                        out.push(PolicyDocument::parse(&v.document));
+                    }
+                }
+            }
+            for doc in group.inline_policies.values() {
+                out.push(PolicyDocument::parse(doc));
+            }
+        }
     }
     out
 }
@@ -846,6 +868,12 @@ impl IamService {
         // to for any key it doesn't recognize.
         apply_context_entries(req, &mut ctx);
 
+        // Pre-compute the set of condition keys referenced by the
+        // identity policies (plus the optional boundary). Any key the
+        // caller didn't supply is reported under MissingContextValues
+        // so simulators can warn about gaps before the real call.
+        let missing_keys = collect_missing_context_values(req, &ctx);
+
         let mut members = String::new();
         for action_name in &actions {
             for resource in &resources {
@@ -862,11 +890,16 @@ impl IamService {
                     Decision::ImplicitDeny => "implicitDeny",
                     Decision::ExplicitDeny => "explicitDeny",
                 };
+                let missing_xml: String = missing_keys
+                    .iter()
+                    .map(|k| format!("<member>{}</member>", xml_escape(k)))
+                    .collect();
                 members.push_str(&format!(
-                    "<member><EvalActionName>{}</EvalActionName><EvalResourceName>{}</EvalResourceName><EvalDecision>{}</EvalDecision><MatchedStatements/><MissingContextValues/></member>",
+                    "<member><EvalActionName>{}</EvalActionName><EvalResourceName>{}</EvalResourceName><EvalDecision>{}</EvalDecision><MatchedStatements/><MissingContextValues>{}</MissingContextValues></member>",
                     xml_escape(action_name),
                     xml_escape(resource),
-                    decision_str
+                    decision_str,
+                    missing_xml,
                 ));
             }
         }
@@ -1102,6 +1135,36 @@ impl IamService {
             empty_response("UpdateServerCertificate", &req.request_id),
         ))
     }
+}
+
+/// Walk every policy doc supplied in the request (PolicyInputList +
+/// PermissionsBoundaryPolicyInputList) and return the condition keys
+/// that the request's [`ConditionContext`] can't resolve. The order is
+/// stable + deduped so callers get a deterministic XML response.
+///
+/// AWS uses this list to surface "you're missing aws:RequestedRegion"
+/// style hints in the simulator UI even when the decision is `allowed`.
+fn collect_missing_context_values(
+    req: &AwsRequest,
+    ctx: &fakecloud_core::auth::ConditionContext,
+) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    let policy_lists = [
+        "PolicyInputList.member.",
+        "PermissionsBoundaryPolicyInputList.member.",
+    ];
+    for prefix in policy_lists {
+        for body in collect_member_list(req, prefix) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+                extract_condition_keys(&parsed, &mut keys);
+            }
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys.into_iter()
+        .filter(|k| ctx.lookup(k).is_none())
+        .collect()
 }
 
 fn extract_condition_keys(v: &serde_json::Value, out: &mut Vec<String>) {
