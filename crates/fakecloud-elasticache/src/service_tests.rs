@@ -4039,6 +4039,19 @@ fn create_cache_cluster_persists_security_and_subnet_groups() {
     assert!(body.contains("<CacheSecurityGroupName>ec2c-1</CacheSecurityGroupName>"));
     assert!(body.contains("<CacheSecurityGroupName>ec2c-2</CacheSecurityGroupName>"));
     assert!(body.contains("<CacheParameterGroupName>default.redis7</CacheParameterGroupName>"));
+    // SecurityGroupMembershipList's member has no xmlName so awsQuery
+    // serializes each entry under `<member>`. Anything else (e.g.
+    // `<SecurityGroupMembership>`) makes the AWS SDK Rust deserializer
+    // drop the entry. Lock the wire shape in so the regression in
+    // PR #1169 doesn't come back.
+    let normalized = body.replace([' ', '\n'], "");
+    assert!(normalized.contains(
+        "<member><SecurityGroupId>sg-aaa</SecurityGroupId><Status>active</Status></member>"
+    ));
+    assert!(normalized.contains(
+        "<member><SecurityGroupId>sg-bbb</SecurityGroupId><Status>active</Status></member>"
+    ));
+    assert!(!body.contains("<SecurityGroupMembership>"));
 }
 
 #[test]
