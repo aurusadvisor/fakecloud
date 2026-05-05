@@ -2106,6 +2106,77 @@ async fn tag_state_unified_no_duplicate_state_tags() {
     // `func.tags` confirms tags actually landed in the unified slot.
 }
 
+#[tokio::test]
+async fn untag_resource_accepts_json_body_fallback() {
+    // Defensive: some clients put `TagKeys` in the JSON body even
+    // though the AWS Smithy model says `httpQuery: "tagKeys"`. When no
+    // query param is present we fall back to parsing the body so those
+    // clients still work end-to-end.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "tag-fn").await;
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:tag-fn";
+
+    let body = json!({"Tags": {"A": "1", "B": "2", "C": "3"}});
+    let req = make_request(
+        Method::POST,
+        &format!("/2017-03-31/tags/{arn}"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // No query string, body carries `TagKeys`.
+    let body = json!({"TagKeys": ["A", "B"]});
+    let req = make_request(
+        Method::DELETE,
+        &format!("/2017-03-31/tags/{arn}"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let accounts = svc.state.read();
+    let state = accounts.get("123456789012").unwrap();
+    let func = state.functions.get("tag-fn").unwrap();
+    assert!(!func.tags.contains_key("A"));
+    assert!(!func.tags.contains_key("B"));
+    assert_eq!(func.tags.get("C").map(String::as_str), Some("3"));
+}
+
+#[tokio::test]
+async fn untag_resource_query_wins_over_json_body() {
+    // When both query params and JSON body are present, query wins —
+    // it's the AWS-canonical wire format. The body is a defensive
+    // fallback only.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "tag-fn").await;
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:tag-fn";
+
+    let body = json!({"Tags": {"A": "1", "B": "2", "C": "3"}});
+    let req = make_request(
+        Method::POST,
+        &format!("/2017-03-31/tags/{arn}"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Query says delete A; body says delete C. Query wins, so only A
+    // is removed.
+    let body = json!({"TagKeys": ["C"]});
+    let mut req = make_request(
+        Method::DELETE,
+        &format!("/2017-03-31/tags/{arn}"),
+        &body.to_string(),
+    );
+    req.raw_query = "tagKeys=A".to_string();
+    svc.handle(req).await.unwrap();
+
+    let accounts = svc.state.read();
+    let state = accounts.get("123456789012").unwrap();
+    let func = state.functions.get("tag-fn").unwrap();
+    assert!(!func.tags.contains_key("A"));
+    assert_eq!(func.tags.get("B").map(String::as_str), Some("2"));
+    assert_eq!(func.tags.get("C").map(String::as_str), Some("3"));
+}
+
 // ── D4: reserved-concurrency enforcement at invoke ──
 
 #[tokio::test]
