@@ -843,7 +843,36 @@ impl RdsService {
                         format!("DBInstance {source_id} not found."),
                     ));
                 }
-                if let Some(source) = state.instances.get(&source_id).cloned() {
+                // Cluster sources require their own provisioning path:
+                // clone the source cluster entry under the green id and
+                // record the cluster ARNs in the BG record so a later
+                // SwitchoverBlueGreenDeployment can operate on something
+                // real.
+                let target_arn_for_record = if cluster_exists {
+                    let source_cluster = state
+                        .extras
+                        .get("clusters")
+                        .and_then(|m| m.get(&source_id))
+                        .cloned();
+                    if let Some(mut green_cluster) = source_cluster {
+                        let green_arn =
+                            Arn::new("rds", region, &aid, &format!("cluster:{target_id}"))
+                                .to_string();
+                        if let Some(obj) = green_cluster.as_object_mut() {
+                            obj.insert(
+                                "DBClusterIdentifier".to_string(),
+                                json!(target_id.clone()),
+                            );
+                            obj.insert("DBClusterArn".to_string(), json!(green_arn.clone()));
+                            obj.insert("Status".to_string(), json!("available"));
+                        }
+                        store(&mut state.extras, "clusters")
+                            .insert(target_id.clone(), green_cluster);
+                        green_arn
+                    } else {
+                        target_arn.clone()
+                    }
+                } else if let Some(source) = state.instances.get(&source_id).cloned() {
                     let mut green = source.clone();
                     green.db_instance_identifier = target_id.clone();
                     green.db_instance_arn = target_arn.clone();
@@ -851,15 +880,19 @@ impl RdsService {
                     green.read_replica_source_db_instance_identifier = Some(source_id.clone());
                     green.dbi_resource_id = format!("db-{}", uuid::Uuid::new_v4().simple());
                     state.instances.insert(target_id.clone(), green);
-                }
+                    target_arn.clone()
+                } else {
+                    target_arn.clone()
+                };
                 let entry = json!({
                     "BlueGreenDeploymentIdentifier": id,
                     "BlueGreenDeploymentName": get_param(req, "BlueGreenDeploymentName").unwrap_or_else(|| "blue-green".to_string()),
                     "Status": "AVAILABLE",
                     "Source": source_arn_full,
-                    "Target": target_arn,
+                    "Target": target_arn_for_record,
                     "SourceDBInstanceIdentifier": source_id,
                     "TargetDBInstanceIdentifier": target_id,
+                    "SourceIsCluster": cluster_exists && !instance_exists,
                     "BlueGreenDeploymentArn": arn,
                 });
                 store(&mut state.extras, "blue_green").insert(id.clone(), entry.clone());
@@ -2869,6 +2902,60 @@ mod tests {
         assert_eq!(entry["Status"].as_str(), Some("AVAILABLE"));
         assert_eq!(entry["SourceDBInstanceIdentifier"].as_str(), Some("blue"));
         assert_eq!(entry["TargetDBInstanceIdentifier"].as_str(), Some("green"));
+    }
+
+    #[test]
+    fn create_blue_green_deployment_with_cluster_source_provisions_green_cluster() {
+        let svc = svc();
+        // Create a source DBCluster (not a DBInstance).
+        ok_on(
+            &svc,
+            "CreateDBCluster",
+            &[
+                ("DBClusterIdentifier", "blue-cluster"),
+                ("Engine", "aurora-postgresql"),
+            ],
+        );
+        let resp = svc
+            .handle_extra_action(&req(
+                "CreateBlueGreenDeployment",
+                &[
+                    (
+                        "Source",
+                        "arn:aws:rds:us-east-1:000000000000:cluster:blue-cluster",
+                    ),
+                    ("TargetDBInstanceName", "green-cluster"),
+                ],
+            ))
+            .expect("CreateBlueGreenDeployment");
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        let needle = "<BlueGreenDeploymentIdentifier>";
+        let start = body.find(needle).expect("bgd id present") + needle.len();
+        let end = body[start..]
+            .find("</BlueGreenDeploymentIdentifier>")
+            .expect("close tag");
+        let bgd_id = body[start..start + end].to_string();
+        let accounts = svc.state_handle().read();
+        let state = accounts.get("000000000000").unwrap();
+        // Cluster sources must provision a green cluster (not a stray
+        // green instance).
+        let clusters = state.extras.get("clusters").expect("clusters");
+        assert!(
+            clusters.contains_key("green-cluster"),
+            "green cluster missing from extras['clusters']"
+        );
+        assert!(
+            !state.instances.contains_key("green-cluster"),
+            "green cluster source must not provision a stray DBInstance"
+        );
+        let entry = state
+            .extras
+            .get("blue_green")
+            .unwrap()
+            .get(&bgd_id)
+            .unwrap();
+        assert_eq!(entry["Status"].as_str(), Some("AVAILABLE"));
+        assert_eq!(entry["SourceIsCluster"].as_bool(), Some(true));
     }
 
     #[test]

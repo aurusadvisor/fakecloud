@@ -2775,6 +2775,27 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/ses/account/sandbox",
+            axum::routing::post({
+                let ss = ses_emails_state.clone();
+                move |axum::Json(body): axum::Json<types::SesSandboxRequest>| async move {
+                    let mut accounts = ss.write();
+                    let state = accounts.default_mut();
+                    // sandbox=true means production_access disabled (sandbox
+                    // semantics on); sandbox=false re-enables production
+                    // access (default fakecloud behavior).
+                    state.account_settings.production_access_enabled = !body.sandbox;
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "sandbox": body.sandbox,
+                            "productionAccessEnabled": state.account_settings.production_access_enabled,
+                        })),
+                    )
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/ses/inbound",
             axum::routing::post({
                 let ss = ses_inbound_state.clone();

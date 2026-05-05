@@ -457,6 +457,12 @@ impl SesState {
             dedicated_ip_pools: BTreeMap::new(),
             dedicated_ips: BTreeMap::new(),
             multi_region_endpoints: BTreeMap::new(),
+            // production_access_enabled defaults to true: fakecloud is a
+            // testing tool, not real AWS, and most users want to send to
+            // arbitrary recipients without first jumping the sandbox-only
+            // verified-recipient gate. Users who want to test sandbox
+            // semantics can flip the flag back via the
+            // /_fakecloud/ses/account/sandbox admin endpoint.
             account_settings: AccountSettings {
                 sending_enabled: true,
                 dedicated_ip_auto_warmup_enabled: false,
