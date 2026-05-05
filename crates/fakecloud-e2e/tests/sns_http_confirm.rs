@@ -17,6 +17,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+/// Locate the end-of-headers `\r\n\r\n` marker in a raw HTTP buffer.
+/// Returns the index of the first byte of the marker.
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
 /// Inbound HTTP request captured by `MockSubscriber`. Stores the raw
 /// bytes; tests parse out headers and body as needed.
 #[derive(Clone, Debug)]
@@ -69,9 +75,42 @@ impl MockSubscriber {
                 };
                 let received = received_for_task.clone();
                 tokio::spawn(async move {
-                    let mut buf = vec![0u8; 16 * 1024];
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+                    // Read until headers complete then keep reading for the
+                    // declared Content-Length. A single `read` would race
+                    // the kernel splitting the request across packets on
+                    // a loaded CI runner.
+                    let mut acc: Vec<u8> = Vec::with_capacity(8 * 1024);
+                    let mut chunk = [0u8; 4096];
+                    let mut headers_end: Option<usize> = None;
+                    let mut content_length: usize = 0;
+                    loop {
+                        let n = match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        acc.extend_from_slice(&chunk[..n]);
+                        if headers_end.is_none() {
+                            if let Some(idx) = find_header_end(&acc) {
+                                headers_end = Some(idx);
+                                let header_slice = &acc[..idx];
+                                let header_str = String::from_utf8_lossy(header_slice);
+                                for line in header_str.lines() {
+                                    if let Some(v) =
+                                        line.to_ascii_lowercase().strip_prefix("content-length:")
+                                    {
+                                        content_length = v.trim().parse().unwrap_or(0);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(end) = headers_end {
+                            let body_start = end + 4; // past \r\n\r\n
+                            if acc.len() >= body_start + content_length {
+                                break;
+                            }
+                        }
+                    }
+                    let raw = String::from_utf8_lossy(&acc).to_string();
                     received.lock().await.push(CapturedRequest { raw });
                     let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = sock.write_all(resp.as_bytes()).await;
@@ -126,8 +165,10 @@ async fn sns_http_subscribe_posts_confirmation_envelope_and_publish_routes_after
         .unwrap();
     assert_eq!(sub.subscription_arn().unwrap(), "pending confirmation");
 
-    // Wait for the confirmation POST.
-    let requests = subscriber.wait_for(1, Duration::from_secs(5)).await;
+    // Wait for the confirmation POST. Generous timeout because nextest
+    // partitions run dozens of E2E tests in parallel and the spawned
+    // reqwest can be slow to schedule on a loaded CI runner.
+    let requests = subscriber.wait_for(1, Duration::from_secs(30)).await;
     let confirmation = &requests[0];
 
     // Headers must match AWS conventions.
@@ -170,7 +211,10 @@ async fn sns_http_subscribe_posts_confirmation_envelope_and_publish_routes_after
         .send()
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Give any spurious delivery enough wall-clock time to land before
+    // we assert nothing arrived. 500ms leaves margin on a busy runner
+    // without making the test slow on the happy path.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         subscriber.received.lock().await.len(),
         1,
@@ -198,7 +242,7 @@ async fn sns_http_subscribe_posts_confirmation_envelope_and_publish_routes_after
         .send()
         .await
         .unwrap();
-    let requests = subscriber.wait_for(2, Duration::from_secs(5)).await;
+    let requests = subscriber.wait_for(2, Duration::from_secs(30)).await;
     let notification = &requests[1];
     assert_eq!(
         notification.header("x-amz-sns-message-type").as_deref(),
