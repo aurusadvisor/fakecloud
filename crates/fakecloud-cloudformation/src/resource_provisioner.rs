@@ -6228,7 +6228,12 @@ impl ResourceProvisioner {
         let account_recovery_setting =
             parse_cognito_account_recovery(props.get("AccountRecoverySetting"));
 
-        let signing_kid = format!("{pool_id}-key-1");
+        // Generate the RSA-2048 keypair eagerly. The kid is derived
+        // from a SHA-256 of the public SPKI DER so it stays stable
+        // across snapshots and matches the JWKS document.
+        let signing = fakecloud_cognito::jwt::generate_pool_signing_key();
+        let signing_key_pem = signing.private_key_pem;
+        let signing_kid = signing.kid;
         let pool = UserPool {
             id: pool_id.clone(),
             name: pool_name,
@@ -6259,10 +6264,7 @@ impl ResourceProvisioner {
             sms_mfa_configuration: None,
             user_pool_tier,
             verification_message_template: None,
-            // Generate the RSA-2048 keypair eagerly so CloudFormation-
-            // created pools sign RS256 JWTs out of the box, matching the
-            // runtime CreateUserPool handler.
-            signing_key_pem: Some(fakecloud_cognito::jwt::generate_pool_signing_key()),
+            signing_key_pem: Some(signing_key_pem),
             signing_kid: Some(signing_kid),
         };
 
