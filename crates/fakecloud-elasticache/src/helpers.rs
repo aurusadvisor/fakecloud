@@ -265,8 +265,17 @@ pub(crate) fn parse_log_delivery_configs(req: &AwsRequest) -> Vec<LogDeliveryCon
         let base = format!("LogDeliveryConfigurations.LogDeliveryConfigurationRequest.{i}");
         let log_type = optional_query_param(req, &format!("{base}.LogType"));
         let dest_type = optional_query_param(req, &format!("{base}.DestinationType"));
-        if log_type.is_none() && dest_type.is_none() {
+        let enabled = optional_query_param(req, &format!("{base}.Enabled"));
+        if log_type.is_none() && dest_type.is_none() && enabled.is_none() {
             break;
+        }
+        // AWS deletes a log delivery destination when Enabled=false. Skip it
+        // here so the modify handler ends up with only the active set.
+        if matches!(
+            enabled.as_deref(),
+            Some("false") | Some("False") | Some("FALSE")
+        ) {
+            continue;
         }
         let log_format = optional_query_param(req, &format!("{base}.LogFormat"))
             .unwrap_or_else(|| "json".into());
@@ -964,6 +973,26 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
         .as_ref()
         .map(|m| format!("<ClusterMode>{}</ClusterMode>", xml_escape(m)))
         .unwrap_or_default();
+    let cache_parameter_group_xml = g
+        .cache_parameter_group_name
+        .as_ref()
+        .map(|n| {
+            format!(
+                "<CacheParameterGroup><CacheParameterGroupName>{}</CacheParameterGroupName></CacheParameterGroup>",
+                xml_escape(n)
+            )
+        })
+        .unwrap_or_default();
+    let preferred_maintenance_window_xml = g
+        .preferred_maintenance_window
+        .as_ref()
+        .map(|w| {
+            format!(
+                "<PreferredMaintenanceWindow>{}</PreferredMaintenanceWindow>",
+                xml_escape(w)
+            )
+        })
+        .unwrap_or_default();
 
     let id = xml_escape(&g.replication_group_id);
     let description = xml_escape(&g.description);
@@ -1080,6 +1109,8 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
          {configuration_endpoint_xml}\
          {notification_topic_xml}\
          {cluster_mode_xml}\
+         {cache_parameter_group_xml}\
+         {preferred_maintenance_window_xml}\
          <PendingModifiedValues/>\
          <ARN>{arn}</ARN>",
     )
@@ -1633,5 +1664,132 @@ mod cluster_xml_tests {
         assert!(xml.contains("<AuthTokenEnabled>true</AuthTokenEnabled>"));
         assert!(xml.contains("<LogType>slow-log</LogType>"));
         assert!(xml.contains("<ConfigurationEndpoint>"));
+    }
+}
+
+#[cfg(test)]
+mod replication_group_xml_tests {
+    use super::*;
+    use crate::state::{LogDeliveryConfiguration, ReplicationGroup};
+
+    fn fixture() -> ReplicationGroup {
+        ReplicationGroup {
+            replication_group_id: "rg1".into(),
+            description: "fixture".into(),
+            global_replication_group_id: None,
+            global_replication_group_role: None,
+            status: "available".into(),
+            cache_node_type: "cache.t3.micro".into(),
+            engine: "redis".into(),
+            engine_version: "7.1".into(),
+            num_cache_clusters: 1,
+            automatic_failover_enabled: false,
+            endpoint_address: "127.0.0.1".into(),
+            endpoint_port: 6379,
+            arn: "arn:aws:elasticache:us-east-1:000000000000:replicationgroup:rg1".into(),
+            created_at: "2026-05-02T00:00:00Z".into(),
+            container_id: String::new(),
+            host_port: 6379,
+            member_clusters: vec!["rg1-001".into()],
+            snapshot_retention_limit: 0,
+            snapshot_window: "05:00-09:00".into(),
+            transit_encryption_enabled: false,
+            at_rest_encryption_enabled: false,
+            cluster_enabled: false,
+            kms_key_id: None,
+            auth_token_enabled: false,
+            user_group_ids: Vec::new(),
+            multi_az_enabled: false,
+            log_delivery_configurations: Vec::new(),
+            data_tiering: None,
+            ip_discovery: None,
+            network_type: None,
+            transit_encryption_mode: None,
+            num_node_groups: 1,
+            configuration_endpoint_address: None,
+            configuration_endpoint_port: None,
+            replicas_per_node_group: None,
+            auth_token: None,
+            port: 6379,
+            notification_topic_arn: None,
+            cluster_mode: None,
+            data_tiering_enabled: None,
+            notification_topic_status: None,
+            cache_parameter_group_name: None,
+            cache_subnet_group_name: None,
+            security_group_ids: Vec::new(),
+            preferred_maintenance_window: None,
+            snapshot_name: None,
+            snapshot_arns: Vec::new(),
+            auto_minor_version_upgrade: true,
+        }
+    }
+
+    #[test]
+    fn modify_kitchen_sink_fields_appear_in_xml() {
+        let mut g = fixture();
+        g.transit_encryption_enabled = true;
+        g.transit_encryption_mode = Some("required".into());
+        g.at_rest_encryption_enabled = true;
+        g.kms_key_id = Some("alias/k".into());
+        g.multi_az_enabled = true;
+        g.automatic_failover_enabled = true;
+        g.user_group_ids = vec!["ug-a".into(), "ug-b".into()];
+        g.log_delivery_configurations = vec![LogDeliveryConfiguration {
+            log_type: "slow-log".into(),
+            destination_type: "cloudwatch-logs".into(),
+            destination_details: Some("/aws/elasticache/x".into()),
+            log_format: "json".into(),
+            status: "active".into(),
+        }];
+        g.ip_discovery = Some("ipv6".into());
+        g.network_type = Some("dual_stack".into());
+        g.cluster_mode = Some("compatible".into());
+        g.cluster_enabled = true;
+        g.notification_topic_arn = Some("arn:aws:sns:us-east-1:000:t".into());
+        g.notification_topic_status = Some("active".into());
+        g.cache_parameter_group_name = Some("default.redis7".into());
+        g.preferred_maintenance_window = Some("mon:02:00-mon:03:00".into());
+        g.auto_minor_version_upgrade = false;
+
+        let xml = replication_group_xml(&g, "us-east-1");
+        assert!(xml.contains("<TransitEncryptionEnabled>true</TransitEncryptionEnabled>"));
+        assert!(xml.contains("<TransitEncryptionMode>required</TransitEncryptionMode>"));
+        assert!(xml.contains("<AtRestEncryptionEnabled>true</AtRestEncryptionEnabled>"));
+        assert!(xml.contains("<KmsKeyId>alias/k</KmsKeyId>"));
+        assert!(xml.contains("<MultiAZ>enabled</MultiAZ>"));
+        assert!(xml.contains("<AutomaticFailover>enabled</AutomaticFailover>"));
+        assert!(xml.contains("<member>ug-a</member>"));
+        assert!(xml.contains("<member>ug-b</member>"));
+        assert!(xml.contains("<LogType>slow-log</LogType>"));
+        assert!(xml.contains("<IpDiscovery>ipv6</IpDiscovery>"));
+        assert!(xml.contains("<NetworkType>dual_stack</NetworkType>"));
+        assert!(xml.contains("<ClusterMode>compatible</ClusterMode>"));
+        assert!(xml.contains("<ClusterEnabled>true</ClusterEnabled>"));
+        assert!(xml.contains("<TopicArn>arn:aws:sns:us-east-1:000:t</TopicArn>"));
+        assert!(xml.contains("<TopicStatus>active</TopicStatus>"));
+        assert!(xml.contains("<CacheParameterGroupName>default.redis7</CacheParameterGroupName>"));
+        assert!(xml.contains(
+            "<PreferredMaintenanceWindow>mon:02:00-mon:03:00</PreferredMaintenanceWindow>"
+        ));
+        assert!(xml.contains("<AutoMinorVersionUpgrade>false</AutoMinorVersionUpgrade>"));
+    }
+
+    #[test]
+    fn defaults_emit_canonical_state() {
+        let g = fixture();
+        let xml = replication_group_xml(&g, "us-east-1");
+        // Defaults: AMVU true, encryption flags false, no optional sections.
+        assert!(xml.contains("<AutoMinorVersionUpgrade>true</AutoMinorVersionUpgrade>"));
+        assert!(xml.contains("<TransitEncryptionEnabled>false</TransitEncryptionEnabled>"));
+        assert!(xml.contains("<AtRestEncryptionEnabled>false</AtRestEncryptionEnabled>"));
+        assert!(xml.contains("<MultiAZ>disabled</MultiAZ>"));
+        assert!(xml.contains("<AutomaticFailover>disabled</AutomaticFailover>"));
+        assert!(xml.contains("<UserGroupIds/>"));
+        assert!(xml.contains("<LogDeliveryConfigurations/>"));
+        // No CacheParameterGroup / NotificationConfiguration when unset.
+        assert!(!xml.contains("<CacheParameterGroup>"));
+        assert!(!xml.contains("<NotificationConfiguration>"));
+        assert!(!xml.contains("<PreferredMaintenanceWindow>"));
     }
 }

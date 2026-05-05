@@ -1353,6 +1353,371 @@ async fn elasticache_modify_replication_group_description() {
 }
 
 #[tokio::test]
+async fn elasticache_modify_replication_group_kitchen_sink() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    // Seed two user groups so we can both add and remove memberships.
+    client
+        .create_user_group()
+        .user_group_id("ks-ug-add")
+        .engine("redis")
+        .user_ids("default")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_user_group()
+        .user_group_id("ks-ug-remove")
+        .engine("redis")
+        .user_ids("default")
+        .send()
+        .await
+        .unwrap();
+
+    // Bring up the replication group with the existing membership pre-attached
+    // so the modify call can prove RemoveUserGroupIds drops it. UserGroupIds
+    // is required at create time when AuthToken+TransitEncryption are set.
+    client
+        .create_replication_group()
+        .replication_group_id("ks-mod-rg")
+        .replication_group_description("kitchen sink modify base")
+        .engine("redis")
+        .engine_version("7.1")
+        .auth_token("initial-token")
+        .transit_encryption_enabled(true)
+        .at_rest_encryption_enabled(true)
+        .multi_az_enabled(false)
+        .automatic_failover_enabled(false)
+        .user_group_ids("ks-ug-remove")
+        .send()
+        .await
+        .unwrap();
+
+    let cw_details = aws_sdk_elasticache::types::CloudWatchLogsDestinationDetails::builder()
+        .log_group("/aws/elasticache/slow-modified")
+        .build();
+    let dest = aws_sdk_elasticache::types::DestinationDetails::builder()
+        .cloud_watch_logs_details(cw_details)
+        .build();
+    let log_cfg = aws_sdk_elasticache::types::LogDeliveryConfigurationRequest::builder()
+        .log_type(aws_sdk_elasticache::types::LogType::SlowLog)
+        .destination_type(aws_sdk_elasticache::types::DestinationType::CloudWatchLogs)
+        .destination_details(dest)
+        .log_format(aws_sdk_elasticache::types::LogFormat::Json)
+        .enabled(true)
+        .build();
+
+    let modify_resp = client
+        .modify_replication_group()
+        .replication_group_id("ks-mod-rg")
+        .replication_group_description("kitchen sink modified")
+        .apply_immediately(true)
+        .auth_token("rotated-token")
+        .auth_token_update_strategy(aws_sdk_elasticache::types::AuthTokenUpdateStrategyType::Rotate)
+        .transit_encryption_enabled(true)
+        .transit_encryption_mode(aws_sdk_elasticache::types::TransitEncryptionMode::Required)
+        .multi_az_enabled(true)
+        .automatic_failover_enabled(true)
+        .ip_discovery(aws_sdk_elasticache::types::IpDiscovery::Ipv6)
+        .cluster_mode(aws_sdk_elasticache::types::ClusterMode::Compatible)
+        .snapshot_retention_limit(14)
+        .snapshot_window("06:00-07:00")
+        .preferred_maintenance_window("mon:02:00-mon:03:00")
+        .notification_topic_arn("arn:aws:sns:us-east-1:123456789012:rg-events")
+        .notification_topic_status("active")
+        .cache_parameter_group_name("default.redis7")
+        .auto_minor_version_upgrade(false)
+        .engine_version("7.1")
+        .cache_node_type("cache.r6g.large")
+        .user_group_ids_to_add("ks-ug-add")
+        .user_group_ids_to_remove("ks-ug-remove")
+        .log_delivery_configurations(log_cfg)
+        .send()
+        .await
+        .unwrap();
+
+    // Modify response must echo all updates synchronously.
+    let modified = modify_resp.replication_group().expect("replication group");
+    assert_eq!(modified.description(), Some("kitchen sink modified"));
+    assert_eq!(modified.transit_encryption_enabled(), Some(true));
+    assert_eq!(
+        modified.transit_encryption_mode(),
+        Some(&aws_sdk_elasticache::types::TransitEncryptionMode::Required)
+    );
+    assert_eq!(
+        modified.multi_az(),
+        Some(&aws_sdk_elasticache::types::MultiAzStatus::Enabled)
+    );
+    assert_eq!(
+        modified.automatic_failover(),
+        Some(&aws_sdk_elasticache::types::AutomaticFailoverStatus::Enabled)
+    );
+    assert_eq!(
+        modified.ip_discovery(),
+        Some(&aws_sdk_elasticache::types::IpDiscovery::Ipv6)
+    );
+    assert_eq!(
+        modified.cluster_mode(),
+        Some(&aws_sdk_elasticache::types::ClusterMode::Compatible)
+    );
+
+    // Re-describe and assert each persisted field.
+    let describe = client
+        .describe_replication_groups()
+        .replication_group_id("ks-mod-rg")
+        .send()
+        .await
+        .unwrap();
+    let groups = describe.replication_groups();
+    assert_eq!(groups.len(), 1);
+    let g = &groups[0];
+
+    assert_eq!(g.description(), Some("kitchen sink modified"));
+    assert_eq!(g.snapshot_retention_limit(), Some(14));
+    assert_eq!(g.snapshot_window(), Some("06:00-07:00"));
+    assert_eq!(g.cache_node_type(), Some("cache.r6g.large"));
+    assert_eq!(g.auth_token_enabled(), Some(true));
+    assert_eq!(g.transit_encryption_enabled(), Some(true));
+    assert_eq!(
+        g.transit_encryption_mode(),
+        Some(&aws_sdk_elasticache::types::TransitEncryptionMode::Required)
+    );
+    assert_eq!(g.at_rest_encryption_enabled(), Some(true));
+    assert_eq!(g.auto_minor_version_upgrade(), Some(false));
+    assert_eq!(
+        g.multi_az(),
+        Some(&aws_sdk_elasticache::types::MultiAzStatus::Enabled)
+    );
+    assert_eq!(
+        g.automatic_failover(),
+        Some(&aws_sdk_elasticache::types::AutomaticFailoverStatus::Enabled)
+    );
+    assert_eq!(
+        g.ip_discovery(),
+        Some(&aws_sdk_elasticache::types::IpDiscovery::Ipv6)
+    );
+    assert_eq!(
+        g.cluster_mode(),
+        Some(&aws_sdk_elasticache::types::ClusterMode::Compatible)
+    );
+    assert_eq!(g.cluster_enabled(), Some(true));
+
+    // User-group membership: ks-ug-add added, ks-ug-remove removed.
+    let user_group_ids: Vec<&str> = g.user_group_ids().iter().map(String::as_str).collect();
+    assert!(
+        user_group_ids.contains(&"ks-ug-add"),
+        "ks-ug-add must be attached: {user_group_ids:?}"
+    );
+    assert!(
+        !user_group_ids.contains(&"ks-ug-remove"),
+        "ks-ug-remove must be detached: {user_group_ids:?}"
+    );
+
+    // CacheParameterGroup, NotificationConfiguration, and
+    // PreferredMaintenanceWindow are not modeled on the SDK ReplicationGroup
+    // type but they are emitted in the raw XML AWS returns. Verify those
+    // wire-level fields by querying the endpoint directly.
+    let raw = reqwest::Client::new()
+        .post(server.endpoint())
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=fake/20260101/us-east-1/elasticache/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body("Action=DescribeReplicationGroups&Version=2015-02-02&ReplicationGroupId=ks-mod-rg")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        raw.contains("<CacheParameterGroupName>default.redis7</CacheParameterGroupName>"),
+        "missing CacheParameterGroup XML: {raw}"
+    );
+    assert!(
+        raw.contains("<TopicArn>arn:aws:sns:us-east-1:123456789012:rg-events</TopicArn>"),
+        "missing NotificationConfiguration TopicArn: {raw}"
+    );
+    assert!(
+        raw.contains("<TopicStatus>active</TopicStatus>"),
+        "missing NotificationConfiguration TopicStatus: {raw}"
+    );
+    assert!(
+        raw.contains(
+            "<PreferredMaintenanceWindow>mon:02:00-mon:03:00</PreferredMaintenanceWindow>"
+        ),
+        "missing PreferredMaintenanceWindow: {raw}"
+    );
+
+    // Log delivery: the modify call replaced the set with one CW Logs entry
+    // pointing at the new log group.
+    let log_configs = g.log_delivery_configurations();
+    assert_eq!(log_configs.len(), 1);
+    let cfg = &log_configs[0];
+    assert_eq!(
+        cfg.log_type(),
+        Some(&aws_sdk_elasticache::types::LogType::SlowLog)
+    );
+    assert_eq!(
+        cfg.destination_type(),
+        Some(&aws_sdk_elasticache::types::DestinationType::CloudWatchLogs)
+    );
+    let log_group = cfg
+        .destination_details()
+        .and_then(|d| d.cloud_watch_logs_details())
+        .and_then(|c| c.log_group());
+    assert_eq!(log_group, Some("/aws/elasticache/slow-modified"));
+
+    // Reverse-side: ks-ug-remove no longer references the rg, ks-ug-add does.
+    let ugs = client
+        .describe_user_groups()
+        .send()
+        .await
+        .unwrap()
+        .user_groups()
+        .to_vec();
+    let ug_add = ugs
+        .iter()
+        .find(|g| g.user_group_id() == Some("ks-ug-add"))
+        .expect("ks-ug-add user group");
+    let ug_remove = ugs
+        .iter()
+        .find(|g| g.user_group_id() == Some("ks-ug-remove"))
+        .expect("ks-ug-remove user group");
+    assert!(ug_add
+        .replication_groups()
+        .iter()
+        .any(|id| id == "ks-mod-rg"));
+    assert!(!ug_remove
+        .replication_groups()
+        .iter()
+        .any(|id| id == "ks-mod-rg"));
+}
+
+#[tokio::test]
+async fn elasticache_modify_replication_group_remove_user_groups_clears_all() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_user_group()
+        .user_group_id("rm-ug-1")
+        .engine("redis")
+        .user_ids("default")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_user_group()
+        .user_group_id("rm-ug-2")
+        .engine("redis")
+        .user_ids("default")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .create_replication_group()
+        .replication_group_id("rm-rg")
+        .replication_group_description("remove user groups")
+        .auth_token("token")
+        .transit_encryption_enabled(true)
+        .user_group_ids("rm-ug-1")
+        .user_group_ids("rm-ug-2")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .modify_replication_group()
+        .replication_group_id("rm-rg")
+        .remove_user_groups(true)
+        .send()
+        .await
+        .unwrap();
+
+    let g = client
+        .describe_replication_groups()
+        .replication_group_id("rm-rg")
+        .send()
+        .await
+        .unwrap()
+        .replication_groups()
+        .first()
+        .cloned()
+        .expect("rg");
+    assert!(g.user_group_ids().is_empty());
+}
+
+#[tokio::test]
+async fn elasticache_modify_replication_group_auth_token_delete_clears() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("auth-del-rg")
+        .replication_group_description("delete auth token")
+        .auth_token("initial")
+        .transit_encryption_enabled(true)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .modify_replication_group()
+        .replication_group_id("auth-del-rg")
+        .auth_token_update_strategy(aws_sdk_elasticache::types::AuthTokenUpdateStrategyType::Delete)
+        .send()
+        .await
+        .unwrap();
+
+    let g = resp.replication_group().expect("rg");
+    assert_eq!(g.auth_token_enabled(), Some(false));
+}
+
+#[tokio::test]
+async fn elasticache_modify_replication_group_rejects_invalid_cluster_mode() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("bad-cm-rg")
+        .replication_group_description("invalid cluster mode")
+        .send()
+        .await
+        .unwrap();
+
+    // SDK accepts unknown enum strings via Unknown(_); send raw via the
+    // customizable ModifyReplicationGroup path is overkill, so instead use a
+    // raw HTTP request for the invalid path. The build-time enum on the SDK
+    // prevents passing arbitrary strings through the typed builder.
+    let raw = reqwest::Client::new()
+        .post(server.endpoint())
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=fake/20260101/us-east-1/elasticache/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(
+            "Action=ModifyReplicationGroup\
+             &Version=2015-02-02\
+             &ReplicationGroupId=bad-cm-rg\
+             &ClusterMode=wat",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw.status().as_u16(), 400);
+    let body = raw.text().await.unwrap();
+    assert!(body.contains("InvalidParameterValue"), "body: {body}");
+    assert!(body.contains("ClusterMode"), "body: {body}");
+}
+
+#[tokio::test]
 async fn elasticache_increase_replica_count() {
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
