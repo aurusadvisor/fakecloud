@@ -1708,17 +1708,20 @@ pub(super) fn param_to_describe_json(p: &SsmParameter, region: &str) -> Value {
     if let Some(key_id) = &p.key_id {
         v["KeyId"] = json!(key_id);
     }
-    // Add policies if present and valid JSON
+    // Add policies if present and valid JSON. AWS describes each
+    // attached policy as `{PolicyText, PolicyType, PolicyStatus}`,
+    // where PolicyText is the original JSON the caller passed in and
+    // PolicyType is the `Type` field of that object.
     if let Some(policies_str) = &p.policies {
         if let Ok(parsed) = serde_json::from_str::<Value>(policies_str) {
             if let Some(arr) = parsed.as_array() {
                 let policy_objects: Vec<Value> = arr
                     .iter()
-                    .filter_map(|p| p.as_str())
-                    .map(|p| {
+                    .map(|policy| {
+                        let policy_type = policy["Type"].as_str().unwrap_or("Unknown").to_string();
                         json!({
-                            "PolicyText": p,
-                            "PolicyType": p,
+                            "PolicyText": policy.to_string(),
+                            "PolicyType": policy_type,
                             "PolicyStatus": "Finished",
                         })
                     })

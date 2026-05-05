@@ -4313,3 +4313,194 @@ fn get_parameters_by_path_skips_expired_entries() {
         .collect();
     assert_eq!(names, vec!["/app/live"]);
 }
+
+#[test]
+fn put_parameter_rejects_policy_on_standard_tier() {
+    let svc = make_service();
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": "9999-01-01T00:00:00.000Z" }
+    }]))
+    .unwrap();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/standard-policy",
+            "Value": "v1",
+            "Type": "String",
+            "Policies": policies
+        }),
+    );
+    let err = match svc.put_parameter(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("standard tier with policies should fail"),
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        err.message().contains("Advanced"),
+        "expected Advanced-tier message, got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn put_parameter_rejects_malformed_policies() {
+    let svc = make_service();
+    // Missing Attributes.Timestamp on an Expiration policy.
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": {}
+    }]))
+    .unwrap();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/malformed",
+            "Value": "v1",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": policies
+        }),
+    );
+    let err = match svc.put_parameter(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("malformed policy should fail"),
+    };
+    assert_eq!(err.code(), "InvalidPolicyAttributeException");
+}
+
+#[test]
+fn put_parameter_rejects_unknown_policy_type() {
+    let svc = make_service();
+    let policies = serde_json::to_string(&json!([{
+        "Type": "NotARealPolicy",
+        "Version": "1.0",
+        "Attributes": { "X": "Y" }
+    }]))
+    .unwrap();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/unknown-type",
+            "Value": "v1",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": policies
+        }),
+    );
+    let err = match svc.put_parameter(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("unknown type should fail"),
+    };
+    assert_eq!(err.code(), "InvalidPolicyAttributeException");
+}
+
+#[test]
+fn put_parameter_rejects_invalid_policies_json() {
+    let svc = make_service();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/garbage",
+            "Value": "v1",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": "{not-json"
+        }),
+    );
+    let err = match svc.put_parameter(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("non-JSON Policies should fail"),
+    };
+    assert_eq!(err.code(), "InvalidPolicyAttributeException");
+}
+
+#[test]
+fn put_parameter_records_policy_registration_event() {
+    let svc = make_service();
+    let policies = serde_json::to_string(&json!([
+        {
+            "Type": "Expiration",
+            "Version": "1.0",
+            "Attributes": { "Timestamp": "9999-01-01T00:00:00.000Z" }
+        },
+        {
+            "Type": "ExpirationNotification",
+            "Version": "1.0",
+            "Attributes": { "Before": "30", "Unit": "Days" }
+        }
+    ]))
+    .unwrap();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/with-policies",
+            "Value": "v1",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": policies
+        }),
+    );
+    svc.put_parameter(&req).unwrap();
+
+    let events = svc.parameter_policy_events("123456789012");
+    assert!(events
+        .iter()
+        .any(|e| e.event_type == "ExpirationRegistered" && e.parameter_name == "/with-policies"));
+    assert!(events
+        .iter()
+        .any(|e| e.event_type == "ExpirationNotificationRegistered"
+            && e.parameter_name == "/with-policies"));
+}
+
+#[test]
+fn overwrite_keeps_existing_policies_when_omitted() {
+    let svc = make_service();
+    let policies = serde_json::to_string(&json!([{
+        "Type": "Expiration",
+        "Version": "1.0",
+        "Attributes": { "Timestamp": "9999-01-01T00:00:00.000Z" }
+    }]))
+    .unwrap();
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/keep-policies",
+            "Value": "v1",
+            "Type": "String",
+            "Tier": "Advanced",
+            "Policies": policies
+        }),
+    );
+    svc.put_parameter(&req).unwrap();
+
+    // Overwrite without Policies.
+    let req = make_request(
+        "PutParameter",
+        json!({
+            "Name": "/keep-policies",
+            "Value": "v2",
+            "Type": "String",
+            "Overwrite": true
+        }),
+    );
+    svc.put_parameter(&req).unwrap();
+
+    // Read back via DescribeParameters and confirm Policies survived.
+    let req = make_request(
+        "DescribeParameters",
+        json!({
+            "ParameterFilters": [{
+                "Key": "Name",
+                "Values": ["/keep-policies"]
+            }]
+        }),
+    );
+    let resp = svc.describe_parameters(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let params = body["Parameters"].as_array().unwrap();
+    assert_eq!(params.len(), 1);
+    assert!(params[0]["Policies"].is_array());
+}
