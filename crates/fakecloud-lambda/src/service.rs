@@ -447,6 +447,52 @@ impl Drop for ConcurrencyGuard {
 /// `$LATEST`) to a concrete numeric version string. Aliases with a
 /// `RoutingConfig.AdditionalVersionWeights` table do a weighted pick
 /// across the alias's primary `function_version` plus the additional
+/// True when `prev` is byte-equivalent to `live` for every field
+/// that `PublishVersion` would otherwise capture into a new snapshot.
+/// Used to short-circuit a no-op publish (AWS-style idempotency:
+/// re-publishing without any change returns the previous version
+/// unchanged). The comparison spans code identity (sha + size),
+/// configuration (runtime/handler/role/timeout/memory/env/layers/...)
+/// and every advanced field round-tripped through
+/// `function_config_json`. The caller is responsible for resolving
+/// the `effective_description` (caller-supplied override wins over
+/// the live `$LATEST` description, matching real PublishVersion
+/// semantics).
+fn function_config_unchanged_for_publish(
+    prev: &LambdaFunction,
+    live: &LambdaFunction,
+    effective_description: &str,
+) -> bool {
+    prev.code_sha256 == live.code_sha256
+        && prev.code_size == live.code_size
+        && prev.image_uri == live.image_uri
+        && prev.package_type == live.package_type
+        && prev.runtime == live.runtime
+        && prev.role == live.role
+        && prev.handler == live.handler
+        && prev.description == effective_description
+        && prev.timeout == live.timeout
+        && prev.memory_size == live.memory_size
+        && prev.environment == live.environment
+        && prev.architectures == live.architectures
+        && prev.layers.len() == live.layers.len()
+        && prev
+            .layers
+            .iter()
+            .zip(live.layers.iter())
+            .all(|(a, b)| a.arn == b.arn && a.code_size == b.code_size)
+        && prev.tracing_mode == live.tracing_mode
+        && prev.kms_key_arn == live.kms_key_arn
+        && prev.ephemeral_storage_size == live.ephemeral_storage_size
+        && prev.vpc_config == live.vpc_config
+        && prev.dead_letter_config_arn == live.dead_letter_config_arn
+        && prev.file_system_configs == live.file_system_configs
+        && prev.logging_config == live.logging_config
+        && prev.image_config == live.image_config
+        && prev.signing_profile_version_arn == live.signing_profile_version_arn
+        && prev.signing_job_arn == live.signing_job_arn
+}
+
 /// versions in the weight map. Returns `None` for `$LATEST` /
 /// unqualified invokes (caller uses the live `$LATEST` config).
 pub(crate) fn resolve_qualifier_to_version(
@@ -1559,12 +1605,17 @@ impl LambdaService {
         let latest_version = existing.iter().filter_map(|v| v.parse::<u64>().ok()).max();
 
         // PublishVersion is idempotent on AWS: if `$LATEST` hasn't
-        // changed since the most recent published version (same
-        // CodeSha256 and same Description, when none is overridden),
-        // return that existing snapshot instead of bumping the
-        // counter. This keeps deploy pipelines that re-publish on
-        // every CI run from leaking a fresh numbered version per
-        // build when the underlying artifact is identical.
+        // changed since the most recent published version, return that
+        // existing snapshot instead of bumping the counter. We compare
+        // every field that PublishVersion would otherwise carry into
+        // the new snapshot — code identity, description, runtime,
+        // handler, role, env, memory/timeout, layers, image config,
+        // VPC, EFS, logging, tracing, kms, ephemeral storage — so a
+        // config-only change (e.g. UpdateFunctionConfiguration bumping
+        // memory) still produces a fresh version. This keeps deploy
+        // pipelines that re-publish on every CI run from leaking a
+        // fresh numbered version per build when the underlying
+        // artifact + config are identical.
         if let Some(latest_num) = latest_version {
             let latest_str = latest_num.to_string();
             if let Some(prev_snap) = state
@@ -1573,12 +1624,10 @@ impl LambdaService {
                 .and_then(|m| m.get(&latest_str))
                 .cloned()
             {
-                let same_sha = prev_snap.code_sha256 == func.code_sha256;
                 let effective_desc = description_override
                     .clone()
                     .unwrap_or_else(|| func.description.clone());
-                let same_desc = prev_snap.description == effective_desc;
-                if same_sha && same_desc {
+                if function_config_unchanged_for_publish(&prev_snap, func, &effective_desc) {
                     let mut config = self.function_config_json(&prev_snap);
                     config["Version"] = json!(latest_str);
                     config["FunctionArn"] = json!(format!("{}:{latest_str}", func.function_arn));

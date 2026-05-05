@@ -1732,6 +1732,36 @@ async fn publish_version_idempotent_when_latest_unchanged() {
 }
 
 #[tokio::test]
+async fn publish_version_creates_new_version_on_config_only_change() {
+    // PublishVersion idempotency must not collapse a config-only
+    // change (memory, env, etc.) to the previous snapshot — AWS
+    // produces a new numbered version when any field that the
+    // snapshot captures has moved, even if CodeSha256 is unchanged.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "cfg-fn").await;
+
+    let req = make_request(Method::POST, "/2015-03-31/functions/cfg-fn/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let v1: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v1["Version"], "1");
+
+    // Bump MemorySize via UpdateFunctionConfiguration (no code change).
+    let body = json!({ "MemorySize": 256 });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/cfg-fn/configuration",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::POST, "/2015-03-31/functions/cfg-fn/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let v2: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v2["Version"], "2");
+    assert_eq!(v2["MemorySize"].as_i64().unwrap(), 256);
+}
+
+#[tokio::test]
 async fn publish_version_snapshots_code_immutable() {
     let svc = LambdaService::new(make_state());
     seed_function(&svc, "pv3").await;

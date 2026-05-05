@@ -153,13 +153,13 @@ impl LambdaService {
         // unqualified, alias-name for an alias qualifier. AWS clients
         // that read back the policy via GetPolicy expect this exact
         // shape so IAM-level evaluators can match the principal's
-        // request resource.
+        // request resource. `func.function_arn` is always the bare ARN
+        // (snapshots clone the live arn without a suffix), so a plain
+        // concat is correct — `trim_end_matches` would over-strip on
+        // pathological function names like "v1" plus qualifier "1".
         let resource_arn = match qualifier.as_deref() {
             None | Some("$LATEST") => func.function_arn.clone(),
-            Some(q) => format!(
-                "{}:{q}",
-                func.function_arn.trim_end_matches(&format!(":{q}"))
-            ),
+            Some(q) => format!("{}:{q}", func.function_arn),
         };
 
         let mut new_statement = serde_json::Map::new();
