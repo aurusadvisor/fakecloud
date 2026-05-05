@@ -2106,11 +2106,7 @@ async fn iam_misc_account_ops() {
     // covered by the e2e test
     // `iam_set_and_get_sts_preferences_round_trip` and the audit
     // ignores it because it's not listed in SUPPORTED_ACTIONS.
-    let r = iam_post_raw(
-        &server,
-        &[("Action", "GetSecurityTokenServicePreferences")],
-    )
-    .await;
+    let r = iam_post_raw(&server, &[("Action", "GetSecurityTokenServicePreferences")]).await;
     assert!(r.status().is_success());
     assert!(r
         .text()
