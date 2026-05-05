@@ -1000,8 +1000,11 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
     // Emit one NodeGroup per shard. AWS numbers them 0001..N in
     // padded form regardless of cluster_enabled. The same primary
     // endpoint is reused since fakecloud runs a single backing
-    // container per replication group.
-    let shard_count = g.num_node_groups.max(1);
+    // container per replication group. Clamp at AWS's documented
+    // 500-shard ceiling so a corrupt stored value can't cause an
+    // unbounded XML allocation here.
+    const MAX_SHARDS: i32 = 500;
+    let shard_count = g.num_node_groups.clamp(1, MAX_SHARDS);
     let node_groups_inner: String = (1..=shard_count)
         .map(|shard| {
             // Pull the matching member cluster id when possible so multi-shard

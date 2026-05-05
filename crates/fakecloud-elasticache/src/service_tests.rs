@@ -2827,6 +2827,40 @@ async fn create_replication_group_missing_description_errors() {
     assert!(svc.create_replication_group(&req).await.is_err());
 }
 
+#[tokio::test]
+async fn create_replication_group_rejects_num_node_groups_out_of_range() {
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let svc = ElastiCacheService::new(shared);
+    // Cap at 500 to bound XML allocation, matching AWS's documented limit.
+    let req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "huge-rg"),
+            ("ReplicationGroupDescription", "too many shards"),
+            ("NumNodeGroups", "1000000"),
+        ],
+    );
+    match svc.create_replication_group(&req).await {
+        Ok(_) => panic!("expected NumNodeGroups=1000000 to be rejected"),
+        Err(e) => assert_eq!(e.status(), http::StatusCode::BAD_REQUEST),
+    }
+
+    let req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "zero-rg"),
+            ("ReplicationGroupDescription", "zero shards"),
+            ("NumNodeGroups", "0"),
+        ],
+    );
+    match svc.create_replication_group(&req).await {
+        Ok(_) => panic!("expected NumNodeGroups=0 to be rejected"),
+        Err(e) => assert_eq!(e.status(), http::StatusCode::BAD_REQUEST),
+    }
+}
+
 // Build a ReplicationGroup as if `CreateReplicationGroup` had run, by
 // running the same parsing path the handler does (sans runtime). Used
 // by the persistence round-trip tests below to exercise every input
