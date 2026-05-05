@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use aws_sdk_scheduler::types::{
     ActionAfterCompletion, DeadLetterConfig, FlexibleTimeWindow, FlexibleTimeWindowMode,
-    ScheduleState, Target,
+    RetryPolicy, ScheduleState, Target,
 };
 use aws_sdk_sqs::types::QueueAttributeName;
 use fakecloud_testkit::TestServer;
@@ -451,4 +451,212 @@ async fn cross_account_sqs_target_delivers_to_target_account_queue() {
         .await
         .expect("cross-account schedule should deliver to account B queue");
     assert_eq!(msg.body.unwrap(), "{\"crossAccount\":true}");
+}
+
+// ---------------------------------------------------------------------------
+// K11: FlexibleTimeWindow + RetryPolicy + ScheduleExpressionTimezone
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn scheduler_flexible_time_window_off_fires_immediately() {
+    // Mode=OFF (default) must fire on the next tick after due, with no
+    // window-driven deferral. This locks the OFF semantics so the
+    // FLEXIBLE test below has a meaningful baseline.
+    let server = TestServer::start().await;
+    let sched = server.scheduler_client().await;
+    let sqs = server.sqs_client().await;
+
+    let q_url = queue_url(&sqs, "flex-off-dest").await;
+    let q_arn = queue_arn(&sqs, &q_url).await;
+
+    let target = Target::builder()
+        .arn(q_arn)
+        .role_arn("arn:aws:iam::000000000000:role/scheduler")
+        .input("{\"k\":\"off\"}")
+        .build()
+        .unwrap();
+
+    sched
+        .create_schedule()
+        .name("flex-off")
+        .schedule_expression("rate(1 minute)")
+        .flexible_time_window(off_window())
+        .target(target)
+        .send()
+        .await
+        .unwrap();
+
+    let msg = wait_for_message(&sqs, &q_url, Duration::from_secs(10))
+        .await
+        .expect("OFF mode must fire promptly on next tick");
+    assert_eq!(msg.body.unwrap(), "{\"k\":\"off\"}");
+}
+
+#[tokio::test]
+async fn scheduler_flexible_time_window_flexible_fires_within_window() {
+    // Mode=FLEXIBLE with MaximumWindowInMinutes=1 must fire within
+    // [0, 60]s of due. We use a 1-minute window (the smallest AWS
+    // accepts) and a 90s deadline so the window can complete with
+    // headroom. The RNG is seeded per (schedule_arn, fire_minute) so
+    // the offset is bounded but non-deterministic across schedules.
+    let server = TestServer::start().await;
+    let sched = server.scheduler_client().await;
+    let sqs = server.sqs_client().await;
+
+    let q_url = queue_url(&sqs, "flex-on-dest").await;
+    let q_arn = queue_arn(&sqs, &q_url).await;
+
+    let target = Target::builder()
+        .arn(q_arn)
+        .role_arn("arn:aws:iam::000000000000:role/scheduler")
+        .input("{\"k\":\"flex\"}")
+        .build()
+        .unwrap();
+
+    let window = FlexibleTimeWindow::builder()
+        .mode(FlexibleTimeWindowMode::Flexible)
+        .maximum_window_in_minutes(1)
+        .build()
+        .unwrap();
+
+    sched
+        .create_schedule()
+        .name("flex-on")
+        .schedule_expression("rate(1 minute)")
+        .flexible_time_window(window)
+        .target(target)
+        .send()
+        .await
+        .unwrap();
+
+    let msg = wait_for_message(&sqs, &q_url, Duration::from_secs(90))
+        .await
+        .expect("FLEXIBLE schedule must fire within MaximumWindowInMinutes");
+    assert_eq!(msg.body.unwrap(), "{\"k\":\"flex\"}");
+}
+
+#[tokio::test]
+async fn scheduler_retry_policy_routes_to_dlq_after_budget_exhausted() {
+    // Schedule with MaximumRetryAttempts=2 against a non-existent queue.
+    // Expected: initial attempt + 2 retries all fail -> DLQ receives
+    // exactly one message after the budget is exhausted.
+    let server = TestServer::start().await;
+    let sched = server.scheduler_client().await;
+    let sqs = server.sqs_client().await;
+
+    let dlq_url = queue_url(&sqs, "retry-dlq").await;
+    let dlq_arn = queue_arn(&sqs, &dlq_url).await;
+
+    let target = Target::builder()
+        .arn("arn:aws:sqs:us-east-1:000000000000:retry-missing")
+        .role_arn("arn:aws:iam::000000000000:role/scheduler")
+        .input("{\"v\":\"retry-fail\"}")
+        .dead_letter_config(DeadLetterConfig::builder().arn(dlq_arn.clone()).build())
+        .retry_policy(
+            RetryPolicy::builder()
+                .maximum_event_age_in_seconds(86400)
+                .maximum_retry_attempts(2)
+                .build(),
+        )
+        .build()
+        .unwrap();
+
+    sched
+        .create_schedule()
+        .name("retry-fail")
+        .schedule_expression("rate(1 minute)")
+        .flexible_time_window(off_window())
+        .target(target)
+        .send()
+        .await
+        .unwrap();
+
+    let msg = wait_for_message(&sqs, &dlq_url, Duration::from_secs(30))
+        .await
+        .expect("DLQ must receive failed delivery once retry budget is exhausted");
+    assert_eq!(msg.body.unwrap(), "{\"v\":\"retry-fail\"}");
+    let attrs = msg.message_attributes.unwrap();
+    assert!(attrs.contains_key("X-Amz-Scheduler-Error-Code"));
+}
+
+#[tokio::test]
+async fn scheduler_retry_policy_does_not_dlq_when_target_recovers() {
+    // Schedule against a queue that DOES exist. Initial attempt
+    // succeeds -> no DLQ traffic. This pins the success path so we
+    // know retries don't double-deliver to the DLQ when the target
+    // accepts the first attempt.
+    let server = TestServer::start().await;
+    let sched = server.scheduler_client().await;
+    let sqs = server.sqs_client().await;
+
+    let dest_url = queue_url(&sqs, "retry-ok-dest").await;
+    let dest_arn = queue_arn(&sqs, &dest_url).await;
+    let dlq_url = queue_url(&sqs, "retry-ok-dlq").await;
+    let dlq_arn = queue_arn(&sqs, &dlq_url).await;
+
+    let target = Target::builder()
+        .arn(dest_arn)
+        .role_arn("arn:aws:iam::000000000000:role/scheduler")
+        .input("{\"v\":\"recovers\"}")
+        .dead_letter_config(DeadLetterConfig::builder().arn(dlq_arn).build())
+        .retry_policy(
+            RetryPolicy::builder()
+                .maximum_event_age_in_seconds(86400)
+                .maximum_retry_attempts(3)
+                .build(),
+        )
+        .build()
+        .unwrap();
+
+    sched
+        .create_schedule()
+        .name("retry-ok")
+        .schedule_expression("rate(1 minute)")
+        .flexible_time_window(off_window())
+        .target(target)
+        .send()
+        .await
+        .unwrap();
+
+    // Target receives the message normally.
+    let msg = wait_for_message(&sqs, &dest_url, Duration::from_secs(15))
+        .await
+        .expect("target must receive on first attempt when reachable");
+    assert_eq!(msg.body.unwrap(), "{\"v\":\"recovers\"}");
+
+    // DLQ stays empty (allow a brief window in case retries fired
+    // late, then poll once).
+    let dlq_msg = wait_for_message(&sqs, &dlq_url, Duration::from_secs(2)).await;
+    assert!(
+        dlq_msg.is_none(),
+        "DLQ must remain empty when target accepts delivery"
+    );
+}
+
+#[tokio::test]
+async fn scheduler_schedule_expression_timezone_round_trips() {
+    // Wall-clock testing of cron-in-tz is fragile; the firing logic
+    // for tz lives in unit tests on `expr::matches_cron_in_tz`. This
+    // e2e pins the contract that ScheduleExpressionTimezone is
+    // accepted, persisted, and returned via GetSchedule unchanged.
+    let server = TestServer::start().await;
+    let sched = server.scheduler_client().await;
+
+    sched
+        .create_schedule()
+        .name("tz-sched")
+        .schedule_expression("cron(0 12 * * ? *)")
+        .schedule_expression_timezone("America/New_York")
+        .flexible_time_window(off_window())
+        .target(sqs_target())
+        .send()
+        .await
+        .unwrap();
+
+    let got = sched.get_schedule().name("tz-sched").send().await.unwrap();
+    assert_eq!(
+        got.schedule_expression_timezone().unwrap(),
+        "America/New_York"
+    );
+    assert_eq!(got.schedule_expression().unwrap(), "cron(0 12 * * ? *)");
 }

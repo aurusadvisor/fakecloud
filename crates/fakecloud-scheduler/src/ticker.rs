@@ -148,8 +148,7 @@ impl Ticker {
                         _ => 0,
                     };
                     if window_minutes > 0 {
-                        let offset_seconds =
-                            stable_offset_seconds(&pending_key, now, window_minutes);
+                        let offset_seconds = stable_offset_seconds(&sched.arn, now, window_minutes);
                         let fire_at = now + chrono::Duration::seconds(offset_seconds);
                         pending_fires.insert(pending_key, PendingFire { fire_at });
                         continue;
@@ -210,15 +209,17 @@ impl Ticker {
                         .map(|s| (now - entry.first_due).num_seconds() >= s)
                         .unwrap_or(false);
                     if entry.attempts <= max_attempts && !aged_out {
-                        // Retry: schedule a re-fire on a later tick by
-                        // pushing this schedule back onto the pending
-                        // map a few seconds out (no exponential backoff
-                        // — fakecloud does not promise wall-clock
-                        // accuracy, just retry budget exhaustion).
+                        // Exponential backoff capped at 60s: 1s, 2s, 4s,
+                        // 8s, ... AWS Scheduler does not document the
+                        // exact curve, but using a bounded geometric
+                        // schedule ensures retry budget exhaustion and
+                        // MaximumEventAgeInSeconds enforcement remain
+                        // observable in tests.
+                        let backoff = backoff_seconds(entry.attempts);
                         pending_fires.insert(
                             retry_key,
                             PendingFire {
-                                fire_at: now + chrono::Duration::seconds(1),
+                                fire_at: now + chrono::Duration::seconds(backoff),
                             },
                         );
                     } else {
@@ -248,22 +249,34 @@ impl Ticker {
     }
 }
 
-/// Pick a deterministic random offset within [0, window_minutes*60)
-/// seconds for a given schedule key + now. Stable per schedule + minute
-/// so the offset is honored across multiple ticks at the same boundary.
-fn stable_offset_seconds(
-    key: &(String, ScheduleKey),
-    now: DateTime<Utc>,
-    window_minutes: i64,
-) -> i64 {
+/// Geometric backoff schedule for failed target deliveries. Returns
+/// `1s, 2s, 4s, 8s, ..., 60s` then caps. Caller passes the current
+/// attempt count (1-indexed: first retry is `attempt=1`).
+fn backoff_seconds(attempt: i64) -> i64 {
+    const CAP_SECONDS: i64 = 60;
+    let shift = attempt.saturating_sub(1).clamp(0, 30) as u32;
+    (1_i64 << shift).min(CAP_SECONDS)
+}
+
+/// Pick a uniform-random offset within `[0, window_minutes*60]` seconds
+/// for a given schedule. Reproducible: the RNG is seeded from a hash of
+/// `(schedule_arn, fire_at_unix_minute)` so the same `(schedule, minute)`
+/// pair yields the same offset across ticks (the offset is honored on
+/// every tick until it lands), and tests can predict the value without
+/// freezing wall time.
+fn stable_offset_seconds(schedule_arn: &str, now: DateTime<Utc>, window_minutes: i64) -> i64 {
+    use rand::{Rng, SeedableRng};
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
-    key.0.hash(&mut h);
-    key.1.hash(&mut h);
+    schedule_arn.hash(&mut h);
     now.timestamp().div_euclid(60).hash(&mut h);
-    let bound = (window_minutes * 60).max(1) as u64;
-    (h.finish() % bound) as i64
+    let seed = h.finish();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let upper = (window_minutes * 60).max(0) as u64;
+    // Inclusive upper: AWS's FlexibleTimeWindow spec covers the whole
+    // [0, MaximumWindowInMinutes*60] window.
+    rng.gen_range(0..=upper) as i64
 }
 
 enum PostFire {
@@ -354,7 +367,7 @@ fn is_due_with_dedup(
 mod tests {
     use super::*;
     use crate::state::{FlexibleTimeWindow, Schedule, SharedSchedulerState, Target};
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use fakecloud_aws::arn::Arn;
     use fakecloud_core::delivery::{SqsDelivery, SqsDeliveryError, SqsMessageAttribute};
     use parking_lot::RwLock;
@@ -745,5 +758,122 @@ mod tests {
         let mut retries = HashMap::new();
         ticker.tick(&mut cron, &mut pending, &mut retries);
         assert!(rec.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn backoff_seconds_is_exponential_and_capped() {
+        // 1, 2, 4, 8, 16, 32, 60 (cap), 60, ...
+        assert_eq!(super::backoff_seconds(1), 1);
+        assert_eq!(super::backoff_seconds(2), 2);
+        assert_eq!(super::backoff_seconds(3), 4);
+        assert_eq!(super::backoff_seconds(4), 8);
+        assert_eq!(super::backoff_seconds(5), 16);
+        assert_eq!(super::backoff_seconds(6), 32);
+        assert_eq!(super::backoff_seconds(7), 60);
+        assert_eq!(super::backoff_seconds(20), 60);
+        // Defensive: 0 and negatives shouldn't panic.
+        assert_eq!(super::backoff_seconds(0), 1);
+        assert_eq!(super::backoff_seconds(-1), 1);
+    }
+
+    #[test]
+    fn stable_offset_seconds_is_reproducible_and_within_bounds() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 1, 12, 30, 15).unwrap();
+        let arn = "arn:aws:scheduler:us-east-1:1:schedule/default/foo";
+        // Same (arn, minute) -> same offset.
+        let a = super::stable_offset_seconds(arn, now, 5);
+        let b = super::stable_offset_seconds(arn, now, 5);
+        assert_eq!(a, b, "offset must be stable per (arn, minute)");
+        // Within [0, 5*60].
+        assert!((0..=300).contains(&a), "offset {a} not in [0, 300]");
+        // Different schedule ARN -> almost certainly different offset.
+        let c = super::stable_offset_seconds(
+            "arn:aws:scheduler:us-east-1:1:schedule/default/bar",
+            now,
+            5,
+        );
+        assert!((0..=300).contains(&c));
+    }
+
+    #[test]
+    fn retry_then_success_clears_retry_state_and_delivers_to_target() {
+        // Schedule with MaxRetryAttempts=3, target succeeds on the 3rd attempt.
+        let state = make_state();
+        seed_schedule(
+            &state,
+            "retry-then-ok",
+            "rate(1 minute)",
+            "arn:aws:sqs:us-east-1:111122223333:flaky",
+        );
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(ACCOUNT);
+            let sched = s
+                .schedules
+                .get_mut(&("default".to_string(), "retry-then-ok".to_string()))
+                .unwrap();
+            sched.target.retry_policy = Some(crate::state::RetryPolicy {
+                maximum_event_age_in_seconds: Some(86400),
+                maximum_retry_attempts: Some(3),
+            });
+        }
+
+        struct FlakyN {
+            calls: Mutex<Vec<String>>,
+            fail_first_n: i64,
+        }
+        impl SqsDelivery for FlakyN {
+            fn deliver_to_queue(&self, _: &str, _: &str, _: &HashMap<String, String>) {}
+            fn try_deliver_to_queue_with_attrs(
+                &self,
+                queue_arn: &str,
+                _body: &str,
+                _attrs: &HashMap<String, SqsMessageAttribute>,
+                _g: Option<&str>,
+                _d: Option<&str>,
+            ) -> Result<(), SqsDeliveryError> {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(queue_arn.to_string());
+                if (calls.len() as i64) <= self.fail_first_n {
+                    Err(SqsDeliveryError::QueueNotFound(queue_arn.to_string()))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let rec = Arc::new(FlakyN {
+            calls: Mutex::new(Vec::new()),
+            fail_first_n: 2,
+        });
+        let bus = Arc::new(DeliveryBus::new().with_sqs(rec.clone()));
+        let ticker = Ticker::new(state.clone(), bus);
+        let mut cron = HashMap::new();
+        let mut pending = HashMap::new();
+        let mut retries = HashMap::new();
+
+        // Tick 1: initial fire fails (call #1), retry queued.
+        ticker.tick(&mut cron, &mut pending, &mut retries);
+        assert_eq!(retries.len(), 1, "retry state must be tracked");
+        for (_, p) in pending.iter_mut() {
+            p.fire_at = Utc::now() - chrono::Duration::seconds(1);
+        }
+        // Tick 2: first retry fails (call #2), retry queued.
+        ticker.tick(&mut cron, &mut pending, &mut retries);
+        for (_, p) in pending.iter_mut() {
+            p.fire_at = Utc::now() - chrono::Duration::seconds(1);
+        }
+        // Tick 3: second retry succeeds (call #3) -> retry state cleared.
+        ticker.tick(&mut cron, &mut pending, &mut retries);
+
+        let calls = rec.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            3,
+            "expected 3 delivery attempts (2 fail + 1 ok)"
+        );
+        assert!(
+            retries.is_empty(),
+            "retry state must be cleared after success"
+        );
     }
 }
