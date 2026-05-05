@@ -41,3 +41,17 @@ func (c *ACMClient) SetCertificateStatus(
 	path := fmt.Sprintf("/_fakecloud/acm/certificates/%s/status", id)
 	return c.fc.doPost(ctx, path, req, nil)
 }
+
+// ApproveCertificate flips a PENDING_VALIDATION certificate to ISSUED,
+// the synchronous equivalent of the user clicking the validation link
+// in an ACM-sent email. EMAIL-validated certs do not auto-issue, so
+// tests drive their issuance through this endpoint. arnOrID accepts
+// either the full certificate ARN or just the trailing UUID.
+func (c *ACMClient) ApproveCertificate(ctx context.Context, arnOrID string) error {
+	id := arnOrID
+	if idx := strings.LastIndex(arnOrID, "certificate/"); idx >= 0 {
+		id = arnOrID[idx+len("certificate/"):]
+	}
+	path := fmt.Sprintf("/_fakecloud/acm/certificates/%s/approve", id)
+	return c.fc.doPost(ctx, path, nil, nil)
+}

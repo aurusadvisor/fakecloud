@@ -319,6 +319,31 @@ impl TestServer {
             .expect("set-acm-certificate-status request failed");
         resp.status().as_u16()
     }
+
+    /// Approve an ACM certificate via
+    /// `POST /_fakecloud/acm/certificates/{arn-or-id}/approve`. This is
+    /// the synchronous equivalent of "the user clicked the validation
+    /// link in the email" — fakecloud flips the cert from
+    /// `PENDING_VALIDATION` to `ISSUED`. Used by tests that exercise
+    /// the EMAIL validation flow (where the auto-issue tick
+    /// intentionally doesn't fire). Returns the HTTP status code so
+    /// tests can assert 204 vs 404.
+    pub async fn approve_acm_certificate(&self, arn_or_id: &str) -> u16 {
+        let id = arn_or_id
+            .rsplit_once("certificate/")
+            .map(|(_, id)| id)
+            .unwrap_or(arn_or_id);
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!(
+                "{}/_fakecloud/acm/certificates/{}/approve",
+                self.endpoint, id
+            ))
+            .send()
+            .await
+            .expect("approve-acm-certificate request failed");
+        resp.status().as_u16()
+    }
 }
 
 impl Drop for TestServer {

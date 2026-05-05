@@ -72,11 +72,36 @@ pub struct StoredCertificate {
     pub tags: BTreeMap<String, String>,
     pub in_use_by: Vec<String>,
     /// Number of `DescribeCertificate` reads since the cert was issued.
-    /// Real ACM transitions PENDING_VALIDATION → ISSUED asynchronously
-    /// over minutes; we flip after a small read-count threshold so tests
-    /// don't have to wait wall-clock seconds.
+    /// Legacy field kept for state-file compatibility; the read-count
+    /// flip was removed in favour of the async auto-issue tick (see
+    /// `AcmService::pending_validation_delay`).
     #[serde(default)]
     pub describe_read_count: u32,
+    /// Snapshot of the last managed-renewal round. `None` until either
+    /// the auto-issue tick fires (for DNS) or the admin `/approve`
+    /// endpoint flips an EMAIL cert; refreshed on every successful
+    /// `RenewCertificate`. Surfaced as `RenewalSummary` in
+    /// `DescribeCertificate` for `AMAZON_ISSUED` certs.
+    #[serde(default)]
+    pub renewal_summary: Option<RenewalSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenewalSummary {
+    /// One of `PENDING_AUTO_RENEWAL`, `PENDING_VALIDATION`, `SUCCESS`, `FAILED`.
+    pub renewal_status: String,
+    /// Per-domain validation snapshot at the moment the renewal summary
+    /// was emitted. fakecloud copies the cert's current
+    /// `domain_validation` into this field so callers see consistent
+    /// data between top-level `DomainValidationOptions` and
+    /// `RenewalSummary.DomainValidationOptions`.
+    pub domain_validation: Vec<DomainValidation>,
+    /// Optional renewal failure reason. Real ACM uses
+    /// `RenewalStatusReason` (an enum: `NO_AVAILABLE_CONTACTS`,
+    /// `ADDITIONAL_VERIFICATION_REQUIRED`, etc.); fakecloud just stores
+    /// whatever string the admin endpoint or renew flow recorded.
+    pub renewal_status_reason: Option<String>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
