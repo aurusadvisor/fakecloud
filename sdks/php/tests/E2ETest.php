@@ -81,7 +81,16 @@ final class E2ETest extends TestCase
 
     public function testSqsGetMessages(): void
     {
-        $this->awsSqs('CreateQueue', ['QueueName' => 'php-test-queue']);
+        // Disable SSE-SQS so the introspection endpoint surfaces the
+        // plaintext body. Queues created without explicit attributes
+        // get `SqsManagedSseEnabled=true` (the AWS default since
+        // May 2023) and the body would be the at-rest ciphertext
+        // envelope.
+        $this->awsSqs('CreateQueue', [
+            'QueueName' => 'php-test-queue',
+            'Attribute.1.Name' => 'SqsManagedSseEnabled',
+            'Attribute.1.Value' => 'false',
+        ]);
         $queueUrl = $this->endpoint . '/000000000000/php-test-queue';
         $this->awsSqs('SendMessage', [
             'QueueUrl' => $queueUrl,

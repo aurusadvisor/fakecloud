@@ -411,6 +411,71 @@ async fn sqs_message_attributes() {
     assert_eq!(attr.string_value().unwrap(), "test-value");
 }
 
+/// SendMessage with `MessageSystemAttribute` entries (e.g. the
+/// X-Ray `AWSTraceHeader`) returns a non-empty
+/// `MD5OfMessageSystemAttributes` alongside the body and attributes
+/// digests. Real SQS clients verify the digest end-to-end; mismatching
+/// it would surface as an opaque "checksum mismatch" client error, so
+/// fakecloud has to canonicalize the bytes the same way AWS does.
+#[tokio::test]
+async fn sqs_send_message_returns_md5_of_message_system_attributes() {
+    use aws_sdk_sqs::types::{MessageSystemAttributeNameForSends, MessageSystemAttributeValue};
+
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let resp = client
+        .create_queue()
+        .queue_name("sys-attrs-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = resp.queue_url().unwrap().to_string();
+
+    let trace = MessageSystemAttributeValue::builder()
+        .data_type("String")
+        .string_value("Root=1-5759e988-bd862e3fe1be46a994272793")
+        .build()
+        .unwrap();
+
+    let send = client
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("payload")
+        .message_system_attributes(MessageSystemAttributeNameForSends::AwsTraceHeader, trace)
+        .send()
+        .await
+        .unwrap();
+
+    // Plain MessageBody MD5 is always present.
+    assert!(
+        send.md5_of_message_body().is_some(),
+        "MD5OfMessageBody must be returned"
+    );
+
+    // The new digest matches the canonical encoding of the system attrs
+    // (sorted name, length-prefixed name + type "String" + transport
+    // type 1 + length-prefixed value bytes).
+    use md5::Digest;
+    let trace_value = "Root=1-5759e988-bd862e3fe1be46a994272793";
+    let mut hasher = md5::Md5::new();
+    let name = "AWSTraceHeader";
+    hasher.update((name.len() as u32).to_be_bytes());
+    hasher.update(name.as_bytes());
+    hasher.update(("String".len() as u32).to_be_bytes());
+    hasher.update(b"String");
+    hasher.update([1u8]);
+    hasher.update((trace_value.len() as u32).to_be_bytes());
+    hasher.update(trace_value.as_bytes());
+    let expected = format!("{:032x}", hasher.finalize());
+
+    assert_eq!(
+        send.md5_of_message_system_attributes(),
+        Some(expected.as_str()),
+        "MD5OfMessageSystemAttributes must match canonical AWS encoding"
+    );
+}
+
 #[tokio::test]
 async fn sqs_fifo_queue_ordering() {
     let server = TestServer::start().await;
@@ -1171,9 +1236,13 @@ async fn sqs_introspection_messages() {
     let server = TestServer::start().await;
     let client = server.sqs_client().await;
 
+    // Disable SSE-SQS so the introspection endpoint surfaces the
+    // plaintext body rather than the at-rest ciphertext envelope. The
+    // SSE round-trip is covered by `sqs_managed_sse_round_trips_through_alias_aws_sqs`.
     let queue = client
         .create_queue()
         .queue_name("intro-queue")
+        .attributes(QueueAttributeName::SqsManagedSseEnabled, "false")
         .send()
         .await
         .unwrap();

@@ -145,13 +145,31 @@ impl SqsService {
         }
     }
 
-    /// Decrypt a stored SQS body via the KMS hook. Caller must gate this
-    /// on the queue having `KmsMasterKeyId` set; opaque base64 ciphertext
-    /// can't be detected by prefix.
+    /// Decrypt a stored SQS body via the KMS hook.
     ///
-    /// Fail-closed: a hook error here surfaces as 500
-    /// `KMS.InternalFailureException` so callers don't silently see the
-    /// raw ciphertext envelope when KMS access is broken.
+    /// Bodies stored on a queue can come from two paths:
+    ///  - The SQS SendMessage handler, which encrypts under the
+    ///    queue's effective key (SSE-KMS or SSE-SQS) and stores a
+    ///    base64-wrapped fakecloud-kms envelope.
+    ///  - Cross-service delivery (SNS fanout, EventBridge target,
+    ///    S3 / DDB / ECS / Logs notifications, SES events, etc.) which
+    ///    bypasses the SQS service entirely and writes the plaintext
+    ///    body directly into `queue.messages` via `SqsDeliveryImpl`.
+    ///
+    /// Real AWS keeps both paths working on encrypted queues by
+    /// re-encrypting the cross-service body server-side; fakecloud's
+    /// in-process delivery bus doesn't need to round-trip through KMS
+    /// and skips encryption entirely. To avoid silently dropping
+    /// every cross-service message on a managed-SSE queue, we detect
+    /// fakecloud envelopes by their version header and only invoke
+    /// the KMS hook when one is present. Anything else is returned
+    /// as-is — same end-result the caller would see if the body had
+    /// been written through SendMessage on an unencrypted queue.
+    ///
+    /// Hook errors on a body that *does* look like an envelope
+    /// surface as 500 `KMS.InternalFailureException` so callers don't
+    /// silently see the raw ciphertext envelope when KMS access is
+    /// broken.
     fn decrypt_message_body(
         &self,
         account_id: &str,
@@ -161,6 +179,9 @@ impl SqsService {
         let Some(hook) = &self.kms_hook else {
             return Ok(ciphertext.to_string());
         };
+        if !looks_like_fakecloud_envelope(ciphertext) {
+            return Ok(ciphertext.to_string());
+        }
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("aws:sqs:arn".to_string(), queue_arn.to_string());
         match hook.decrypt(account_id, ciphertext, "sqs.amazonaws.com", ctx) {
@@ -174,6 +195,32 @@ impl SqsService {
                 ))
             }
         }
+    }
+
+    /// Resolve the effective at-rest encryption key id for a queue.
+    ///
+    /// Real AWS SQS exposes two SSE modes that are mutually exclusive at
+    /// the API level but flow through the same KMS audit trail:
+    ///
+    /// - **SSE-KMS**: customer or AWS-managed CMK supplied via
+    ///   `KmsMasterKeyId`. Wins when set to a non-empty value.
+    /// - **SSE-SQS**: AWS-managed `alias/aws/sqs` key, implicit when
+    ///   `SqsManagedSseEnabled=true` (the default since May 2023). The
+    ///   alias is provisioned on first use by the KMS hook.
+    ///
+    /// Returns `None` when neither attribute selects a key — in that
+    /// case the body is stored as plaintext (matches a queue with
+    /// `SqsManagedSseEnabled=false` and no KMS key).
+    fn effective_kms_key_id(attributes: &BTreeMap<String, String>) -> Option<String> {
+        if let Some(k) = attributes.get("KmsMasterKeyId") {
+            if !k.is_empty() {
+                return Some(k.clone());
+            }
+        }
+        if attributes.get("SqsManagedSseEnabled").map(String::as_str) == Some("true") {
+            return Some("alias/aws/sqs".to_string());
+        }
+        None
     }
 
     /// Persist the current in-memory state as a snapshot. Called after
@@ -1131,15 +1178,14 @@ impl SqsService {
                 None
             };
 
-            // SSE-KMS: encrypt the body via the KMS hook so the in-memory
-            // queue holds a fakecloud-kms envelope. md5_of_body keeps the
-            // plaintext digest — that's what callers verify against, and
-            // matches AWS's behavior of returning the plaintext MD5.
-            let kms_key_id = queue
-                .attributes
-                .get("KmsMasterKeyId")
-                .cloned()
-                .filter(|s| !s.is_empty());
+            // At-rest encryption: encrypt the body via the KMS hook so the
+            // in-memory queue holds a fakecloud-kms envelope. The hook
+            // resolution covers both SSE-KMS (`KmsMasterKeyId` set) and
+            // SSE-SQS (`SqsManagedSseEnabled=true`, implicit
+            // `alias/aws/sqs`). `md5_of_body` keeps the plaintext digest
+            // — that's what callers verify against, and matches AWS's
+            // behavior of returning the plaintext MD5.
+            let kms_key_id = Self::effective_kms_key_id(&queue.attributes);
             let stored_body = self.encrypt_message_body(
                 &req.account_id,
                 &queue.arn,
@@ -1479,70 +1525,41 @@ impl SqsService {
             queue.messages = remaining;
         }
 
-        // SSE-KMS: decrypt the body BEFORE we commit any state changes
-        // (inflight push / DLQ move / queue.messages rewrite). A KMS
-        // failure here would otherwise leave the queue in a broken state
-        // — the message hidden in inflight or moved to DLQ — while the
-        // client receives 500 and never sees the body. Real AWS treats
-        // KMS failures as a Receive failure that doesn't consume the
-        // message; rollback the popped batch by pushing it back onto
-        // `queue.messages`.
-        let queue_arn = queue.arn.clone();
-        let kms_key_id = queue
-            .attributes
-            .get("KmsMasterKeyId")
-            .cloned()
-            .filter(|s| !s.is_empty());
-        if kms_key_id.is_some() && self.kms_hook.is_some() {
-            // Decrypt into a side buffer first; only commit the
-            // plaintext bodies back onto `received` once the entire
-            // batch decrypts cleanly. Otherwise a partial decrypt would
-            // leak plaintext back onto the queue during rollback.
-            let mut plaintexts: Vec<String> = Vec::with_capacity(received.len());
-            for msg in received.iter() {
-                match self.decrypt_message_body(account_id, &queue_arn, &msg.body) {
-                    Ok(plain) => plaintexts.push(plain),
-                    Err(err) => {
-                        // Rollback the popped batch (both would-be-received
-                        // and would-be-DLQ messages) onto the front of the
-                        // queue with their original ciphertext bodies and
-                        // their receive_count restored, so the next receive
-                        // can retry once KMS recovers.
-                        let mut rollback: VecDeque<SqsMessage> = VecDeque::new();
-                        for (_, mut m) in dlq_messages.into_iter() {
-                            m.receive_count = m.receive_count.saturating_sub(1);
-                            m.visible_at = None;
-                            m.receipt_handle = None;
-                            rollback.push_back(m);
-                        }
-                        for mut m in received.into_iter() {
-                            m.receive_count = m.receive_count.saturating_sub(1);
-                            m.visible_at = None;
-                            m.receipt_handle = None;
-                            rollback.push_back(m);
-                        }
-                        for m in rollback.into_iter().rev() {
-                            queue.messages.push_front(m);
-                        }
-                        return Err(err);
-                    }
-                }
-            }
-            for (msg, plain) in received.iter_mut().zip(plaintexts) {
-                msg.body = plain;
-            }
-        }
-
+        // Push the popped messages onto inflight with their original
+        // at-rest bodies (ciphertext for SendMessage-encrypted msgs,
+        // plaintext for cross-service deliveries). Inflight has to
+        // mirror the at-rest form so a later ChangeMessageVisibility
+        // / inflight-expiry round-trip can re-decrypt without
+        // corrupting anything.
         for msg in &received {
             queue.inflight.push(msg.clone());
         }
 
-        // Move messages to DLQ
-        for (dlq_arn, mut msg) in dlq_messages {
+        // Capture queue-level encryption settings BEFORE the DLQ path
+        // re-borrows `state.queues` mutably to push into the DLQ.
+        let queue_arn = queue.arn.clone();
+        let kms_key_id = Self::effective_kms_key_id(&queue.attributes);
+
+        // Move messages to DLQ — also with at-rest bodies untouched,
+        // since the DLQ may have its own SSE settings and a downstream
+        // receive call decrypts what's there.
+        for (dlq_arn, mut msg) in dlq_messages.into_iter() {
             if let Some(dlq) = state.queues.values_mut().find(|q| q.arn == dlq_arn) {
                 msg.receipt_handle = None;
                 msg.visible_at = None;
                 dlq.messages.push_back(msg);
+            }
+        }
+
+        // At-rest decryption: rewrite each delivered message's body
+        // from ciphertext to plaintext for the response. Covers both
+        // SSE-KMS (`KmsMasterKeyId`) and SSE-SQS
+        // (`SqsManagedSseEnabled=true`). Bodies that don't look like a
+        // fakecloud envelope (cross-service deliveries) are passed
+        // through unchanged inside `decrypt_message_body`.
+        if kms_key_id.is_some() && self.kms_hook.is_some() {
+            for msg in received.iter_mut() {
+                msg.body = self.decrypt_message_body(account_id, &queue_arn, &msg.body)?;
             }
         }
 
@@ -1990,18 +2007,15 @@ impl SqsService {
 
         let cfg = BatchSendConfig::from_queue(queue, now);
 
-        // SSE-KMS: pre-encrypt every entry's body before handing it to
-        // the per-entry helper. Encryption is queue-wide, so a KMS
-        // failure here aborts the whole batch (matches AWS behavior:
-        // when the queue's CMK is unavailable, no entry can succeed).
-        // Skip encryption for entries that won't pass per-entry
-        // validation — otherwise an invalid entry would still record a
-        // KMS GenerateDataKey call and inflate the audit trail.
-        let kms_key_id = queue
-            .attributes
-            .get("KmsMasterKeyId")
-            .cloned()
-            .filter(|s| !s.is_empty());
+        // At-rest encryption: pre-encrypt every entry's body before
+        // handing it to the per-entry helper. Encryption is queue-wide
+        // and covers both SSE-KMS and SSE-SQS modes, so a KMS failure
+        // here aborts the whole batch (matches AWS behavior: when the
+        // queue's CMK is unavailable, no entry can succeed). Skip
+        // encryption for entries that won't pass per-entry validation
+        // — otherwise an invalid entry would still record a KMS
+        // GenerateDataKey call and inflate the audit trail.
+        let kms_key_id = Self::effective_kms_key_id(&queue.attributes);
         let queue_arn = queue.arn.clone();
         let mut stored_overrides: Vec<Option<String>> = Vec::with_capacity(entries.len());
         if kms_key_id.is_some() && self.kms_hook.is_some() {
