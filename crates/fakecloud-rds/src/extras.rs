@@ -439,31 +439,57 @@ impl RdsService {
             "DescribeDBClusterParameters" => {
                 let name = get_param(req, "DBClusterParameterGroupName").ok_or_else(|| missing("DBClusterParameterGroupName"))?;
                 let source_filter = get_param(req, "Source");
-                let want_user_source = source_filter.as_deref().is_none_or(|s| s == "user");
+                let source = source_filter.as_deref();
+                let include_user = source.is_none_or(|s| s == "user");
+                let include_engine_default = source.is_none_or(|s| s == "engine-default");
                 let accounts = self.state_handle().read();
                 let state = accounts.get(&aid);
+                let entry = state
+                    .and_then(|s| s.extras.get("cluster_param_groups"))
+                    .and_then(|m| m.get(&name));
+                let family = entry
+                    .and_then(|e| e.get("DBParameterGroupFamily"))
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("aurora-postgresql15")
+                    .to_string();
+                let user_params: BTreeMap<String, String> = entry
+                    .and_then(|e| e.get("Parameters"))
+                    .and_then(|p| p.as_object())
+                    .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect())
+                    .unwrap_or_default();
                 let mut members = String::new();
-                if want_user_source {
-                    if let Some(s) = state {
-                        if let Some(map) = s.extras.get("cluster_param_groups") {
-                            if let Some(entry) = map.get(&name) {
-                                if let Some(params) = entry.get("Parameters").and_then(|p| p.as_object()) {
-                                    for (n, v) in params {
-                                        let value = v.as_str().unwrap_or("").to_string();
-                                        members.push_str(&format!(
-                                            "      <Parameter>\n        <ParameterName>{}</ParameterName>\n        <ParameterValue>{}</ParameterValue>\n        <Source>user</Source>\n        <ApplyType>dynamic</ApplyType>\n        <DataType>string</DataType>\n        <IsModifiable>true</IsModifiable>\n      </Parameter>\n",
-                                            xml_escape(n),
-                                            xml_escape(&value),
-                                        ));
-                                    }
-                                }
-                            }
+                if include_user {
+                    for (n, v) in &user_params {
+                        members.push_str(&crate::service::render_user_parameter_xml(n, v));
+                    }
+                }
+                if include_engine_default {
+                    // A user override flips a parameter's effective
+                    // source from `engine-default` to `user`, so we
+                    // always hide modified parameters from engine-default
+                    // views — even if the caller filtered to that source.
+                    for default in crate::state::engine_default_parameters(&family) {
+                        if user_params.contains_key(default.name) {
+                            continue;
                         }
+                        members.push_str(&crate::service::render_engine_default_parameter_xml(default));
                     }
                 }
                 Ok(xml_response("DescribeDBClusterParameters", format!("    <Parameters>\n{members}    </Parameters>"), &rid))
             }
-            "DescribeEngineDefaultClusterParameters" => Ok(xml_response("DescribeEngineDefaultClusterParameters", "    <EngineDefaults>\n      <Parameters/>\n    </EngineDefaults>".to_string(), &rid)),
+            "DescribeEngineDefaultClusterParameters" => {
+                let family = get_param(req, "DBParameterGroupFamily").unwrap_or_else(|| "aurora-postgresql15".to_string());
+                let mut members = String::new();
+                for default in crate::state::engine_default_parameters(&family) {
+                    members.push_str(&crate::service::render_engine_default_parameter_xml(default));
+                }
+                let body = format!(
+                    "    <EngineDefaults>\n      <DBParameterGroupFamily>{}</DBParameterGroupFamily>\n      <Parameters>\n{}      </Parameters>\n    </EngineDefaults>",
+                    xml_escape(&family),
+                    members,
+                );
+                Ok(xml_response("DescribeEngineDefaultClusterParameters", body, &rid))
+            }
 
             // ── DB Cluster endpoints ──
             "CreateDBClusterEndpoint" => {
@@ -1186,7 +1212,19 @@ impl RdsService {
                 let name = get_param(req, "DBParameterGroupName").ok_or_else(|| missing("DBParameterGroupName"))?;
                 Ok(xml_response("ResetDBParameterGroup", format!("    <DBParameterGroupName>{}</DBParameterGroupName>", xml_escape(&name)), &rid))
             }
-            "DescribeEngineDefaultParameters" => Ok(xml_response("DescribeEngineDefaultParameters", "    <EngineDefaults>\n      <Parameters/>\n    </EngineDefaults>".to_string(), &rid)),
+            "DescribeEngineDefaultParameters" => {
+                let family = get_param(req, "DBParameterGroupFamily").unwrap_or_else(|| "postgres16".to_string());
+                let mut members = String::new();
+                for default in crate::state::engine_default_parameters(&family) {
+                    members.push_str(&crate::service::render_engine_default_parameter_xml(default));
+                }
+                let body = format!(
+                    "    <EngineDefaults>\n      <DBParameterGroupFamily>{}</DBParameterGroupFamily>\n      <Parameters>\n{}      </Parameters>\n    </EngineDefaults>",
+                    xml_escape(&family),
+                    members,
+                );
+                Ok(xml_response("DescribeEngineDefaultParameters", body, &rid))
+            }
             "DescribeDBSnapshotAttributes" => Ok(xml_response("DescribeDBSnapshotAttributes", "    <DBSnapshotAttributesResult>\n      <DBSnapshotAttributes/>\n    </DBSnapshotAttributesResult>".to_string(), &rid)),
             "ModifyDBSnapshot" | "ModifyDBSnapshotAttribute" => Ok(xml_response(action.as_str(), "    <DBSnapshot/>".to_string(), &rid)),
             "RestoreDBClusterFromSnapshot" => {

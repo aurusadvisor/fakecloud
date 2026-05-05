@@ -3205,19 +3205,34 @@ impl RdsService {
                 )
             })?;
 
-        // Modified params surface as Source=user; engine defaults
-        // surface as Source=engine-default. We only persist user-set
-        // values, so we always report `user` and skip when the caller
-        // requested only `engine-default`.
-        let want_user_source = source_filter.as_deref().is_none_or(|s| s == "user");
+        // Real RDS surfaces two parameter sources for a group:
+        //   * `user` — values set via `ModifyDBParameterGroup`.
+        //   * `engine-default` — baseline values inherited from the
+        //     parameter group family (e.g. `postgres16`).
+        // With no `Source` filter we return both, mirroring AWS. When a
+        // user value shadows an engine default we skip the default so
+        // each parameter appears exactly once.
+        let source = source_filter.as_deref();
+        let include_user = source.is_none_or(|s| s == "user");
+        let include_engine_default = source.is_none_or(|s| s == "engine-default");
         let mut members_xml = String::new();
-        if want_user_source {
+        if include_user {
             for (name, value) in &parameter_group.parameters {
-                members_xml.push_str(&format!(
-                    "      <Parameter>\n        <ParameterName>{}</ParameterName>\n        <ParameterValue>{}</ParameterValue>\n        <Source>user</Source>\n        <ApplyType>dynamic</ApplyType>\n        <DataType>string</DataType>\n        <IsModifiable>true</IsModifiable>\n      </Parameter>\n",
-                    xml_escape(name),
-                    xml_escape(value),
-                ));
+                members_xml.push_str(&render_user_parameter_xml(name, value));
+            }
+        }
+        if include_engine_default {
+            // A user override flips a parameter's effective source from
+            // `engine-default` to `user`, so engine-default views always
+            // skip parameters the user has modified — even when the
+            // caller asks only for `engine-default`.
+            for default in
+                crate::state::engine_default_parameters(&parameter_group.db_parameter_group_family)
+            {
+                if parameter_group.parameters.contains_key(default.name) {
+                    continue;
+                }
+                members_xml.push_str(&render_engine_default_parameter_xml(default));
             }
         }
         let body = format!("    <Parameters>\n{members_xml}    </Parameters>");
@@ -3228,23 +3243,59 @@ impl RdsService {
     }
 }
 
-/// Parse `Parameters.member.N.{ParameterName,ParameterValue,ApplyMethod}`
-/// from a Query-protocol request. Skips members missing a name or value;
-/// ApplyMethod is accepted but ignored (single-state model).
+/// Render a single user-set parameter as the XML shape AWS emits inside
+/// `DescribeDB(Cluster)Parameters` responses. We don't store metadata
+/// alongside user values so we report `dynamic`/`string` defaults.
+pub(crate) fn render_user_parameter_xml(name: &str, value: &str) -> String {
+    format!(
+        "      <Parameter>\n        <ParameterName>{}</ParameterName>\n        <ParameterValue>{}</ParameterValue>\n        <Source>user</Source>\n        <ApplyType>dynamic</ApplyType>\n        <DataType>string</DataType>\n        <IsModifiable>true</IsModifiable>\n      </Parameter>\n",
+        xml_escape(name),
+        xml_escape(value),
+    )
+}
+
+/// Render a single engine-default parameter as the XML shape AWS emits
+/// inside `DescribeDB(Cluster)Parameters` and
+/// `DescribeEngineDefault(Cluster)Parameters` responses.
+pub(crate) fn render_engine_default_parameter_xml(
+    default: &crate::state::EngineDefaultParameter,
+) -> String {
+    format!(
+        "      <Parameter>\n        <ParameterName>{}</ParameterName>\n        <ParameterValue>{}</ParameterValue>\n        <Source>engine-default</Source>\n        <ApplyType>{}</ApplyType>\n        <DataType>{}</DataType>\n        <AllowedValues>{}</AllowedValues>\n        <IsModifiable>{}</IsModifiable>\n      </Parameter>\n",
+        xml_escape(default.name),
+        xml_escape(default.value),
+        xml_escape(default.apply_type),
+        xml_escape(default.data_type),
+        xml_escape(default.allowed_values),
+        default.is_modifiable,
+    )
+}
+
+/// Parse `Parameters.{Parameter|member}.N.{ParameterName,ParameterValue,ApplyMethod}`
+/// from a Query-protocol request. AWS RDS uses `Parameters.Parameter.N`
+/// (the `Parameter` list location name from the Smithy model); we also
+/// accept the generic `Parameters.member.N` form so hand-built clients
+/// using the default Query list shape keep working. Skips members
+/// missing a name or value; ApplyMethod is accepted but ignored
+/// (single-state model).
 pub(crate) fn parse_db_parameter_members(request: &AwsRequest) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for index in 1.. {
-        let name_key = format!("Parameters.member.{index}.ParameterName");
-        let value_key = format!("Parameters.member.{index}.ParameterValue");
-        match (
-            optional_query_param(request, &name_key),
-            optional_query_param(request, &value_key),
-        ) {
-            (Some(name), Some(value)) if !name.is_empty() => {
-                out.push((name, value));
+    for prefix in ["Parameters.Parameter", "Parameters.member"] {
+        let mut index = 1;
+        loop {
+            let name_key = format!("{prefix}.{index}.ParameterName");
+            let value_key = format!("{prefix}.{index}.ParameterValue");
+            let name = optional_query_param(request, &name_key);
+            let value = optional_query_param(request, &value_key);
+            if name.is_none() && value.is_none() {
+                break;
             }
-            (None, None) => break,
-            _ => continue,
+            if let (Some(n), Some(v)) = (name, value) {
+                if !n.is_empty() {
+                    out.push((n, v));
+                }
+            }
+            index += 1;
         }
     }
     out
