@@ -1720,72 +1720,157 @@ fn extras_bucket_for_resource_type(kind: &str) -> Option<&'static str> {
         "og" => "option_groups",
         "secgrp" => "security_groups",
         "es" => "event_subscriptions",
-        "proxy" => "db_proxies",
+        "db-proxy" => "proxies",
         _ => return None,
     })
 }
 
+/// Returns `true` if `kind` is a recognised RDS resource-type segment
+/// for tagging operations. Anything not in this list is treated as an
+/// invalid ARN by AddTags/ListTags/RemoveTags.
+fn is_known_tag_resource_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "db" | "snapshot" | "subgrp" | "pg" | "secgrp" | "og" | "es"
+    ) || extras_bucket_for_resource_type(kind).is_some()
+}
+
+/// Build the per-resource-type NotFound error AWS returns when an ARN
+/// is well-formed and the segment is recognised but the named resource
+/// doesn't exist in this account/region.
+fn resource_not_found_for_kind(kind: &str, name: &str) -> AwsServiceError {
+    let (code, msg) = match kind {
+        "db" => (
+            "DBInstanceNotFound",
+            format!("DBInstance {name} not found."),
+        ),
+        "snapshot" => (
+            "DBSnapshotNotFound",
+            format!("DBSnapshot {name} not found."),
+        ),
+        "cluster" => (
+            "DBClusterNotFoundFault",
+            format!("DBCluster {name} not found."),
+        ),
+        "cluster-snapshot" => (
+            "DBClusterSnapshotNotFoundFault",
+            format!("DBClusterSnapshot {name} not found."),
+        ),
+        "pg" => (
+            "DBParameterGroupNotFound",
+            format!("DBParameterGroup {name} not found."),
+        ),
+        "cluster-pg" => (
+            "DBParameterGroupNotFound",
+            format!("DBClusterParameterGroup {name} not found."),
+        ),
+        "og" => (
+            "OptionGroupNotFoundFault",
+            format!("OptionGroup {name} not found."),
+        ),
+        "subgrp" => (
+            "DBSubnetGroupNotFoundFault",
+            format!("DBSubnetGroup {name} not found."),
+        ),
+        "secgrp" => (
+            "DBSecurityGroupNotFound",
+            format!("DBSecurityGroup {name} not found."),
+        ),
+        "db-proxy" => ("DBProxyNotFoundFault", format!("DBProxy {name} not found.")),
+        "es" => (
+            "SubscriptionNotFound",
+            format!("EventSubscription {name} not found."),
+        ),
+        _ => unreachable!("kind already validated by is_known_tag_resource_kind"),
+    };
+    AwsServiceError::aws_error(StatusCode::NOT_FOUND, code, msg)
+}
+
 /// Locate tag storage on whichever RDS resource the ARN points at.
-/// Supports the four state-backed types (db, snapshot, subgrp, pg)
-/// and extras-backed cluster types (cluster, cluster-snapshot,
-/// cluster-pg, og, secgrp, es, proxy) — for those we mutate a `Tags`
-/// array on the stored JSON entry so it survives serde round-trips.
-/// Returns `None` if the ARN doesn't match any known resource.
+///
+/// Returns:
+/// - `Ok(target)` when the ARN parses, the kind is one of the 11
+///   tagged RDS resource types, and the named resource exists.
+/// - `Err(InvalidParameterValue)` when the ARN can't be parsed or its
+///   resource-type segment is not recognised.
+/// - `Err(<Type>NotFound)` when the kind is recognised but the named
+///   resource doesn't exist in this account/region.
+///
+/// State-backed types (db, snapshot, subgrp, pg) own a typed
+/// `Vec<RdsTag>`. Extras-backed types (cluster, cluster-snapshot,
+/// cluster-pg, og, secgrp, es, db-proxy) tag a `Tags` array on the
+/// stored JSON entry so changes survive serde round-trips.
 pub(crate) fn resolve_tag_target_mut<'a>(
     state: &'a mut crate::state::RdsState,
     arn: &str,
-) -> Option<TagTargetMut<'a>> {
-    let (kind, name) = parse_rds_arn(arn)?;
+) -> Result<TagTargetMut<'a>, AwsServiceError> {
+    let (kind, name) = parse_rds_arn(arn).ok_or_else(|| tag_resource_not_found(arn))?;
+    if !is_known_tag_resource_kind(&kind) {
+        return Err(tag_resource_not_found(arn));
+    }
     match kind.as_str() {
         "db" => state
             .instances
             .get_mut(&name)
-            .map(|i| TagTargetMut::Vec(&mut i.tags)),
+            .map(|i| TagTargetMut::Vec(&mut i.tags))
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
         "snapshot" => state
             .snapshots
             .get_mut(&name)
-            .map(|s| TagTargetMut::Vec(&mut s.tags)),
+            .map(|s| TagTargetMut::Vec(&mut s.tags))
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
         "subgrp" => state
             .subnet_groups
             .get_mut(&name)
-            .map(|g| TagTargetMut::Vec(&mut g.tags)),
+            .map(|g| TagTargetMut::Vec(&mut g.tags))
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
         "pg" => state
             .parameter_groups
             .get_mut(&name)
-            .map(|g| TagTargetMut::Vec(&mut g.tags)),
+            .map(|g| TagTargetMut::Vec(&mut g.tags))
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
         other => extras_bucket_for_resource_type(other)
             .and_then(|bucket| state.extras.get_mut(bucket))
             .and_then(|map| map.get_mut(&name))
-            .map(TagTargetMut::Json),
+            .map(TagTargetMut::Json)
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
     }
 }
 
 pub(crate) fn resolve_tag_target<'a>(
     state: &'a crate::state::RdsState,
     arn: &str,
-) -> Option<TagTargetRef<'a>> {
-    let (kind, name) = parse_rds_arn(arn)?;
+) -> Result<TagTargetRef<'a>, AwsServiceError> {
+    let (kind, name) = parse_rds_arn(arn).ok_or_else(|| tag_resource_not_found(arn))?;
+    if !is_known_tag_resource_kind(&kind) {
+        return Err(tag_resource_not_found(arn));
+    }
     match kind.as_str() {
         "db" => state
             .instances
             .get(&name)
-            .map(|i| TagTargetRef::Vec(&i.tags)),
+            .map(|i| TagTargetRef::Vec(&i.tags))
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
         "snapshot" => state
             .snapshots
             .get(&name)
-            .map(|s| TagTargetRef::Vec(&s.tags)),
+            .map(|s| TagTargetRef::Vec(&s.tags))
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
         "subgrp" => state
             .subnet_groups
             .get(&name)
-            .map(|g| TagTargetRef::Vec(&g.tags)),
+            .map(|g| TagTargetRef::Vec(&g.tags))
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
         "pg" => state
             .parameter_groups
             .get(&name)
-            .map(|g| TagTargetRef::Vec(&g.tags)),
+            .map(|g| TagTargetRef::Vec(&g.tags))
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
         other => extras_bucket_for_resource_type(other)
             .and_then(|bucket| state.extras.get(bucket))
             .and_then(|map| map.get(&name))
-            .map(TagTargetRef::Json),
+            .map(TagTargetRef::Json)
+            .ok_or_else(|| resource_not_found_for_kind(&kind, &name)),
     }
 }
 
