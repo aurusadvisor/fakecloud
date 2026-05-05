@@ -664,3 +664,134 @@ async fn cloudformation_stack_sends_sns_notification() {
         "notification should contain stack name"
     );
 }
+
+#[tokio::test]
+async fn cloudformation_mappings_find_in_map_resolves_resource_property() {
+    let server = TestServer::start().await;
+    let cf_client = server.cloudformation_client().await;
+    let sqs_client = server.sqs_client().await;
+
+    let template = r#"{
+        "Parameters": {
+            "Env": {"Type": "String"}
+        },
+        "Mappings": {
+            "EnvMap": {
+                "prod": {"QueueName": "cf-mapped-prod"},
+                "dev": {"QueueName": "cf-mapped-dev"}
+            }
+        },
+        "Resources": {
+            "MyQueue": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {
+                    "QueueName": {"Fn::FindInMap": ["EnvMap", {"Ref": "Env"}, "QueueName"]}
+                }
+            }
+        }
+    }"#;
+
+    cf_client
+        .create_stack()
+        .stack_name("mappings-stack")
+        .template_body(template)
+        .parameters(
+            aws_sdk_cloudformation::types::Parameter::builder()
+                .parameter_key("Env")
+                .parameter_value("prod")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let queues = sqs_client.list_queues().send().await.unwrap();
+    let urls = queues.queue_urls();
+    assert!(
+        urls.iter().any(|u| u.contains("cf-mapped-prod")),
+        "Queue cf-mapped-prod should exist (resolved via Fn::FindInMap), got: {urls:?}"
+    );
+    assert!(
+        !urls.iter().any(|u| u.contains("cf-mapped-dev")),
+        "dev branch should not have been picked, got: {urls:?}"
+    );
+}
+
+#[tokio::test]
+async fn cloudformation_mappings_find_in_map_default_value_used_on_miss() {
+    let server = TestServer::start().await;
+    let cf_client = server.cloudformation_client().await;
+    let sqs_client = server.sqs_client().await;
+
+    let template = r#"{
+        "Mappings": {
+            "EnvMap": {
+                "prod": {"QueueName": "cf-default-prod"}
+            }
+        },
+        "Resources": {
+            "MyQueue": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {
+                    "QueueName": {"Fn::FindInMap": [
+                        "EnvMap",
+                        "staging",
+                        "QueueName",
+                        {"DefaultValue": "cf-default-fallback"}
+                    ]}
+                }
+            }
+        }
+    }"#;
+
+    cf_client
+        .create_stack()
+        .stack_name("mappings-default-stack")
+        .template_body(template)
+        .send()
+        .await
+        .unwrap();
+
+    let queues = sqs_client.list_queues().send().await.unwrap();
+    let urls = queues.queue_urls();
+    assert!(
+        urls.iter().any(|u| u.contains("cf-default-fallback")),
+        "Queue cf-default-fallback should exist (DefaultValue used on miss), got: {urls:?}"
+    );
+}
+
+#[tokio::test]
+async fn cloudformation_mappings_find_in_map_missing_no_default_validation_error() {
+    let server = TestServer::start().await;
+    let cf_client = server.cloudformation_client().await;
+
+    let template = r#"{
+        "Mappings": {
+            "EnvMap": {
+                "prod": {"QueueName": "cf-only-prod"}
+            }
+        },
+        "Resources": {
+            "MyQueue": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {
+                    "QueueName": {"Fn::FindInMap": ["EnvMap", "staging", "QueueName"]}
+                }
+            }
+        }
+    }"#;
+
+    let err = cf_client
+        .create_stack()
+        .stack_name("mappings-missing-stack")
+        .template_body(template)
+        .send()
+        .await
+        .expect_err("expected ValidationError when FindInMap path doesn't resolve and no DefaultValue is provided");
+
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Unable to get mapping") || msg.contains("ValidationError"),
+        "expected ValidationError mentioning the missing mapping, got: {msg}"
+    );
+}
