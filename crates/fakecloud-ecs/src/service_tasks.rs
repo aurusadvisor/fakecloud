@@ -176,6 +176,7 @@ impl EcsService {
                     network_interfaces: Vec::new(),
                     health_status: Some("UNKNOWN".to_string()),
                     managed_agents: None,
+                    image_digest: None,
                 })
                 .collect();
             let awslogs = td_containers.iter().find_map(|def| {
@@ -657,6 +658,7 @@ mod multi_container_tests {
                 network_interfaces: Vec::new(),
                 health_status: None,
                 managed_agents: None,
+                image_digest: None,
             });
         }
 
@@ -713,6 +715,7 @@ mod port_mapping_tests {
             has_task_role: false,
             port_mappings,
             network_mode: network_mode.map(String::from),
+            depends_on: Vec::new(),
         }
     }
 
@@ -839,6 +842,7 @@ mod port_mapping_tests {
                 network_interfaces: Vec::new(),
                 health_status: None,
                 managed_agents: None,
+                image_digest: None,
             }],
             overrides: serde_json::json!({}),
             started_by: None,
@@ -877,6 +881,7 @@ mod port_mapping_tests {
             essential: true,
             exit_code: None,
             network_bindings: bindings.clone(),
+            image_digest: None,
         }];
         mark_running_multi(&state, "000000000000", "abc", &started);
 

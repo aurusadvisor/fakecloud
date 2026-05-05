@@ -230,6 +230,7 @@ impl EcsRuntime {
         // failure surfaces before we leave the first container running.
         mark_pull_started(state, account_id, task_id);
         let mut run_images: Vec<String> = Vec::with_capacity(resolved_plans.len());
+        let mut image_digests: Vec<Option<String>> = Vec::with_capacity(resolved_plans.len());
         for rp in &resolved_plans {
             let local_pull_uri =
                 fakecloud_core::ecr_uri::translate_to_local(&rp.plan.image, self.server_port);
@@ -262,7 +263,13 @@ impl EcsRuntime {
             } else {
                 rp.plan.image.clone()
             };
+            // Best-effort image digest extraction so DescribeTasks emits
+            // the resolved digest the way real ECS does. Failures here
+            // (e.g. CLI without RepoDigests) are silent — digest stays
+            // `None` rather than failing the task.
+            let digest = self.lookup_image_digest(pull_uri).await;
             run_images.push(run_image);
+            image_digests.push(digest);
         }
         mark_pull_stopped(state, account_id, task_id);
 
@@ -270,7 +277,7 @@ impl EcsRuntime {
         // ones we already started and bail — partial-launch state is harder
         // to reason about than a clean failure.
         let mut started: Vec<RunningContainer> = Vec::with_capacity(resolved_plans.len());
-        for (rp, run_image) in resolved_plans.iter().zip(run_images.iter()) {
+        for (idx, (rp, run_image)) in resolved_plans.iter().zip(run_images.iter()).enumerate() {
             let argv = build_run_argv(&rp.plan, &rp.env, task_id, &self.host_ip, run_image);
             let mut cmd = Command::new(&self.cli);
             cmd.args(&argv);
@@ -291,6 +298,7 @@ impl EcsRuntime {
                 essential: rp.plan.essential,
                 exit_code: None,
                 network_bindings: network_bindings_for(&rp.plan),
+                image_digest: image_digests.get(idx).cloned().unwrap_or(None),
             });
         }
 
@@ -482,6 +490,39 @@ impl EcsRuntime {
             }
             sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    /// Best-effort image digest lookup via `docker image inspect` after a
+    /// pull. Returns the first `RepoDigests[0]` entry's `sha256:...` tail
+    /// when present, matching what AWS ECS returns on `DescribeTasks`.
+    /// `None` on any failure so digest extraction never fails the task.
+    async fn lookup_image_digest(&self, pull_uri: &str) -> Option<String> {
+        let out = self
+            .cli_command()
+            .args([
+                "image",
+                "inspect",
+                "-f",
+                "{{index .RepoDigests 0}}",
+                pull_uri,
+            ])
+            .output()
+            .await
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if raw.is_empty() || raw == "<no value>" {
+            return None;
+        }
+        // RepoDigests entries are `<repo>@sha256:<hex>`. Real ECS surfaces
+        // the digest portion only.
+        Some(
+            raw.rsplit_once('@')
+                .map(|(_, d)| d.to_string())
+                .unwrap_or(raw),
+        )
     }
 
     /// Best-effort cleanup of containers we already started when a later
@@ -692,6 +733,12 @@ pub(crate) struct ContainerPlan {
     /// ECS treats `awsvpc` as "container is on its own ENI"; the
     /// equivalent in fakecloud is "don't publish to the host".
     pub(crate) network_mode: Option<String>,
+    /// Names of containers this one depends on (`dependsOn[].containerName`).
+    /// Used to topologically order the launch loop so dependencies start
+    /// first. The full set of conditions (START/COMPLETE/SUCCESS/HEALTHY)
+    /// isn't enforced yet — we just respect the ordering, which is the
+    /// observable difference from "launch in declaration order".
+    pub(crate) depends_on: Vec<String>,
 }
 
 /// One entry in a container's `portMappings`. Mirrors the AWS shape so
@@ -736,6 +783,11 @@ pub(crate) struct RunningContainer {
     /// task definition's `portMappings` at launch and surfaced verbatim
     /// in the per-container response.
     pub(crate) network_bindings: Vec<serde_json::Value>,
+    /// Image digest captured from `docker inspect` after pull. AWS
+    /// surfaces this on the Container response so callers can pin which
+    /// exact image revision a task is running. `None` when the inspect
+    /// failed or the CLI didn't expose `RepoDigests`.
+    pub(crate) image_digest: Option<String>,
 }
 
 /// Pure decision: does the current set of containers warrant stopping
@@ -828,6 +880,19 @@ fn build_container_plans(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let depends_on = def
+            .as_ref()
+            .and_then(|d| d.get("dependsOn").and_then(|v| v.as_array()).cloned())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| {
+                        e.get("containerName")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         plans.push(ContainerPlan {
             container_name: container.name.clone(),
             image: container.image.clone(),
@@ -839,9 +904,73 @@ fn build_container_plans(
             has_task_role,
             port_mappings,
             network_mode: network_mode.clone(),
+            depends_on,
         });
     }
+    let plans = topo_sort_plans(plans);
     Ok(plans)
+}
+
+/// Topologically sort container plans so `dependsOn` dependencies start
+/// before their dependants. Implements Kahn's algorithm with stable order:
+/// when multiple plans are ready, we keep their original declaration
+/// index, so a task without any dependsOn launches in the same order the
+/// user wrote in the task definition. Cycles fall through with the
+/// remaining plans appended in original order — the runtime will still
+/// launch every container; it just can't guarantee dependency ordering
+/// in that degenerate case (matching ECS, which rejects cycles at
+/// register time but we don't validate that yet).
+fn topo_sort_plans(plans: Vec<ContainerPlan>) -> Vec<ContainerPlan> {
+    use std::collections::{HashMap, HashSet};
+    let names: HashSet<String> = plans.iter().map(|p| p.container_name.clone()).collect();
+    let index: HashMap<String, usize> = plans
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.container_name.clone(), i))
+        .collect();
+    // in_degree[i] = number of unresolved dependencies for plan i. We
+    // ignore depends_on entries that name a container not in the task
+    // (real ECS rejects those at register time; our register path doesn't
+    // yet, so be defensive here).
+    let mut in_degree: Vec<usize> = plans
+        .iter()
+        .map(|p| p.depends_on.iter().filter(|d| names.contains(*d)).count())
+        .collect();
+    // dependants[i] = indices of plans that depend on plan i.
+    let mut dependants: Vec<Vec<usize>> = vec![Vec::new(); plans.len()];
+    for (i, p) in plans.iter().enumerate() {
+        for d in &p.depends_on {
+            if let Some(&di) = index.get(d) {
+                dependants[di].push(i);
+            }
+        }
+    }
+    let mut ordered: Vec<ContainerPlan> = Vec::with_capacity(plans.len());
+    let mut emitted: Vec<bool> = vec![false; plans.len()];
+    loop {
+        // Pick the lowest-index plan whose in_degree is 0 to keep stable
+        // order across runs.
+        let next = (0..plans.len()).find(|&i| !emitted[i] && in_degree[i] == 0);
+        match next {
+            Some(i) => {
+                emitted[i] = true;
+                ordered.push(plans[i].clone());
+                for &di in &dependants[i] {
+                    if in_degree[di] > 0 {
+                        in_degree[di] -= 1;
+                    }
+                }
+            }
+            None => break,
+        }
+    }
+    // Cycle: append anything left in original order so we don't drop plans.
+    for (i, p) in plans.into_iter().enumerate() {
+        if !emitted[i] {
+            ordered.push(p);
+        }
+    }
+    ordered
 }
 
 /// Test-only re-export of [`parse_port_mapping`] so sibling test modules
@@ -1098,6 +1227,9 @@ pub(crate) fn mark_running_multi(
                 c.runtime_id = Some(rc.container_id.clone());
                 c.last_status = "RUNNING".into();
                 c.network_bindings = rc.network_bindings.clone();
+                if rc.image_digest.is_some() {
+                    c.image_digest = rc.image_digest.clone();
+                }
             }
         }
         if let Some(cluster) = s.clusters.get_mut(&task.cluster_name) {
@@ -1359,6 +1491,7 @@ mod tests {
             network_interfaces: Vec::new(),
             health_status: None,
             managed_agents: None,
+            image_digest: None,
         }
     }
 
@@ -1371,6 +1504,7 @@ mod tests {
                 essential: true,
                 exit_code: Some(0),
                 network_bindings: Vec::new(),
+                image_digest: None,
             },
             RunningContainer {
                 name: "sidecar".into(),
@@ -1378,6 +1512,7 @@ mod tests {
                 essential: false,
                 exit_code: None,
                 network_bindings: Vec::new(),
+                image_digest: None,
             },
         ];
         assert!(task_should_stop(&containers));
@@ -1392,6 +1527,7 @@ mod tests {
                 essential: true,
                 exit_code: None,
                 network_bindings: Vec::new(),
+                image_digest: None,
             },
             RunningContainer {
                 name: "sidecar".into(),
@@ -1399,6 +1535,7 @@ mod tests {
                 essential: false,
                 exit_code: Some(0),
                 network_bindings: Vec::new(),
+                image_digest: None,
             },
         ];
         assert!(!task_should_stop(&containers));
@@ -1413,6 +1550,7 @@ mod tests {
                 essential: false,
                 exit_code: Some(0),
                 network_bindings: Vec::new(),
+                image_digest: None,
             },
             RunningContainer {
                 name: "b".into(),
@@ -1420,6 +1558,7 @@ mod tests {
                 essential: false,
                 exit_code: Some(1),
                 network_bindings: Vec::new(),
+                image_digest: None,
             },
         ];
         assert!(task_should_stop(&containers));
@@ -1445,6 +1584,7 @@ mod tests {
                 essential: true,
                 exit_code: Some(0),
                 network_bindings: Vec::new(),
+                image_digest: None,
             },
             RunningContainer {
                 name: "sidecar".into(),
@@ -1452,6 +1592,7 @@ mod tests {
                 essential: false,
                 exit_code: Some(137),
                 network_bindings: Vec::new(),
+                image_digest: None,
             },
         ];
         finalize_stopped_multi(
@@ -1484,5 +1625,69 @@ mod tests {
         assert_eq!(sc.exit_code, Some(137));
         assert_eq!(app.last_status, "STOPPED");
         assert_eq!(sc.last_status, "STOPPED");
+    }
+
+    fn plan(name: &str, deps: &[&str]) -> ContainerPlan {
+        ContainerPlan {
+            container_name: name.into(),
+            image: "alpine".into(),
+            env: Vec::new(),
+            entry_point: Vec::new(),
+            command: Vec::new(),
+            secrets_refs: Vec::new(),
+            essential: true,
+            has_task_role: false,
+            port_mappings: Vec::new(),
+            network_mode: None,
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn topo_sort_orders_by_depends_on() {
+        // sidecar depends on app, so app must come first regardless of
+        // declaration order.
+        let plans = vec![plan("sidecar", &["app"]), plan("app", &[])];
+        let ordered = topo_sort_plans(plans);
+        assert_eq!(ordered[0].container_name, "app");
+        assert_eq!(ordered[1].container_name, "sidecar");
+    }
+
+    #[test]
+    fn topo_sort_preserves_declaration_order_when_no_deps() {
+        let plans = vec![plan("first", &[]), plan("second", &[]), plan("third", &[])];
+        let ordered = topo_sort_plans(plans);
+        let names: Vec<&str> = ordered.iter().map(|p| p.container_name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn topo_sort_handles_chain() {
+        // c -> b -> a, declared in reverse so the topological sort must
+        // bubble dependencies up.
+        let plans = vec![plan("c", &["b"]), plan("b", &["a"]), plan("a", &[])];
+        let ordered = topo_sort_plans(plans);
+        let names: Vec<&str> = ordered.iter().map(|p| p.container_name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn topo_sort_ignores_unknown_dependency() {
+        // depends_on names a container not in this task definition. Real
+        // ECS would reject this at register time; we don't (yet), so the
+        // unknown dep should just be skipped instead of stalling the sort.
+        let plans = vec![plan("only", &["does-not-exist"])];
+        let ordered = topo_sort_plans(plans);
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].container_name, "only");
+    }
+
+    #[test]
+    fn topo_sort_recovers_from_cycle() {
+        // Cyclic dependsOn: both plans should still appear in the output
+        // so the runtime doesn't silently drop them.
+        let plans = vec![plan("a", &["b"]), plan("b", &["a"])];
+        let ordered = topo_sort_plans(plans);
+        assert_eq!(ordered.len(), 2);
     }
 }
