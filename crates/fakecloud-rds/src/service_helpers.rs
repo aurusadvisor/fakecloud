@@ -876,9 +876,12 @@ pub(crate) fn emit_event_static_with_state(
     if let (Some(state), Some(account_id)) = (state, account_id) {
         let mut accounts = state.write();
         let s = accounts.get_or_create(account_id);
+        // The events ring is the read-side for `DescribeEvents`, so we
+        // store the kebab-case form AWS uses there. EventBridge keeps the
+        // SCREAMING_SNAKE form below to match the published RDS schema.
         s.push_event(crate::state::RdsEventRecord {
             source_identifier: source_identifier.to_string(),
-            source_type: source_type.as_str().to_string(),
+            source_type: source_type.describe_events_str().to_string(),
             source_arn: source_arn.to_string(),
             event_id: event_id.to_string(),
             event_categories: event_categories.iter().map(|s| s.to_string()).collect(),

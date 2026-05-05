@@ -204,15 +204,33 @@ pub(crate) enum RdsSourceType {
     DbSnapshot,
     DbParameterGroup,
     DbCluster,
+    DbClusterSnapshot,
 }
 
 impl RdsSourceType {
+    /// EventBridge `SourceType` enum string. Matches the SCREAMING_SNAKE
+    /// form AWS publishes in the `aws.rds` event detail.
     fn as_str(self) -> &'static str {
         match self {
             Self::DbInstance => "DB_INSTANCE",
             Self::DbSnapshot => "DB_SNAPSHOT",
             Self::DbParameterGroup => "DB_PARAMETER_GROUP",
             Self::DbCluster => "DB_CLUSTER",
+            Self::DbClusterSnapshot => "DB_CLUSTER_SNAPSHOT",
+        }
+    }
+
+    /// `DescribeEvents` `SourceType` filter / response value. Per AWS
+    /// API spec this is the kebab-case form (`db-instance`,
+    /// `db-cluster`, `db-snapshot`, `db-parameter-group`, ...) — distinct
+    /// from the EventBridge `SourceType` returned by [`Self::as_str`].
+    pub(crate) fn describe_events_str(self) -> &'static str {
+        match self {
+            Self::DbInstance => "db-instance",
+            Self::DbSnapshot => "db-snapshot",
+            Self::DbParameterGroup => "db-parameter-group",
+            Self::DbCluster => "db-cluster",
+            Self::DbClusterSnapshot => "db-cluster-snapshot",
         }
     }
 
@@ -222,6 +240,7 @@ impl RdsSourceType {
             Self::DbSnapshot => "RDS DB Snapshot Event",
             Self::DbParameterGroup => "RDS DB Parameter Group Event",
             Self::DbCluster => "RDS DB Cluster Event",
+            Self::DbClusterSnapshot => "RDS DB Cluster Snapshot Event",
         }
     }
 }
@@ -2998,7 +3017,18 @@ impl RdsService {
 
         state
             .parameter_groups
-            .insert(db_parameter_group_name, parameter_group.clone());
+            .insert(db_parameter_group_name.clone(), parameter_group.clone());
+        let arn = parameter_group.db_parameter_group_arn.clone();
+        drop(accounts);
+
+        self.emit_event(
+            RdsSourceType::DbParameterGroup,
+            &db_parameter_group_name,
+            &arn,
+            "RDS-EVENT-0179",
+            &["creation"],
+            "DB parameter group created",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -3097,28 +3127,39 @@ impl RdsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_parameter_group_name = required_query_param(request, "DBParameterGroupName")?;
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
+        let arn = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
 
-        if db_parameter_group_name.starts_with("default.") {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "Cannot delete default parameter groups.",
-            ));
-        }
+            if db_parameter_group_name.starts_with("default.") {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    "Cannot delete default parameter groups.",
+                ));
+            }
 
-        if state
-            .parameter_groups
-            .remove(&db_parameter_group_name)
-            .is_none()
-        {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "DBParameterGroupNotFound",
-                format!("DBParameterGroup {db_parameter_group_name} not found."),
-            ));
-        }
+            let removed = state
+                .parameter_groups
+                .remove(&db_parameter_group_name)
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBParameterGroupNotFound",
+                        format!("DBParameterGroup {db_parameter_group_name} not found."),
+                    )
+                })?;
+            removed.db_parameter_group_arn
+        };
+
+        self.emit_event(
+            RdsSourceType::DbParameterGroup,
+            &db_parameter_group_name,
+            &arn,
+            "RDS-EVENT-0064",
+            &["deletion"],
+            "DB parameter group deleted",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -3161,6 +3202,17 @@ impl RdsService {
         }
 
         let parameter_group_clone = parameter_group.clone();
+        let arn = parameter_group_clone.db_parameter_group_arn.clone();
+        drop(accounts);
+
+        self.emit_event(
+            RdsSourceType::DbParameterGroup,
+            &db_parameter_group_name,
+            &arn,
+            "RDS-EVENT-0037",
+            &["configuration change"],
+            "DB parameter group modified",
+        );
 
         Ok(AwsResponse::xml(
             StatusCode::OK,

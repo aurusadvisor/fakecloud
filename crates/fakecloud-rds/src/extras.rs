@@ -129,17 +129,37 @@ impl RdsService {
                     "ReaderEndpoint": format!("{id}.cluster-ro-xxx.{region}.rds.amazonaws.com"),
                     "Port": 5432, "MasterUsername": get_param(req, "MasterUsername").unwrap_or_else(|| "postgres".to_string()),
                 });
-                let mut accounts = write_state!();
-                let state = accounts.get_or_create(&aid);
-                store(&mut state.extras, "clusters").insert(id.clone(), entry);
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    store(&mut state.extras, "clusters").insert(id.clone(), entry);
+                }
+                self.emit_event(
+                    RdsSourceType::DbCluster,
+                    &id,
+                    &arn,
+                    "RDS-EVENT-0170",
+                    &["creation"],
+                    "DB cluster created",
+                );
                 Ok(xml_response("CreateDBCluster", db_cluster_xml(&id, &arn), &rid))
             }
             "DeleteDBCluster" => {
                 let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
-                let mut accounts = write_state!();
-                let state = accounts.get_or_create(&aid);
-                if let Some(m) = state.extras.get_mut("clusters") { m.remove(&id); }
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    if let Some(m) = state.extras.get_mut("clusters") { m.remove(&id); }
+                }
+                self.emit_event(
+                    RdsSourceType::DbCluster,
+                    &id,
+                    &arn,
+                    "RDS-EVENT-0171",
+                    &["deletion"],
+                    "DB cluster deleted",
+                );
                 Ok(xml_response("DeleteDBCluster", db_cluster_xml(&id, &arn), &rid))
             }
             "ModifyDBCluster" => {
@@ -159,19 +179,29 @@ impl RdsService {
                     ("EnableIAMDatabaseAuthentication", "IAMDatabaseAuthenticationEnabled"),
                     ("CopyTagsToSnapshot", "CopyTagsToSnapshot"),
                 ];
-                let mut accounts = write_state!();
-                let state = accounts.get_or_create(&aid);
-                if let Some(map) = state.extras.get_mut("clusters") {
-                    if let Some(entry) = map.get_mut(&id) {
-                        if let Some(obj) = entry.as_object_mut() {
-                            for (param_name, json_key) in updates {
-                                if let Some(v) = get_param(req, param_name) {
-                                    obj.insert((*json_key).to_string(), json!(v));
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    if let Some(map) = state.extras.get_mut("clusters") {
+                        if let Some(entry) = map.get_mut(&id) {
+                            if let Some(obj) = entry.as_object_mut() {
+                                for (param_name, json_key) in updates {
+                                    if let Some(v) = get_param(req, param_name) {
+                                        obj.insert((*json_key).to_string(), json!(v));
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                self.emit_event(
+                    RdsSourceType::DbCluster,
+                    &id,
+                    &arn,
+                    "RDS-EVENT-0016",
+                    &["configuration change"],
+                    "DB cluster was modified",
+                );
                 Ok(xml_response("ModifyDBCluster", db_cluster_xml(&id, &arn), &rid))
             }
             "StartDBCluster" => {
@@ -320,22 +350,32 @@ impl RdsService {
                     .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
                 let cluster = get_param(req, "DBClusterIdentifier").unwrap_or_else(|| "default".to_string());
-                let mut accounts = write_state!();
-                let state = accounts.get_or_create(&aid);
-                let mut entry = state
-                    .extras
-                    .get("clusters")
-                    .and_then(|m| m.get(&cluster))
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                if let Some(obj) = entry.as_object_mut() {
-                    obj.insert("DBClusterSnapshotIdentifier".to_string(), json!(id));
-                    obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
-                    obj.insert("DBClusterIdentifier".to_string(), json!(cluster));
-                    obj.insert("Status".to_string(), json!("available"));
-                    obj.insert("SnapshotType".to_string(), json!("manual"));
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let mut entry = state
+                        .extras
+                        .get("clusters")
+                        .and_then(|m| m.get(&cluster))
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("DBClusterSnapshotIdentifier".to_string(), json!(id));
+                        obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
+                        obj.insert("DBClusterIdentifier".to_string(), json!(cluster));
+                        obj.insert("Status".to_string(), json!("available"));
+                        obj.insert("SnapshotType".to_string(), json!("manual"));
+                    }
+                    store(&mut state.extras, "cluster_snapshots").insert(id.clone(), entry);
                 }
-                store(&mut state.extras, "cluster_snapshots").insert(id.clone(), entry);
+                self.emit_event(
+                    RdsSourceType::DbClusterSnapshot,
+                    &id,
+                    &arn,
+                    "RDS-EVENT-0074",
+                    &["backup"],
+                    "DB cluster snapshot created",
+                );
                 Ok(xml_response(action.as_str(), cluster_snapshot_xml(&id, &arn, &cluster), &rid))
             }
             "CopyDBClusterSnapshot" => {
@@ -377,9 +417,19 @@ impl RdsService {
             "DeleteDBClusterSnapshot" => {
                 let id = get_param(req, "DBClusterSnapshotIdentifier").ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
-                let mut accounts = write_state!();
-                let state = accounts.get_or_create(&aid);
-                if let Some(m) = state.extras.get_mut("cluster_snapshots") { m.remove(&id); }
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    if let Some(m) = state.extras.get_mut("cluster_snapshots") { m.remove(&id); }
+                }
+                self.emit_event(
+                    RdsSourceType::DbClusterSnapshot,
+                    &id,
+                    &arn,
+                    "RDS-EVENT-0075",
+                    &["deletion"],
+                    "DB cluster snapshot deleted",
+                );
                 Ok(xml_response("DeleteDBClusterSnapshot", cluster_snapshot_xml(&id, &arn, "default"), &rid))
             }
             "DescribeDBClusterSnapshots" => list_extras_xml(self, &aid, "cluster_snapshots", "DBClusterSnapshots", "DescribeDBClusterSnapshots", cluster_snapshot_member_xml, &rid),
@@ -1681,17 +1731,41 @@ fn event_sub_xml(v: &Value) -> String {
     )
 }
 
+/// AWS-spec `SourceType` enum values for the `DescribeEvents` filter.
+/// Anything else triggers `InvalidParameterValue`.
+const VALID_DESCRIBE_EVENTS_SOURCE_TYPES: &[&str] = &[
+    "db-instance",
+    "db-cluster",
+    "db-parameter-group",
+    "db-security-group",
+    "db-snapshot",
+    "db-cluster-snapshot",
+    "db-proxy",
+    "blue-green-deployment",
+    "custom-engine-version",
+];
+
 impl RdsService {
     /// Real DescribeEvents implementation: read the per-account events
     /// ring written to by `emit_event`. Honour SourceType /
     /// SourceIdentifier / Duration / StartTime / EndTime / EventCategories
-    /// filters and emit them as the DescribeEventsResult shape.
+    /// filters plus MaxRecords / Marker pagination, and emit them as the
+    /// DescribeEventsResult shape.
     pub(crate) fn describe_events(
         &self,
         req: &AwsRequest,
         rid: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let source_type = get_param(req, "SourceType");
+        if let Some(ref t) = source_type {
+            if !VALID_DESCRIBE_EVENTS_SOURCE_TYPES.contains(&t.as_str()) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("SourceType '{t}' is not a valid value."),
+                ));
+            }
+        }
         let source_identifier = get_param(req, "SourceIdentifier");
         let event_categories: Vec<String> = (1..=20)
             .filter_map(|i| get_param(req, &format!("EventCategories.member.{i}")))
@@ -1710,25 +1784,79 @@ impl RdsService {
             .unwrap_or(now);
 
         let state = self.state_handle().read();
-        let events = state
+        let mut events = state
             .get(&req.account_id)
             .map(|s| s.events.clone())
             .unwrap_or_default();
         drop(state);
 
-        let mut body = String::from("    <Events>\n");
-        for e in events.iter().filter(|e| {
-            source_type.as_deref().is_none_or(|t| e.source_type == t)
-                && source_identifier
-                    .as_deref()
-                    .is_none_or(|i| e.source_identifier == i)
-                && (event_categories.is_empty()
-                    || event_categories
-                        .iter()
-                        .any(|c| e.event_categories.iter().any(|ec| ec == c)))
-                && e.date >= start_time
-                && e.date <= end_time
-        }) {
+        // AWS returns events ordered by `Date` ascending (oldest first).
+        events.sort_by_key(|e| e.date);
+
+        let filtered: Vec<crate::state::RdsEventRecord> = events
+            .into_iter()
+            .filter(|e| {
+                source_type.as_deref().is_none_or(|t| e.source_type == t)
+                    && source_identifier
+                        .as_deref()
+                        .is_none_or(|i| e.source_identifier == i)
+                    && (event_categories.is_empty()
+                        || event_categories
+                            .iter()
+                            .any(|c| e.event_categories.iter().any(|ec| ec == c)))
+                    && e.date >= start_time
+                    && e.date <= end_time
+            })
+            .collect();
+
+        // MaxRecords (1..=100, default 100) and Marker pagination. We key
+        // the marker by the event's RFC3339 timestamp + identifier so
+        // duplicate dates still paginate deterministically.
+        let max_records: usize = match get_param(req, "MaxRecords") {
+            Some(raw) => {
+                let parsed: i32 = raw.parse().map_err(|_| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        "MaxRecords must be a valid integer.",
+                    )
+                })?;
+                if !(1..=100).contains(&parsed) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterValue",
+                        "MaxRecords must be between 1 and 100.",
+                    ));
+                }
+                parsed as usize
+            }
+            None => 100,
+        };
+
+        let start_index = match get_param(req, "Marker") {
+            Some(marker) => marker.parse::<usize>().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    "Marker is invalid.",
+                )
+            })?,
+            None => 0,
+        };
+        let end_index = std::cmp::min(start_index.saturating_add(max_records), filtered.len());
+        let next_marker = if end_index < filtered.len() {
+            Some(end_index.to_string())
+        } else {
+            None
+        };
+        let page = filtered.get(start_index..end_index).unwrap_or(&[]);
+
+        let mut body = String::new();
+        if let Some(m) = next_marker {
+            body.push_str(&format!("    <Marker>{}</Marker>\n", xml_escape(&m)));
+        }
+        body.push_str("    <Events>\n");
+        for e in page {
             body.push_str("      <Event>\n");
             body.push_str(&format!(
                 "        <SourceIdentifier>{}</SourceIdentifier>\n",
