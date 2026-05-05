@@ -4762,6 +4762,80 @@ async fn cognito_well_known_openid_configuration_uses_pool_region() {
         .as_array()
         .unwrap();
     assert_eq!(algs[0], "RS256");
+    let response_types = body["response_types_supported"].as_array().unwrap();
+    assert!(response_types.iter().any(|v| v == "code"));
+    assert!(response_types.iter().any(|v| v == "token"));
+    assert_eq!(body["subject_types_supported"][0], "public");
+    let scopes = body["scopes_supported"].as_array().unwrap();
+    for required in ["openid", "email", "profile", "phone"] {
+        assert!(
+            scopes.iter().any(|v| v == required),
+            "scopes_supported must include {required}: {scopes:?}"
+        );
+    }
+    let auth_methods = body["token_endpoint_auth_methods_supported"]
+        .as_array()
+        .unwrap();
+    assert!(auth_methods.iter().any(|v| v == "client_secret_basic"));
+    assert!(auth_methods.iter().any(|v| v == "client_secret_post"));
+}
+
+/// OIDC discovery omits OAuth2 endpoints until the pool has a hosted-UI
+/// domain — matching real Cognito, which does the same. After
+/// `CreateUserPoolDomain` the endpoints must appear and resolve to
+/// fakecloud's local OAuth2 routes.
+#[tokio::test]
+async fn cognito_oidc_oauth_endpoints_track_pool_domain() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("oidc-domain-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let http = reqwest::Client::new();
+    let url = format!(
+        "{}/{}/.well-known/openid-configuration",
+        server.endpoint(),
+        pool_id
+    );
+
+    // Domain not configured yet -> OAuth endpoints must be absent.
+    let body: serde_json::Value = http.get(&url).send().await.unwrap().json().await.unwrap();
+    assert!(
+        body.get("authorization_endpoint").is_none(),
+        "authorization_endpoint must be omitted before CreateUserPoolDomain: {body}"
+    );
+    assert!(body.get("token_endpoint").is_none());
+    assert!(body.get("userinfo_endpoint").is_none());
+    assert!(body.get("revocation_endpoint").is_none());
+    assert!(body["jwks_uri"].is_string(), "jwks_uri is unconditional");
+
+    // Attach a hosted-UI domain.
+    client
+        .create_user_pool_domain()
+        .user_pool_id(&pool_id)
+        .domain("oidc-domain-test")
+        .send()
+        .await
+        .expect("create user pool domain");
+
+    let body: serde_json::Value = http.get(&url).send().await.unwrap().json().await.unwrap();
+    let auth_ep = body["authorization_endpoint"].as_str().unwrap();
+    assert!(
+        auth_ep.ends_with("/oauth2/authorize"),
+        "authorization_endpoint must point at /oauth2/authorize: {auth_ep}"
+    );
+    let token_ep = body["token_endpoint"].as_str().unwrap();
+    assert!(token_ep.ends_with("/oauth2/token"));
+    let userinfo_ep = body["userinfo_endpoint"].as_str().unwrap();
+    assert!(userinfo_ep.ends_with("/oauth2/userInfo"));
+    let revoke_ep = body["revocation_endpoint"].as_str().unwrap();
+    assert!(revoke_ep.ends_with("/oauth2/revoke"));
 }
 
 /// Y1: every JWT issued by the pool is real RS256-signed against the

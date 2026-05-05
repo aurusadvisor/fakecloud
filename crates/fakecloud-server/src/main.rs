@@ -3650,14 +3650,8 @@ async fn main() {
                       axum::extract::Path(pool_id): axum::extract::Path<String>| {
                     let cs = cs.clone();
                     async move {
-                        let exists = {
-                            let mas = cs.read();
-                            let found = mas
-                                .iter()
-                                .any(|(_, account)| account.user_pools.contains_key(&pool_id));
-                            drop(mas);
-                            found
-                        };
+                        let (exists, pool_domain) =
+                            fakecloud_cognito::pool_existence_and_domain(&cs, &pool_id);
                         if !exists {
                             return (
                                 axum::http::StatusCode::NOT_FOUND,
@@ -3680,7 +3674,10 @@ async fn main() {
                         (
                             axum::http::StatusCode::OK,
                             axum::Json(fakecloud_cognito::oidc_discovery_document(
-                                &pool_id, &region, &base_url,
+                                &pool_id,
+                                &region,
+                                &base_url,
+                                pool_domain.as_deref(),
                             )),
                         )
                     }

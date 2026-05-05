@@ -71,6 +71,15 @@ auth = cog.initiate_auth(
 
 The tokens are real signed JWTs — your application's JWT verification (with jwks_uri pointing at the fakecloud public key endpoint) works unchanged.
 
+## JWKS + OIDC discovery
+
+Each user pool serves the same two well-known endpoints AWS Cognito does, so libraries like `aws-jwt-verify`, `jose`, or `jsonwebtoken` work against fakecloud out of the box:
+
+- `GET <fakecloud>/<pool_id>/.well-known/jwks.json` — the pool's RSA-2048 public key in JWK form (`kty=RSA`, `alg=RS256`, `use=sig`, deterministic `kid`).
+- `GET <fakecloud>/<pool_id>/.well-known/openid-configuration` — OIDC discovery document with `issuer`, `jwks_uri`, supported algs/scopes/response types. OAuth2 endpoints (`authorization_endpoint`, `token_endpoint`, `userinfo_endpoint`, `revocation_endpoint`) appear after `CreateUserPoolDomain`, matching real Cognito.
+
+Point your verifier at `<fakecloud>/<pool_id>` and tokens issued by `InitiateAuth` / `AdminInitiateAuth` verify cryptographically — no test-only signing keys, no stubs.
+
 ## SRP authentication
 
 ```python
