@@ -310,6 +310,22 @@ impl DynamoDbService {
             )
         })?;
 
+        // Per-operation `ReturnValuesOnConditionCheckFailure` is its own
+        // enum; validate it up-front so a malformed value short-circuits
+        // before we touch the state lock. Real DDB rejects unknown values
+        // with a top-level ValidationException, not a CancellationReason.
+        for ti in transact_items {
+            for op_key in ["Put", "Delete", "Update", "ConditionCheck"] {
+                if let Some(op) = ti.get(op_key) {
+                    validate_optional_enum_value(
+                        "returnValuesOnConditionCheckFailure",
+                        &op["ReturnValuesOnConditionCheckFailure"],
+                        &["ALL_OLD", "NONE"],
+                    )?;
+                }
+            }
+        }
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
@@ -326,10 +342,36 @@ impl DynamoDbService {
             }
         }
 
-        // First pass: validate all conditions
+        // First pass: validate all conditions. We collect every
+        // operation's outcome so the per-index `CancellationReasons`
+        // array has a 1:1 alignment with `TransactItems` even when
+        // multiple ops fail. When a Put/Update/Delete/ConditionCheck
+        // sets `ReturnValuesOnConditionCheckFailure=ALL_OLD` and its
+        // ConditionExpression fails, the existing item is surfaced
+        // under the reason's `Item` field — matching the real DDB
+        // response shape used by aws-sdk-go's
+        // `ConditionalCheckFailedException.Item` field.
         let mut cancellation_reasons: Vec<Value> = Vec::new();
-        let mut any_failed = false;
+        let mut failed_codes: Vec<String> = Vec::new();
         let mut per_table_writes: HashMap<String, u32> = HashMap::new();
+
+        let push_cond_failure =
+            |reasons: &mut Vec<Value>,
+             codes: &mut Vec<String>,
+             return_values: Option<&str>,
+             existing: Option<&HashMap<String, AttributeValue>>| {
+                let mut reason = json!({
+                    "Code": "ConditionalCheckFailed",
+                    "Message": "The conditional request failed",
+                });
+                if return_values == Some("ALL_OLD") {
+                    if let Some(item) = existing {
+                        reason["Item"] = json!(item);
+                    }
+                }
+                reasons.push(reason);
+                codes.push("ConditionalCheckFailed".to_string());
+            };
 
         for ti in transact_items {
             if let Some(put) = ti.get("Put") {
@@ -337,21 +379,24 @@ impl DynamoDbService {
                 let item: HashMap<String, AttributeValue> =
                     serde_json::from_value(put["Item"].clone()).unwrap_or_default();
                 let condition = put["ConditionExpression"].as_str();
+                let return_values = put["ReturnValuesOnConditionCheckFailure"].as_str();
 
                 if let Some(cond) = condition {
                     let table = get_table(&state.tables, table_name)?;
                     let expr_attr_names = parse_expression_attribute_names(put);
                     let expr_attr_values = parse_expression_attribute_values(put);
                     let key = extract_key(table, &item);
-                    let existing = table.find_item_index(&key).map(|i| &table.items[i]);
+                    let existing_idx = table.find_item_index(&key);
+                    let existing = existing_idx.map(|i| &table.items[i]);
                     if evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)
                         .is_err()
                     {
-                        cancellation_reasons.push(json!({
-                            "Code": "ConditionalCheckFailed",
-                            "Message": "The conditional request failed"
-                        }));
-                        any_failed = true;
+                        push_cond_failure(
+                            &mut cancellation_reasons,
+                            &mut failed_codes,
+                            return_values,
+                            existing,
+                        );
                         continue;
                     }
                 }
@@ -361,20 +406,23 @@ impl DynamoDbService {
                 let key: HashMap<String, AttributeValue> =
                     serde_json::from_value(delete["Key"].clone()).unwrap_or_default();
                 let condition = delete["ConditionExpression"].as_str();
+                let return_values = delete["ReturnValuesOnConditionCheckFailure"].as_str();
 
                 if let Some(cond) = condition {
                     let table = get_table(&state.tables, table_name)?;
                     let expr_attr_names = parse_expression_attribute_names(delete);
                     let expr_attr_values = parse_expression_attribute_values(delete);
-                    let existing = table.find_item_index(&key).map(|i| &table.items[i]);
+                    let existing_idx = table.find_item_index(&key);
+                    let existing = existing_idx.map(|i| &table.items[i]);
                     if evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)
                         .is_err()
                     {
-                        cancellation_reasons.push(json!({
-                            "Code": "ConditionalCheckFailed",
-                            "Message": "The conditional request failed"
-                        }));
-                        any_failed = true;
+                        push_cond_failure(
+                            &mut cancellation_reasons,
+                            &mut failed_codes,
+                            return_values,
+                            existing,
+                        );
                         continue;
                     }
                 }
@@ -384,20 +432,23 @@ impl DynamoDbService {
                 let key: HashMap<String, AttributeValue> =
                     serde_json::from_value(update["Key"].clone()).unwrap_or_default();
                 let condition = update["ConditionExpression"].as_str();
+                let return_values = update["ReturnValuesOnConditionCheckFailure"].as_str();
 
                 if let Some(cond) = condition {
                     let table = get_table(&state.tables, table_name)?;
                     let expr_attr_names = parse_expression_attribute_names(update);
                     let expr_attr_values = parse_expression_attribute_values(update);
-                    let existing = table.find_item_index(&key).map(|i| &table.items[i]);
+                    let existing_idx = table.find_item_index(&key);
+                    let existing = existing_idx.map(|i| &table.items[i]);
                     if evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values)
                         .is_err()
                     {
-                        cancellation_reasons.push(json!({
-                            "Code": "ConditionalCheckFailed",
-                            "Message": "The conditional request failed"
-                        }));
-                        any_failed = true;
+                        push_cond_failure(
+                            &mut cancellation_reasons,
+                            &mut failed_codes,
+                            return_values,
+                            existing,
+                        );
                         continue;
                     }
                 }
@@ -407,18 +458,21 @@ impl DynamoDbService {
                 let key: HashMap<String, AttributeValue> =
                     serde_json::from_value(check["Key"].clone()).unwrap_or_default();
                 let cond = check["ConditionExpression"].as_str().unwrap_or_default();
+                let return_values = check["ReturnValuesOnConditionCheckFailure"].as_str();
 
                 let table = get_table(&state.tables, table_name)?;
                 let expr_attr_names = parse_expression_attribute_names(check);
                 let expr_attr_values = parse_expression_attribute_values(check);
-                let existing = table.find_item_index(&key).map(|i| &table.items[i]);
+                let existing_idx = table.find_item_index(&key);
+                let existing = existing_idx.map(|i| &table.items[i]);
                 if evaluate_condition(cond, existing, &expr_attr_names, &expr_attr_values).is_err()
                 {
-                    cancellation_reasons.push(json!({
-                        "Code": "ConditionalCheckFailed",
-                        "Message": "The conditional request failed"
-                    }));
-                    any_failed = true;
+                    push_cond_failure(
+                        &mut cancellation_reasons,
+                        &mut failed_codes,
+                        return_values,
+                        existing,
+                    );
                     continue;
                 }
                 cancellation_reasons.push(json!({ "Code": "None" }));
@@ -427,10 +481,20 @@ impl DynamoDbService {
             }
         }
 
-        if any_failed {
+        if !failed_codes.is_empty() {
+            // Real DDB lists every failing code (deduped, in order) inside
+            // square brackets so the SDKs that match on this string still
+            // work when multiple operations fail.
+            let mut seen: Vec<String> = Vec::new();
+            for code in &failed_codes {
+                if !seen.contains(code) {
+                    seen.push(code.clone());
+                }
+            }
+            let codes_str = seen.join(", ");
             let error_body = json!({
                 "__type": "TransactionCanceledException",
-                "message": "Transaction cancelled, please refer cancellation reasons for specific reasons [ConditionalCheckFailed]",
+                "message": format!("Transaction cancelled, please refer cancellation reasons for specific reasons [{codes_str}]"),
                 "CancellationReasons": cancellation_reasons
             });
             return Ok(AwsResponse::json(
@@ -468,14 +532,18 @@ impl DynamoDbService {
         let mut pending_kinesis: Vec<PendingKinesis> = Vec::new();
         let region = req.region.clone();
 
-        // Second pass: apply all writes
-        let apply_result = (|| -> Result<(), AwsServiceError> {
-            for ti in transact_items {
+        // Second pass: apply all writes. The closure returns the
+        // transact-items index that failed alongside the underlying
+        // error so we can build a properly-aligned CancellationReasons
+        // array on revert.
+        let apply_result = (|| -> Result<(), (usize, AwsServiceError)> {
+            for (op_idx, ti) in transact_items.iter().enumerate() {
                 if let Some(put) = ti.get("Put") {
                     let table_name = put["TableName"].as_str().unwrap_or_default();
                     let item: HashMap<String, AttributeValue> =
                         serde_json::from_value(put["Item"].clone()).unwrap_or_default();
-                    let table = get_table_mut(&mut state.tables, table_name)?;
+                    let table =
+                        get_table_mut(&mut state.tables, table_name).map_err(|e| (op_idx, e))?;
                     let key = extract_key(table, &item);
                     let old_image = table.find_item_index(&key).map(|i| table.items[i].clone());
                     let is_modify = old_image.is_some();
@@ -510,7 +578,8 @@ impl DynamoDbService {
                     let table_name = delete["TableName"].as_str().unwrap_or_default();
                     let key: HashMap<String, AttributeValue> =
                         serde_json::from_value(delete["Key"].clone()).unwrap_or_default();
-                    let table = get_table_mut(&mut state.tables, table_name)?;
+                    let table =
+                        get_table_mut(&mut state.tables, table_name).map_err(|e| (op_idx, e))?;
                     let old_image = table.find_item_index(&key).map(|i| table.items[i].clone());
                     if let Some(idx) = table.find_item_index(&key) {
                         table.items.remove(idx);
@@ -546,7 +615,8 @@ impl DynamoDbService {
                     let expr_attr_names = parse_expression_attribute_names(update);
                     let expr_attr_values = parse_expression_attribute_values(update);
 
-                    let table = get_table_mut(&mut state.tables, table_name)?;
+                    let table =
+                        get_table_mut(&mut state.tables, table_name).map_err(|e| (op_idx, e))?;
                     let old_image = table.find_item_index(&key).map(|i| table.items[i].clone());
                     let is_modify = old_image.is_some();
                     let idx = match table.find_item_index(&key) {
@@ -567,7 +637,8 @@ impl DynamoDbService {
                             expr,
                             &expr_attr_names,
                             &expr_attr_values,
-                        )?;
+                        )
+                        .map_err(|e| (op_idx, e))?;
                     }
                     let new_image = table.items[idx].clone();
                     table.recalculate_stats();
@@ -598,15 +669,40 @@ impl DynamoDbService {
             Ok(())
         })();
 
-        if let Err(err) = apply_result {
-            // Revert items on every touched table and bubble the error.
+        if let Err((failed_idx, err)) = apply_result {
+            // Revert items on every touched table so the partial writes
+            // before the failure leave no observable side effects, then
+            // surface the failure as a TransactionCanceledException
+            // whose CancellationReasons array marks the offending op
+            // with `ValidationError` and leaves siblings as `None`.
             for (table_name, items) in snapshots {
                 if let Some(table) = state.tables.get_mut(&table_name) {
                     table.items = items;
                     table.recalculate_stats();
                 }
             }
-            return Err(err);
+            let msg = err.to_string();
+            let reasons: Vec<Value> = (0..transact_items.len())
+                .map(|i| {
+                    if i == failed_idx {
+                        json!({
+                            "Code": "ValidationError",
+                            "Message": msg.clone(),
+                        })
+                    } else {
+                        json!({ "Code": "None" })
+                    }
+                })
+                .collect();
+            let error_body = json!({
+                "__type": "TransactionCanceledException",
+                "message": "Transaction cancelled, please refer cancellation reasons for specific reasons [ValidationError]",
+                "CancellationReasons": reasons
+            });
+            return Ok(AwsResponse::json(
+                StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&error_body).unwrap(),
+            ));
         }
 
         // Append all pending stream records under each table's
@@ -987,6 +1083,209 @@ mod tests {
             0,
             "the Put on Widgets must not commit when a sibling table is missing"
         );
+    }
+
+    #[tokio::test]
+    async fn transact_write_condition_failure_returns_old_item_when_requested() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        // Seed an existing item so attribute_not_exists fails.
+        svc.transact_write_items(&req_for(
+            "TransactWriteItems",
+            json!({
+                "TransactItems": [
+                    {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "a"}, "v": {"S": "old"}}}},
+                ]
+            }),
+        ))
+        .unwrap();
+
+        // Now attempt a Put with an attribute_not_exists guard that
+        // will fail. ALL_OLD asks the service to surface the existing
+        // item back through the cancellation reason.
+        let resp = svc
+            .transact_write_items(&req_for(
+                "TransactWriteItems",
+                json!({
+                    "TransactItems": [
+                        {"Put": {
+                            "TableName": "Widgets",
+                            "Item": {"pk": {"S": "a"}, "v": {"S": "new"}},
+                            "ConditionExpression": "attribute_not_exists(pk)",
+                            "ReturnValuesOnConditionCheckFailure": "ALL_OLD"
+                        }},
+                    ]
+                }),
+            ))
+            .unwrap();
+        assert_eq!(resp.status, http::StatusCode::BAD_REQUEST);
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            body["__type"].as_str().unwrap(),
+            "TransactionCanceledException"
+        );
+        let reasons = body["CancellationReasons"].as_array().unwrap();
+        assert_eq!(reasons.len(), 1);
+        assert_eq!(
+            reasons[0]["Code"].as_str().unwrap(),
+            "ConditionalCheckFailed"
+        );
+        let surfaced = reasons[0]["Item"].as_object().expect("Item attached");
+        assert_eq!(surfaced["v"]["S"].as_str().unwrap(), "old");
+    }
+
+    #[tokio::test]
+    async fn transact_write_condition_failure_omits_old_item_when_not_requested() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        svc.transact_write_items(&req_for(
+            "TransactWriteItems",
+            json!({
+                "TransactItems": [
+                    {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "a"}, "v": {"S": "old"}}}},
+                ]
+            }),
+        ))
+        .unwrap();
+
+        let resp = svc
+            .transact_write_items(&req_for(
+                "TransactWriteItems",
+                json!({
+                    "TransactItems": [
+                        {"Put": {
+                            "TableName": "Widgets",
+                            "Item": {"pk": {"S": "a"}, "v": {"S": "new"}},
+                            "ConditionExpression": "attribute_not_exists(pk)",
+                        }},
+                    ]
+                }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let reasons = body["CancellationReasons"].as_array().unwrap();
+        assert!(
+            reasons[0].get("Item").is_none(),
+            "default ReturnValuesOnConditionCheckFailure=NONE must omit the Item field"
+        );
+    }
+
+    #[tokio::test]
+    async fn transact_write_per_op_cancellation_reasons_align_to_index() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        // Seed two items.
+        svc.transact_write_items(&req_for(
+            "TransactWriteItems",
+            json!({
+                "TransactItems": [
+                    {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "a"}}}},
+                    {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "b"}}}},
+                ]
+            }),
+        ))
+        .unwrap();
+
+        // Three ops: succeed, fail, succeed. We expect three reasons,
+        // index-aligned. After cancel, the surrounding successful Puts
+        // must NOT have committed.
+        let resp = svc
+            .transact_write_items(&req_for(
+                "TransactWriteItems",
+                json!({
+                    "TransactItems": [
+                        {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "c"}}}},
+                        {"ConditionCheck": {
+                            "TableName": "Widgets",
+                            "Key": {"pk": {"S": "missing"}},
+                            "ConditionExpression": "attribute_exists(pk)"
+                        }},
+                        {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "d"}}}},
+                    ]
+                }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let reasons = body["CancellationReasons"].as_array().unwrap();
+        assert_eq!(reasons.len(), 3);
+        assert_eq!(reasons[0]["Code"].as_str().unwrap(), "None");
+        assert_eq!(
+            reasons[1]["Code"].as_str().unwrap(),
+            "ConditionalCheckFailed"
+        );
+        assert_eq!(reasons[2]["Code"].as_str().unwrap(), "None");
+
+        let accts = state.read();
+        let table = accts
+            .get("123456789012")
+            .unwrap()
+            .tables
+            .get("Widgets")
+            .unwrap();
+        let pks: Vec<String> = table
+            .items
+            .iter()
+            .map(|i| i["pk"]["S"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(pks, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn transact_write_apply_failure_reverts_and_emits_validation_error() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        // First op is a valid Put; second op carries a malformed
+        // UpdateExpression so the apply-phase fails. The Put before it
+        // must be reverted.
+        let resp = svc
+            .transact_write_items(&req_for(
+                "TransactWriteItems",
+                json!({
+                    "TransactItems": [
+                        {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "a"}}}},
+                        {"Update": {
+                            "TableName": "Widgets",
+                            "Key": {"pk": {"S": "a"}},
+                            "UpdateExpression": "BOGUS expression that won't parse"
+                        }},
+                    ]
+                }),
+            ))
+            .unwrap();
+        assert_eq!(resp.status, http::StatusCode::BAD_REQUEST);
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            body["__type"].as_str().unwrap(),
+            "TransactionCanceledException"
+        );
+        let reasons = body["CancellationReasons"].as_array().unwrap();
+        assert_eq!(reasons.len(), 2);
+        assert_eq!(reasons[0]["Code"].as_str().unwrap(), "None");
+        assert_eq!(reasons[1]["Code"].as_str().unwrap(), "ValidationError");
+
+        // Confirm revert: the Put on index 0 must NOT have committed.
+        let accts = state.read();
+        let table = accts
+            .get("123456789012")
+            .unwrap()
+            .tables
+            .get("Widgets")
+            .unwrap();
+        assert_eq!(
+            table.items.len(),
+            0,
+            "apply-phase failure must revert earlier writes"
+        );
+        // No stream record should have been emitted either.
+        assert_eq!(table.stream_records.read().len(), 0);
     }
 
     #[tokio::test]
