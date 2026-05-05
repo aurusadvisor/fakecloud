@@ -3189,3 +3189,317 @@ async fn sts_assume_role_with_web_identity_succeeds_when_iss_aud_match() {
         .access_key_id()
         .starts_with("FSIA"));
 }
+
+// ─── F4: IAM polish — ChangePassword / STS prefs / ResyncMFA ────────────
+
+/// Sign IAM/STS calls as a specific IAM user so the dispatch principal
+/// resolution attaches the user's ARN. Used by the F4 ChangePassword
+/// tests below.
+async fn iam_client_for_user(server: &TestServer, akid: &str, secret: &str) -> aws_sdk_iam::Client {
+    use aws_credential_types::Credentials;
+    let cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(akid, secret, None, None, "f4-user"))
+        .load()
+        .await;
+    aws_sdk_iam::Client::new(&cfg)
+}
+
+#[tokio::test]
+async fn iam_change_password_validates_old_and_writes_new() {
+    let server = TestServer::start().await;
+    let root = server.iam_client().await;
+    root.create_user()
+        .user_name("rotator")
+        .send()
+        .await
+        .unwrap();
+    root.create_login_profile()
+        .user_name("rotator")
+        .password("OriginalP@ss!")
+        .send()
+        .await
+        .unwrap();
+    let key = root
+        .create_access_key()
+        .user_name("rotator")
+        .send()
+        .await
+        .unwrap();
+    let access_key = key.access_key().unwrap();
+    let user_client = iam_client_for_user(
+        &server,
+        access_key.access_key_id(),
+        access_key.secret_access_key(),
+    )
+    .await;
+
+    // Wrong old password is rejected with InvalidUserType (403).
+    let err = user_client
+        .change_password()
+        .old_password("wrong")
+        .new_password("FreshP@ss!")
+        .send()
+        .await
+        .unwrap_err();
+    let raw = format!("{err:?}");
+    assert!(
+        raw.contains("InvalidUserType"),
+        "expected InvalidUserType on wrong old password, got: {raw}"
+    );
+
+    // Correct old password rotates to the new value.
+    user_client
+        .change_password()
+        .old_password("OriginalP@ss!")
+        .new_password("FreshP@ss!")
+        .send()
+        .await
+        .unwrap();
+
+    // Re-using the original old password should now fail (the rotation
+    // really wrote the new value to state).
+    let err = user_client
+        .change_password()
+        .old_password("OriginalP@ss!")
+        .new_password("AnotherP@ss!")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("InvalidUserType"));
+}
+
+#[tokio::test]
+async fn iam_change_password_rejects_user_without_login_profile() {
+    let server = TestServer::start().await;
+    let root = server.iam_client().await;
+    root.create_user()
+        .user_name("noprofile-user")
+        .send()
+        .await
+        .unwrap();
+    let key = root
+        .create_access_key()
+        .user_name("noprofile-user")
+        .send()
+        .await
+        .unwrap();
+    let access_key = key.access_key().unwrap();
+    let user_client = iam_client_for_user(
+        &server,
+        access_key.access_key_id(),
+        access_key.secret_access_key(),
+    )
+    .await;
+
+    let err = user_client
+        .change_password()
+        .old_password("a")
+        .new_password("b")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("InvalidUserType"),
+        "expected InvalidUserType for missing login profile"
+    );
+}
+
+#[tokio::test]
+async fn iam_set_and_get_sts_preferences_round_trip() {
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+
+    // SetSecurityTokenServicePreferences with an unknown version is
+    // rejected by AWS — fakecloud now mirrors that.
+    let err = iam
+        .set_security_token_service_preferences()
+        .global_endpoint_token_version(aws_sdk_iam::types::GlobalEndpointTokenVersion::from(
+            "vBogusToken",
+        ))
+        .send()
+        .await
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("InvalidParameterValue"));
+
+    // Valid value is accepted and round-trips through the new
+    // GetSecurityTokenServicePreferences endpoint.
+    iam.set_security_token_service_preferences()
+        .global_endpoint_token_version(aws_sdk_iam::types::GlobalEndpointTokenVersion::V2Token)
+        .send()
+        .await
+        .unwrap();
+
+    // The Smithy-driven SDK doesn't model
+    // GetSecurityTokenServicePreferences (the public AWS API only
+    // exposes Set), so query the operation directly via raw HTTP.
+    // The endpoint returns <GlobalEndpointTokenVersion> inside
+    // <GetSecurityTokenServicePreferencesResult>.
+    let body = "Action=GetSecurityTokenServicePreferences&Version=2010-05-08";
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        .header(
+            "Authorization",
+            "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=0",
+        )
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "expected 2xx, got {resp:?}");
+    let text = resp.text().await.unwrap();
+    assert!(
+        text.contains("<GlobalEndpointTokenVersion>v2Token</GlobalEndpointTokenVersion>"),
+        "expected stored version in response, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn sts_get_caller_identity_rejects_unauthenticated() {
+    // F4: GetCallerIdentity called with neither Authorization nor
+    // x-amz-security-token returns MissingAuthenticationTokenException.
+    let server = TestServer::start().await;
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("Action=GetCallerIdentity&Version=2011-06-15")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let text = resp.text().await.unwrap();
+    assert!(
+        text.contains("MissingAuthenticationTokenException"),
+        "expected MissingAuthenticationTokenException, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn iam_deny_includes_encoded_auth_failure_message() {
+    // F4: when the IAM evaluator denies a request in strict mode, the
+    // AccessDeniedException now includes an encoded authorization
+    // failure message that round-trips through STS
+    // DecodeAuthorizationMessage and reveals the action / principal /
+    // context that drove the deny.
+    use aws_credential_types::Credentials;
+    let server = helpers::TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let root = server.iam_client().await;
+    root.create_user()
+        .user_name("enc-deny-user")
+        .send()
+        .await
+        .unwrap();
+    let key = root
+        .create_access_key()
+        .user_name("enc-deny-user")
+        .send()
+        .await
+        .unwrap();
+    let access_key = key.access_key().unwrap();
+    let cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(
+            access_key.access_key_id(),
+            access_key.secret_access_key(),
+            None,
+            None,
+            "enc-deny",
+        ))
+        .load()
+        .await;
+    let sts = aws_sdk_sts::Client::new(&cfg);
+
+    // No identity policy → implicit deny → AccessDeniedException with
+    // encoded suffix.
+    let err = sts.get_caller_identity().send().await.unwrap_err();
+    let raw = format!("{err:?}");
+    let marker = "Encoded authorization failure message:";
+    let idx = raw
+        .find(marker)
+        .unwrap_or_else(|| panic!("expected encoded suffix in deny message: {raw}"));
+    let token: String = raw[idx + marker.len()..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '+' || *c == '/' || *c == '=')
+        .collect();
+    assert!(!token.is_empty(), "extracted token should not be empty");
+
+    // Decoder hands the JSON blob back, including the action and
+    // principal recorded at deny time.
+    let root_sts = aws_sdk_sts::Client::new(&server.aws_config().await);
+    let decoded = root_sts
+        .decode_authorization_message()
+        .encoded_message(&token)
+        .send()
+        .await
+        .unwrap();
+    let body = decoded.decoded_message().unwrap();
+    assert!(body.contains("sts:GetCallerIdentity"), "body={body}");
+    assert!(body.contains("enc-deny-user"), "body={body}");
+}
+
+#[tokio::test]
+async fn iam_resync_mfa_device_freshens_enable_date() {
+    use chrono::{DateTime, Utc};
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+
+    iam.create_user().user_name("mfa-u").send().await.unwrap();
+    let dev = iam
+        .create_virtual_mfa_device()
+        .virtual_mfa_device_name("mfa-u-token")
+        .send()
+        .await
+        .unwrap();
+    let serial = dev
+        .virtual_mfa_device()
+        .unwrap()
+        .serial_number()
+        .to_string();
+    iam.enable_mfa_device()
+        .user_name("mfa-u")
+        .serial_number(&serial)
+        .authentication_code1("111111")
+        .authentication_code2("222222")
+        .send()
+        .await
+        .unwrap();
+
+    let before = iam
+        .get_mfa_device()
+        .serial_number(&serial)
+        .send()
+        .await
+        .unwrap();
+    let before_date: DateTime<Utc> =
+        DateTime::from_timestamp(before.enable_date().unwrap().secs(), 0).unwrap();
+
+    // Wait so the freshened EnableDate is visibly newer than the
+    // original (RFC3339 precision is seconds).
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    iam.resync_mfa_device()
+        .user_name("mfa-u")
+        .serial_number(&serial)
+        .authentication_code1("333333")
+        .authentication_code2("444444")
+        .send()
+        .await
+        .unwrap();
+
+    let after = iam
+        .get_mfa_device()
+        .serial_number(&serial)
+        .send()
+        .await
+        .unwrap();
+    let after_date: DateTime<Utc> =
+        DateTime::from_timestamp(after.enable_date().unwrap().secs(), 0).unwrap();
+    assert!(
+        after_date > before_date,
+        "ResyncMFADevice should freshen EnableDate: before={before_date:?} after={after_date:?}"
+    );
+}

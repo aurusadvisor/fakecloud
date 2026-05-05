@@ -330,6 +330,9 @@ impl AwsService for IamService {
             "SetSecurityTokenServicePreferences" => {
                 self.set_security_token_service_preferences(&req)
             }
+            "GetSecurityTokenServicePreferences" => {
+                self.get_security_token_service_preferences(&req)
+            }
             "UpdateServerCertificate" => self.update_server_certificate(&req),
 
             _ => Err(AwsServiceError::action_not_implemented("iam", &req.action)),
@@ -562,6 +565,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "GetMFADevice",
     "ResyncMFADevice",
     "SetSecurityTokenServicePreferences",
+    "GetSecurityTokenServicePreferences",
     "UpdateServerCertificate",
 ];
 

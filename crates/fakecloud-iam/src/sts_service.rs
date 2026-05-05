@@ -280,6 +280,23 @@ impl StsService {
             return Ok(AwsResponse::xml(StatusCode::OK, xml));
         }
 
+        // F4: real GetCallerIdentity rejects calls that arrive with
+        // neither a resolvable principal nor an Authorization header.
+        // AWS returns `MissingAuthenticationTokenException` (HTTP 403)
+        // in that case. We keep the unsigned-but-account-scoped path
+        // (the `test` root bypass and similar smoke probes) by falling
+        // back to root only when an Authorization header was present
+        // but didn't resolve to a stored principal.
+        let has_auth_header = req.headers.contains_key("authorization")
+            || req.headers.contains_key("x-amz-security-token");
+        if !has_auth_header {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::FORBIDDEN,
+                "MissingAuthenticationTokenException",
+                "Request is missing Authentication Token",
+            ));
+        }
+
         let accounts = self.state.read();
         let account_id = accounts.default_account_id();
         let partition = partition_for_region(&req.region);
@@ -1949,11 +1966,36 @@ mod tests {
     #[tokio::test]
     async fn get_caller_identity() {
         let (svc, _) = make_sts_service();
-        let req = sts_request("GetCallerIdentity", vec![]);
+        let mut req = sts_request("GetCallerIdentity", vec![]);
+        // F4: GetCallerIdentity now rejects calls with neither a
+        // resolved principal nor an Authorization header. Add a stub
+        // header so the unauthenticated-but-account-scoped fallback
+        // (used by smoke probes / the `test` root bypass) still
+        // returns a usable identity.
+        req.headers.insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("AWS4-HMAC-SHA256 Credential=test/test"),
+        );
         let resp = svc.handle(req).await.unwrap();
         let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
         assert!(body.contains("<Account>123456789012</Account>"));
         assert!(body.contains("<Arn>"));
+    }
+
+    #[tokio::test]
+    async fn get_caller_identity_rejects_unauthenticated_request() {
+        // No principal AND no Authorization header → AWS returns
+        // MissingAuthenticationTokenException (403). The `test` root
+        // bypass and signed requests both attach a header, so the
+        // common dev path is unaffected.
+        let (svc, _) = make_sts_service();
+        let req = sts_request("GetCallerIdentity", vec![]);
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected MissingAuthenticationTokenException"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert!(format!("{:?}", err).contains("MissingAuthenticationTokenException"));
     }
 
     // ── AssumeRole ──
