@@ -430,10 +430,9 @@ impl LambdaService {
         let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
 
         // ZipFile / ImageUri / S3Bucket+S3Key are mutually exclusive; AWS
-        // rejects the request when more than one is present, but we just
-        // pick the first available with a defined precedence: ZipFile,
-        // ImageUri, S3 (which we resolve only enough to swap the bytes —
-        // S3 fetches happen out of band on real Lambda).
+        // rejects the request when more than one is present. The handler
+        // picks one with a defined precedence: ZipFile, S3 descriptor,
+        // ImageUri.
         let new_zip: Option<Vec<u8>> = match body["ZipFile"].as_str() {
             Some(b64) => Some(
                 base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).map_err(
@@ -449,6 +448,30 @@ impl LambdaService {
             None => None,
         };
         let new_image_uri = body["ImageUri"].as_str().map(String::from);
+        // S3 source descriptor: when the caller didn't supply ZipFile or
+        // ImageUri, AWS expects S3Bucket+S3Key (S3ObjectVersion is
+        // optional). fakecloud doesn't fetch the object — CreateFunction
+        // takes the same shortcut — so we synthesize a fingerprint from
+        // the descriptor and use that as the new code identity. The hash
+        // and size still rotate when the descriptor differs, so
+        // optimistic-concurrency callers see RevisionId bump on real
+        // changes.
+        let new_s3_descriptor: Option<Vec<u8>> =
+            match (body["S3Bucket"].as_str(), body["S3Key"].as_str()) {
+                (Some(bucket), Some(key)) if new_zip.is_none() && new_image_uri.is_none() => {
+                    let mut descriptor = serde_json::Map::new();
+                    descriptor.insert("S3Bucket".to_string(), Value::String(bucket.to_string()));
+                    descriptor.insert("S3Key".to_string(), Value::String(key.to_string()));
+                    if let Some(ver) = body["S3ObjectVersion"].as_str() {
+                        descriptor.insert(
+                            "S3ObjectVersion".to_string(),
+                            Value::String(ver.to_string()),
+                        );
+                    }
+                    Some(serde_json::to_vec(&Value::Object(descriptor)).unwrap_or_default())
+                }
+                _ => None,
+            };
         let supplied_signing_profile = body["SigningProfileVersionArn"].as_str().map(String::from);
         let supplied_revision_id = body["RevisionId"].as_str().map(String::from);
         let new_architectures: Option<Vec<String>> = body["Architectures"].as_array().map(|arr| {
@@ -538,6 +561,29 @@ impl LambdaService {
             func.code_sha256 = code_sha256;
             func.image_uri = None;
             func.package_type = "Zip".to_string();
+        } else if let Some(descriptor_bytes) = new_s3_descriptor {
+            // Hash the S3 descriptor JSON (S3Bucket+S3Key+optional
+            // S3ObjectVersion) so the same descriptor produces a stable
+            // sha and a different descriptor rotates RevisionId. This
+            // mirrors CreateFunction's behavior for S3-sourced code,
+            // which also fingerprints the descriptor rather than fetching
+            // S3 (real Lambda fetches asynchronously).
+            let mut hasher = Sha256::new();
+            hasher.update(&descriptor_bytes);
+            let hash = hasher.finalize();
+            let code_sha256 =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hash);
+            if code_sha256 != func.code_sha256 {
+                changed = true;
+            }
+            func.code_size = descriptor_bytes.len() as i64;
+            // We don't have the object bytes — clear the cached zip so
+            // the runtime falls back to whatever it had previously cached
+            // rather than serving stale bytes for the new descriptor.
+            func.code_zip = None;
+            func.code_sha256 = code_sha256;
+            func.image_uri = None;
+            func.package_type = "Zip".to_string();
         } else if let Some(uri) = new_image_uri {
             if func.image_uri.as_deref() != Some(uri.as_str()) {
                 changed = true;
@@ -545,6 +591,11 @@ impl LambdaService {
             func.image_uri = Some(uri);
             func.code_zip = None;
             func.package_type = "Image".to_string();
+            // AWS reports CodeSize=0 and an empty CodeSha256 for
+            // image-package functions — the actual digest lives on the
+            // ECR side, not in the Lambda response.
+            func.code_size = 0;
+            func.code_sha256 = String::new();
         }
 
         if let Some(arns) = new_architectures {
@@ -569,6 +620,11 @@ impl LambdaService {
         if changed {
             func.revision_id = uuid::Uuid::new_v4().to_string();
         }
+        // A successful UpdateFunctionCode clears any prior failure
+        // reason — function_config_json elides the field when None,
+        // matching AWS's "no LastUpdateStatusReason on success" shape.
+        func.last_update_status_reason = None;
+        func.last_update_status_reason_code = None;
 
         // Publish=true mints a new immutable version snapshot off the
         // freshly updated $LATEST and returns that version's config.

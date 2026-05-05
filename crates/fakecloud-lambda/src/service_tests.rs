@@ -1569,6 +1569,101 @@ async fn update_function_code_dry_run_does_not_mutate() {
     assert_eq!(cfg["RevisionId"].as_str().unwrap(), pre_rev);
 }
 
+#[tokio::test]
+async fn update_function_code_with_s3_descriptor_rotates_hash() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "s3src").await;
+
+    let req = make_request(Method::GET, "/2015-03-31/functions/s3src/configuration", "");
+    let pre: Value =
+        serde_json::from_slice(svc.handle(req).await.unwrap().body.expect_bytes()).unwrap();
+    let pre_sha = pre["CodeSha256"].as_str().unwrap().to_string();
+    let pre_rev = pre["RevisionId"].as_str().unwrap().to_string();
+
+    // S3Bucket+S3Key swap -- fakecloud fingerprints the descriptor, so a
+    // different bucket/key must produce a different CodeSha256 and rotate
+    // RevisionId.
+    let body = json!({"S3Bucket": "deploy-bucket", "S3Key": "lambdas/v2.zip"});
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/s3src/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let post_sha = post["CodeSha256"].as_str().unwrap().to_string();
+    assert_ne!(post_sha, pre_sha, "S3 swap should rotate CodeSha256");
+    assert_ne!(
+        post["RevisionId"].as_str().unwrap(),
+        pre_rev,
+        "S3 swap should rotate RevisionId"
+    );
+    assert!(post["CodeSize"].as_i64().unwrap() > 0);
+    assert_eq!(post["PackageType"].as_str().unwrap(), "Zip");
+
+    // Same descriptor again -> RevisionId stable (no spurious bump).
+    let body = json!({"S3Bucket": "deploy-bucket", "S3Key": "lambdas/v2.zip"});
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/s3src/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let again: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(again["CodeSha256"].as_str().unwrap(), post_sha);
+    assert_eq!(
+        again["RevisionId"].as_str().unwrap(),
+        post["RevisionId"].as_str().unwrap()
+    );
+
+    // Different S3ObjectVersion on the same bucket+key counts as a new
+    // descriptor and must rotate the hash.
+    let body = json!({
+        "S3Bucket": "deploy-bucket",
+        "S3Key": "lambdas/v2.zip",
+        "S3ObjectVersion": "v-abc123",
+    });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/s3src/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let versioned: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_ne!(versioned["CodeSha256"].as_str().unwrap(), post_sha);
+}
+
+#[tokio::test]
+async fn update_function_code_image_uri_clears_size_and_sha() {
+    // AWS reports CodeSize=0 and an empty CodeSha256 for image-package
+    // functions; the digest lives on the ECR side, not in the Lambda
+    // response. Verify UpdateFunctionCode brings those fields in line
+    // when swapping to a new image.
+    let svc = LambdaService::new(make_state());
+    let body = json!({
+        "FunctionName": "img-clear",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "PackageType": "Image",
+        "Code": {"ImageUri": "old.example.com/image:1"},
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    svc.handle(req).await.unwrap();
+
+    let body = json!({"ImageUri": "new.example.com/image:2"});
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/img-clear/code",
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let post: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(post["CodeSize"].as_i64().unwrap(), 0);
+    assert_eq!(post["CodeSha256"].as_str().unwrap(), "");
+    assert_eq!(post["PackageType"].as_str().unwrap(), "Image");
+}
+
 // ── PublishVersion behavior tests (D2) ──
 
 #[tokio::test]
