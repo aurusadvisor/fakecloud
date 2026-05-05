@@ -832,7 +832,7 @@ impl OrganizationsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let filter = parse_handshake_filter(&body)?;
-        let (max_results, next_token) = parse_handshake_pagination(&body)?;
+        let (max_results, next_token) = parse_list_pagination(&body)?;
 
         let guard = self.state.read();
         let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
@@ -856,7 +856,7 @@ impl OrganizationsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let filter = parse_handshake_filter(&body)?;
-        let (max_results, next_token) = parse_handshake_pagination(&body)?;
+        let (max_results, next_token) = parse_list_pagination(&body)?;
 
         let guard = self.state.write();
         self.require_member_management(&guard, &req.account_id)?;
@@ -900,22 +900,27 @@ impl OrganizationsService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let (max_results, next_token) = parse_list_pagination(&body)?;
         let guard = self.state.write();
         self.require_member_management(&guard, &req.account_id)?;
         let org = guard.as_ref().expect("management gate proved Some");
         let entries: Vec<Value> = org
             .list_trusted_services()
             .into_iter()
-            .map(|svc| {
+            .map(|(svc, enabled_at)| {
                 json!({
                     "ServicePrincipal": svc,
-                    "DateEnabled": Utc::now().timestamp() as f64,
+                    "DateEnabled": enabled_at.timestamp() as f64,
                 })
             })
             .collect();
-        Ok(AwsResponse::ok_json(
-            json!({ "EnabledServicePrincipals": entries }),
-        ))
+        let (page, token) = paginate(&entries, next_token.as_deref(), max_results);
+        let mut body = json!({ "EnabledServicePrincipals": page });
+        if let Some(t) = token {
+            body["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(body))
     }
 
     fn register_delegated_administrator(
@@ -957,6 +962,7 @@ impl OrganizationsService {
             .get("ServicePrincipal")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let (max_results, next_token) = parse_list_pagination(&body)?;
         let guard = self.state.write();
         self.require_member_management(&guard, &req.account_id)?;
         let org = guard.as_ref().expect("management gate proved Some");
@@ -977,9 +983,12 @@ impl OrganizationsService {
                 }))
             })
             .collect();
-        Ok(AwsResponse::ok_json(
-            json!({ "DelegatedAdministrators": entries }),
-        ))
+        let (page, token) = paginate(&entries, next_token.as_deref(), max_results);
+        let mut body = json!({ "DelegatedAdministrators": page });
+        if let Some(t) = token {
+            body["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(body))
     }
 
     fn list_delegated_services_for_account(
@@ -988,22 +997,26 @@ impl OrganizationsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let account_id = required_str(&body, "AccountId")?.to_string();
+        let (max_results, next_token) = parse_list_pagination(&body)?;
         let guard = self.state.write();
         self.require_member_management(&guard, &req.account_id)?;
         let org = guard.as_ref().expect("management gate proved Some");
         let entries: Vec<Value> = org
             .list_delegated_services_for_account(&account_id)
             .into_iter()
-            .map(|svc| {
+            .map(|(svc, enabled_at)| {
                 json!({
                     "ServicePrincipal": svc,
-                    "DelegationEnabledDate": Utc::now().timestamp() as f64,
+                    "DelegationEnabledDate": enabled_at.timestamp() as f64,
                 })
             })
             .collect();
-        Ok(AwsResponse::ok_json(
-            json!({ "DelegatedServices": entries }),
-        ))
+        let (page, token) = paginate(&entries, next_token.as_deref(), max_results);
+        let mut body = json!({ "DelegatedServices": page });
+        if let Some(t) = token {
+            body["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(body))
     }
 
     fn enable_all_features(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1654,8 +1667,10 @@ fn handshake_matches_filter(h: &crate::state::Handshake, filter: &HandshakeFilte
 }
 
 /// Parse `MaxResults` (1..=20, default 20) and `NextToken` (string
-/// matching what `paginate` mints) from a `ListHandshakes*` request.
-fn parse_handshake_pagination(body: &Value) -> Result<(usize, Option<String>), AwsServiceError> {
+/// matching what `paginate` mints) from any AWS Organizations
+/// `List*` request body. Shared by handshake, AWS-service-access,
+/// delegated-administrator and delegated-service listings.
+fn parse_list_pagination(body: &Value) -> Result<(usize, Option<String>), AwsServiceError> {
     let max_results = match body.get("MaxResults") {
         None | Some(Value::Null) => 20usize,
         Some(v) => {

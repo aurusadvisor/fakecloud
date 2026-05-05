@@ -53,10 +53,14 @@ pub struct OrganizationState {
     /// `ACCEPTED` / `DECLINED` / `CANCELED` / `EXPIRED`.
     #[serde(default)]
     pub handshakes: BTreeMap<String, Handshake>,
-    /// AWS service principals enabled via `EnableAWSServiceAccess`.
-    /// Stored as the principal hostname (eg. `config.amazonaws.com`).
+    /// AWS service principals enabled via `EnableAWSServiceAccess`,
+    /// keyed by the principal hostname (eg. `config.amazonaws.com`)
+    /// with the value being the moment the principal was first enabled.
+    /// `ListAWSServiceAccessForOrganization` surfaces the timestamp as
+    /// `DateEnabled`. Re-enabling an already-trusted service is a no-op
+    /// — the original timestamp is preserved (matches AWS behavior).
     #[serde(default)]
-    pub trusted_services: HashSet<String>,
+    pub trusted_services: BTreeMap<String, DateTime<Utc>>,
     /// Service principal -> set of member account ids registered as
     /// delegated administrators for that service.
     #[serde(default)]
@@ -159,7 +163,7 @@ impl OrganizationState {
             attachments,
             create_account_requests: BTreeMap::new(),
             handshakes: BTreeMap::new(),
-            trusted_services: HashSet::new(),
+            trusted_services: BTreeMap::new(),
             delegated_administrators: BTreeMap::new(),
             enabled_policy_types: default_enabled_policy_types(),
             resource_tags: BTreeMap::new(),
@@ -532,9 +536,13 @@ impl OrganizationState {
             .collect()
     }
 
-    /// Mark `service_principal` as a trusted service. Idempotent.
+    /// Mark `service_principal` as a trusted service. Idempotent: the
+    /// originally-recorded `DateEnabled` is preserved on repeat calls
+    /// (matches AWS Organizations).
     pub fn enable_aws_service_access(&mut self, service_principal: &str) {
-        self.trusted_services.insert(service_principal.to_string());
+        self.trusted_services
+            .entry(service_principal.to_string())
+            .or_insert_with(Utc::now);
     }
 
     /// Drop `service_principal` from the trusted set. Also removes any
@@ -555,11 +563,14 @@ impl OrganizationState {
         Ok(())
     }
 
-    /// Iterate enabled trusted services in alphabetical order.
-    pub fn list_trusted_services(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.trusted_services.iter().cloned().collect();
-        v.sort();
-        v
+    /// Iterate enabled trusted services in alphabetical order, paired
+    /// with the `DateEnabled` timestamp captured at first enable.
+    pub fn list_trusted_services(&self) -> Vec<(String, DateTime<Utc>)> {
+        // BTreeMap iterates in key order, so this is already alphabetical.
+        self.trusted_services
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 
     /// Register `account_id` as a delegated administrator for the given
@@ -573,7 +584,7 @@ impl OrganizationState {
         if !self.accounts.contains_key(account_id) {
             return Err(OrgError::AccountNotFound(account_id.to_string()));
         }
-        if !self.trusted_services.contains(service_principal) {
+        if !self.trusted_services.contains_key(service_principal) {
             return Err(OrgError::AWSServiceAccessNotEnabled(
                 service_principal.to_string(),
             ));
@@ -635,15 +646,20 @@ impl OrganizationState {
         out
     }
 
-    /// List service principals that `account_id` is a delegated admin for.
-    pub fn list_delegated_services_for_account(&self, account_id: &str) -> Vec<String> {
+    /// List service principals that `account_id` is a delegated admin
+    /// for, paired with the per-service `DelegationEnabledDate`.
+    /// Iteration order is alphabetical by service principal (the
+    /// `delegated_administrators` BTreeMap key order).
+    pub fn list_delegated_services_for_account(
+        &self,
+        account_id: &str,
+    ) -> Vec<(String, DateTime<Utc>)> {
         let mut out = Vec::new();
         for (svc, admins) in &self.delegated_administrators {
-            if admins.contains_key(account_id) {
-                out.push(svc.clone());
+            if let Some(admin) = admins.get(account_id) {
+                out.push((svc.clone(), admin.registered_at));
             }
         }
-        out.sort();
         out
     }
 
@@ -1575,9 +1591,13 @@ mod tests {
     fn enable_aws_service_access_is_idempotent() {
         let mut org = OrganizationState::bootstrap("111111111111");
         org.enable_aws_service_access("config.amazonaws.com");
+        let first = org.list_trusted_services()[0].1;
         org.enable_aws_service_access("config.amazonaws.com");
         let trusted = org.list_trusted_services();
-        assert_eq!(trusted, vec!["config.amazonaws.com"]);
+        assert_eq!(trusted.len(), 1);
+        assert_eq!(trusted[0].0, "config.amazonaws.com");
+        // Second call must NOT overwrite the original DateEnabled.
+        assert_eq!(trusted[0].1, first);
     }
 
     #[test]
@@ -1624,8 +1644,12 @@ mod tests {
             .unwrap();
         org.register_delegated_administrator("222222222222", "config.amazonaws.com")
             .unwrap();
-        let svcs = org.list_delegated_services_for_account("222222222222");
-        assert_eq!(svcs, vec!["config.amazonaws.com", "ssm.amazonaws.com"]);
+        let names: Vec<String> = org
+            .list_delegated_services_for_account("222222222222")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, vec!["config.amazonaws.com", "ssm.amazonaws.com"]);
     }
 
     #[test]
