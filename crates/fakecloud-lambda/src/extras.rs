@@ -906,6 +906,14 @@ impl LambdaService {
                     .collect()
             })
             .unwrap_or_default();
+        let architectures: Vec<String> = body["CompatibleArchitectures"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
         let layer_arn = layer.layer_arn.clone();
         let lv = LayerVersion {
             version: next_version,
@@ -918,6 +926,7 @@ impl LambdaService {
             code_zip: zip_bytes,
             code_sha256: code_sha256.clone(),
             code_size,
+            compatible_architectures: architectures,
         };
         layer.versions.push(lv.clone());
         let location = layer_content_url(req, &account_id, layer_name, next_version);
@@ -928,6 +937,7 @@ impl LambdaService {
             "Description": lv.description,
             "CreatedDate": lv.created_date.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string(),
             "CompatibleRuntimes": lv.compatible_runtimes,
+            "CompatibleArchitectures": lv.compatible_architectures,
             "LicenseInfo": lv.license_info,
             "Content": {
                 "Location": location,
@@ -953,6 +963,7 @@ impl LambdaService {
                             "Description": v.description,
                             "CreatedDate": v.created_date.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string(),
                             "CompatibleRuntimes": v.compatible_runtimes,
+                            "CompatibleArchitectures": v.compatible_architectures,
                         })),
                     })
                 })
@@ -981,6 +992,7 @@ impl LambdaService {
                                 "Description": v.description,
                                 "CreatedDate": v.created_date.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string(),
                                 "CompatibleRuntimes": v.compatible_runtimes,
+                                "CompatibleArchitectures": v.compatible_architectures,
                                 "LicenseInfo": v.license_info,
                             })
                         })
@@ -1012,6 +1024,7 @@ impl LambdaService {
                         "Description": v.description,
                         "CreatedDate": v.created_date.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string(),
                         "CompatibleRuntimes": v.compatible_runtimes,
+                        "CompatibleArchitectures": v.compatible_architectures,
                         "LicenseInfo": v.license_info,
                         "Content": {
                             "Location": location,
@@ -1047,6 +1060,7 @@ impl LambdaService {
                         "Description": v.description,
                         "CreatedDate": v.created_date.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string(),
                         "CompatibleRuntimes": v.compatible_runtimes,
+                        "CompatibleArchitectures": v.compatible_architectures,
                         "LicenseInfo": v.license_info,
                         "Content": {
                             "Location": location,
@@ -1161,6 +1175,26 @@ impl LambdaService {
 
     // ── Function URL ──
 
+    /// Render a `FunctionUrlConfig` into the AWS-shaped JSON the Lambda
+    /// SDK expects (PascalCase keys, ISO-8601 timestamps). Direct
+    /// `serde_json::to_value` would emit the struct's snake_case field
+    /// names, which the SDK silently treats as missing fields — leaving
+    /// `function_url()` returning an empty string.
+    fn function_url_config_json(cfg: &FunctionUrlConfig) -> Value {
+        let mut out = json!({
+            "FunctionArn": cfg.function_arn,
+            "FunctionUrl": cfg.function_url,
+            "AuthType": cfg.auth_type,
+            "InvokeMode": cfg.invoke_mode,
+            "CreationTime": cfg.creation_time.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string(),
+            "LastModifiedTime": cfg.last_modified_time.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string(),
+        });
+        if let Some(cors) = &cfg.cors {
+            out["Cors"] = cors.clone();
+        }
+        out
+    }
+
     fn create_function_url_config(
         &self,
         function_name: &str,
@@ -1196,7 +1230,7 @@ impl LambdaService {
         state
             .function_url_configs
             .insert(function_name.to_string(), cfg.clone());
-        ok(serde_json::to_value(cfg).unwrap_or_default())
+        ok(Self::function_url_config_json(&cfg))
     }
 
     fn get_function_url_config(
@@ -1209,7 +1243,7 @@ impl LambdaService {
             state
                 .function_url_configs
                 .get(function_name)
-                .map(|c| ok(serde_json::to_value(c).unwrap_or_default()))
+                .map(|c| ok(Self::function_url_config_json(c)))
                 .unwrap_or_else(|| Err(not_found("FunctionUrlConfig", function_name)))
         })
     }
@@ -1236,7 +1270,8 @@ impl LambdaService {
             cfg.invoke_mode = m.to_string();
         }
         cfg.last_modified_time = Utc::now();
-        ok(serde_json::to_value(cfg).unwrap_or_default())
+        let snapshot = cfg.clone();
+        ok(Self::function_url_config_json(&snapshot))
     }
 
     fn delete_function_url_config(
@@ -1253,7 +1288,11 @@ impl LambdaService {
     fn list_function_url_configs(&self, account_id: &str) -> Result<AwsResponse, AwsServiceError> {
         let region = self.region_for(account_id);
         self.with_state_read(account_id, &region, |state| {
-            let configs: Vec<&FunctionUrlConfig> = state.function_url_configs.values().collect();
+            let configs: Vec<Value> = state
+                .function_url_configs
+                .values()
+                .map(Self::function_url_config_json)
+                .collect();
             ok(json!({"FunctionUrlConfigs": configs}))
         })
     }
