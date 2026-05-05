@@ -909,6 +909,14 @@ impl ElastiCacheService {
             Some(optional_query_param(request, "IpDiscovery").unwrap_or_else(|| "ipv4".into()));
         let az_mode =
             Some(optional_query_param(request, "AZMode").unwrap_or_else(|| "single-az".into()));
+        let kms_key_id = optional_query_param(request, "KmsKeyId");
+        let transit_encryption_mode = optional_query_param(request, "TransitEncryptionMode");
+        let data_tiering_enabled =
+            parse_optional_bool(optional_query_param(request, "DataTieringEnabled").as_deref())?;
+        let cluster_mode = optional_query_param(request, "ClusterMode");
+        let preferred_outpost_arns =
+            parse_query_list_param(request, "PreferredOutpostArns", "PreferredOutpostArn");
+        let tags = parse_tags(request)?;
 
         let (preferred_availability_zone, arn) = {
             let mut accounts = self.state.write();
@@ -1029,13 +1037,26 @@ impl ElastiCacheService {
             ip_discovery,
             az_mode,
             auth_token,
+            kms_key_id,
+            transit_encryption_mode,
+            data_tiering_enabled,
+            cluster_mode,
+            preferred_outpost_arns,
         };
 
         let xml = cache_cluster_xml(&cluster, true);
         {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
+            let cluster_arn = cluster.arn.clone();
             state.finish_cache_cluster_creation(cluster.clone());
+            // Initialise the tag bucket for this resource ARN, then merge any
+            // `Tags.Tag.N` entries supplied at create time. Mirrors the
+            // pattern used by CreateReplicationGroup / CreateUser etc.
+            state.tags.entry(cluster_arn.clone()).or_default();
+            if !tags.is_empty() {
+                merge_tags(state.tags.entry(cluster_arn).or_default(), &tags);
+            }
             if let Some(ref group_id) = cluster.replication_group_id {
                 add_cluster_to_replication_group(state, group_id, &cluster.cache_cluster_id);
             }

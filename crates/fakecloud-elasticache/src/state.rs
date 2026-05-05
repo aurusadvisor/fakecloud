@@ -178,6 +178,30 @@ pub struct CacheCluster {
     /// compare/rotate; never echoed back in describe XML.
     #[serde(default)]
     pub auth_token: Option<String>,
+    /// `KmsKeyId` — at-rest encryption key passed at create time.
+    /// AWS doesn't echo this on `DescribeCacheClusters`, but real
+    /// SDKs (terraform plan diff, compliance scans) read it from
+    /// state, so we round-trip it on the struct.
+    #[serde(default)]
+    pub kms_key_id: Option<String>,
+    /// `TransitEncryptionMode` — `preferred` or `required`. Round-tripped
+    /// onto `DescribeCacheClusters` exactly like AWS does.
+    #[serde(default)]
+    pub transit_encryption_mode: Option<String>,
+    /// `DataTieringEnabled` toggle (Redis r6gd only). Stored verbatim
+    /// so terraform plan diff and DescribeCacheClusters round-trip.
+    #[serde(default)]
+    pub data_tiering_enabled: Option<bool>,
+    /// `ClusterMode` input — `compatible` / `enabled` / `disabled`.
+    /// Stored separately from `cluster_enabled` because the input
+    /// allows the tri-state `compatible` value.
+    #[serde(default)]
+    pub cluster_mode: Option<String>,
+    /// `PreferredOutpostArns.member.N` — cross-outpost cluster placement.
+    /// Round-tripped from input; not echoed by AWS but kept on the struct
+    /// so the original request shape is preserved.
+    #[serde(default)]
+    pub preferred_outpost_arns: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1361,6 +1385,11 @@ mod tests {
                 ip_discovery: None,
                 az_mode: None,
                 auth_token: None,
+                kms_key_id: None,
+                transit_encryption_mode: None,
+                data_tiering_enabled: None,
+                cluster_mode: None,
+                preferred_outpost_arns: Vec::new(),
             },
         );
         assert_eq!(state.cache_clusters.len(), 1);
