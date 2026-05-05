@@ -123,7 +123,14 @@ class E2ETest {
     @Test
     void sqsGetMessagesReturnsSentMessages() {
         SqsClient sqs = configure(SqsClient.builder()).build();
-        var q = sqs.createQueue(CreateQueueRequest.builder().queueName("test-queue").build());
+        // Disable SSE-SQS so the introspection endpoint surfaces the
+        // plaintext body. Default queues encrypt at rest under
+        // `alias/aws/sqs` (AWS default since May 2023) and the body
+        // would be the at-rest envelope.
+        var q = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName("test-queue")
+                .attributesWithStrings(java.util.Map.of("SqsManagedSseEnabled", "false"))
+                .build());
         sqs.sendMessage(SendMessageRequest.builder()
                 .queueUrl(q.queueUrl())
                 .messageBody("hello from e2e")

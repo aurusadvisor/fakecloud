@@ -242,13 +242,20 @@ async fn sdk_elasticache_get_serverless_caches() {
 
 #[tokio::test]
 async fn sdk_sqs_get_messages() {
+    use aws_sdk_sqs::types::QueueAttributeName;
+
     let server = TestServer::start().await;
     let fc = FakeCloud::new(server.endpoint());
     let sqs = server.sqs_client().await;
 
+    // Disable SSE-SQS so the introspection endpoint surfaces the
+    // plaintext body. Default queues encrypt at rest under
+    // `alias/aws/sqs` (AWS default since May 2023) and the SDK probe
+    // would see the at-rest envelope.
     let create = sqs
         .create_queue()
         .queue_name("sdk-sqs-queue")
+        .attributes(QueueAttributeName::SqsManagedSseEnabled, "false")
         .send()
         .await
         .unwrap();

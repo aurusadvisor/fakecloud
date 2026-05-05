@@ -239,7 +239,14 @@ def test_reset_clears_state(fc: FakeCloudSync, fakecloud_url: str) -> None:
 
 def test_sqs_messages(fc: FakeCloudSync, fakecloud_url: str) -> None:
     sqs = boto3.client("sqs", **_boto_kwargs(fakecloud_url))
-    queue_url = sqs.create_queue(QueueName="sdk-test-queue")["QueueUrl"]
+    # Disable SSE-SQS so the introspection endpoint surfaces the
+    # plaintext body. Default queues encrypt at rest under
+    # `alias/aws/sqs` (AWS default since May 2023) and the body would
+    # otherwise be the at-rest envelope.
+    queue_url = sqs.create_queue(
+        QueueName="sdk-test-queue",
+        Attributes={"SqsManagedSseEnabled": "false"},
+    )["QueueUrl"]
     sqs.send_message(QueueUrl=queue_url, MessageBody="hello from sdk test")
 
     result = fc.sqs.get_messages()
