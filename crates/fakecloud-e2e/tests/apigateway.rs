@@ -575,3 +575,158 @@ async fn data_plane_cognito_authorizer_accepts_real_jwt_and_rejects_garbage() {
         .expect("send");
     assert_eq!(good.status(), 200);
 }
+
+// ── Usage plan throttle + quota (Phase R2) ──
+//
+// Drives the api-key + usage-plan enforcement path end-to-end through
+// real HTTP requests so we exercise the facade routing, the api-key
+// header check, and the in-memory token bucket. The unit tests cover
+// the meter math and method-level overrides; this case proves the wiring
+// is connected through the public API surface.
+
+/// Provision an API with `apiKeyRequired = true` on a MOCK GET method and
+/// associate a fresh API key + usage plan with the given throttle. Returns
+/// `(api_id, api_key_value)`.
+async fn provision_metered_api(
+    client: &aws_sdk_apigateway::Client,
+    plan_throttle: aws_sdk_apigateway::types::ThrottleSettings,
+) -> (String, String) {
+    use aws_sdk_apigateway::types::{ApiStage, IntegrationType};
+
+    let api = client
+        .create_rest_api()
+        .name("metered")
+        .send()
+        .await
+        .expect("create_rest_api");
+    let api_id = api.id().unwrap().to_string();
+    let root = api.root_resource_id().unwrap().to_string();
+    let resource = client
+        .create_resource()
+        .rest_api_id(&api_id)
+        .parent_id(&root)
+        .path_part("items")
+        .send()
+        .await
+        .expect("create_resource");
+    let res_id = resource.id().unwrap().to_string();
+    client
+        .put_method()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .authorization_type("NONE")
+        .api_key_required(true)
+        .send()
+        .await
+        .expect("put_method");
+    client
+        .put_integration()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .r#type(IntegrationType::Mock)
+        .send()
+        .await
+        .expect("put_integration");
+    client
+        .create_deployment()
+        .rest_api_id(&api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .expect("create_deployment");
+
+    let key = client
+        .create_api_key()
+        .name("metered-key")
+        .enabled(true)
+        .send()
+        .await
+        .expect("create_api_key");
+    let key_id = key.id().unwrap().to_string();
+    let key_value = key.value().unwrap().to_string();
+
+    let plan = client
+        .create_usage_plan()
+        .name("metered-plan")
+        .api_stages(ApiStage::builder().api_id(&api_id).stage("prod").build())
+        .throttle(plan_throttle)
+        .send()
+        .await
+        .expect("create_usage_plan");
+    let plan_id = plan.id().unwrap().to_string();
+    client
+        .create_usage_plan_key()
+        .usage_plan_id(&plan_id)
+        .key_id(&key_id)
+        .key_type("API_KEY")
+        .send()
+        .await
+        .expect("create_usage_plan_key");
+
+    (api_id, key_value)
+}
+
+#[tokio::test]
+async fn data_plane_missing_api_key_returns_403() {
+    use aws_sdk_apigateway::types::ThrottleSettings;
+
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+    let (api_id, _key) = provision_metered_api(
+        &client,
+        ThrottleSettings::builder()
+            .rate_limit(100.0)
+            .burst_limit(100)
+            .build(),
+    )
+    .await;
+
+    let http = reqwest::Client::new();
+    let resp = http
+        .get(format!("{}/prod/items", server.endpoint()))
+        .header("host", execute_api_host(&api_id))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn data_plane_throttle_returns_429_when_burst_exhausted() {
+    use aws_sdk_apigateway::types::ThrottleSettings;
+
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+    // 1 RPS / burst=1: the bucket has exactly one token at start, the
+    // second request must trip 429 before the rate refills a fresh
+    // token.
+    let (api_id, key_value) = provision_metered_api(
+        &client,
+        ThrottleSettings::builder()
+            .rate_limit(1.0)
+            .burst_limit(1)
+            .build(),
+    )
+    .await;
+
+    let http = reqwest::Client::new();
+    let first = http
+        .get(format!("{}/prod/items", server.endpoint()))
+        .header("host", execute_api_host(&api_id))
+        .header("x-api-key", &key_value)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(first.status(), 200);
+
+    let second = http
+        .get(format!("{}/prod/items", server.endpoint()))
+        .header("host", execute_api_host(&api_id))
+        .header("x-api-key", &key_value)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(second.status(), 429);
+}
