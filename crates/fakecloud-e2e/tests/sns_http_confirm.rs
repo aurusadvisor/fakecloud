@@ -1,0 +1,248 @@
+//! End-to-end coverage for SNS HTTP/HTTPS subscription confirmation.
+//!
+//! Real AWS POSTs a SubscriptionConfirmation envelope to the subscriber
+//! endpoint when an HTTP/HTTPS subscription is created. The subscriber
+//! is then expected to call `ConfirmSubscription` with the embedded
+//! Token before any notifications fan out. These tests spin up a tiny
+//! TCP server, subscribe it to a topic, capture the inbound POST, and
+//! drive the round-trip end-to-end.
+
+mod helpers;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use helpers::TestServer;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::Mutex;
+
+/// Inbound HTTP request captured by `MockSubscriber`. Stores the raw
+/// bytes; tests parse out headers and body as needed.
+#[derive(Clone, Debug)]
+struct CapturedRequest {
+    raw: String,
+}
+
+impl CapturedRequest {
+    fn header(&self, name: &str) -> Option<String> {
+        let lower = name.to_ascii_lowercase();
+        for line in self.raw.lines().skip(1) {
+            if line.is_empty() {
+                break;
+            }
+            if let Some((k, v)) = line.split_once(':') {
+                if k.trim().to_ascii_lowercase() == lower {
+                    return Some(v.trim().to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn body(&self) -> &str {
+        self.raw
+            .split_once("\r\n\r\n")
+            .map(|(_, b)| b)
+            .unwrap_or("")
+    }
+}
+
+/// Tiny HTTP server that records every inbound request and replies
+/// 200 OK. Stays alive for the duration of the test via `tokio::spawn`.
+struct MockSubscriber {
+    url: String,
+    received: Arc<Mutex<Vec<CapturedRequest>>>,
+}
+
+impl MockSubscriber {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/sns-hook");
+        let received: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let received_for_task = received.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let received = received_for_task.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16 * 1024];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+                    received.lock().await.push(CapturedRequest { raw });
+                    let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        Self { url, received }
+    }
+
+    /// Wait up to `timeout` for at least `n` requests to arrive.
+    async fn wait_for(&self, n: usize, timeout: Duration) -> Vec<CapturedRequest> {
+        let start = std::time::Instant::now();
+        loop {
+            {
+                let guard = self.received.lock().await;
+                if guard.len() >= n {
+                    return guard.clone();
+                }
+            }
+            if start.elapsed() > timeout {
+                let guard = self.received.lock().await;
+                panic!("timed out waiting for {n} requests; got {}", guard.len());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn sns_http_subscribe_posts_confirmation_envelope_and_publish_routes_after_confirm() {
+    let server = TestServer::start().await;
+    let sns = server.sns_client().await;
+    let subscriber = MockSubscriber::start().await;
+
+    let topic = sns
+        .create_topic()
+        .name("http-confirm-e2e")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    // Subscribe with HTTP — fakecloud should POST a
+    // SubscriptionConfirmation envelope to the endpoint asynchronously.
+    let sub = sns
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("http")
+        .endpoint(&subscriber.url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sub.subscription_arn().unwrap(), "pending confirmation");
+
+    // Wait for the confirmation POST.
+    let requests = subscriber.wait_for(1, Duration::from_secs(5)).await;
+    let confirmation = &requests[0];
+
+    // Headers must match AWS conventions.
+    assert_eq!(
+        confirmation.header("x-amz-sns-message-type").as_deref(),
+        Some("SubscriptionConfirmation")
+    );
+    assert_eq!(
+        confirmation.header("x-amz-sns-topic-arn").as_deref(),
+        Some(topic_arn.as_str())
+    );
+    assert_eq!(
+        confirmation.header("content-type").as_deref(),
+        Some("text/plain; charset=UTF-8")
+    );
+
+    // Body shape — JSON with the standard SNS confirmation fields.
+    let body: serde_json::Value =
+        serde_json::from_str(confirmation.body()).expect("confirmation body is JSON");
+    assert_eq!(body["Type"], "SubscriptionConfirmation");
+    assert_eq!(body["TopicArn"], topic_arn);
+    assert!(body["Message"]
+        .as_str()
+        .unwrap()
+        .contains("You have chosen to subscribe"));
+    let token = body["Token"].as_str().expect("Token present").to_string();
+    assert_eq!(token.len(), 256, "token should be 256 chars");
+    assert!(token.chars().all(|c| c.is_ascii_alphanumeric()));
+    assert!(body["MessageId"].is_string());
+    assert!(body["Timestamp"].is_string());
+    assert_eq!(body["SignatureVersion"], "1");
+    let subscribe_url = body["SubscribeURL"].as_str().unwrap();
+    assert!(subscribe_url.contains("Action=ConfirmSubscription"));
+    assert!(subscribe_url.contains(&token));
+
+    // Publish before confirmation — endpoint must NOT receive it.
+    sns.publish()
+        .topic_arn(&topic_arn)
+        .message("blocked")
+        .send()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        subscriber.received.lock().await.len(),
+        1,
+        "publish before confirmation must not fan out"
+    );
+
+    // Confirm with the issued token.
+    let confirmed = sns
+        .confirm_subscription()
+        .topic_arn(&topic_arn)
+        .token(&token)
+        .send()
+        .await
+        .unwrap();
+    let confirmed_arn = confirmed.subscription_arn().unwrap();
+    assert!(
+        confirmed_arn.starts_with(&topic_arn),
+        "confirmation should return the real subscription ARN, got {confirmed_arn}"
+    );
+
+    // Now publish — the endpoint should receive a Notification POST.
+    sns.publish()
+        .topic_arn(&topic_arn)
+        .message("after-confirm")
+        .send()
+        .await
+        .unwrap();
+    let requests = subscriber.wait_for(2, Duration::from_secs(5)).await;
+    let notification = &requests[1];
+    assert_eq!(
+        notification.header("x-amz-sns-message-type").as_deref(),
+        Some("Notification")
+    );
+    let n_body: serde_json::Value =
+        serde_json::from_str(notification.body()).expect("notification body is JSON");
+    assert_eq!(n_body["Type"], "Notification");
+    assert_eq!(n_body["TopicArn"], topic_arn);
+    assert_eq!(n_body["Message"], "after-confirm");
+}
+
+#[tokio::test]
+async fn sns_http_confirm_rejects_bad_token() {
+    let server = TestServer::start().await;
+    let sns = server.sns_client().await;
+    let subscriber = MockSubscriber::start().await;
+
+    let topic = sns
+        .create_topic()
+        .name("bad-token-e2e")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    sns.subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("http")
+        .endpoint(&subscriber.url)
+        .send()
+        .await
+        .unwrap();
+
+    let err = sns
+        .confirm_subscription()
+        .topic_arn(&topic_arn)
+        .token("not-a-real-token")
+        .send()
+        .await
+        .expect_err("bad token must reject");
+    let dbg = format!("{err:?}");
+    assert!(
+        dbg.contains("InvalidParameter") || dbg.contains("Invalid token"),
+        "expected InvalidParameter, got {dbg}"
+    );
+}

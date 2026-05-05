@@ -848,12 +848,18 @@ impl SnsService {
             "pending confirmation".to_string()
         };
 
-        // Generate a confirmation token for pending subscriptions
+        // Generate a confirmation token for pending subscriptions. AWS
+        // issues a 256-character opaque token; matching the length keeps
+        // clients that validate it happy.
         let confirmation_token = if !confirmed {
-            Some(uuid::Uuid::new_v4().to_string())
+            Some(self::helpers::generate_confirmation_token())
         } else {
             None
         };
+        // Snapshot the server endpoint while we still hold the lock so
+        // the spawned POST can build a SubscribeURL pointing at *this*
+        // fakecloud instance, not the public AWS endpoint.
+        let server_endpoint = state.endpoint.clone();
 
         let sub = SnsSubscription {
             subscription_arn: sub_arn.clone(),
@@ -883,14 +889,22 @@ impl SnsService {
             } else if let Some(token) = confirmation_token {
                 let endpoint_url = endpoint.clone();
                 let topic = topic_arn.clone();
+                let sub_arn_for_header = sub_arn.clone();
+                let server_url = server_endpoint.clone();
                 tokio::spawn(async move {
-                    let body = build_subscription_confirmation_envelope(&topic, &token);
+                    let body =
+                        build_subscription_confirmation_envelope(&topic, &token, &server_url);
                     let client = reqwest::Client::new();
                     let result = client
                         .post(&endpoint_url)
-                        .header("Content-Type", "application/json")
+                        // AWS sends SNS notifications with text/plain content
+                        // type even though the body is JSON. Subscriber SDKs
+                        // (e.g. notification handlers) match on this exactly.
+                        .header("Content-Type", "text/plain; charset=UTF-8")
                         .header("x-amz-sns-message-type", "SubscriptionConfirmation")
                         .header("x-amz-sns-topic-arn", &topic)
+                        .header("x-amz-sns-subscription-arn", &sub_arn_for_header)
+                        .header("User-Agent", "Amazon Simple Notification Service Agent")
                         .body(body)
                         .send()
                         .await;
@@ -939,10 +953,13 @@ impl SnsService {
             })
             .map(|s| s.subscription_arn.clone())
             .ok_or_else(|| {
+                // AWS returns InvalidParameterException for unknown or
+                // expired confirmation tokens; matching the wire format
+                // lets client SDKs surface the right error type.
                 AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "NotFound",
-                    format!("No pending subscription found for token: {token}"),
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameter",
+                    format!("Invalid token: {token}"),
                 )
             })?;
 
