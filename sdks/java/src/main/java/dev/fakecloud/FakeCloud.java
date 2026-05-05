@@ -607,5 +607,24 @@ public final class FakeCloud {
                     "/_fakecloud/acm/certificates/" + encodePath(id) + "/status",
                     new SetCertificateStatusRequest(status, reason));
         }
+
+        /**
+         * Approve a {@code PENDING_VALIDATION} certificate. Synchronous
+         * equivalent of "the user clicked the validation link in the
+         * email" — flips the cert to {@code ISSUED} and refreshes its
+         * renewal eligibility / RenewalSummary. EMAIL-validated certs
+         * do not auto-issue, so tests drive their issuance through this
+         * endpoint. {@code arnOrId} accepts either the full ACM ARN or
+         * the trailing UUID portion.
+         */
+        public void approveCertificate(String arnOrId) {
+            String id = arnOrId;
+            int idx = arnOrId.lastIndexOf("certificate/");
+            if (idx >= 0) {
+                id = arnOrId.substring(idx + "certificate/".length());
+            }
+            http.postNoContent(
+                    "/_fakecloud/acm/certificates/" + encodePath(id) + "/approve");
+        }
     }
 }

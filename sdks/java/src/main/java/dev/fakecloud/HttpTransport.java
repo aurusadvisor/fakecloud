@@ -77,6 +77,22 @@ final class HttpTransport {
         return status;
     }
 
+    /**
+     * POST with no body where the server replies with no content (204) on
+     * success. Used by admin endpoints that take their input entirely from
+     * the URL path (e.g. {@code /acm/certificates/{id}/approve}).
+     */
+    int postNoContent(String path) {
+        HttpRequest.Builder req =
+                HttpRequest.newBuilder(uri(path)).POST(HttpRequest.BodyPublishers.noBody());
+        HttpResponse<byte[]> resp = execute(req);
+        int status = resp.statusCode();
+        if (status < 200 || status >= 300) {
+            throw new FakeCloudError(status, new String(resp.body(), StandardCharsets.UTF_8));
+        }
+        return status;
+    }
+
     <T> T postText(String path, String body, Class<T> type) {
         HttpRequest.Builder req = HttpRequest.newBuilder(uri(path))
                 .header("Content-Type", "text/plain")

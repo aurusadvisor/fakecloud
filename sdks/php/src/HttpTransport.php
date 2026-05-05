@@ -59,6 +59,20 @@ final class HttpTransport
         return $response['status'];
     }
 
+    /**
+     * POST with no body where the server replies with no content (204) on
+     * success. Used by admin endpoints whose input lives entirely in the
+     * URL path (e.g. /acm/certificates/{id}/approve).
+     */
+    public function postNoContent(string $path): int
+    {
+        $response = $this->execute('POST', $path);
+        if ($response['status'] < 200 || $response['status'] >= 300) {
+            throw new FakeCloudError($response['status'], $response['body']);
+        }
+        return $response['status'];
+    }
+
     public function postText(string $path, string $body): array
     {
         return $this->send('POST', $path, $body, 'text/plain');

@@ -767,4 +767,25 @@ export class AcmClient {
       throw new FakeCloudError(resp.status, body);
     }
   }
+
+  /**
+   * Approve a `PENDING_VALIDATION` certificate. Synchronous equivalent
+   * of "the user clicked the validation link in the email" — flips the
+   * cert to `ISSUED` and refreshes its renewal eligibility /
+   * RenewalSummary. EMAIL-validated certs do not auto-issue, so tests
+   * drive their issuance through this endpoint.
+   */
+  async approveCertificate(arnOrId: string): Promise<void> {
+    const idx = arnOrId.lastIndexOf("certificate/");
+    const id =
+      idx >= 0 ? arnOrId.substring(idx + "certificate/".length) : arnOrId;
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/acm/certificates/${encodeURIComponent(id)}/approve`,
+      { method: "POST" },
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new FakeCloudError(resp.status, body);
+    }
+  }
 }

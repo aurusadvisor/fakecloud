@@ -457,6 +457,20 @@ class AcmClient:
         )
         _check(resp)
 
+    async def approve_certificate(self, arn_or_id: str) -> None:
+        """Approve a ``PENDING_VALIDATION`` certificate.
+
+        Synchronous equivalent of "the user clicked the approval link in
+        the validation email" — flips the cert to ``ISSUED`` and
+        refreshes its renewal eligibility / RenewalSummary. Used to
+        drive the EMAIL validation flow in tests, where the auto-issue
+        tick intentionally doesn't fire.
+        """
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/acm/certificates/{_acm_id(arn_or_id)}/approve",
+        )
+        _check(resp)
+
 
 class _SyncAcmClient:
     """Sync ACM admin client."""
@@ -477,6 +491,12 @@ class _SyncAcmClient:
         resp = self._client.post(
             f"{self._base}/_fakecloud/acm/certificates/{_acm_id(arn_or_id)}/status",
             json=body,
+        )
+        _check(resp)
+
+    def approve_certificate(self, arn_or_id: str) -> None:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/acm/certificates/{_acm_id(arn_or_id)}/approve",
         )
         _check(resp)
 

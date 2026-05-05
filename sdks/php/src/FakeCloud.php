@@ -635,4 +635,21 @@ final class AcmClient
             $body
         );
     }
+
+    /**
+     * Approve a PENDING_VALIDATION certificate. Synchronous equivalent
+     * of "the user clicked the validation link in the email" — flips
+     * the cert to ISSUED and refreshes its renewal eligibility /
+     * RenewalSummary. EMAIL-validated certs do not auto-issue, so
+     * tests drive their issuance through this endpoint. $arnOrId
+     * accepts the full ACM ARN or just the trailing UUID.
+     */
+    public function approveCertificate(string $arnOrId): void
+    {
+        $idx = strrpos($arnOrId, 'certificate/');
+        $id = $idx === false ? $arnOrId : substr($arnOrId, $idx + strlen('certificate/'));
+        $this->http->postNoContent(
+            '/_fakecloud/acm/certificates/' . HttpTransport::encodePath($id) . '/approve'
+        );
+    }
 }
