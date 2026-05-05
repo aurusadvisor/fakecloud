@@ -2559,6 +2559,8 @@ async fn test_duplicate_custom_verification_template() {
 #[tokio::test]
 async fn test_send_custom_verification_email() {
     let state = make_state();
+    // Seed verified sender so the verified-identity gate lets the send through.
+    seed_identity(&state, "a@b.com");
     let svc = SesV2Service::new(state.clone());
 
     // Create template first
@@ -2587,11 +2589,80 @@ async fn test_send_custom_verification_email() {
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert!(body["MessageId"].as_str().is_some());
 
-    // Verify stored in sent_emails
+    // Verify stored in sent_emails with the resolved sender on the record.
     let _mas_r = state.read();
     let s = _mas_r.default_ref();
     assert_eq!(s.sent_emails.len(), 1);
     assert_eq!(s.sent_emails[0].to, vec!["user@example.com"]);
+    assert_eq!(s.sent_emails[0].from, "a@b.com");
+}
+
+#[tokio::test]
+async fn test_send_custom_verification_email_unverified_sender() {
+    let state = make_state();
+    let svc = SesV2Service::new(state);
+
+    // Template's FromEmailAddress has no matching verified identity.
+    let req = make_request(
+        Method::POST,
+        "/v2/email/custom-verification-email-templates",
+        r#"{
+            "TemplateName": "verify",
+            "FromEmailAddress": "unverified@nowhere.com",
+            "TemplateSubject": "Verify",
+            "TemplateContent": "content",
+            "SuccessRedirectionURL": "https://ok",
+            "FailureRedirectionURL": "https://fail"
+        }"#,
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-custom-verification-emails",
+        r#"{"EmailAddress": "user@example.com", "TemplateName": "verify"}"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["__type"].as_str(),
+        Some("MailFromDomainNotVerifiedException")
+    );
+}
+
+#[tokio::test]
+async fn test_send_custom_verification_email_domain_verified_sender() {
+    let state = make_state();
+    // Verifying the domain implicitly verifies all addresses on it.
+    seed_identity(&state, "example.com");
+    let svc = SesV2Service::new(state.clone());
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/custom-verification-email-templates",
+        r#"{
+            "TemplateName": "verify",
+            "FromEmailAddress": "noreply@example.com",
+            "TemplateSubject": "Verify",
+            "TemplateContent": "content",
+            "SuccessRedirectionURL": "https://ok",
+            "FailureRedirectionURL": "https://fail"
+        }"#,
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(
+        Method::POST,
+        "/v2/email/outbound-custom-verification-emails",
+        r#"{"EmailAddress": "user@example.com", "TemplateName": "verify"}"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let _mas_r = state.read();
+    let s = _mas_r.default_ref();
+    assert_eq!(s.sent_emails.len(), 1);
+    assert_eq!(s.sent_emails[0].from, "noreply@example.com");
 }
 
 #[tokio::test]

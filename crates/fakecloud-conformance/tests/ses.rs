@@ -1108,6 +1108,16 @@ async fn ses_custom_verification_email_templates() {
     let server = TestServer::start().await;
     let client = server.sesv2_client().await;
 
+    // Verify the template's from-domain so SendCustomVerificationEmail
+    // passes the verified-identity gate (real SES otherwise rejects with
+    // `MailFromDomainNotVerifiedException`).
+    client
+        .create_email_identity()
+        .email_identity("example.com")
+        .send()
+        .await
+        .unwrap();
+
     // Create
     client
         .create_custom_verification_email_template()
