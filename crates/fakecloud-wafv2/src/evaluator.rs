@@ -716,6 +716,15 @@ fn field_size(field: Option<&Value>, req: &WafRequest, xforms: Option<&Value>) -
         .unwrap_or(0)
 }
 
+/// Result of resolving the aggregation key for a rate-based rule.
+/// `Key` carries the actual aggregate key value; `Fallback(b)` means the
+/// configured input (typically a `FORWARDED_IP` header) was missing or
+/// malformed and the caller should honor the rule's `FallbackBehavior`.
+enum AggregateKey {
+    Key(String),
+    Fallback(bool),
+}
+
 fn eval_rate_based(stmt: &Value, ctx: &StmtCtx) -> bool {
     // No limiter -> we cannot count, treat as non-match. Callers that need
     // rate limiting use `evaluate_web_acl`.
@@ -742,48 +751,69 @@ fn eval_rate_based(stmt: &Value, ctx: &StmtCtx) -> bool {
         .get("AggregateKeyType")
         .and_then(Value::as_str)
         .unwrap_or("IP");
-    let Some(agg_key) = rate_aggregate_key(agg, ctx.req, stmt) else {
-        return false;
+    let agg_key = match rate_aggregate_key(agg, ctx.req, stmt) {
+        AggregateKey::Key(k) => k,
+        // Per AWS docs: when the configured source (FORWARDED_IP header)
+        // is missing or contains a malformed IP, `FallbackBehavior=MATCH`
+        // counts the request as a match and `NO_MATCH` skips the rule.
+        // The aggregation key resolution short-circuits to the boolean.
+        AggregateKey::Fallback(b) => return b,
     };
     let count = limiter.record(&ctx.rule_id, &agg_key, window, ctx.now_epoch_secs);
     count > limit
 }
 
-fn rate_aggregate_key(agg: &str, req: &WafRequest, stmt: &Value) -> Option<String> {
+fn rate_aggregate_key(agg: &str, req: &WafRequest, stmt: &Value) -> AggregateKey {
     match agg {
-        "IP" => Some(req.source_ip.to_string()),
+        "IP" => AggregateKey::Key(req.source_ip.to_string()),
         "FORWARDED_IP" => {
-            let header_name = stmt
-                .get("ForwardedIPConfig")
+            let cfg = stmt.get("ForwardedIPConfig");
+            let header_name = cfg
                 .and_then(|c| c.get("HeaderName"))
                 .and_then(Value::as_str)
                 .unwrap_or("X-Forwarded-For");
-            req.headers
+            let fallback_match = cfg
+                .and_then(|c| c.get("FallbackBehavior"))
+                .and_then(Value::as_str)
+                .map(|b| b.eq_ignore_ascii_case("MATCH"))
+                .unwrap_or(false);
+            let raw = req
+                .headers
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(header_name))
                 .map(|(_, v)| {
                     // X-Forwarded-For is a comma-separated chain; the
                     // client-asserted client IP is the leftmost entry.
                     v.split(',').next().unwrap_or(v).trim().to_string()
-                })
+                });
+            match raw {
+                None => AggregateKey::Fallback(fallback_match),
+                Some(v) if v.parse::<std::net::IpAddr>().is_err() => {
+                    AggregateKey::Fallback(fallback_match)
+                }
+                Some(v) => AggregateKey::Key(v),
+            }
         }
-        "CONSTANT" => Some("__constant__".to_string()),
-        // CUSTOM_KEYS would aggregate on user-defined keys; stub on the
-        // first key value for W1 rather than no-match (so basic config
-        // still rate-limits *something*).
+        "CONSTANT" => AggregateKey::Key("__constant__".to_string()),
+        // CUSTOM_KEYS aggregates on user-defined fields. We join all
+        // resolvable key values into a single bucket id; if none of the
+        // configured keys can be resolved, fall through to non-match
+        // (CustomKeys has no `FallbackBehavior` knob — AWS just skips).
         "CUSTOM_KEYS" => {
-            let arr = stmt.get("CustomKeys").and_then(Value::as_array)?;
+            let Some(arr) = stmt.get("CustomKeys").and_then(Value::as_array) else {
+                return AggregateKey::Fallback(false);
+            };
             let parts: Vec<String> = arr
                 .iter()
                 .filter_map(|k| custom_key_value(k, req))
                 .collect();
             if parts.is_empty() {
-                None
+                AggregateKey::Fallback(false)
             } else {
-                Some(parts.join("|"))
+                AggregateKey::Key(parts.join("|"))
             }
         }
-        _ => None,
+        _ => AggregateKey::Fallback(false),
     }
 }
 
@@ -1600,6 +1630,138 @@ mod tests {
         assert_eq!(
             evaluate_web_acl(&acl, &b, &HashMap::new(), &HashMap::new(), &limiter, now).action,
             WafAction::Block
+        );
+    }
+
+    #[test]
+    fn rate_based_forwarded_ip_missing_header_no_match_default() {
+        // No FallbackBehavior configured -> defaults to NO_MATCH so the
+        // rule does not fire when the header is missing.
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "rate",
+                "Priority": 0,
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"RateBasedStatement": {
+                    "Limit": 1,
+                    "AggregateKeyType": "FORWARDED_IP",
+                    "EvaluationWindowSec": 60,
+                    "ForwardedIPConfig": {"HeaderName": "X-Forwarded-For"},
+                }},
+            })],
+        );
+        let limiter = RateLimiter::new();
+        // No XFF header on the request.
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            0,
+        );
+        assert_eq!(
+            v.action,
+            WafAction::Allow,
+            "missing XFF defaults to NO_MATCH"
+        );
+    }
+
+    #[test]
+    fn rate_based_forwarded_ip_missing_header_with_match_fallback_blocks() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "rate",
+                "Priority": 0,
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"RateBasedStatement": {
+                    "Limit": 1,
+                    "AggregateKeyType": "FORWARDED_IP",
+                    "EvaluationWindowSec": 60,
+                    "ForwardedIPConfig": {
+                        "HeaderName": "X-Forwarded-For",
+                        "FallbackBehavior": "MATCH"
+                    },
+                }},
+            })],
+        );
+        let limiter = RateLimiter::new();
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            0,
+        );
+        assert_eq!(
+            v.action,
+            WafAction::Block,
+            "missing XFF with FallbackBehavior=MATCH blocks regardless of count"
+        );
+    }
+
+    #[test]
+    fn rate_based_forwarded_ip_malformed_value_uses_fallback_not_counter() {
+        // Without the malformed-IP fallback fix, a request whose XFF header
+        // is garbage would still rate-limit on the garbage string. With the
+        // fix, FallbackBehavior=NO_MATCH skips and FallbackBehavior=MATCH
+        // blocks unconditionally.
+        let mk_acl = |fb: &str| {
+            make_acl(
+                json!({"Allow": {}}),
+                vec![json!({
+                    "Name": "rate",
+                    "Priority": 0,
+                    "Action": {"Block": {}},
+                    "VisibilityConfig": {},
+                    "Statement": {"RateBasedStatement": {
+                        "Limit": 1000,
+                        "AggregateKeyType": "FORWARDED_IP",
+                        "EvaluationWindowSec": 60,
+                        "ForwardedIPConfig": {
+                            "HeaderName": "X-Forwarded-For",
+                            "FallbackBehavior": fb,
+                        },
+                    }},
+                })],
+            )
+        };
+        let limiter = RateLimiter::new();
+        let headers = vec![("X-Forwarded-For".to_string(), "not-an-ip".to_string())];
+        let r = WafRequest {
+            method: "GET",
+            uri: "/",
+            headers: &headers,
+            body: b"",
+            query: "",
+            source_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            country: None,
+            body_size_bytes: 0,
+        };
+        let acl_no = mk_acl("NO_MATCH");
+        assert_eq!(
+            evaluate_web_acl(&acl_no, &r, &HashMap::new(), &HashMap::new(), &limiter, 0).action,
+            WafAction::Allow,
+            "malformed XFF + NO_MATCH falls through"
+        );
+        let acl_match = mk_acl("MATCH");
+        assert_eq!(
+            evaluate_web_acl(
+                &acl_match,
+                &r,
+                &HashMap::new(),
+                &HashMap::new(),
+                &limiter,
+                0
+            )
+            .action,
+            WafAction::Block,
+            "malformed XFF + MATCH blocks even though limit is 1000"
         );
     }
 
