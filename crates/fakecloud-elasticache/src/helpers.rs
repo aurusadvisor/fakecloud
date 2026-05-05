@@ -717,6 +717,16 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
         .as_ref()
         .map(|n| format!("<IpDiscovery>{}</IpDiscovery>", xml_escape(n)))
         .unwrap_or_default();
+    let transit_encryption_mode_xml = cluster
+        .transit_encryption_mode
+        .as_ref()
+        .map(|m| {
+            format!(
+                "<TransitEncryptionMode>{}</TransitEncryptionMode>",
+                xml_escape(m)
+            )
+        })
+        .unwrap_or_default();
     let notification_topic_xml = cluster
         .notification_topic_arn
         .as_ref()
@@ -801,6 +811,7 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
          {preferred_outpost_arn_xml}\
          {network_type_xml}\
          {ip_discovery_xml}\
+         {transit_encryption_mode_xml}\
          <TransitEncryptionEnabled>{}</TransitEncryptionEnabled>\
          <AtRestEncryptionEnabled>{}</AtRestEncryptionEnabled>\
          <AuthTokenEnabled>{}</AuthTokenEnabled>\
@@ -1574,6 +1585,11 @@ mod cluster_xml_tests {
             ip_discovery: None,
             az_mode: None,
             auth_token: None,
+            kms_key_id: None,
+            transit_encryption_mode: None,
+            data_tiering_enabled: None,
+            cluster_mode: None,
+            preferred_outpost_arns: Vec::new(),
         }
     }
 

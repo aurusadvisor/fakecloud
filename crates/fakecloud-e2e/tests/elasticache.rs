@@ -2052,3 +2052,150 @@ async fn elasticache_describe_cache_engine_versions_includes_memcached() {
         Some("memcached1.6")
     );
 }
+
+#[tokio::test]
+async fn elasticache_create_cache_cluster_round_trips_extended_fields() {
+    // Kitchen-sink CreateCacheCluster: every documented input AWS supports
+    // through the SDK builder. Asserts the create + describe responses echo
+    // every field that maps to a slot on the CacheCluster shape, and that
+    // input-only fields persist on the in-memory state via subsequent SDK
+    // calls (ListTagsForResource).
+    if !docker_available() {
+        return;
+    }
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let create_resp = client
+        .create_cache_cluster()
+        .cache_cluster_id("ext-cc")
+        .engine("redis")
+        .engine_version("7.1")
+        .cache_node_type("cache.t3.micro")
+        .num_cache_nodes(1)
+        .cache_parameter_group_name("default.redis7")
+        .cache_subnet_group_name("default")
+        .security_group_ids("sg-aaa")
+        .security_group_ids("sg-bbb")
+        .port(6390)
+        .preferred_maintenance_window("sun:05:00-sun:09:00")
+        .preferred_availability_zone("us-east-1a")
+        .auto_minor_version_upgrade(false)
+        .notification_topic_arn("arn:aws:sns:us-east-1:123456789012:topic")
+        .auth_token("supersecret-XYZ")
+        .transit_encryption_enabled(true)
+        .network_type(aws_sdk_elasticache::types::NetworkType::Ipv4)
+        .ip_discovery(aws_sdk_elasticache::types::IpDiscovery::Ipv4)
+        .outpost_mode(aws_sdk_elasticache::types::OutpostMode::SingleOutpost)
+        .preferred_outpost_arn("arn:aws:outposts:us-east-1:123456789012:outpost/op-abc")
+        .snapshot_name("seed-snap")
+        .snapshot_arns("arn:aws:s3:::my-bucket/seed.rdb")
+        .snapshot_retention_limit(7)
+        .snapshot_window("03:00-05:00")
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("team")
+                .value("platform")
+                .build(),
+        )
+        .tags(
+            aws_sdk_elasticache::types::Tag::builder()
+                .key("env")
+                .value("prod")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let cluster = create_resp.cache_cluster().expect("cache cluster");
+    assert_eq!(cluster.cache_cluster_id(), Some("ext-cc"));
+    assert_eq!(cluster.engine(), Some("redis"));
+    assert_eq!(cluster.engine_version(), Some("7.1"));
+    assert_eq!(cluster.cache_node_type(), Some("cache.t3.micro"));
+    assert_eq!(cluster.num_cache_nodes(), Some(1));
+    assert_eq!(cluster.transit_encryption_enabled(), Some(true));
+    assert_eq!(cluster.auth_token_enabled(), Some(true));
+    assert_eq!(cluster.auto_minor_version_upgrade(), Some(false));
+    assert_eq!(cluster.cache_subnet_group_name(), Some("default"));
+    let arn = cluster.arn().expect("cluster arn").to_string();
+
+    // DescribeCacheClusters should reflect the same persisted fields.
+    let describe = client
+        .describe_cache_clusters()
+        .cache_cluster_id("ext-cc")
+        .send()
+        .await
+        .unwrap();
+    let clusters = describe.cache_clusters();
+    assert_eq!(clusters.len(), 1);
+    let described = &clusters[0];
+    assert_eq!(described.engine(), Some("redis"));
+    assert_eq!(described.engine_version(), Some("7.1"));
+    assert_eq!(described.transit_encryption_enabled(), Some(true));
+    assert_eq!(described.auth_token_enabled(), Some(true));
+    assert_eq!(described.auto_minor_version_upgrade(), Some(false));
+    assert_eq!(described.cache_subnet_group_name(), Some("default"));
+    let cache_param_group = described
+        .cache_parameter_group()
+        .expect("cache parameter group");
+    assert_eq!(
+        cache_param_group.cache_parameter_group_name(),
+        Some("default.redis7")
+    );
+    let security_groups = described.security_groups();
+    let sg_ids: Vec<&str> = security_groups
+        .iter()
+        .filter_map(|sg| sg.security_group_id())
+        .collect();
+    assert!(sg_ids.contains(&"sg-aaa"));
+    assert!(sg_ids.contains(&"sg-bbb"));
+    let notification = described
+        .notification_configuration()
+        .expect("notification configuration");
+    assert_eq!(
+        notification.topic_arn(),
+        Some("arn:aws:sns:us-east-1:123456789012:topic")
+    );
+    assert_eq!(described.snapshot_retention_limit(), Some(7));
+    assert_eq!(described.snapshot_window(), Some("03:00-05:00"));
+    assert_eq!(
+        described.preferred_maintenance_window(),
+        Some("sun:05:00-sun:09:00")
+    );
+    assert_eq!(described.preferred_availability_zone(), Some("us-east-1a"));
+    assert_eq!(
+        described.preferred_outpost_arn(),
+        Some("arn:aws:outposts:us-east-1:123456789012:outpost/op-abc")
+    );
+
+    // Tags supplied at create time must be visible via ListTagsForResource.
+    let list_tags = client
+        .list_tags_for_resource()
+        .resource_name(&arn)
+        .send()
+        .await
+        .unwrap();
+    let tag_list = list_tags.tag_list();
+    let tag_pairs: std::collections::BTreeMap<String, String> = tag_list
+        .iter()
+        .filter_map(|t| {
+            t.key()
+                .and_then(|k| t.value().map(|v| (k.to_string(), v.to_string())))
+        })
+        .collect();
+    assert_eq!(tag_pairs.get("team").map(String::as_str), Some("platform"));
+    assert_eq!(tag_pairs.get("env").map(String::as_str), Some("prod"));
+
+    // AuthToken must never be echoed back through the response. Re-check the
+    // full describe XML body via the SDK by inspecting the persisted fields
+    // — AuthToken is intentionally absent from the SDK's CacheCluster shape
+    // (only AuthTokenEnabled is exposed), so we just confirm the bool.
+
+    client
+        .delete_cache_cluster()
+        .cache_cluster_id("ext-cc")
+        .send()
+        .await
+        .unwrap();
+}

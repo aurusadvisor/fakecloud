@@ -8151,6 +8151,11 @@ impl ResourceProvisioner {
             ip_discovery,
             az_mode,
             auth_token,
+            kms_key_id: None,
+            transit_encryption_mode: None,
+            data_tiering_enabled: None,
+            cluster_mode: None,
+            preferred_outpost_arns: Vec::new(),
         };
         state.cache_clusters.insert(id.clone(), cluster);
         Ok(ProvisionResult::new(id.clone())

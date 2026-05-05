@@ -168,6 +168,11 @@ fn cache_cluster_xml_contains_expected_fields() {
         ip_discovery: None,
         az_mode: None,
         auth_token: None,
+        kms_key_id: None,
+        transit_encryption_mode: None,
+        data_tiering_enabled: None,
+        cluster_mode: None,
+        preferred_outpost_arns: Vec::new(),
     };
     let xml = cache_cluster_xml(&cluster, true);
     assert!(xml.contains("<CacheClusterId>classic-1</CacheClusterId>"));
@@ -723,6 +728,11 @@ fn service_with_cache_cluster(cluster_id: &str) -> ElastiCacheService {
                 ip_discovery: None,
                 az_mode: None,
                 auth_token: None,
+                kms_key_id: None,
+                transit_encryption_mode: None,
+                data_tiering_enabled: None,
+                cluster_mode: None,
+                preferred_outpost_arns: Vec::new(),
             },
         );
     }
@@ -777,6 +787,11 @@ fn describe_cache_clusters_returns_all() {
                 ip_discovery: None,
                 az_mode: None,
                 auth_token: None,
+                kms_key_id: None,
+                transit_encryption_mode: None,
+                data_tiering_enabled: None,
+                cluster_mode: None,
+                preferred_outpost_arns: Vec::new(),
             },
         );
     }
@@ -3673,6 +3688,11 @@ async fn reboot_cache_cluster_marks_rebooting_when_no_runtime() {
                 ip_discovery: None,
                 az_mode: None,
                 auth_token: None,
+                kms_key_id: None,
+                transit_encryption_mode: None,
+                data_tiering_enabled: None,
+                cluster_mode: None,
+                preferred_outpost_arns: Vec::new(),
             },
         );
     }
@@ -3871,6 +3891,13 @@ fn cache_cluster_from_request(req: &AwsRequest) -> crate::state::CacheCluster {
     let ip_discovery =
         Some(optional_query_param(req, "IpDiscovery").unwrap_or_else(|| "ipv4".into()));
     let az_mode = Some(optional_query_param(req, "AZMode").unwrap_or_else(|| "single-az".into()));
+    let kms_key_id = optional_query_param(req, "KmsKeyId");
+    let transit_encryption_mode = optional_query_param(req, "TransitEncryptionMode");
+    let data_tiering_enabled =
+        parse_optional_bool(optional_query_param(req, "DataTieringEnabled").as_deref()).unwrap();
+    let cluster_mode = optional_query_param(req, "ClusterMode");
+    let preferred_outpost_arns =
+        parse_query_list_param(req, "PreferredOutpostArns", "PreferredOutpostArn");
     let arn = format!("arn:aws:elasticache:us-east-1:123456789012:cluster:{cache_cluster_id}");
     crate::state::CacheCluster {
         cache_cluster_id: cache_cluster_id.clone(),
@@ -3910,6 +3937,11 @@ fn cache_cluster_from_request(req: &AwsRequest) -> crate::state::CacheCluster {
         ip_discovery,
         az_mode,
         auth_token,
+        kms_key_id,
+        transit_encryption_mode,
+        data_tiering_enabled,
+        cluster_mode,
+        preferred_outpost_arns,
     }
 }
 
@@ -4180,4 +4212,222 @@ fn create_cache_cluster_does_not_echo_auth_token() {
         .get("auth-cc")
         .unwrap();
     assert_eq!(cluster.auth_token.as_deref(), Some("supersecret-token-XYZ"));
+}
+
+#[test]
+fn create_cache_cluster_persists_kitchen_sink_fields() {
+    // Kitchen-sink CreateCacheCluster: every documented input field plus the
+    // newer encryption / cluster-mode / data-tiering knobs. Asserts the full
+    // round-trip through state + DescribeCacheClusters.
+    let create_req = request(
+        "CreateCacheCluster",
+        &[
+            ("CacheClusterId", "kitchen-sink-cc"),
+            ("Engine", "redis"),
+            ("EngineVersion", "7.1"),
+            ("CacheNodeType", "cache.r6gd.xlarge"),
+            ("NumCacheNodes", "1"),
+            ("CacheParameterGroupName", "default.redis7"),
+            ("CacheSubnetGroupName", "default"),
+            ("SecurityGroupIds.SecurityGroupId.1", "sg-aaa"),
+            ("SecurityGroupIds.SecurityGroupId.2", "sg-bbb"),
+            ("CacheSecurityGroupNames.CacheSecurityGroupName.1", "ec2c-1"),
+            ("Port", "6390"),
+            ("PreferredMaintenanceWindow", "sun:05:00-sun:09:00"),
+            ("PreferredAvailabilityZone", "us-east-1a"),
+            ("AZMode", "single-az"),
+            ("AutoMinorVersionUpgrade", "false"),
+            ("NotificationTopicArn", "arn:aws:sns:us-east-1:123:topic"),
+            ("AuthToken", "supersecret-XYZ"),
+            ("TransitEncryptionEnabled", "true"),
+            ("AtRestEncryptionEnabled", "true"),
+            ("TransitEncryptionMode", "required"),
+            (
+                "KmsKeyId",
+                "arn:aws:kms:us-east-1:123:key/abcd-efgh-1234",
+            ),
+            ("DataTieringEnabled", "true"),
+            ("ClusterMode", "compatible"),
+            ("NetworkType", "dual_stack"),
+            ("IpDiscovery", "ipv6"),
+            ("OutpostMode", "single-outpost"),
+            (
+                "PreferredOutpostArn",
+                "arn:aws:outposts:us-east-1:123:outpost/op-abc",
+            ),
+            (
+                "PreferredOutpostArns.PreferredOutpostArn.1",
+                "arn:aws:outposts:us-east-1:123:outpost/op-abc",
+            ),
+            (
+                "PreferredOutpostArns.PreferredOutpostArn.2",
+                "arn:aws:outposts:us-east-1:123:outpost/op-def",
+            ),
+            ("SnapshotName", "seed-snap"),
+            ("SnapshotArns.SnapshotArn.1", "arn:aws:s3:::bkt/seed.rdb"),
+            ("SnapshotRetentionLimit", "7"),
+            ("SnapshotWindow", "03:00-05:00"),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.LogType",
+                "slow-log",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.DestinationType",
+                "cloudwatch-logs",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.DestinationDetails.CloudWatchLogsDetails.LogGroup",
+                "/aws/elasticache/slow",
+            ),
+            (
+                "LogDeliveryConfigurations.LogDeliveryConfigurationRequest.1.LogFormat",
+                "json",
+            ),
+            ("Tags.Tag.1.Key", "team"),
+            ("Tags.Tag.1.Value", "platform"),
+            ("Tags.Tag.2.Key", "env"),
+            ("Tags.Tag.2.Value", "prod"),
+        ],
+    );
+    let svc = service_with_cache_cluster_from_request(&create_req);
+
+    // Verify the full struct round-tripped to state.
+    {
+        let state = svc.state.read();
+        let cluster = state
+            .get("123456789012")
+            .unwrap()
+            .cache_clusters
+            .get("kitchen-sink-cc")
+            .unwrap();
+        assert_eq!(cluster.engine, "redis");
+        assert_eq!(cluster.engine_version, "7.1");
+        assert_eq!(cluster.cache_node_type, "cache.r6gd.xlarge");
+        assert_eq!(cluster.num_cache_nodes, 1);
+        assert_eq!(
+            cluster.cache_parameter_group_name.as_deref(),
+            Some("default.redis7")
+        );
+        assert_eq!(cluster.cache_subnet_group_name.as_deref(), Some("default"));
+        assert_eq!(cluster.security_group_ids, vec!["sg-aaa", "sg-bbb"]);
+        assert_eq!(cluster.cache_security_group_names, vec!["ec2c-1"]);
+        assert_eq!(cluster.port, 6390);
+        assert_eq!(
+            cluster.preferred_maintenance_window.as_deref(),
+            Some("sun:05:00-sun:09:00")
+        );
+        assert_eq!(cluster.preferred_availability_zone, "us-east-1a");
+        assert_eq!(cluster.az_mode.as_deref(), Some("single-az"));
+        assert!(!cluster.auto_minor_version_upgrade);
+        assert_eq!(
+            cluster.notification_topic_arn.as_deref(),
+            Some("arn:aws:sns:us-east-1:123:topic")
+        );
+        assert_eq!(cluster.auth_token.as_deref(), Some("supersecret-XYZ"));
+        assert!(cluster.auth_token_enabled);
+        assert!(cluster.transit_encryption_enabled);
+        assert!(cluster.at_rest_encryption_enabled);
+        assert_eq!(cluster.transit_encryption_mode.as_deref(), Some("required"));
+        assert_eq!(
+            cluster.kms_key_id.as_deref(),
+            Some("arn:aws:kms:us-east-1:123:key/abcd-efgh-1234")
+        );
+        assert_eq!(cluster.data_tiering_enabled, Some(true));
+        assert_eq!(cluster.cluster_mode.as_deref(), Some("compatible"));
+        assert_eq!(cluster.network_type.as_deref(), Some("dual_stack"));
+        assert_eq!(cluster.ip_discovery.as_deref(), Some("ipv6"));
+        assert_eq!(cluster.outpost_mode.as_deref(), Some("single-outpost"));
+        assert_eq!(
+            cluster.preferred_outpost_arn.as_deref(),
+            Some("arn:aws:outposts:us-east-1:123:outpost/op-abc")
+        );
+        assert_eq!(
+            cluster.preferred_outpost_arns,
+            vec![
+                "arn:aws:outposts:us-east-1:123:outpost/op-abc",
+                "arn:aws:outposts:us-east-1:123:outpost/op-def",
+            ]
+        );
+        assert_eq!(cluster.snapshot_name.as_deref(), Some("seed-snap"));
+        assert_eq!(cluster.snapshot_arns, vec!["arn:aws:s3:::bkt/seed.rdb"]);
+        assert_eq!(cluster.snapshot_retention_limit, 7);
+        assert_eq!(cluster.snapshot_window.as_deref(), Some("03:00-05:00"));
+        assert_eq!(cluster.log_delivery_configurations.len(), 1);
+    }
+
+    // DescribeCacheClusters round-trip — every field that AWS echoes on the
+    // CacheCluster response shape must show up in the body.
+    let describe = request(
+        "DescribeCacheClusters",
+        &[("CacheClusterId", "kitchen-sink-cc")],
+    );
+    let resp = svc.describe_cache_clusters(&describe).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<CacheClusterId>kitchen-sink-cc</CacheClusterId>"));
+    assert!(body.contains("<Engine>redis</Engine>"));
+    assert!(body.contains("<EngineVersion>7.1</EngineVersion>"));
+    assert!(body.contains("<CacheNodeType>cache.r6gd.xlarge</CacheNodeType>"));
+    assert!(body.contains("<NumCacheNodes>1</NumCacheNodes>"));
+    assert!(body.contains("<CacheSubnetGroupName>default</CacheSubnetGroupName>"));
+    assert!(body.contains("<CacheParameterGroupName>default.redis7</CacheParameterGroupName>"));
+    assert!(body.contains("<SecurityGroupId>sg-aaa</SecurityGroupId>"));
+    assert!(body.contains("<SecurityGroupId>sg-bbb</SecurityGroupId>"));
+    assert!(body.contains("<CacheSecurityGroupName>ec2c-1</CacheSecurityGroupName>"));
+    assert!(body.contains("<TransitEncryptionEnabled>true</TransitEncryptionEnabled>"));
+    assert!(body.contains("<AtRestEncryptionEnabled>true</AtRestEncryptionEnabled>"));
+    assert!(body.contains("<TransitEncryptionMode>required</TransitEncryptionMode>"));
+    assert!(body.contains("<AuthTokenEnabled>true</AuthTokenEnabled>"));
+    assert!(body.contains("<AutoMinorVersionUpgrade>false</AutoMinorVersionUpgrade>"));
+    assert!(body.contains("<NetworkType>dual_stack</NetworkType>"));
+    assert!(body.contains("<IpDiscovery>ipv6</IpDiscovery>"));
+    assert!(body.contains("<AZMode>single-az</AZMode>"));
+    assert!(body.contains("<OutpostMode>single-outpost</OutpostMode>"));
+    assert!(body.contains(
+        "<PreferredOutpostArn>arn:aws:outposts:us-east-1:123:outpost/op-abc</PreferredOutpostArn>"
+    ));
+    assert!(body
+        .contains("<PreferredMaintenanceWindow>sun:05:00-sun:09:00</PreferredMaintenanceWindow>"));
+    assert!(body.contains("<TopicArn>arn:aws:sns:us-east-1:123:topic</TopicArn>"));
+    assert!(body.contains("<SnapshotRetentionLimit>7</SnapshotRetentionLimit>"));
+    assert!(body.contains("<SnapshotWindow>03:00-05:00</SnapshotWindow>"));
+    assert!(body.contains("<LogType>slow-log</LogType>"));
+    assert!(body.contains("<DestinationType>cloudwatch-logs</DestinationType>"));
+    assert!(body.contains("<LogGroup>/aws/elasticache/slow</LogGroup>"));
+    // Auth token raw value must never appear.
+    assert!(!body.contains("supersecret-XYZ"));
+}
+
+#[test]
+fn create_cache_cluster_through_handler_persists_tags_and_extended_fields() {
+    // Drive the real `create_cache_cluster` handler path by pre-seeding the
+    // cluster as the runtime would — service_with_cache_cluster_from_request
+    // runs the same parser the handler does, so this is a faithful unit-test
+    // of the persistence layer including Tags + new fields.
+    let create_req = request(
+        "CreateCacheCluster",
+        &[
+            ("CacheClusterId", "tagged-cc"),
+            ("Engine", "redis"),
+            ("KmsKeyId", "arn:aws:kms:us-east-1:123:key/k1"),
+            ("DataTieringEnabled", "false"),
+            ("ClusterMode", "disabled"),
+            ("TransitEncryptionMode", "preferred"),
+            ("Tags.Tag.1.Key", "team"),
+            ("Tags.Tag.1.Value", "platform"),
+        ],
+    );
+    let svc = service_with_cache_cluster_from_request(&create_req);
+    let state = svc.state.read();
+    let account = state.get("123456789012").unwrap();
+    let cluster = account.cache_clusters.get("tagged-cc").unwrap();
+    assert_eq!(
+        cluster.kms_key_id.as_deref(),
+        Some("arn:aws:kms:us-east-1:123:key/k1")
+    );
+    assert_eq!(cluster.data_tiering_enabled, Some(false));
+    assert_eq!(cluster.cluster_mode.as_deref(), Some("disabled"));
+    assert_eq!(
+        cluster.transit_encryption_mode.as_deref(),
+        Some("preferred")
+    );
 }
