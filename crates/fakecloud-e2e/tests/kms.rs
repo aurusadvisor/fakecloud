@@ -679,6 +679,190 @@ async fn kms_sign_verify_roundtrip() {
     assert!(verify_resp.signature_valid());
 }
 
+/// Proves G1 is real, not canned: ask KMS to Sign, fetch the published
+/// SubjectPublicKeyInfo via GetPublicKey, and verify the signature
+/// OUTSIDE fakecloud using the rsa crate directly. Covers all three
+/// PKCS1v15 hash sizes plus all three PSS hash sizes for an RSA_2048
+/// key, then repeats one combo on an RSA_3072 and RSA_4096 key to
+/// confirm keypair generation works at the larger sizes too.
+#[tokio::test]
+async fn kms_rsa_sign_verifies_outside_fakecloud() {
+    use rsa::pkcs1v15::{Signature as Pkcs1Signature, VerifyingKey as Pkcs1VerifyingKey};
+    use rsa::pkcs8::DecodePublicKey;
+    use rsa::pss::{Signature as PssSignature, VerifyingKey as PssVerifyingKey};
+    use rsa::sha2::{Sha256, Sha384, Sha512};
+    use rsa::signature::Verifier;
+    use rsa::RsaPublicKey;
+
+    let server = TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let pkcs1_algs = [
+        aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPkcs1V15Sha256,
+        aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPkcs1V15Sha384,
+        aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPkcs1V15Sha512,
+    ];
+    let pss_algs = [
+        aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPssSha256,
+        aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPssSha384,
+        aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPssSha512,
+    ];
+
+    for spec in [
+        aws_sdk_kms::types::KeySpec::Rsa2048,
+        aws_sdk_kms::types::KeySpec::Rsa3072,
+        aws_sdk_kms::types::KeySpec::Rsa4096,
+    ] {
+        let resp = client
+            .create_key()
+            .key_usage(aws_sdk_kms::types::KeyUsageType::SignVerify)
+            .key_spec(spec.clone())
+            .send()
+            .await
+            .unwrap();
+        let key_id = resp.key_metadata().unwrap().key_id().to_string();
+
+        // GetPublicKey must return parseable SubjectPublicKeyInfo DER.
+        let pk_resp = client
+            .get_public_key()
+            .key_id(&key_id)
+            .send()
+            .await
+            .unwrap();
+        let spki_der = pk_resp.public_key().unwrap().clone();
+        let public = RsaPublicKey::from_public_key_der(spki_der.as_ref())
+            .expect("GetPublicKey must return parseable SPKI DER");
+
+        let message = b"prove this signature is real RSA crypto";
+
+        // RSA_3072 / RSA_4096 only need one combo to prove keygen works
+        // at that size; we exhaustively cover all six algorithms on
+        // RSA_2048 below.
+        let pkcs1_subset: &[_] = if matches!(spec, aws_sdk_kms::types::KeySpec::Rsa2048) {
+            &pkcs1_algs[..]
+        } else {
+            &pkcs1_algs[..1]
+        };
+        let pss_subset: &[_] = if matches!(spec, aws_sdk_kms::types::KeySpec::Rsa2048) {
+            &pss_algs[..]
+        } else {
+            &pss_algs[..1]
+        };
+
+        for alg in pkcs1_subset {
+            let sig = client
+                .sign()
+                .key_id(&key_id)
+                .message(Blob::new(message.to_vec()))
+                .signing_algorithm(alg.clone())
+                .send()
+                .await
+                .unwrap()
+                .signature()
+                .unwrap()
+                .clone();
+            let sig_bytes = sig.as_ref();
+            let parsed = Pkcs1Signature::try_from(sig_bytes).unwrap();
+            let verified = match alg {
+                aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPkcs1V15Sha256 => {
+                    let vk: Pkcs1VerifyingKey<Sha256> = Pkcs1VerifyingKey::new(public.clone());
+                    vk.verify(message, &parsed).is_ok()
+                }
+                aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPkcs1V15Sha384 => {
+                    let vk: Pkcs1VerifyingKey<Sha384> = Pkcs1VerifyingKey::new(public.clone());
+                    vk.verify(message, &parsed).is_ok()
+                }
+                aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPkcs1V15Sha512 => {
+                    let vk: Pkcs1VerifyingKey<Sha512> = Pkcs1VerifyingKey::new(public.clone());
+                    vk.verify(message, &parsed).is_ok()
+                }
+                _ => unreachable!(),
+            };
+            assert!(
+                verified,
+                "external rsa crate must verify {alg:?} signature on {spec:?}"
+            );
+        }
+
+        for alg in pss_subset {
+            let sig = client
+                .sign()
+                .key_id(&key_id)
+                .message(Blob::new(message.to_vec()))
+                .signing_algorithm(alg.clone())
+                .send()
+                .await
+                .unwrap()
+                .signature()
+                .unwrap()
+                .clone();
+            let sig_bytes = sig.as_ref();
+            let parsed = PssSignature::try_from(sig_bytes).unwrap();
+            let verified = match alg {
+                aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPssSha256 => {
+                    let vk: PssVerifyingKey<Sha256> = PssVerifyingKey::new(public.clone());
+                    vk.verify(message, &parsed).is_ok()
+                }
+                aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPssSha384 => {
+                    let vk: PssVerifyingKey<Sha384> = PssVerifyingKey::new(public.clone());
+                    vk.verify(message, &parsed).is_ok()
+                }
+                aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPssSha512 => {
+                    let vk: PssVerifyingKey<Sha512> = PssVerifyingKey::new(public.clone());
+                    vk.verify(message, &parsed).is_ok()
+                }
+                _ => unreachable!(),
+            };
+            assert!(
+                verified,
+                "external rsa crate must verify {alg:?} signature on {spec:?}"
+            );
+        }
+
+        // Tampered message must NOT verify under the published key.
+        let sig = client
+            .sign()
+            .key_id(&key_id)
+            .message(Blob::new(message.to_vec()))
+            .signing_algorithm(aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPkcs1V15Sha256)
+            .send()
+            .await
+            .unwrap()
+            .signature()
+            .unwrap()
+            .clone();
+        let parsed = Pkcs1Signature::try_from(sig.as_ref()).unwrap();
+        let vk: Pkcs1VerifyingKey<Sha256> = Pkcs1VerifyingKey::new(public.clone());
+        assert!(
+            vk.verify(b"different bytes", &parsed).is_err(),
+            "tampered message must fail external verify"
+        );
+
+        // Fakecloud's own Verify must agree on a fresh signature.
+        let sig = client
+            .sign()
+            .key_id(&key_id)
+            .message(Blob::new(message.to_vec()))
+            .signing_algorithm(aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPssSha256)
+            .send()
+            .await
+            .unwrap()
+            .signature()
+            .unwrap()
+            .clone();
+        let verify_resp = client
+            .verify()
+            .key_id(&key_id)
+            .message(Blob::new(message.to_vec()))
+            .signature(sig)
+            .signing_algorithm(aws_sdk_kms::types::SigningAlgorithmSpec::RsassaPssSha256)
+            .send()
+            .await
+            .unwrap();
+        assert!(verify_resp.signature_valid());
+    }
+}
+
 #[tokio::test]
 async fn kms_generate_random() {
     let server = TestServer::start().await;
