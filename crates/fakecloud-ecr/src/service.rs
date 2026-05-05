@@ -1065,6 +1065,15 @@ impl EcrService {
             .get_mut(&name)
             .ok_or_else(|| repository_not_found(&name))?;
 
+        check_repo_policy(
+            &account,
+            &request.account_id,
+            &repo.repository_arn,
+            &name,
+            repo.policy.as_deref(),
+            "ecr:BatchDeleteImage",
+        )?;
+
         let mut deleted: Vec<Value> = Vec::new();
         let mut failures: Vec<Value> = Vec::new();
         for id in &ids {
