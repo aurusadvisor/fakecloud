@@ -1832,14 +1832,36 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         // AWS sends keys as repeated `tagKeys=K1&tagKeys=K2` query
-        // params. The dispatcher's deduplicated `query_params` HashMap
-        // collapses repeats, so parse the raw query string for every
-        // occurrence. Also accept `tagKeys.1=K1` / `tagKeys.member.1=K1`
-        // for SDKs that serialize list params indexed-style.
+        // params per the Smithy model (`httpQuery: "tagKeys"`). The
+        // dispatcher's deduplicated `query_params` HashMap collapses
+        // repeats, so parse the raw query string for every occurrence.
+        // Also accept `tagKeys.1=K1` / `tagKeys.member.1=K1` for SDKs
+        // that serialize list params indexed-style.
+        //
+        // As a defensive fallback we also accept a JSON body of the
+        // form `{"TagKeys": [...]}` / `{"tagKeys": [...]}` for clients
+        // that mistakenly send the tag keys in the body. Query
+        // parameters win when both are present, since query is the
+        // AWS-canonical wire format.
         let mut keys: Vec<String> = Vec::new();
         for (k, v) in parse_query_pairs(&req.raw_query) {
             if k == "tagKeys" || k.starts_with("tagKeys.") {
                 keys.push(v);
+            }
+        }
+        if keys.is_empty() {
+            let parsed = body(req);
+            for field in ["TagKeys", "tagKeys"] {
+                if let Some(arr) = parsed.get(field).and_then(|v| v.as_array()) {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            keys.push(s.to_string());
+                        }
+                    }
+                    if !keys.is_empty() {
+                        break;
+                    }
+                }
             }
         }
         let resource_arn_decoded = decode_query_segment(resource_arn);

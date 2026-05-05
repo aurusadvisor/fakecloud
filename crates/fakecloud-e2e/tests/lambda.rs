@@ -360,6 +360,122 @@ async fn lambda_add_get_remove_permission_roundtrip() {
     assert!(err.is_err());
 }
 
+#[tokio::test]
+async fn lambda_add_permission_with_qualified_action_no_double_prefix() {
+    // Caller passes `lambda:InvokeFunction` (already fully qualified).
+    // The stored policy should round-trip exactly that string back, with
+    // no `lambda:lambda:InvokeFunction` double-prefix on read.
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("qprefix-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .add_permission()
+        .function_name("qprefix-fn")
+        .statement_id("with-prefix")
+        .action("lambda:InvokeFunction")
+        .principal("events.amazonaws.com")
+        .send()
+        .await
+        .unwrap();
+
+    let got = client
+        .get_policy()
+        .function_name("qprefix-fn")
+        .send()
+        .await
+        .unwrap();
+    let doc: serde_json::Value = serde_json::from_str(got.policy().unwrap()).unwrap();
+    let stmts = doc["Statement"].as_array().unwrap();
+    assert_eq!(stmts.len(), 1);
+    // Round-trip preserves the qualified verb verbatim — no lambda:lambda: prefix.
+    assert_eq!(stmts[0]["Action"], "lambda:InvokeFunction");
+}
+
+#[tokio::test]
+async fn lambda_tag_list_untag_roundtrip() {
+    // TagResource -> ListTagsForResource -> UntagResource end-to-end
+    // against the real fakecloud binary via aws-sdk-lambda. Pins the
+    // unified storage path: tags live on the function record, the
+    // SDK's UntagResource (which sends `tagKeys` as a query parameter)
+    // hits the right key, and DeleteFunction wipes them clean.
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("tag-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let arn = "arn:aws:lambda:us-east-1:123456789012:function:tag-fn";
+
+    // TagResource adds env=prod, team=core.
+    client
+        .tag_resource()
+        .resource(arn)
+        .tags("env", "prod")
+        .tags("team", "core")
+        .send()
+        .await
+        .unwrap();
+
+    let listed = client.list_tags().resource(arn).send().await.unwrap();
+    let tags = listed.tags().unwrap();
+    assert_eq!(tags.get("env").map(String::as_str), Some("prod"));
+    assert_eq!(tags.get("team").map(String::as_str), Some("core"));
+
+    // UntagResource removes env, leaves team.
+    client
+        .untag_resource()
+        .resource(arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+
+    let listed = client.list_tags().resource(arn).send().await.unwrap();
+    let tags = listed.tags().unwrap();
+    assert!(!tags.contains_key("env"));
+    assert_eq!(tags.get("team").map(String::as_str), Some("core"));
+
+    // DeleteFunction wipes the function and (transitively) its tags.
+    client
+        .delete_function()
+        .function_name("tag-fn")
+        .send()
+        .await
+        .unwrap();
+
+    // ListTagsForResource on the deleted function -> 404, confirming no
+    // stale state.tags entry hangs around.
+    let err = client.list_tags().resource(arn).send().await;
+    assert!(err.is_err(), "ListTags after DeleteFunction must 404");
+}
+
 fn make_python_zip_returning(payload: &str) -> Vec<u8> {
     // A second-flavor zip whose handler returns a payload-derived value,
     // so callers can confirm UpdateFunctionCode actually swapped the code
