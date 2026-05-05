@@ -16,7 +16,7 @@ REST APIs (v1) and HTTP APIs (v2) are independent AWS services. The v2 (HTTP API
 - **Deployments & stages** — CreateDeployment auto-creates a stage when `stageName` is set; cache flush operations
 - **Models & request validators** — schema management; validator CRUD
 - **Authorizers** — TOKEN, REQUEST, COGNITO_USER_POOLS shapes
-- **API keys & usage plans** — CRUD + association via `usage_plan_keys`; data plane enforces `apiKeyRequired`, plan-level `throttle` (token-bucket per key+plan), and `quota` (DAY/WEEK/MONTH counters)
+- **API keys & usage plans** — CRUD + association via `usage_plan_keys`; data plane enforces `apiKeyRequired`, plan-level `throttle` (token-bucket per key+plan), method-level overrides under `apiStages[].throttle["{path}/{HTTP_METHOD}"]` (including the `/*/*` wildcard), and `quota` (DAY/WEEK/MONTH counters)
 - **VPC links, domain names, base path mappings, client certificates** — full CRUD
 - **Documentation parts/versions** — full CRUD
 - **Gateway responses** — full CRUD
@@ -32,7 +32,7 @@ When a request arrives at a deployed stage URL (`/restapis/{api_id}/{stage}/{pat
 - `HTTP` / `HTTP_PROXY` — forwards via `reqwest` to the configured URI.
 - `MOCK` — returns an empty JSON body unless an integration response template overrides it.
 
-Before the integration runs, methods with `apiKeyRequired = true` go through the API key + usage plan gate: an `x-api-key` header is required, the value is matched against `state.api_keys` (must be enabled), and the first usage plan whose `apiStages[]` contains `(api_id, stage)` is selected. The plan's `throttle` (token-bucket on `rateLimit`/`burstLimit`) and `quota` (DAY/WEEK/MONTH counter against `limit`, with `offset` shifting the period boundary) are enforced; failures return `403 ForbiddenException` and `429 LimitExceededException` respectively, matching the AWS wire shape.
+Before the integration runs, methods with `apiKeyRequired = true` go through the API key + usage plan gate: an `x-api-key` header is required, the value is matched against `state.api_keys` (must be enabled), and the first usage plan whose `apiStages[]` contains `(api_id, stage)` is selected. Throttle resolution prefers the matched apiStage's `throttle["{resource_path}/{HTTP_METHOD}"]` override (with `/*/*` honored as the catch-all) over the plan-level `throttle`; the chosen `(rateLimit, burstLimit)` drives a token-bucket whose meter key includes the override path so per-method buckets stay segregated. The plan's `quota` (DAY/WEEK/MONTH counter against `limit`, with `offset` shifting the period boundary) is enforced after throttle. Failures return `403 ForbiddenException` and `429 LimitExceededException` respectively, matching the AWS wire shape.
 
 ## Protocol
 

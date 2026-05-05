@@ -265,7 +265,12 @@ pub async fn handle(
     // this `(api_id, stage_name)` in `apiStages`, throttle + quota are
     // enforced. Plans without throttle/quota fall through unchanged.
     if api_key_required {
-        if let Err(err) = enforce_usage_plan(service, req, &api_id, &stage_name) {
+        // Effective method on the request — for ANY-method matches, the
+        // caller's verb still drives method-level throttle lookups. The
+        // method path AWS uses in `apiStages[].throttle` keys is
+        // `<resource_path>/<HTTP_METHOD>` (e.g. `/items/GET`).
+        let method_path = format!("{}/{}", resource_path, req.method.as_str().to_uppercase());
+        if let Err(err) = enforce_usage_plan(service, req, &api_id, &stage_name, &method_path) {
             service.record_request(&req.account_id, &api_id, &stage_name, req, err.status());
             return Err(err);
         }
@@ -975,13 +980,16 @@ async fn http_proxy(
 
 // ── Usage plan throttle + quota ──
 
-/// In-memory throttle + quota state. Keyed by
-/// `(account_id, plan_id, key_id)` for buckets and additionally by the
-/// quota's period window string for counters. Lives in
-/// `ApiGatewayService::meters`; not persisted across restarts.
+/// In-memory throttle + quota state. Buckets are keyed by
+/// `(account_id, plan_id, key_id, method_override_path)` — the trailing
+/// segment is empty when the plan-level throttle is in effect, or the
+/// `apiStages[].throttle` map key (e.g. `/items/GET`) when a method
+/// override applies. Counters add a period-window string to the same
+/// `(account, plan, key)` tuple so each window meters independently.
+/// Lives in `ApiGatewayService::meters`; not persisted across restarts.
 #[derive(Default)]
 pub struct UsageMeters {
-    pub buckets: HashMap<(String, String, String), TokenBucket>,
+    pub buckets: HashMap<(String, String, String, String), TokenBucket>,
     pub counters: HashMap<(String, String, String, String), u64>,
 }
 
@@ -1037,6 +1045,7 @@ fn enforce_usage_plan(
     req: &AwsRequest,
     api_id: &str,
     stage_name: &str,
+    method_path: &str,
 ) -> Result<(), AwsServiceError> {
     let presented = req
         .headers
@@ -1065,7 +1074,7 @@ fn enforce_usage_plan(
             Some(k) if k.enabled => k,
             _ => return Err(api_key_forbidden()),
         };
-        let plan = first_matching_plan(state, &key.id, api_id, stage_name);
+        let plan = first_matching_plan(state, &key.id, api_id, stage_name, method_path);
         (key.id, plan)
     };
     let Some(plan) = plan else {
@@ -1074,9 +1083,19 @@ fn enforce_usage_plan(
 
     let mut meters = service.meters.lock();
 
-    // Throttle.
-    if let Some((rate, burst)) = plan.throttle {
-        let bucket_key = (req.account_id.clone(), plan.id.clone(), key_id.clone());
+    // Throttle. A method-level override (`apiStages[].throttle[<path>]`)
+    // takes precedence over the plan-level throttle. The bucket key
+    // includes the method override path so each `(plan, key, method)`
+    // triple meters independently — matching AWS's documented behavior
+    // that method-level limits are evaluated separately from the plan
+    // overall throttle.
+    if let Some((rate, burst, method_override)) = plan.throttle {
+        let bucket_key = (
+            req.account_id.clone(),
+            plan.id.clone(),
+            key_id.clone(),
+            method_override.unwrap_or_default(),
+        );
         let bucket = meters
             .buckets
             .entry(bucket_key)
@@ -1111,8 +1130,14 @@ fn enforce_usage_plan(
 #[derive(Debug, Clone)]
 struct UsagePlanSnapshot {
     id: String,
-    /// `(rateLimit_per_sec, burstLimit)` when configured.
-    throttle: Option<(f64, f64)>,
+    /// Effective throttle for the request:
+    /// `(rateLimit_per_sec, burstLimit, method_override_path)`. The
+    /// third value is `Some(path)` when an `apiStages[].throttle[path]`
+    /// entry overrode the plan-level limits, and `None` when the
+    /// plan-level throttle (or no throttle) is in effect. Carrying the
+    /// path through to the meter key keeps method-level buckets
+    /// segregated from plan-level ones, matching AWS's docs.
+    throttle: Option<(f64, f64, Option<String>)>,
     /// `(limit, period, offset_days)` when configured.
     quota: Option<(u64, QuotaPeriod, i64)>,
 }
@@ -1135,12 +1160,15 @@ fn parse_quota_period(s: &str) -> Option<QuotaPeriod> {
 
 /// AWS picks any matching plan when multiple plans associate the same
 /// key; we pick the first per `BTreeMap` iteration order, which is
-/// deterministic by `usagePlanId`.
+/// deterministic by `usagePlanId`. `method_path` (e.g. `/items/GET`)
+/// drives selection of the per-method throttle override under the
+/// matched `apiStages[]` entry.
 fn first_matching_plan(
     state: &crate::state::ApiGatewayState,
     key_id: &str,
     api_id: &str,
     stage_name: &str,
+    method_path: &str,
 ) -> Option<UsagePlanSnapshot> {
     for (plan_id, keys) in &state.usage_plan_keys {
         if !keys.contains_key(key_id) {
@@ -1149,30 +1177,41 @@ fn first_matching_plan(
         let Some(plan) = state.usage_plans.get(plan_id) else {
             continue;
         };
-        let stage_match = plan.api_stages.iter().any(|stage_entry| {
+        let matched_stage = plan.api_stages.iter().find(|stage_entry| {
             let api = stage_entry.get("apiId").and_then(|v| v.as_str());
             let stage = stage_entry.get("stage").and_then(|v| v.as_str());
             matches!((api, stage), (Some(a), Some(s)) if a == api_id && s == stage_name)
         });
-        if !stage_match {
+        let Some(matched_stage) = matched_stage else {
             continue;
-        }
-        return Some(snapshot_plan(plan));
+        };
+        return Some(snapshot_plan(plan, matched_stage, method_path));
     }
     None
 }
 
-fn snapshot_plan(plan: &crate::state::UsagePlan) -> UsagePlanSnapshot {
-    let throttle = plan.throttle.as_ref().and_then(|t| {
-        let rate = t.get("rateLimit").and_then(|v| v.as_f64())?;
-        let burst = t
-            .get("burstLimit")
-            .and_then(|v| v.as_f64().or_else(|| v.as_i64().map(|n| n as f64)))?;
-        if rate <= 0.0 || burst <= 0.0 {
-            return None;
-        }
-        Some((rate, burst))
-    });
+fn snapshot_plan(
+    plan: &crate::state::UsagePlan,
+    matched_stage: &serde_json::Value,
+    method_path: &str,
+) -> UsagePlanSnapshot {
+    let plan_throttle = plan.throttle.as_ref().and_then(parse_throttle);
+    // Method-level override under the matched apiStage entry. AWS keys
+    // these by `<resource_path>/<HTTP_METHOD>`. We try the exact path
+    // first, then the AWS catch-all `/*/*` if no exact match.
+    let method_throttle = matched_stage
+        .get("throttle")
+        .and_then(|t| t.as_object())
+        .and_then(|map| {
+            let exact = map.get(method_path);
+            let wildcard = map.get("/*/*");
+            exact
+                .or(wildcard)
+                .and_then(parse_throttle)
+                .map(|(rate, burst)| (rate, burst, Some(method_path.to_string())))
+        });
+    let throttle =
+        method_throttle.or_else(|| plan_throttle.map(|(rate, burst)| (rate, burst, None)));
     let quota = plan.quota.as_ref().and_then(|q| {
         let limit = q.get("limit").and_then(|v| v.as_u64())?;
         let period_str = q.get("period").and_then(|v| v.as_str())?;
@@ -1185,6 +1224,20 @@ fn snapshot_plan(plan: &crate::state::UsagePlan) -> UsagePlanSnapshot {
         throttle,
         quota,
     }
+}
+
+/// Parse a `{rateLimit, burstLimit}` JSON object into a `(rate, burst)`
+/// pair. Returns `None` for missing fields, non-numeric values, or
+/// non-positive limits — AWS treats those as "no throttle configured".
+fn parse_throttle(t: &serde_json::Value) -> Option<(f64, f64)> {
+    let rate = t.get("rateLimit").and_then(|v| v.as_f64())?;
+    let burst = t
+        .get("burstLimit")
+        .and_then(|v| v.as_f64().or_else(|| v.as_i64().map(|n| n as f64)))?;
+    if rate <= 0.0 || burst <= 0.0 {
+        return None;
+    }
+    Some((rate, burst))
 }
 
 /// Compute the canonical window key for a quota period. AWS resets
@@ -2016,6 +2069,168 @@ mod tests {
         let err = match handle(&service, &make_request(headers)).await {
             Err(e) => e,
             Ok(_) => panic!("second request must trip quota"),
+        };
+        assert_eq!(err.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Plan throttle is generous (100/100) but the apiStages entry
+    /// pins `/items/GET` to 1/1. The second request must trip the
+    /// method-level bucket even though the plan-level rate would have
+    /// allowed it — mirroring AWS's documented per-method overrides.
+    #[tokio::test]
+    async fn method_level_throttle_override_takes_precedence_over_plan() {
+        use crate::state::{ApiKey, UsagePlan};
+        let state = build_state("NONE", None);
+        let key_value = "method-key".to_string();
+        let plan_id = "plan-method-override".to_string();
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.api_key_required = true;
+            }
+            st.api_keys.insert(
+                "k1".to_string(),
+                ApiKey {
+                    id: "k1".to_string(),
+                    value: key_value.clone(),
+                    name: "k".to_string(),
+                    description: None,
+                    enabled: true,
+                    created_date: Utc::now(),
+                    last_updated_date: Utc::now(),
+                    stage_keys: vec![],
+                    tags: BTreeMap::new(),
+                    customer_id: None,
+                },
+            );
+            st.usage_plans.insert(
+                plan_id.clone(),
+                UsagePlan {
+                    id: plan_id.clone(),
+                    name: "p".to_string(),
+                    description: None,
+                    api_stages: vec![serde_json::json!({
+                        "apiId": TEST_API_ID,
+                        "stage": "prod",
+                        "throttle": {
+                            "/items/GET": {"rateLimit": 1.0, "burstLimit": 1}
+                        }
+                    })],
+                    // Plan-level limits intentionally generous so a
+                    // failure here proves the method-level bucket was
+                    // consulted.
+                    throttle: Some(serde_json::json!({"rateLimit": 100.0, "burstLimit": 100})),
+                    quota: None,
+                    product_code: None,
+                    tags: BTreeMap::new(),
+                },
+            );
+            let mut plan_keys = BTreeMap::new();
+            plan_keys.insert(
+                "k1".to_string(),
+                serde_json::json!({"id": "k1", "type": "API_KEY", "value": key_value}),
+            );
+            st.usage_plan_keys.insert(plan_id.clone(), plan_keys);
+        }
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", key_value.parse().unwrap());
+
+        let first = handle(&service, &make_request(headers.clone()))
+            .await
+            .expect("first request consumes the only method-level token");
+        assert_eq!(first.status, StatusCode::OK);
+
+        let err = match handle(&service, &make_request(headers)).await {
+            Err(e) => e,
+            Ok(_) => panic!("second request must trip method-level throttle"),
+        };
+        assert_eq!(err.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 1);
+    }
+
+    /// `/*/*` wildcard under apiStages.throttle applies to any method
+    /// path that lacks a more specific entry. Same shape as the exact
+    /// override test, but keyed under the catch-all instead of
+    /// `/items/GET`.
+    #[tokio::test]
+    async fn method_level_throttle_wildcard_catchall_applies() {
+        use crate::state::{ApiKey, UsagePlan};
+        let state = build_state("NONE", None);
+        let key_value = "wildcard-key".to_string();
+        let plan_id = "plan-wildcard".to_string();
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.api_key_required = true;
+            }
+            st.api_keys.insert(
+                "k2".to_string(),
+                ApiKey {
+                    id: "k2".to_string(),
+                    value: key_value.clone(),
+                    name: "k".to_string(),
+                    description: None,
+                    enabled: true,
+                    created_date: Utc::now(),
+                    last_updated_date: Utc::now(),
+                    stage_keys: vec![],
+                    tags: BTreeMap::new(),
+                    customer_id: None,
+                },
+            );
+            st.usage_plans.insert(
+                plan_id.clone(),
+                UsagePlan {
+                    id: plan_id.clone(),
+                    name: "p".to_string(),
+                    description: None,
+                    api_stages: vec![serde_json::json!({
+                        "apiId": TEST_API_ID,
+                        "stage": "prod",
+                        "throttle": {
+                            "/*/*": {"rateLimit": 1.0, "burstLimit": 1}
+                        }
+                    })],
+                    throttle: None,
+                    quota: None,
+                    product_code: None,
+                    tags: BTreeMap::new(),
+                },
+            );
+            let mut plan_keys = BTreeMap::new();
+            plan_keys.insert(
+                "k2".to_string(),
+                serde_json::json!({"id": "k2", "type": "API_KEY", "value": key_value}),
+            );
+            st.usage_plan_keys.insert(plan_id.clone(), plan_keys);
+        }
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", key_value.parse().unwrap());
+
+        let first = handle(&service, &make_request(headers.clone()))
+            .await
+            .expect("first request consumes the only wildcard token");
+        assert_eq!(first.status, StatusCode::OK);
+
+        let err = match handle(&service, &make_request(headers)).await {
+            Err(e) => e,
+            Ok(_) => panic!("second request must trip wildcard throttle"),
         };
         assert_eq!(err.status(), StatusCode::TOO_MANY_REQUESTS);
     }
