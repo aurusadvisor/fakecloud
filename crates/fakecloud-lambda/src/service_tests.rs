@@ -1125,7 +1125,7 @@ async fn get_function_unknown_errors() {
 #[tokio::test]
 async fn delete_function_unknown_errors() {
     let svc = LambdaService::new(make_state());
-    assert!(svc.delete_function("ghost", "123456789012").is_err());
+    assert!(svc.delete_function("ghost", "123456789012", None).is_err());
 }
 
 #[tokio::test]
@@ -1692,10 +1692,43 @@ async fn publish_version_increments_per_function_counter() {
     let v1: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(v1["Version"], "1");
 
+    // Mutate $LATEST so the next PublishVersion isn't a no-op idempotent
+    // re-publish — AWS returns the previous version when nothing changed.
+    let new_zip_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"diff-bytes");
+    let body = json!({ "ZipFile": new_zip_b64 });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/pv2/code",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
     let req = make_request(Method::POST, "/2015-03-31/functions/pv2/versions", "{}");
     let resp = svc.handle(req).await.unwrap();
     let v2: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(v2["Version"], "2");
+}
+
+#[tokio::test]
+async fn publish_version_idempotent_when_latest_unchanged() {
+    // AWS PublishVersion returns the existing latest version when
+    // $LATEST hasn't changed since the previous publish.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "idem").await;
+
+    let req = make_request(Method::POST, "/2015-03-31/functions/idem/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let v1: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v1["Version"], "1");
+    let v1_revision = v1["RevisionId"].as_str().unwrap().to_string();
+
+    // No mutation in between; second publish is a no-op that returns v1.
+    let req = make_request(Method::POST, "/2015-03-31/functions/idem/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let again: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(again["Version"], "1");
+    assert_eq!(again["RevisionId"].as_str().unwrap(), v1_revision);
 }
 
 #[tokio::test]
@@ -1742,10 +1775,21 @@ async fn list_versions_by_function_returns_all_plus_latest() {
     let svc = LambdaService::new(make_state());
     seed_function(&svc, "pv4").await;
 
-    for _ in 0..2 {
-        let req = make_request(Method::POST, "/2015-03-31/functions/pv4/versions", "{}");
-        svc.handle(req).await.unwrap();
-    }
+    // Two distinct publishes need a $LATEST mutation in between; AWS
+    // PublishVersion is idempotent when nothing has changed.
+    let req = make_request(Method::POST, "/2015-03-31/functions/pv4/versions", "{}");
+    svc.handle(req).await.unwrap();
+    let new_zip_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"v2-bytes");
+    let body = json!({ "ZipFile": new_zip_b64 });
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/pv4/code",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let req = make_request(Method::POST, "/2015-03-31/functions/pv4/versions", "{}");
+    svc.handle(req).await.unwrap();
 
     let req = make_request(Method::GET, "/2015-03-31/functions/pv4/versions", "");
     let resp = svc.handle(req).await.unwrap();

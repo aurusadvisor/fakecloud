@@ -70,15 +70,15 @@ impl LambdaService {
             .and_then(|v| v.as_str())
             .map(str::to_string);
 
+        // `Qualifier` scopes the policy to a specific numbered version
+        // snapshot. AWS keeps a separate resource policy per qualifier
+        // (so a v1 policy doesn't leak to $LATEST or to v2). Aliases
+        // and `$LATEST` map back to the live function record's policy.
+        let qualifier = req.query_params.get("Qualifier").cloned();
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let func = state.functions.get_mut(function_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFoundException",
-                format!("Function not found: {function_name}"),
-            )
-        })?;
+        let func = resolve_policy_target_mut(state, function_name, qualifier.as_deref())?;
 
         // Load current policy or seed a fresh canonical doc. Any
         // stored blob that doesn't parse as a JSON object is treated
@@ -148,12 +148,26 @@ impl LambdaService {
         // `lambda:s3:PutObject` double-prefix). Cross-service evaluator
         // paths that want a `service:verb` form should already pass
         // the qualified name; we don't second-guess them here.
+        // Resource ARN matches the qualifier the policy is scoped to:
+        // `:1` for a numbered version, plain ARN for `$LATEST` or
+        // unqualified, alias-name for an alias qualifier. AWS clients
+        // that read back the policy via GetPolicy expect this exact
+        // shape so IAM-level evaluators can match the principal's
+        // request resource.
+        let resource_arn = match qualifier.as_deref() {
+            None | Some("$LATEST") => func.function_arn.clone(),
+            Some(q) => format!(
+                "{}:{q}",
+                func.function_arn.trim_end_matches(&format!(":{q}"))
+            ),
+        };
+
         let mut new_statement = serde_json::Map::new();
         new_statement.insert("Sid".to_string(), json!(statement_id));
         new_statement.insert("Effect".to_string(), json!("Allow"));
         new_statement.insert("Principal".to_string(), principal_value);
         new_statement.insert("Action".to_string(), json!(action));
-        new_statement.insert("Resource".to_string(), json!(func.function_arn));
+        new_statement.insert("Resource".to_string(), json!(resource_arn));
         if !condition.is_empty() {
             new_statement.insert("Condition".to_string(), Value::Object(condition));
         }
@@ -173,16 +187,11 @@ impl LambdaService {
         function_name: &str,
         statement_id: &str,
         account_id: &str,
+        qualifier: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(account_id);
-        let func = state.functions.get_mut(function_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFoundException",
-                format!("Function not found: {function_name}"),
-            )
-        })?;
+        let func = resolve_policy_target_mut(state, function_name, qualifier)?;
         let policy_str = func.policy.as_deref().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
@@ -227,17 +236,12 @@ impl LambdaService {
         &self,
         function_name: &str,
         account_id: &str,
+        qualifier: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let accounts = self.state.read();
         let empty = LambdaState::new(account_id, "");
         let state = accounts.get(account_id).unwrap_or(&empty);
-        let func = state.functions.get(function_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFoundException",
-                format!("Function not found: {function_name}"),
-            )
-        })?;
+        let func = resolve_policy_target_ref(state, function_name, qualifier)?;
         let policy = func.policy.as_deref().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
@@ -249,9 +253,86 @@ impl LambdaService {
             StatusCode::OK,
             json!({
                 "Policy": policy,
-                "RevisionId": uuid::Uuid::new_v4().to_string(),
+                "RevisionId": func.revision_id.clone(),
             })
             .to_string(),
         ))
+    }
+}
+
+/// Mutable lookup for the LambdaFunction record that owns the
+/// resource policy for `(function_name, qualifier)`. When the
+/// qualifier is a numeric version, the policy lives on the
+/// immutable snapshot in `function_version_snapshots`. Aliases
+/// resolve to the version they point at; missing aliases / versions
+/// 404 with `ResourceNotFoundException`. `$LATEST` and unqualified
+/// requests target the live `functions` map.
+fn resolve_policy_target_mut<'a>(
+    state: &'a mut crate::state::LambdaState,
+    function_name: &str,
+    qualifier: Option<&str>,
+) -> Result<&'a mut crate::state::LambdaFunction, AwsServiceError> {
+    let resolved_version =
+        crate::service::resolve_qualifier_to_version(state, function_name, qualifier);
+    let region = state.region.clone();
+    let account_id = state.account_id.clone();
+    match resolved_version {
+        None => state.functions.get_mut(function_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!(
+                    "Function not found: arn:aws:lambda:{region}:{account_id}:function:{function_name}"
+                ),
+            )
+        }),
+        Some(v) => state
+            .function_version_snapshots
+            .get_mut(function_name)
+            .and_then(|m| m.get_mut(&v))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!(
+                        "Function not found: arn:aws:lambda:{region}:{account_id}:function:{function_name}:{v}"
+                    ),
+                )
+            }),
+    }
+}
+
+fn resolve_policy_target_ref<'a>(
+    state: &'a crate::state::LambdaState,
+    function_name: &str,
+    qualifier: Option<&str>,
+) -> Result<&'a crate::state::LambdaFunction, AwsServiceError> {
+    let resolved_version =
+        crate::service::resolve_qualifier_to_version(state, function_name, qualifier);
+    match resolved_version {
+        None => state.functions.get(function_name).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!(
+                    "Function not found: arn:aws:lambda:{}:{}:function:{}",
+                    state.region, state.account_id, function_name
+                ),
+            )
+        }),
+        Some(v) => state
+            .function_version_snapshots
+            .get(function_name)
+            .and_then(|m| m.get(&v))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!(
+                        "Function not found: arn:aws:lambda:{}:{}:function:{}:{v}",
+                        state.region, state.account_id, function_name
+                    ),
+                )
+            }),
     }
 }

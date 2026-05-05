@@ -1140,21 +1140,84 @@ impl LambdaService {
         &self,
         function_name: &str,
         account_id: &str,
+        qualifier: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(account_id);
         let region = state.region.clone();
-        let account_id = state.account_id.clone();
+        let account_id_owned = state.account_id.clone();
+
+        // Qualifier=N targets a single immutable version snapshot; the
+        // live $LATEST function and other versions stay put. AWS only
+        // accepts numeric qualifiers here — alias targets are deleted
+        // via DeleteAlias, and `$LATEST` is rejected as
+        // InvalidParameterValueException.
+        if let Some(q) = qualifier {
+            if q == "$LATEST" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    "$LATEST version cannot be deleted without deleting the function.",
+                ));
+            }
+            if !q.chars().all(|c| c.is_ascii_digit()) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!(
+                        "Value '{q}' at 'qualifier' failed to satisfy constraint: Member must satisfy regular expression pattern: (|[a-zA-Z0-9$_-]+)"
+                    ),
+                ));
+            }
+            // Live function must exist or AWS 404s before checking the version.
+            if !state.functions.contains_key(function_name) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!(
+                        "Function not found: arn:aws:lambda:{region}:{account_id_owned}:function:{function_name}:{q}"
+                    ),
+                ));
+            }
+            let snap_existed = state
+                .function_version_snapshots
+                .get_mut(function_name)
+                .map(|m| m.remove(q).is_some())
+                .unwrap_or(false);
+            if !snap_existed {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!(
+                        "Function not found: arn:aws:lambda:{region}:{account_id_owned}:function:{function_name}:{q}"
+                    ),
+                ));
+            }
+            // Drop the version from the ordered list too so
+            // ListVersionsByFunction reflects the deletion.
+            if let Some(list) = state.function_versions.get_mut(function_name) {
+                list.retain(|v| v != q);
+            }
+            return Ok(AwsResponse::json(StatusCode::NO_CONTENT, ""));
+        }
+
         if state.functions.remove(function_name).is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ResourceNotFoundException",
                 format!(
-                    "Function not found: arn:aws:lambda:{}:{}:function:{}",
-                    region, account_id, function_name
+                    "Function not found: arn:aws:lambda:{region}:{account_id_owned}:function:{function_name}"
                 ),
             ));
         }
+        // Drop all numbered versions + their snapshots so the function
+        // is gone end-to-end (AWS deletes everything when no Qualifier
+        // is supplied).
+        state.function_versions.remove(function_name);
+        state.function_version_snapshots.remove(function_name);
+        // Aliases on this function disappear too.
+        let prefix = format!("{function_name}:");
+        state.aliases.retain(|k, _| !k.starts_with(&prefix));
 
         // Clean up any running container for this function
         if let Some(ref runtime) = self.runtime {
@@ -1493,12 +1556,39 @@ impl LambdaService {
             .get(function_name)
             .cloned()
             .unwrap_or_default();
-        let next: u64 = existing
-            .iter()
-            .filter_map(|v| v.parse::<u64>().ok())
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let latest_version = existing.iter().filter_map(|v| v.parse::<u64>().ok()).max();
+
+        // PublishVersion is idempotent on AWS: if `$LATEST` hasn't
+        // changed since the most recent published version (same
+        // CodeSha256 and same Description, when none is overridden),
+        // return that existing snapshot instead of bumping the
+        // counter. This keeps deploy pipelines that re-publish on
+        // every CI run from leaking a fresh numbered version per
+        // build when the underlying artifact is identical.
+        if let Some(latest_num) = latest_version {
+            let latest_str = latest_num.to_string();
+            if let Some(prev_snap) = state
+                .function_version_snapshots
+                .get(function_name)
+                .and_then(|m| m.get(&latest_str))
+                .cloned()
+            {
+                let same_sha = prev_snap.code_sha256 == func.code_sha256;
+                let effective_desc = description_override
+                    .clone()
+                    .unwrap_or_else(|| func.description.clone());
+                let same_desc = prev_snap.description == effective_desc;
+                if same_sha && same_desc {
+                    let mut config = self.function_config_json(&prev_snap);
+                    config["Version"] = json!(latest_str);
+                    config["FunctionArn"] = json!(format!("{}:{latest_str}", func.function_arn));
+                    config["MasterArn"] = json!(func.function_arn);
+                    return Ok(AwsResponse::json(StatusCode::CREATED, config.to_string()));
+                }
+            }
+        }
+
+        let next: u64 = latest_version.unwrap_or(0) + 1;
         let next_str = next.to_string();
 
         // Snapshot the function config + code for the new immutable version.
@@ -1716,7 +1806,11 @@ impl AwsService for LambdaService {
                 req.region.as_str(),
                 req.query_params.get("Qualifier").map(String::as_str),
             ),
-            "DeleteFunction" => self.delete_function(resource_name.as_deref().unwrap_or(""), aid),
+            "DeleteFunction" => self.delete_function(
+                resource_name.as_deref().unwrap_or(""),
+                aid,
+                req.query_params.get("Qualifier").map(String::as_str),
+            ),
             "Invoke" => {
                 let invocation_type = InvocationType::from_header(
                     req.headers
@@ -1747,11 +1841,20 @@ impl AwsService for LambdaService {
                 self.publish_version(resource_name.as_deref().unwrap_or(""), aid, &req)
             }
             "AddPermission" => self.add_permission(resource_name.as_deref().unwrap_or(""), &req),
-            "GetPolicy" => self.get_policy(resource_name.as_deref().unwrap_or(""), aid),
+            "GetPolicy" => self.get_policy(
+                resource_name.as_deref().unwrap_or(""),
+                aid,
+                req.query_params.get("Qualifier").map(String::as_str),
+            ),
             "RemovePermission" => {
                 // Path: /2015-03-31/functions/{name}/policy/{sid}
                 let sid = req.path_segments.get(4).cloned().unwrap_or_default();
-                self.remove_permission(resource_name.as_deref().unwrap_or(""), &sid, aid)
+                self.remove_permission(
+                    resource_name.as_deref().unwrap_or(""),
+                    &sid,
+                    aid,
+                    req.query_params.get("Qualifier").map(String::as_str),
+                )
             }
             "CreateEventSourceMapping" => self.create_event_source_mapping(&req),
             "ListEventSourceMappings" => self.list_event_source_mappings(aid),
