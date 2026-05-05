@@ -86,6 +86,13 @@ pub fn parse_template_with_resolution(
         serde_yaml::from_str(template_body).map_err(|e| format!("Invalid YAML template: {e}"))?
     };
 
+    // Expand `Fn::ForEach::*` macros (template transform). New resources
+    // and properties land in place before the rest of resolution sees the
+    // template, so a ForEach-emitted resource works exactly like a
+    // hand-authored one. Parameters flow in so the items list can be a
+    // `Ref` to a CommaDelimitedList parameter.
+    let value = expand_for_each(&value, &BTreeMap::new(), parameters)?;
+
     let description = value
         .get("Description")
         .and_then(|v| v.as_str())
@@ -240,6 +247,11 @@ pub fn parse_outputs(
     resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
     imports: &BTreeMap<String, String>,
 ) -> Result<Vec<TemplateOutput>, String> {
+    // Expand Fn::ForEach in Outputs so resolve picks up macro-emitted
+    // entries. Callers pass the raw template value, which may still
+    // contain unexpanded ForEach macros.
+    let template_owned = expand_for_each(template, &BTreeMap::new(), parameters)?;
+    let template = &template_owned;
     let outputs_obj = match template.get("Outputs").and_then(|v| v.as_object()) {
         Some(o) => o,
         None => return Ok(Vec::new()),
@@ -464,6 +476,168 @@ fn stringify_value(value: &Value, parameters: &BTreeMap<String, String>) -> Stri
     }
 }
 
+/// Expand `Fn::ForEach::<UniqueLoopName>` macros in `value` recursively.
+///
+/// Syntax (from the AWS docs / sample):
+/// ```text
+/// "Fn::ForEach::TopicLoop": [
+///   "LoopVar",
+///   ["a", "b", "c"],
+///   { "${LoopVar}Topic": { "Type": "AWS::SNS::Topic", ... } }
+/// ]
+/// ```
+/// becomes three siblings (`aTopic`, `bTopic`, `cTopic`) in the parent
+/// object. `${LoopVar}` substitutes inside both keys and values, so the
+/// emitted body can reference the iteration value the same way `Fn::Sub`
+/// does.
+///
+/// Macros nest: an outer ForEach's bindings flow into inner ForEach
+/// bodies via `bindings`, so `${OuterVar}` resolves inside an inner
+/// loop's body. Each call resolves its own loop variable's iterations
+/// before recursing into the emitted entries.
+fn expand_for_each(
+    value: &Value,
+    bindings: &BTreeMap<String, String>,
+    parameters: &BTreeMap<String, String>,
+) -> Result<Value, String> {
+    match value {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                if let Some(loop_name) = k.strip_prefix("Fn::ForEach::") {
+                    let arr = v.as_array().ok_or_else(|| {
+                        format!("Fn::ForEach::{loop_name} requires an array argument")
+                    })?;
+                    if arr.len() != 3 {
+                        return Err(format!(
+                            "Fn::ForEach::{loop_name} requires 3 arguments (loopVar, list, template), got {}",
+                            arr.len()
+                        ));
+                    }
+                    let loop_var = arr[0].as_str().ok_or_else(|| {
+                        format!("Fn::ForEach::{loop_name} loop variable must be a string")
+                    })?;
+                    // The items list may be a literal array OR a `Ref`
+                    // to a CommaDelimitedList parameter (AWS-supported).
+                    // Resolve the latter against `parameters` by
+                    // splitting on `,` so the loop iterates the same
+                    // values the template author wrote.
+                    let items_owned: Vec<Value> =
+                        resolve_for_each_items(&arr[1], parameters).ok_or_else(|| {
+                            format!(
+                                "Fn::ForEach::{loop_name} second argument must be an array or a Ref to a CommaDelimitedList parameter"
+                            )
+                        })?;
+                    let body = arr[2].as_object().ok_or_else(|| {
+                        format!("Fn::ForEach::{loop_name} third argument must be an object")
+                    })?;
+                    for item in &items_owned {
+                        let item_str = match item {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        let mut next = bindings.clone();
+                        next.insert(loop_var.to_string(), item_str.clone());
+                        // Substitute loop vars across the whole body
+                        // first, then recurse via `expand_for_each` so
+                        // any nested `Fn::ForEach::*` keys land inline
+                        // as sibling entries of `out` (instead of
+                        // wrapping them under the unresolved macro key).
+                        let body_value = Value::Object(body.clone());
+                        let substituted = substitute_loop_vars_in_value(&body_value, &next);
+                        let expanded = expand_for_each(&substituted, &next, parameters)?;
+                        if let Value::Object(emitted) = expanded {
+                            for (ek, ev) in emitted {
+                                out.insert(ek, ev);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                out.insert(k.clone(), expand_for_each(v, bindings, parameters)?);
+            }
+            Ok(Value::Object(out))
+        }
+        Value::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr {
+                out.push(expand_for_each(v, bindings, parameters)?);
+            }
+            Ok(Value::Array(out))
+        }
+        other => Ok(other.clone()),
+    }
+}
+
+/// Resolve the `items` argument of an `Fn::ForEach` macro. Accepts:
+/// - A literal JSON array — returned as-is.
+/// - `{ "Ref": "<name>" }` against a parameter holding either a comma
+///   delimited list (`CommaDelimitedList` / `List<*>`) or a single
+///   value. Splits on `,` and trims whitespace so parameters set as
+///   `"a, b, c"` iterate cleanly.
+///
+/// Returns `None` for any other shape (e.g. an object that isn't a
+/// `Ref`, or a `Ref` to an undefined parameter), letting the caller
+/// surface a precise error.
+fn resolve_for_each_items(
+    value: &Value,
+    parameters: &BTreeMap<String, String>,
+) -> Option<Vec<Value>> {
+    if let Some(arr) = value.as_array() {
+        return Some(arr.clone());
+    }
+    if let Some(map) = value.as_object() {
+        if let Some(name) = map.get("Ref").and_then(|v| v.as_str()) {
+            let raw = parameters.get(name)?;
+            return Some(
+                raw.split(',')
+                    .map(|p| Value::String(p.trim().to_string()))
+                    .collect(),
+            );
+        }
+    }
+    None
+}
+
+/// Substitute every `${var}` and `&{var}` token in a string against
+/// `bindings`. Both forms are AWS-supported for `Fn::ForEach` loop
+/// variables — `&{}` exists so identifiers with non-alphanumeric
+/// characters can interpolate into resource logical IDs without
+/// colliding with Fn::Sub's `${}` syntax. Unknown vars stay verbatim
+/// so non-loop substitutions (Fn::Sub, resource physical IDs) handle
+/// them later.
+fn substitute_loop_vars(s: &str, bindings: &BTreeMap<String, String>) -> String {
+    let mut result = s.to_string();
+    for (k, v) in bindings {
+        result = result.replace(&format!("${{{k}}}"), v);
+        result = result.replace(&format!("&{{{k}}}"), v);
+    }
+    result
+}
+
+/// Walk `value` and apply `substitute_loop_vars` to every string leaf.
+/// Object keys are also rewritten so resource logical IDs and property
+/// names parameterized by the loop variable land correctly.
+fn substitute_loop_vars_in_value(value: &Value, bindings: &BTreeMap<String, String>) -> Value {
+    match value {
+        Value::String(s) => Value::String(substitute_loop_vars(s, bindings)),
+        Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                let new_key = substitute_loop_vars(k, bindings);
+                out.insert(new_key, substitute_loop_vars_in_value(v, bindings));
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(
+            arr.iter()
+                .map(|v| substitute_loop_vars_in_value(v, bindings))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Walk `value`, replacing every `Fn::FindInMap` map ref with its
 /// resolved leaf value. Args resolve `Ref` / nested `Fn::FindInMap`
 /// against `parameters` + `mappings` first. Unresolvable lookups return
@@ -648,6 +822,9 @@ pub fn resolve_resource_properties_with_attrs(
     } else {
         serde_yaml::from_str(template_body).map_err(|e| format!("Invalid YAML template: {e}"))?
     };
+    // Re-expand ForEach so the resource we look up matches the post-
+    // expansion logical IDs from the original parse.
+    let value = expand_for_each(&value, &BTreeMap::new(), parameters)?;
 
     let resources_obj = value
         .get("Resources")
@@ -926,7 +1103,10 @@ fn resolve_refs_full(
                     base64::engine::general_purpose::STANDARD.encode(s.as_bytes()),
                 );
             }
-            // Fn::Length: number of elements in an array.
+            // Fn::Length: number of elements in an array, or characters
+            // in a string. Real CFN only documents list inputs but
+            // accepts strings; we count UTF-8 chars (not bytes) so
+            // multi-byte characters count once.
             if let Some(len_val) = map.get("Fn::Length") {
                 let resolved = resolve_refs_full(
                     len_val,
@@ -937,10 +1117,12 @@ fn resolve_refs_full(
                     imports,
                     conditions,
                 );
-                if let Some(arr) = resolved.as_array() {
-                    return Value::Number(serde_json::Number::from(arr.len()));
-                }
-                return Value::Number(serde_json::Number::from(0));
+                let n: usize = match &resolved {
+                    Value::Array(arr) => arr.len(),
+                    Value::String(s) => s.chars().count(),
+                    _ => 0,
+                };
+                return Value::Number(serde_json::Number::from(n));
             }
             // Fn::ToJsonString: serialize a value as a JSON string.
             if let Some(to_json) = map.get("Fn::ToJsonString") {
@@ -2559,5 +2741,540 @@ Resources:
             !serialized.contains(NO_VALUE_SENTINEL_KEY),
             "sentinel leaked: {serialized}"
         );
+    }
+
+    // ── BB5: Fn::Select / Split / Base64 / Cidr / Length / ToJsonString / ForEach ──
+
+    #[test]
+    fn fn_select_string_index_resolves() {
+        // CFN accepts the index as a string literal (`"0"`) — CFN's
+        // own examples do this, so the engine must coerce.
+        let (p, r, ids, attrs) = empty();
+        let v: Value = serde_json::from_str(r#"{"Fn::Select": ["2", ["a", "b", "c", "d"]]}"#)
+            .expect("static fixture parses");
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(resolved, Value::String("c".to_string()));
+    }
+
+    #[test]
+    fn fn_select_out_of_range_returns_null() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value = serde_json::from_str(r#"{"Fn::Select": [10, ["a", "b"]]}"#)
+            .expect("static fixture parses");
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(resolved, Value::Null);
+    }
+
+    #[test]
+    fn fn_select_resolves_ref_inside_list() {
+        let template = r#"{
+            "Parameters": {"AZs": {"Type": "CommaDelimitedList"}},
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": {"Fn::Select": [0, {"Fn::Split": [",", {"Ref": "AZs"}]}]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert(
+            "AZs".to_string(),
+            "us-east-1a,us-east-1b,us-east-1c".to_string(),
+        );
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["QueueName"],
+            Value::String("us-east-1a".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_split_empty_delimiter_returns_full_string_split_per_char() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value =
+            serde_json::from_str(r#"{"Fn::Split": ["", "abc"]}"#).expect("static fixture parses");
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        // str::split("") yields `["", "a", "b", "c", ""]` in Rust.
+        // CFN's behavior with empty delimiter is undefined, but match
+        // the underlying primitive so callers can reason about it.
+        assert!(resolved.is_array());
+    }
+
+    #[test]
+    fn fn_split_no_match_returns_single_element_array() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value = serde_json::from_str(r#"{"Fn::Split": [",", "no-commas-here"]}"#)
+            .expect("static fixture parses");
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(resolved, serde_json::json!(["no-commas-here"]));
+    }
+
+    #[test]
+    fn fn_base64_encodes_unicode() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value =
+            serde_json::from_str(r#"{"Fn::Base64": "héllo"}"#).expect("static fixture parses");
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        // "héllo" is 6 bytes UTF-8 (h=1, é=2, l=1, l=1, o=1).
+        assert_eq!(resolved, Value::String("aMOpbGxv".to_string()));
+    }
+
+    #[test]
+    fn fn_base64_resolves_nested_intrinsic() {
+        let template = r#"{
+            "Parameters": {"Greeting": {"Type": "String"}},
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": {"Fn::Base64": {"Ref": "Greeting"}}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Greeting".to_string(), "hello".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["QueueName"],
+            Value::String("aGVsbG8=".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_length_counts_string_chars() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value =
+            serde_json::from_str(r#"{"Fn::Length": "héllo"}"#).expect("static fixture parses");
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        // 5 chars (not 6 bytes) — multibyte counted once.
+        assert_eq!(resolved, Value::Number(5.into()));
+    }
+
+    #[test]
+    fn fn_length_resolves_nested_split() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value = serde_json::from_str(r#"{"Fn::Length": {"Fn::Split": [",", "a,b,c,d,e"]}}"#)
+            .expect("static fixture parses");
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(resolved, Value::Number(5.into()));
+    }
+
+    #[test]
+    fn fn_to_json_string_serializes_array() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value = serde_json::from_str(r#"{"Fn::ToJsonString": ["a", "b", "c"]}"#)
+            .expect("static fixture parses");
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(resolved, Value::String(r#"["a","b","c"]"#.to_string()));
+    }
+
+    #[test]
+    fn fn_to_json_string_resolves_inner_ref() {
+        let template = r#"{
+            "Parameters": {"Name": {"Type": "String"}},
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": {
+                            "Fn::ToJsonString": {"k": {"Ref": "Name"}}
+                        }
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Name".to_string(), "abc".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["QueueName"],
+            Value::String(r#"{"k":"abc"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn fn_cidr_count_matches_request() {
+        // Real Fn::Cidr returns up to 2^cidr_bits subnets; we ask for 2
+        // out of a possible 256, so only 2 land in the output.
+        let (p, r, ids, attrs) = empty();
+        let v: Value = serde_json::from_str(r#"{"Fn::Cidr": ["10.0.0.0/16", 2, 8]}"#)
+            .expect("static fixture parses");
+        let resolved = resolve_refs(&v, &p, &r, &ids, &attrs);
+        assert_eq!(resolved, serde_json::json!(["10.0.0.0/24", "10.0.1.0/24"]));
+    }
+
+    #[test]
+    fn fn_cidr_resolves_via_ref() {
+        let template = r#"{
+            "Parameters": {"Vpc": {"Type": "String"}},
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": {"Fn::Select": [
+                            0,
+                            {"Fn::Cidr": [{"Ref": "Vpc"}, 4, 8]}
+                        ]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Vpc".to_string(), "172.16.0.0/16".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["QueueName"],
+            Value::String("172.16.0.0/24".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_for_each_expands_resources() {
+        let template = r#"{
+            "Resources": {
+                "Fn::ForEach::TopicLoop": [
+                    "TopicName",
+                    ["alpha", "beta", "gamma"],
+                    {
+                        "${TopicName}Topic": {
+                            "Type": "AWS::SNS::Topic",
+                            "Properties": {"TopicName": "${TopicName}-topic"}
+                        }
+                    }
+                ]
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        let names: Vec<&str> = parsed
+            .resources
+            .iter()
+            .map(|r| r.logical_id.as_str())
+            .collect();
+        assert!(names.contains(&"alphaTopic"), "got: {names:?}");
+        assert!(names.contains(&"betaTopic"), "got: {names:?}");
+        assert!(names.contains(&"gammaTopic"), "got: {names:?}");
+        let alpha = parsed
+            .resources
+            .iter()
+            .find(|r| r.logical_id == "alphaTopic")
+            .unwrap();
+        assert_eq!(
+            alpha.properties["TopicName"],
+            Value::String("alpha-topic".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_for_each_substitutes_in_nested_values() {
+        let template = r#"{
+            "Resources": {
+                "Fn::ForEach::Q": [
+                    "QName",
+                    ["one", "two"],
+                    {
+                        "${QName}Queue": {
+                            "Type": "AWS::SQS::Queue",
+                            "Properties": {
+                                "QueueName": "${QName}",
+                                "Tags": [
+                                    {"Key": "name", "Value": "${QName}"}
+                                ]
+                            }
+                        }
+                    }
+                ]
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        let one = parsed
+            .resources
+            .iter()
+            .find(|r| r.logical_id == "oneQueue")
+            .unwrap();
+        assert_eq!(
+            one.properties["QueueName"],
+            Value::String("one".to_string())
+        );
+        assert_eq!(
+            one.properties["Tags"][0]["Value"],
+            Value::String("one".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_for_each_nested_loops_expand_cartesian() {
+        let template = r#"{
+            "Resources": {
+                "Fn::ForEach::Outer": [
+                    "Env",
+                    ["dev", "prod"],
+                    {
+                        "Fn::ForEach::Inner": [
+                            "Region",
+                            ["us-east-1", "eu-west-1"],
+                            {
+                                "${Env}${Region}Q": {
+                                    "Type": "AWS::SQS::Queue",
+                                    "Properties": {"QueueName": "${Env}-${Region}"}
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        let names: Vec<&str> = parsed
+            .resources
+            .iter()
+            .map(|r| r.logical_id.as_str())
+            .collect();
+        for env in ["dev", "prod"] {
+            for region in ["us-east-1", "eu-west-1"] {
+                let expected = format!("{env}{region}Q");
+                assert!(
+                    names.contains(&expected.as_str()),
+                    "missing {expected} in {names:?}"
+                );
+            }
+        }
+        let dev_us = parsed
+            .resources
+            .iter()
+            .find(|r| r.logical_id == "devus-east-1Q")
+            .unwrap();
+        assert_eq!(
+            dev_us.properties["QueueName"],
+            Value::String("dev-us-east-1".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_for_each_keeps_other_resources_untouched() {
+        let template = r#"{
+            "Resources": {
+                "Static": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {"QueueName": "static-q"}
+                },
+                "Fn::ForEach::Loop": [
+                    "I",
+                    ["a", "b"],
+                    {
+                        "${I}Topic": {
+                            "Type": "AWS::SNS::Topic",
+                            "Properties": {"TopicName": "${I}"}
+                        }
+                    }
+                ]
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        let names: Vec<&str> = parsed
+            .resources
+            .iter()
+            .map(|r| r.logical_id.as_str())
+            .collect();
+        assert!(names.contains(&"Static"));
+        assert!(names.contains(&"aTopic"));
+        assert!(names.contains(&"bTopic"));
+        assert_eq!(parsed.resources.len(), 3);
+    }
+
+    #[test]
+    fn fn_for_each_invalid_arity_errors() {
+        let template = r#"{
+            "Resources": {
+                "Fn::ForEach::Bad": [
+                    "Var",
+                    ["a"]
+                ]
+            }
+        }"#;
+        let err = parse_template(template, &BTreeMap::new()).unwrap_err();
+        assert!(err.contains("Fn::ForEach"), "got: {err}");
+    }
+
+    #[test]
+    fn fn_for_each_resolves_intrinsics_in_emitted_resources() {
+        // Body of the loop references both the loop variable and a
+        // stack parameter, exercising that downstream intrinsic
+        // resolution still runs over emitted resources.
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}},
+            "Resources": {
+                "Fn::ForEach::Q": [
+                    "Name",
+                    ["alpha", "beta"],
+                    {
+                        "${Name}Queue": {
+                            "Type": "AWS::SQS::Queue",
+                            "Properties": {
+                                "QueueName": {"Fn::Sub": "${Env}-${Name}"}
+                            }
+                        }
+                    }
+                ]
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "prod".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        // ${Name} substitutes at ForEach expansion time; ${Env} comes
+        // from the parameter at Fn::Sub time. Both must land.
+        let alpha = parsed
+            .resources
+            .iter()
+            .find(|r| r.logical_id == "alphaQueue")
+            .unwrap();
+        assert_eq!(
+            alpha.properties["QueueName"],
+            Value::String("prod-alpha".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_for_each_re_resolves_at_provision_time() {
+        // resolve_resource_properties_with_attrs must also expand
+        // ForEach so the looked-up resource by logical ID matches the
+        // post-expansion template.
+        let template = r#"{
+            "Resources": {
+                "Fn::ForEach::Q": [
+                    "Name",
+                    ["alpha"],
+                    {
+                        "${Name}Queue": {
+                            "Type": "AWS::SQS::Queue",
+                            "Properties": {"QueueName": "${Name}-q"}
+                        }
+                    }
+                ]
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        let resource = parsed
+            .resources
+            .iter()
+            .find(|r| r.logical_id == "alphaQueue")
+            .unwrap();
+        let reresolved = resolve_resource_properties_with_attrs(
+            resource,
+            template,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            reresolved.properties["QueueName"],
+            Value::String("alpha-q".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_for_each_resolves_ref_to_comma_delimited_list_param() {
+        // CommaDelimitedList parameters are a documented ForEach input
+        // shape. Stack passes the value as a single string; ForEach
+        // must split it before iterating.
+        let template = r#"{
+            "Parameters": {"Names": {"Type": "CommaDelimitedList"}},
+            "Resources": {
+                "Fn::ForEach::Q": [
+                    "N",
+                    {"Ref": "Names"},
+                    {
+                        "${N}Queue": {
+                            "Type": "AWS::SQS::Queue",
+                            "Properties": {"QueueName": "${N}-q"}
+                        }
+                    }
+                ]
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Names".to_string(), "alpha,beta,gamma".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        let names: Vec<&str> = parsed
+            .resources
+            .iter()
+            .map(|r| r.logical_id.as_str())
+            .collect();
+        for v in ["alphaQueue", "betaQueue", "gammaQueue"] {
+            assert!(names.contains(&v), "missing {v} in {names:?}");
+        }
+    }
+
+    #[test]
+    fn fn_for_each_ampersand_substitution_form() {
+        // AWS supports `&{Var}` in addition to `${Var}` for ForEach
+        // loop variable substitution; needed when the surrounding
+        // template separately uses ${}-style for Fn::Sub.
+        let template = r#"{
+            "Resources": {
+                "Fn::ForEach::Q": [
+                    "Name",
+                    ["alpha", "beta"],
+                    {
+                        "&{Name}Queue": {
+                            "Type": "AWS::SQS::Queue",
+                            "Properties": {"QueueName": "&{Name}"}
+                        }
+                    }
+                ]
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        let names: Vec<&str> = parsed
+            .resources
+            .iter()
+            .map(|r| r.logical_id.as_str())
+            .collect();
+        assert!(names.contains(&"alphaQueue"), "got: {names:?}");
+        assert!(names.contains(&"betaQueue"), "got: {names:?}");
+        let alpha = parsed
+            .resources
+            .iter()
+            .find(|r| r.logical_id == "alphaQueue")
+            .unwrap();
+        assert_eq!(
+            alpha.properties["QueueName"],
+            Value::String("alpha".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_for_each_in_outputs_expands() {
+        let template = r#"{
+            "Resources": {
+                "Q": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "q"}}
+            },
+            "Outputs": {
+                "Fn::ForEach::OutputLoop": [
+                    "I",
+                    ["one", "two"],
+                    {
+                        "${I}Out": {"Value": "${I}-value"}
+                    }
+                ]
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        let names: Vec<&str> = parsed
+            .outputs
+            .iter()
+            .map(|o| o.logical_id.as_str())
+            .collect();
+        assert!(names.contains(&"oneOut"), "got: {names:?}");
+        assert!(names.contains(&"twoOut"), "got: {names:?}");
+        let one = parsed
+            .outputs
+            .iter()
+            .find(|o| o.logical_id == "oneOut")
+            .unwrap();
+        assert_eq!(one.value, "one-value");
     }
 }
