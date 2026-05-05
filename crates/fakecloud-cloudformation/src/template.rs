@@ -120,8 +120,10 @@ pub fn parse_template_with_resolution(
             .unwrap_or(Value::Object(serde_json::Map::new()));
 
         // Pre-resolve Fn::FindInMap before the main intrinsics pass so the
-        // existing resolver doesn't need to thread mappings through.
-        let properties = apply_mappings(&properties, parameters, &mappings);
+        // existing resolver doesn't need to thread mappings through. We
+        // pass `conditions` so a FindInMap sitting in an unused Fn::If
+        // branch is skipped (CFN never executes the dropped branch).
+        let properties = apply_mappings(&properties, parameters, &mappings, &conditions)?;
 
         // Resolve Ref and parameter substitutions in properties
         let resolved = resolve_refs_full(
@@ -463,59 +465,156 @@ fn stringify_value(value: &Value, parameters: &BTreeMap<String, String>) -> Stri
 }
 
 /// Walk `value`, replacing every `Fn::FindInMap` map ref with its
-/// resolved leaf value. Args resolve `Ref` against `parameters`. Unknown
-/// map / key returns the original node so downstream resolvers can flag
-/// the gap.
+/// resolved leaf value. Args resolve `Ref` / nested `Fn::FindInMap`
+/// against `parameters` + `mappings` first. Unresolvable lookups return
+/// the optional `DefaultValue` from the 4-arg form, otherwise surface a
+/// `ValidationError`-shaped string matching CloudFormation's error.
+///
+/// `Fn::If` short-circuits: only the branch picked by `conditions`
+/// recurses, so a `Fn::FindInMap` sitting in an unused branch never
+/// trips the strict miss-handling. Conditions that aren't yet known
+/// (caller passed an empty map) recurse into both branches as before
+/// to preserve behaviour.
 fn apply_mappings(
     value: &Value,
     parameters: &BTreeMap<String, String>,
     mappings: &Mappings,
-) -> Value {
+    conditions: &BTreeMap<String, bool>,
+) -> Result<Value, String> {
     match value {
         Value::Object(map) => {
-            if let Some(arr) = map.get("Fn::FindInMap").and_then(|v| v.as_array()) {
+            if let Some(arr) = map.get("Fn::If").and_then(|v| v.as_array()) {
                 if arr.len() == 3 {
-                    let map_name = stringify_findinmap_arg(&arr[0], parameters);
-                    let top_key = stringify_findinmap_arg(&arr[1], parameters);
-                    let second_key = stringify_findinmap_arg(&arr[2], parameters);
-                    if let Some(top) = mappings.get(&map_name) {
-                        if let Some(second) = top.get(&top_key) {
-                            if let Some(leaf) = second.get(&second_key) {
-                                return leaf.clone();
-                            }
-                        }
+                    let cond_name = arr[0].as_str().unwrap_or("");
+                    if let Some(picked_idx) =
+                        conditions
+                            .get(cond_name)
+                            .copied()
+                            .map(|b| if b { 1 } else { 2 })
+                    {
+                        // Resolve the picked branch eagerly; leave the
+                        // unused branch verbatim so the downstream
+                        // resolver (`resolve_refs_full`) still sees the
+                        // same Fn::If shape and re-applies its own
+                        // branch picking. Crucially, we never recurse
+                        // into the unused branch, so a FindInMap that
+                        // would fail there never executes.
+                        let mut new_arr = arr.clone();
+                        new_arr[picked_idx] =
+                            apply_mappings(&arr[picked_idx], parameters, mappings, conditions)?;
+                        let mut rewritten = serde_json::Map::new();
+                        rewritten.insert("Fn::If".to_string(), Value::Array(new_arr));
+                        return Ok(Value::Object(rewritten));
                     }
-                    return value.clone();
                 }
+            }
+            if let Some(arr) = map.get("Fn::FindInMap").and_then(|v| v.as_array()) {
+                return resolve_find_in_map(arr, parameters, mappings, conditions);
             }
             let mut new_map = serde_json::Map::new();
             for (k, v) in map {
-                new_map.insert(k.clone(), apply_mappings(v, parameters, mappings));
+                new_map.insert(
+                    k.clone(),
+                    apply_mappings(v, parameters, mappings, conditions)?,
+                );
             }
-            Value::Object(new_map)
+            Ok(Value::Object(new_map))
         }
-        Value::Array(arr) => Value::Array(
-            arr.iter()
-                .map(|v| apply_mappings(v, parameters, mappings))
-                .collect(),
-        ),
-        other => other.clone(),
+        Value::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr {
+                out.push(apply_mappings(v, parameters, mappings, conditions)?);
+            }
+            Ok(Value::Array(out))
+        }
+        other => Ok(other.clone()),
     }
 }
 
-fn stringify_findinmap_arg(value: &Value, parameters: &BTreeMap<String, String>) -> String {
+/// Resolve a single `Fn::FindInMap` array. Supports the 3-arg form
+/// `[MapName, TopKey, SecondKey]` and the 4-arg form
+/// `[MapName, TopKey, SecondKey, { DefaultValue: <value> }]`. Args may
+/// themselves be intrinsics (e.g. `{ "Ref": "AWS::Region" }` or a
+/// nested `Fn::FindInMap`); those resolve before lookup.
+fn resolve_find_in_map(
+    arr: &[Value],
+    parameters: &BTreeMap<String, String>,
+    mappings: &Mappings,
+    conditions: &BTreeMap<String, bool>,
+) -> Result<Value, String> {
+    if arr.len() != 3 && arr.len() != 4 {
+        return Err(format!(
+            "Fn::FindInMap requires 3 or 4 arguments, got {}",
+            arr.len()
+        ));
+    }
+    let default_value: Option<Value> = if arr.len() == 4 {
+        let opts = arr[3].as_object().ok_or_else(|| {
+            "Fn::FindInMap fourth argument must be an object with a DefaultValue key".to_string()
+        })?;
+        let dv = opts.get("DefaultValue").ok_or_else(|| {
+            "Fn::FindInMap fourth argument must contain a DefaultValue key".to_string()
+        })?;
+        Some(apply_mappings(dv, parameters, mappings, conditions)?)
+    } else {
+        None
+    };
+
+    let map_name = stringify_findinmap_arg(&arr[0], parameters, mappings, conditions)?;
+    let top_key = stringify_findinmap_arg(&arr[1], parameters, mappings, conditions)?;
+    let second_key = stringify_findinmap_arg(&arr[2], parameters, mappings, conditions)?;
+
+    if let Some(top) = mappings.get(&map_name) {
+        if let Some(second) = top.get(&top_key) {
+            if let Some(leaf) = second.get(&second_key) {
+                return Ok(leaf.clone());
+            }
+        }
+    }
+
+    if let Some(dv) = default_value {
+        return Ok(dv);
+    }
+
+    Err(format!(
+        "Template error: Unable to get mapping for {map_name}::{top_key}::{second_key}"
+    ))
+}
+
+fn stringify_findinmap_arg(
+    value: &Value,
+    parameters: &BTreeMap<String, String>,
+    mappings: &Mappings,
+    conditions: &BTreeMap<String, bool>,
+) -> Result<String, String> {
     match value {
-        Value::String(s) => s.clone(),
+        Value::String(s) => Ok(s.clone()),
         Value::Object(m) => {
             if let Some(name) = m.get("Ref").and_then(|v| v.as_str()) {
                 if let Some(p) = parameters.get(name) {
-                    return p.clone();
+                    return Ok(p.clone());
                 }
-                return name.to_string();
+                // Pseudo refs that have a canonical default value
+                // resolve so FindInMap keyed off `AWS::Region` etc.
+                // works without the caller priming `parameters`.
+                if let Some(Value::String(s)) = pseudo_value(name, parameters) {
+                    return Ok(s);
+                }
+                return Ok(name.to_string());
             }
-            value.to_string()
+            // Nested Fn::FindInMap as a key — resolve it and stringify
+            // the leaf, so e.g. `Fn::FindInMap: [Outer, !FindInMap [...], K]`
+            // works.
+            if let Some(arr) = m.get("Fn::FindInMap").and_then(|v| v.as_array()) {
+                let resolved = resolve_find_in_map(arr, parameters, mappings, conditions)?;
+                return Ok(match resolved {
+                    Value::String(s) => s,
+                    other => other.to_string(),
+                });
+            }
+            Ok(value.to_string())
         }
-        _ => value.to_string(),
+        _ => Ok(value.to_string()),
     }
 }
 
@@ -567,7 +666,7 @@ pub fn resolve_resource_properties_with_attrs(
     // provisioned property map.
     let conditions = evaluate_conditions(&value, parameters)?;
     let mappings = parse_mappings(&value);
-    let raw_props = apply_mappings(&raw_props, parameters, &mappings);
+    let raw_props = apply_mappings(&raw_props, parameters, &mappings, &conditions)?;
 
     let resolved = resolve_refs_full(
         &raw_props,
@@ -1775,7 +1874,7 @@ Resources:
     }
 
     #[test]
-    fn fn_find_in_map_unknown_keys_passes_through() {
+    fn fn_find_in_map_unknown_keys_returns_error() {
         let template = r#"{
             "Mappings": {
                 "RegionMap": {
@@ -1791,10 +1890,283 @@ Resources:
                 }
             }
         }"#;
+        let err = parse_template(template, &BTreeMap::new()).unwrap_err();
+        assert!(
+            err.contains("Unable to get mapping for RegionMap::ap-south-1::AMI"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn fn_find_in_map_four_arg_returns_default_when_missing() {
+        let template = r#"{
+            "Mappings": {
+                "RegionMap": {
+                    "us-east-1": {"AMI": "ami-east"}
+                }
+            },
+            "Resources": {
+                "Inst": {
+                    "Type": "AWS::EC2::Instance",
+                    "Properties": {
+                        "ImageId": {"Fn::FindInMap": [
+                            "RegionMap",
+                            "ap-south-1",
+                            "AMI",
+                            {"DefaultValue": "ami-fallback"}
+                        ]}
+                    }
+                }
+            }
+        }"#;
         let parsed = parse_template(template, &BTreeMap::new()).unwrap();
-        assert!(parsed.resources[0].properties["ImageId"]
-            .as_object()
-            .is_some());
+        assert_eq!(
+            parsed.resources[0].properties["ImageId"],
+            Value::String("ami-fallback".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_find_in_map_four_arg_prefers_match_over_default() {
+        let template = r#"{
+            "Mappings": {
+                "RegionMap": {
+                    "us-east-1": {"AMI": "ami-east"}
+                }
+            },
+            "Resources": {
+                "Inst": {
+                    "Type": "AWS::EC2::Instance",
+                    "Properties": {
+                        "ImageId": {"Fn::FindInMap": [
+                            "RegionMap",
+                            "us-east-1",
+                            "AMI",
+                            {"DefaultValue": "ami-fallback"}
+                        ]}
+                    }
+                }
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["ImageId"],
+            Value::String("ami-east".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_find_in_map_default_value_is_resolved_intrinsic() {
+        let template = r#"{
+            "Parameters": {"Fallback": {"Type": "String"}},
+            "Mappings": {
+                "RegionMap": {
+                    "us-east-1": {"AMI": "ami-east"}
+                }
+            },
+            "Resources": {
+                "Inst": {
+                    "Type": "AWS::EC2::Instance",
+                    "Properties": {
+                        "ImageId": {"Fn::FindInMap": [
+                            "RegionMap",
+                            "ap-south-1",
+                            "AMI",
+                            {"DefaultValue": {"Ref": "Fallback"}}
+                        ]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Fallback".to_string(), "ami-default".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["ImageId"],
+            Value::String("ami-default".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_find_in_map_unknown_map_name_errors() {
+        let template = r#"{
+            "Mappings": {
+                "RegionMap": {
+                    "us-east-1": {"AMI": "ami-east"}
+                }
+            },
+            "Resources": {
+                "Inst": {
+                    "Type": "AWS::EC2::Instance",
+                    "Properties": {
+                        "ImageId": {"Fn::FindInMap": ["DoesNotExist", "us-east-1", "AMI"]}
+                    }
+                }
+            }
+        }"#;
+        let err = parse_template(template, &BTreeMap::new()).unwrap_err();
+        assert!(
+            err.contains("Unable to get mapping for DoesNotExist::us-east-1::AMI"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn fn_find_in_map_wrong_arg_count_errors() {
+        let template = r#"{
+            "Mappings": {"M": {"a": {"b": "c"}}},
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": {"Fn::FindInMap": ["M", "a"]}
+                    }
+                }
+            }
+        }"#;
+        let err = parse_template(template, &BTreeMap::new()).unwrap_err();
+        assert!(
+            err.contains("Fn::FindInMap requires 3 or 4 arguments"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn fn_find_in_map_resolves_via_pseudo_region() {
+        let template = r#"{
+            "Mappings": {
+                "RegionMap": {
+                    "us-east-1": {"AMI": "ami-east"},
+                    "us-west-2": {"AMI": "ami-west"}
+                }
+            },
+            "Resources": {
+                "Inst": {
+                    "Type": "AWS::EC2::Instance",
+                    "Properties": {
+                        "ImageId": {"Fn::FindInMap": [
+                            "RegionMap",
+                            {"Ref": "AWS::Region"},
+                            "AMI"
+                        ]}
+                    }
+                }
+            }
+        }"#;
+        // No AWS::Region in parameters — the pseudo-default ("us-east-1")
+        // should kick in so FindInMap still resolves.
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["ImageId"],
+            Value::String("ami-east".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_find_in_map_in_unused_if_branch_does_not_error() {
+        // FindInMap sits in the FALSE branch of Fn::If; the path
+        // `RegionMap::ap-south-1::AMI` doesn't exist. Because
+        // `WantAlt` resolves to "no" the alt branch is unused and
+        // CFN never executes that FindInMap — parse_template must
+        // succeed instead of erroring.
+        let template = r#"{
+            "Parameters": {"WantAlt": {"Type": "String"}},
+            "Conditions": {
+                "UseAlt": {"Fn::Equals": [{"Ref": "WantAlt"}, "yes"]}
+            },
+            "Mappings": {
+                "RegionMap": {
+                    "us-east-1": {"AMI": "ami-east"}
+                }
+            },
+            "Resources": {
+                "Inst": {
+                    "Type": "AWS::EC2::Instance",
+                    "Properties": {
+                        "ImageId": {"Fn::If": [
+                            "UseAlt",
+                            {"Fn::FindInMap": ["RegionMap", "ap-south-1", "AMI"]},
+                            {"Fn::FindInMap": ["RegionMap", "us-east-1", "AMI"]}
+                        ]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("WantAlt".to_string(), "no".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        assert_eq!(
+            parsed.resources[0].properties["ImageId"],
+            Value::String("ami-east".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_find_in_map_in_active_if_branch_still_errors_on_miss() {
+        // Same shape as above but the active branch is the broken
+        // one; the strict miss handling must still surface.
+        let template = r#"{
+            "Parameters": {"WantAlt": {"Type": "String"}},
+            "Conditions": {
+                "UseAlt": {"Fn::Equals": [{"Ref": "WantAlt"}, "yes"]}
+            },
+            "Mappings": {
+                "RegionMap": {
+                    "us-east-1": {"AMI": "ami-east"}
+                }
+            },
+            "Resources": {
+                "Inst": {
+                    "Type": "AWS::EC2::Instance",
+                    "Properties": {
+                        "ImageId": {"Fn::If": [
+                            "UseAlt",
+                            {"Fn::FindInMap": ["RegionMap", "ap-south-1", "AMI"]},
+                            {"Fn::FindInMap": ["RegionMap", "us-east-1", "AMI"]}
+                        ]}
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("WantAlt".to_string(), "yes".to_string());
+        let err = parse_template(template, &params).unwrap_err();
+        assert!(
+            err.contains("Unable to get mapping for RegionMap::ap-south-1::AMI"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn fn_find_in_map_alongside_ref_and_sub_still_resolve() {
+        let template = r#"{
+            "Parameters": {"Env": {"Type": "String"}},
+            "Mappings": {
+                "EnvMap": {
+                    "prod": {"Suffix": "live"},
+                    "dev": {"Suffix": "test"}
+                }
+            },
+            "Resources": {
+                "Q": {
+                    "Type": "AWS::SQS::Queue",
+                    "Properties": {
+                        "QueueName": {"Fn::FindInMap": ["EnvMap", {"Ref": "Env"}, "Suffix"]},
+                        "Tags": [
+                            {"Key": "EnvRef", "Value": {"Ref": "Env"}},
+                            {"Key": "Subbed", "Value": {"Fn::Sub": "env-${Env}"}}
+                        ]
+                    }
+                }
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Env".to_string(), "prod".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        let p = &parsed.resources[0].properties;
+        assert_eq!(p["QueueName"], Value::String("live".to_string()));
+        assert_eq!(p["Tags"][0]["Value"], Value::String("prod".to_string()));
+        assert_eq!(p["Tags"][1]["Value"], Value::String("env-prod".to_string()));
     }
 
     // ── Conditions: cycle detection + AWS::NoValue removal ──
