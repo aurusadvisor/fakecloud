@@ -137,6 +137,64 @@ pub(crate) fn validate_listener_port(port: i32) -> Result<(), AwsServiceError> {
     Ok(())
 }
 
+/// Each load balancer type accepts only a subset of listener
+/// protocols, and GWLB pins the port to GENEVE's standard `6081`.
+/// AWS rejects mismatches up front - e.g. an ALB cannot listen on
+/// raw TCP, an NLB cannot listen on HTTP, and a GWLB cannot listen
+/// on anything except GENEVE/6081.
+///
+/// `protocol` and `port` are optional: callers should still call
+/// [`validate_listener_protocol`] / [`validate_listener_port`] for
+/// the standalone shape checks; this helper only enforces the
+/// per-type matrix.
+pub(crate) fn validate_listener_protocol_port_for_lb_type(
+    lb_type: &str,
+    protocol: Option<&str>,
+    port: Option<i32>,
+) -> Result<(), AwsServiceError> {
+    let allowed: &[&str] = match lb_type {
+        "application" => &["HTTP", "HTTPS"],
+        "network" => &["TCP", "UDP", "TCP_UDP", "TLS"],
+        "gateway" => &["GENEVE"],
+        // Unknown LB type - fall back to permissive; the caller has
+        // already gated on the enum.
+        _ => return Ok(()),
+    };
+    if let Some(p) = protocol {
+        if !allowed.contains(&p) {
+            return Err(invalid_param(format!(
+                "Protocol '{p}' is not valid for {lb_type} load balancers. Valid values: {}",
+                allowed.join(", ")
+            )));
+        }
+    }
+    if lb_type == "gateway" {
+        if let Some(port) = port {
+            if port != 6081 {
+                return Err(invalid_param(format!(
+                    "Port '{port}' is not valid for gateway load balancers. GENEVE listeners must use port 6081"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `ipv6.enable_prefix_for_source_nat` is the only LB attribute
+/// whose value is restricted to a tight set of bool-ish strings.
+/// AWS accepts `true`/`false` and the `on`/`off` aliases used by
+/// the corresponding `EnablePrefixForIpv6SourceNat` create-time
+/// enum. Anything else returns a `ValidationError` rather than
+/// being silently round-tripped.
+pub(crate) fn validate_ipv6_source_nat_value(value: &str) -> Result<(), AwsServiceError> {
+    if !matches!(value, "true" | "false" | "on" | "off") {
+        return Err(invalid_param(format!(
+            "ipv6.enable_prefix_for_source_nat must be one of true|false|on|off, got '{value}'"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn lb_not_found(arn: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,

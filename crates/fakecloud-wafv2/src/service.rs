@@ -1035,7 +1035,7 @@ impl Wafv2Service {
     fn associate_web_acl(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let acl_arn = require_str(&body, "WebACLArn")?;
-        let resource_arn = require_str(&body, "ResourceArn")?;
+        let resource_arn = normalize_resource_arn(&require_str(&body, "ResourceArn")?);
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         if !account.web_acls.values().any(|a| a.arn == acl_arn) {
@@ -1047,7 +1047,7 @@ impl Wafv2Service {
 
     fn disassociate_web_acl(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let resource_arn = require_str(&body, "ResourceArn")?;
+        let resource_arn = normalize_resource_arn(&require_str(&body, "ResourceArn")?);
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         account.associations.remove(&resource_arn);
@@ -1056,7 +1056,7 @@ impl Wafv2Service {
 
     fn get_web_acl_for_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let resource_arn = require_str(&body, "ResourceArn")?;
+        let resource_arn = normalize_resource_arn(&require_str(&body, "ResourceArn")?);
         let state = self.state.read();
         let account = state.accounts.get(&req.account_id);
         let acl_arn = account.and_then(|a| a.associations.get(&resource_arn).cloned());
@@ -1720,6 +1720,39 @@ fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "WAFInvalidParameterException", msg)
 }
 
+/// Normalize an ELBv2-style `ResourceArn` to the canonical
+/// load-balancer ARN. Real AWS associates web ACLs with the load
+/// balancer (not the listener), but callers regularly pass through
+/// listener ARNs - either by accident or because they only have
+/// the listener handy in their CloudFormation template. Trim the
+/// listener suffix so the persisted association matches the lb
+/// arn the data plane looks up.
+///
+/// Non-ELBv2 ARNs (API Gateway, AppSync, Cognito, Verified Access)
+/// are returned unchanged.
+fn normalize_resource_arn(arn: &str) -> String {
+    // Listener ARN:
+    //   arn:aws:elasticloadbalancing:<region>:<acct>:listener/<type>/<name>/<lb-suffix>/<listener-suffix>
+    // LoadBalancer ARN:
+    //   arn:aws:elasticloadbalancing:<region>:<acct>:loadbalancer/<type>/<name>/<lb-suffix>
+    if let Some(rest) = arn.strip_prefix("arn:aws:elasticloadbalancing:") {
+        if let Some((before, after)) = rest.split_once(":listener/") {
+            // Listener path has 4 segments (<type>/<name>/<lb-suffix>/<listener-suffix>);
+            // drop the trailing listener suffix to recover the lb ARN.
+            let mut parts = after.splitn(4, '/');
+            let ty = parts.next();
+            let name = parts.next();
+            let lb_suffix = parts.next();
+            if let (Some(ty), Some(name), Some(lb_suffix)) = (ty, name, lb_suffix) {
+                return format!(
+                    "arn:aws:elasticloadbalancing:{before}:loadbalancer/{ty}/{name}/{lb_suffix}"
+                );
+            }
+        }
+    }
+    arn.to_string()
+}
+
 fn not_found(resource: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -2092,4 +2125,43 @@ fn regex_set_detail_json(set: &RegexPatternSet) -> Value {
             .insert("Description".to_string(), Value::String(d.clone()));
     }
     obj
+}
+
+#[cfg(test)]
+mod arn_norm_tests {
+    use super::normalize_resource_arn;
+
+    #[test]
+    fn elb_listener_arn_collapses_to_load_balancer_arn() {
+        let listener =
+            "arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/app/web/abc/xyz";
+        assert_eq!(
+            normalize_resource_arn(listener),
+            "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/web/abc"
+        );
+    }
+
+    #[test]
+    fn elb_load_balancer_arn_passes_through() {
+        let lb = "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/web/abc";
+        assert_eq!(normalize_resource_arn(lb), lb);
+    }
+
+    #[test]
+    fn nlb_listener_arn_collapses_to_network_load_balancer_arn() {
+        let listener =
+            "arn:aws:elasticloadbalancing:eu-west-1:123456789012:listener/net/wire/abc/xyz";
+        assert_eq!(
+            normalize_resource_arn(listener),
+            "arn:aws:elasticloadbalancing:eu-west-1:123456789012:loadbalancer/net/wire/abc"
+        );
+    }
+
+    #[test]
+    fn non_elbv2_arn_passes_through() {
+        let apigw = "arn:aws:apigateway:us-east-1::/restapis/abc/stages/prod";
+        assert_eq!(normalize_resource_arn(apigw), apigw);
+        let cog = "arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_xxx";
+        assert_eq!(normalize_resource_arn(cog), cog);
+    }
 }

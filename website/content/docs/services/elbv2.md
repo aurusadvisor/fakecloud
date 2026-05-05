@@ -32,6 +32,9 @@ fakecloud implements ELBv2 with full control-plane coverage across all three loa
 - Target group name validation, target type enum (`instance`, `ip`, `lambda`, `alb`), health check threshold ranges all match AWS.
 - `DeleteTargetGroup` returns `ResourceInUse` when any listener default action or rule action — including those wrapped in `ForwardConfig.TargetGroups` — still references the target group.
 - `CreateRule`/`ModifyRule` reject priority values <= 0 with `ValidationError`, and rule actions referencing a non-existent target group return `TargetGroupNotFound`.
+- `CreateListener`/`ModifyListener` reject Protocol/Port mismatches per LB type with `ValidationError`. ALB (`application`) accepts only `HTTP`, `HTTPS` on ports 1-65535. NLB (`network`) accepts only `TCP`, `UDP`, `TCP_UDP`, `TLS` on ports 1-65535. GWLB (`gateway`) accepts only `GENEVE` and pins the port to `6081`.
+- `ModifyLoadBalancerAttributes` validates `ipv6.enable_prefix_for_source_nat` against the AWS-supported set `true`, `false`, `on`, `off` and rejects anything else with `ValidationError`. The value round-trips verbatim through `DescribeLoadBalancerAttributes`.
+- `wafv2:AssociateWebACL`/`DisassociateWebACL`/`GetWebACLForResource` accept either a load balancer ARN or a listener ARN as `ResourceArn` for ELBv2 targets — the listener ARN is normalized to its parent load-balancer ARN server-side so the data plane lookup matches.
 
 ### Idempotent creates
 
