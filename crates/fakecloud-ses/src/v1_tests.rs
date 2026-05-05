@@ -1150,6 +1150,54 @@ fn send_email_v1_skips_recipient_check_in_production() {
 }
 
 #[test]
+fn send_email_v1_accepts_simulator_recipients_in_sandbox() {
+    // Mailbox simulator addresses bypass the gate the same way real SES
+    // documents (`simulator.amazonses.com` is implicitly verified).
+    let state = make_state();
+    disable_production_access(&state);
+    seed_identity(&state, "sender@example.com");
+    for recipient in [
+        "bounce@simulator.amazonses.com",
+        "complaint@simulator.amazonses.com",
+        "success@simulator.amazonses.com",
+        "suppressionlist@simulator.amazonses.com",
+    ] {
+        let req = make_v1_request(
+            "SendEmail",
+            vec![
+                ("Source", "sender@example.com"),
+                ("Destination.ToAddresses.member.1", recipient),
+                ("Message.Subject.Data", "Hi"),
+                ("Message.Body.Text.Data", "Hello"),
+            ],
+        );
+        let resp = handle_v1_action(&state, &req)
+            .unwrap_or_else(|e| panic!("simulator recipient {recipient}: {}", e.message()));
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+}
+
+#[test]
+fn send_email_v1_accepts_simulator_sender_without_verified_identity() {
+    let state = make_state();
+    disable_production_access(&state);
+    let req = make_v1_request(
+        "SendEmail",
+        vec![
+            ("Source", "ooto@simulator.amazonses.com"),
+            (
+                "Destination.ToAddresses.member.1",
+                "bounce@simulator.amazonses.com",
+            ),
+            ("Message.Subject.Data", "Hi"),
+            ("Message.Body.Text.Data", "Hello"),
+        ],
+    );
+    let resp = handle_v1_action(&state, &req).unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[test]
 fn test_send_raw_email() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");

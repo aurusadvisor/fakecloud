@@ -110,9 +110,21 @@ fn extract_email_address(from: &str) -> &str {
     from.trim()
 }
 
+/// True for mailbox-simulator addresses. Real SES treats every address
+/// on `simulator.amazonses.com` as implicitly verified; we match that
+/// behavior so callers can exercise bounce/complaint/suppression flows
+/// without having to register the simulator domain as a verified identity.
+fn is_simulator_address(email: &str) -> bool {
+    matches!(email.split_once('@'), Some((_, "simulator.amazonses.com")))
+}
+
 /// Match an email against verified identities (exact email or verified
-/// domain match).
+/// domain match). Mailbox-simulator addresses bypass the gate the same
+/// way real SES does.
 fn identity_is_verified(st: &SesState, email: &str) -> bool {
+    if is_simulator_address(email) {
+        return true;
+    }
     if st
         .identities
         .get(email)
