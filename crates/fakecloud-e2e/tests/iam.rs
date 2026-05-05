@@ -3086,6 +3086,58 @@ async fn sts_assume_role_with_web_identity_rejects_unknown_audience() {
 }
 
 #[tokio::test]
+async fn sts_assume_role_with_web_identity_accepts_array_audience() {
+    // RFC 7519 §4.1.3: JWT `aud` may be a JSON array. Real Google /
+    // Auth0 / Cognito tokens use the array form. The audience check
+    // must accept any entry that's in the provider's client_id_list.
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+    let sts = server.sts_client().await;
+
+    iam.create_open_id_connect_provider()
+        .url("https://accounts.google.com")
+        .client_id_list("primary-client-id")
+        .thumbprint_list("0".repeat(40))
+        .send()
+        .await
+        .unwrap();
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{
+        "Effect":"Allow",
+        "Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/accounts.google.com"},
+        "Action":"sts:AssumeRoleWithWebIdentity"
+    }]}"#;
+    iam.create_role()
+        .role_name("oidc-array-aud-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+
+    use base64::Engine;
+    let header =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        br#"{"iss":"https://accounts.google.com","aud":["other-client","primary-client-id"],"sub":"u1"}"#,
+    );
+    let token = format!("{header}.{payload}.");
+
+    let resp = sts
+        .assume_role_with_web_identity()
+        .role_arn("arn:aws:iam::123456789012:role/oidc-array-aud-role")
+        .role_session_name("array-aud")
+        .web_identity_token(&token)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp
+        .credentials()
+        .unwrap()
+        .access_key_id()
+        .starts_with("FSIA"));
+}
+
+#[tokio::test]
 async fn sts_assume_role_with_web_identity_succeeds_when_iss_aud_match() {
     // F1: with a registered OIDC provider whose client_id_list contains
     // the JWT `aud`, AssumeRoleWithWebIdentity must succeed and the

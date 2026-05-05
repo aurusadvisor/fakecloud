@@ -671,24 +671,28 @@ impl StsService {
                         format!("No OpenIDConnect provider found in your account for issuer {iss}"),
                     ));
                 }
-                // Audience must be in the provider's client_id_list when
-                // the provider has any client IDs configured. Empty
-                // list means "accept any aud" (matches AWS for
-                // legacy/uninitialized providers).
+                // Audience must overlap with the provider's
+                // client_id_list when the provider has any client IDs
+                // configured. Empty list means "accept any aud"
+                // (matches AWS for legacy/uninitialized providers).
+                // Tokens carry every audience claim the IdP issued the
+                // assertion to (RFC 7519 array form), so any one
+                // matching client_id_list entry is enough.
                 if let Some((ref _iss, ref provider)) = oidc_match {
                     if !provider.client_id_list.is_empty() {
-                        match claims.aud.as_deref() {
-                            Some(aud) if provider.client_id_list.iter().any(|c| c == aud) => {}
-                            _ => {
-                                return Err(AwsServiceError::aws_error(
-                                    StatusCode::BAD_REQUEST,
-                                    "InvalidIdentityToken",
-                                    format!(
-                                        "Incorrect token audience: not in client_id_list for provider {}",
-                                        provider.arn
-                                    ),
-                                ));
-                            }
+                        let any_match = claims
+                            .aud
+                            .iter()
+                            .any(|aud| provider.client_id_list.iter().any(|c| c == aud));
+                        if !any_match {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "InvalidIdentityToken",
+                                format!(
+                                    "Incorrect token audience: not in client_id_list for provider {}",
+                                    provider.arn
+                                ),
+                            ));
                         }
                     }
                 }
@@ -733,10 +737,14 @@ impl StsService {
                 .or_else(|| provider_id_param.as_deref().map(normalize_issuer));
             if let Some(prefix) = key_prefix {
                 if let Some(ref claims) = jwt {
-                    if let Some(ref aud) = claims.aud {
+                    if !claims.aud.is_empty() {
+                        // `aud` is multi-valued (RFC 7519); surface
+                        // every audience so a `StringEquals` /
+                        // `ForAnyValue:StringEquals` condition matches
+                        // whichever entry the policy names.
                         context
                             .service_keys
-                            .insert(format!("{prefix}:aud"), vec![aud.clone()]);
+                            .insert(format!("{prefix}:aud"), claims.aud.clone());
                     }
                     if let Some(ref sub) = claims.sub {
                         context
@@ -1464,7 +1472,11 @@ fn extract_xml_text_after(xml: &str, local_name: &str) -> Option<String> {
 #[derive(Debug, Clone, Default)]
 struct JwtClaims {
     iss: Option<String>,
-    aud: Option<String>,
+    /// `aud` per RFC 7519 §4.1.3 may be either a single string or a JSON
+    /// array of strings. Real-world IdPs (Google, Auth0, Cognito) all
+    /// emit the array form regularly, so we carry every entry and
+    /// match against any of them when validating.
+    aud: Vec<String>,
     sub: Option<String>,
     raw: serde_json::Map<String, serde_json::Value>,
 }
@@ -1486,9 +1498,20 @@ fn decode_jwt(token: &str) -> Option<JwtClaims> {
     let json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
     let map = json.as_object()?.clone();
     let str_field = |k: &str| map.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    // RFC 7519 §4.1.3: `aud` is either a string or a JSON array of
+    // strings. Accept both shapes — Google, Auth0, and Cognito all
+    // emit the array form.
+    let aud = match map.get("aud") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    };
     Some(JwtClaims {
         iss: str_field("iss"),
-        aud: str_field("aud"),
+        aud,
         sub: str_field("sub"),
         raw: map,
     })
