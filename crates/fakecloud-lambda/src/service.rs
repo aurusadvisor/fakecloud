@@ -491,6 +491,8 @@ fn function_config_unchanged_for_publish(
         && prev.image_config == live.image_config
         && prev.signing_profile_version_arn == live.signing_profile_version_arn
         && prev.signing_job_arn == live.signing_job_arn
+        && prev.runtime_version_config == live.runtime_version_config
+        && prev.snap_start == live.snap_start
 }
 
 /// versions in the weight map. Returns `None` for `$LATEST` /
