@@ -191,8 +191,46 @@ pub async fn handle(
     {
         Ok(out) => out,
         Err(err) => {
-            service.record_request(&req.account_id, &api_id, &stage_name, req, err.status());
-            return Err(err);
+            // Consult any configured gateway response template for the
+            // failure category (UNAUTHORIZED for 401, ACCESS_DENIED for
+            // 403) so customers can override the status code and body.
+            // If the specific category has no override, fall back to
+            // DEFAULT_4XX — AWS treats it as the catch-all for any 4xx
+            // response that isn't otherwise customized.
+            let response_type = match err.status() {
+                StatusCode::UNAUTHORIZED => "UNAUTHORIZED",
+                StatusCode::FORBIDDEN => "ACCESS_DENIED",
+                _ => "DEFAULT_4XX",
+            };
+            let overridden = apply_gateway_response_override(
+                service,
+                &req.account_id,
+                &api_id,
+                response_type,
+                &err,
+            )
+            .or_else(|| {
+                if response_type == "DEFAULT_4XX" {
+                    None
+                } else {
+                    apply_gateway_response_override(
+                        service,
+                        &req.account_id,
+                        &api_id,
+                        "DEFAULT_4XX",
+                        &err,
+                    )
+                }
+            });
+            let recorded_status = overridden
+                .as_ref()
+                .map(|r| r.status)
+                .unwrap_or_else(|| err.status());
+            service.record_request(&req.account_id, &api_id, &stage_name, req, recorded_status);
+            return match overridden {
+                Some(resp) => Ok(resp),
+                None => Err(err),
+            };
         }
     };
 
@@ -681,6 +719,84 @@ fn interpret_cached(
         })),
         AuthEffect::Deny => Err(forbidden("User is not authorized to access this resource")),
     }
+}
+
+/// Apply the customer-configured gateway response template (if any) for
+/// `response_type`. Returns `None` when no override is registered, in
+/// which case the caller should propagate the original `AwsServiceError`
+/// unchanged. AWS allows overriding the HTTP status code and the
+/// response body via `responseTemplates` keyed by content type; we honor
+/// both and substitute `$context.error.messageString` /
+/// `$context.error.responseType` so the standard AWS-recommended template
+/// `{"message":$context.error.messageString}` renders correctly.
+fn apply_gateway_response_override(
+    service: &ApiGatewayService,
+    account_id: &str,
+    api_id: &str,
+    response_type: &str,
+    err: &AwsServiceError,
+) -> Option<AwsResponse> {
+    let accounts = service.state_handle().read();
+    let state = accounts.get(account_id)?;
+    let value = state.gateway_responses.get(api_id)?.get(response_type)?;
+    // `statusCode` may be a string or numeric per AWS docs; accept both
+    // and reject anything that doesn't fit a u16 instead of silently
+    // truncating it.
+    let status_code = value
+        .get("statusCode")
+        .and_then(|v| {
+            v.as_str().and_then(|s| s.parse::<u16>().ok()).or_else(|| {
+                v.as_u64()
+                    .filter(|n| *n <= u16::MAX as u64)
+                    .map(|n| n as u16)
+            })
+        })
+        .and_then(|n| StatusCode::from_u16(n).ok())
+        .unwrap_or_else(|| err.status());
+    let templates = value.get("responseTemplates").and_then(|v| v.as_object());
+    let template = templates
+        .and_then(|t| t.get("application/json").and_then(|v| v.as_str()))
+        .map(|s| s.to_string());
+    let body = match template {
+        Some(t) => render_error_template(&t, response_type, &err.message()),
+        // Default body matches AWS's built-in shape for an UNAUTHORIZED /
+        // ACCESS_DENIED response.
+        None => format!("{{\"message\":\"{}\"}}", escape_json(&err.message())),
+    };
+    Some(AwsResponse {
+        status: status_code,
+        content_type: "application/json".to_string(),
+        body: bytes::Bytes::from(body.into_bytes()).into(),
+        headers: http::HeaderMap::new(),
+    })
+}
+
+/// Substitute the two `$context.error.*` variables AWS exposes in
+/// gateway response templates. Anything else is left verbatim — full VTL
+/// rendering belongs to integration request/response transforms, not
+/// here.
+fn render_error_template(template: &str, response_type: &str, message: &str) -> String {
+    let escaped = escape_json(message);
+    template
+        .replace("$context.error.messageString", &format!("\"{escaped}\""))
+        .replace("$context.error.message", &escaped)
+        .replace("$context.error.responseType", response_type)
+}
+
+fn escape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn inject_authorizer_into_event(event: &mut serde_json::Value, outcome: &AuthorizerOutcome) {
@@ -1836,6 +1952,125 @@ mod tests {
             current_quota_window(april, QuotaPeriod::Month, 0),
             current_quota_window(may, QuotaPeriod::Month, 0)
         );
+    }
+
+    #[tokio::test]
+    async fn token_authorizer_cache_short_circuits_second_invocation() {
+        // Two requests with the same identity-source value must hit the
+        // authorizer Lambda once; the cached Allow result feeds the
+        // second call directly.
+        let state = build_state("CUSTOM", Some(token_authorizer()));
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            FN_ARN,
+            serde_json::json!({
+                "principalId": "u",
+                "policyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [{"Effect": "Allow", "Resource": "*"}]
+                }
+            }),
+        );
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "tok-cache".parse().unwrap());
+
+        for _ in 0..2 {
+            let resp = handle(&service, &make_request(headers.clone()))
+                .await
+                .expect("Allow must let request through");
+            assert_eq!(resp.status, StatusCode::OK);
+        }
+        // Authorizer Lambda invoked exactly once across both requests
+        // (cache TTL is 300s by default in this fixture).
+        assert_eq!(lambda.invocation_count(FN_ARN), 1);
+        // Backend Lambda invoked twice — caching only applies to the
+        // authorizer decision, not to the integration.
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 2);
+    }
+
+    #[tokio::test]
+    async fn unauthorized_gateway_response_template_overrides_status_and_body() {
+        // Customer registers a gateway response template that maps
+        // UNAUTHORIZED to HTTP 418 with a custom JSON body. A request
+        // missing the identity-source header must surface that override
+        // instead of the default 401.
+        let state = build_state("CUSTOM", Some(token_authorizer()));
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mut by_type = BTreeMap::new();
+            by_type.insert(
+                "UNAUTHORIZED".to_string(),
+                serde_json::json!({
+                    "responseType": "UNAUTHORIZED",
+                    "statusCode": "418",
+                    "responseTemplates": {
+                        "application/json": "{\"reason\":$context.error.messageString}"
+                    }
+                }),
+            );
+            st.gateway_responses
+                .insert(TEST_API_ID.to_string(), by_type);
+        }
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let resp = handle(&service, &make_request(HeaderMap::new()))
+            .await
+            .expect("override must surface as a successful AwsResponse");
+        assert_eq!(resp.status, StatusCode::IM_A_TEAPOT);
+        let body_bytes = match &resp.body {
+            fakecloud_core::service::ResponseBody::Bytes(b) => b.clone(),
+            _ => panic!("override body should be inline bytes"),
+        };
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(body["reason"].as_str().unwrap().contains("Authorization"));
+        // Authorizer Lambda never invoked — request shorted at the
+        // missing identity source check.
+        assert_eq!(lambda.invocation_count(FN_ARN), 0);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
+    async fn default_4xx_gateway_response_template_falls_back_for_unauthorized() {
+        // No UNAUTHORIZED-specific override is registered, but
+        // DEFAULT_4XX is. AWS treats DEFAULT_4XX as the catch-all for
+        // any uncustomized 4xx, so the missing-token 401 must adopt the
+        // fallback's status and body.
+        let state = build_state("CUSTOM", Some(token_authorizer()));
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mut by_type = BTreeMap::new();
+            by_type.insert(
+                "DEFAULT_4XX".to_string(),
+                serde_json::json!({
+                    "responseType": "DEFAULT_4XX",
+                    "statusCode": 451,
+                    "responseTemplates": {
+                        "application/json": "{\"fallback\":$context.error.messageString}"
+                    }
+                }),
+            );
+            st.gateway_responses
+                .insert(TEST_API_ID.to_string(), by_type);
+        }
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let resp = handle(&service, &make_request(HeaderMap::new()))
+            .await
+            .expect("DEFAULT_4XX fallback must surface as a successful AwsResponse");
+        assert_eq!(resp.status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+        let body_bytes = match &resp.body {
+            fakecloud_core::service::ResponseBody::Bytes(b) => b.clone(),
+            _ => panic!("override body should be inline bytes"),
+        };
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(body["fallback"].as_str().unwrap().contains("Authorization"));
     }
 
     #[tokio::test]
