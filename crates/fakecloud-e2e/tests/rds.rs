@@ -1068,3 +1068,186 @@ async fn rds_parameter_group_families() {
         Some("InvalidParameterValue")
     );
 }
+
+#[tokio::test]
+async fn rds_promote_read_replica_clears_source_pointer() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "promote-src-db").await;
+
+    client
+        .create_db_instance_read_replica()
+        .db_instance_identifier("promote-replica-db")
+        .source_db_instance_identifier("promote-src-db")
+        .send()
+        .await
+        .expect("create read replica");
+
+    helpers::wait_for_db_available(&client, "promote-replica-db", 180).await;
+
+    // Sanity: replica points at source, source lists replica.
+    let replica_before = client
+        .describe_db_instances()
+        .db_instance_identifier("promote-replica-db")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        replica_before.db_instances()[0].read_replica_source_db_instance_identifier(),
+        Some("promote-src-db")
+    );
+    let source_before = client
+        .describe_db_instances()
+        .db_instance_identifier("promote-src-db")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        source_before.db_instances()[0].read_replica_db_instance_identifiers(),
+        &["promote-replica-db".to_string()]
+    );
+
+    let promote = client
+        .promote_read_replica()
+        .db_instance_identifier("promote-replica-db")
+        .backup_retention_period(7)
+        .preferred_backup_window("04:00-05:00")
+        .send()
+        .await
+        .expect("PromoteReadReplica");
+    let promoted = promote.db_instance().expect("db instance");
+    assert_eq!(
+        promoted.db_instance_identifier(),
+        Some("promote-replica-db")
+    );
+    // Source pointer cleared on the promoted instance.
+    assert!(promoted
+        .read_replica_source_db_instance_identifier()
+        .is_none());
+
+    // Persisted state matches.
+    let replica_after = client
+        .describe_db_instances()
+        .db_instance_identifier("promote-replica-db")
+        .send()
+        .await
+        .unwrap();
+    let after = &replica_after.db_instances()[0];
+    assert!(after.read_replica_source_db_instance_identifier().is_none());
+    assert_eq!(after.backup_retention_period(), Some(7));
+    assert_eq!(after.preferred_backup_window(), Some("04:00-05:00"));
+
+    let source_after = client
+        .describe_db_instances()
+        .db_instance_identifier("promote-src-db")
+        .send()
+        .await
+        .unwrap();
+    assert!(source_after.db_instances()[0]
+        .read_replica_db_instance_identifiers()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn rds_promote_read_replica_rejects_non_replica() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "promote-standalone-db").await;
+
+    let err = client
+        .promote_read_replica()
+        .db_instance_identifier("promote-standalone-db")
+        .send()
+        .await
+        .expect_err("non-replica should be rejected");
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidDBInstanceState")
+    );
+}
+
+#[tokio::test]
+async fn rds_switchover_read_replica_swaps_roles() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "switch-src-db").await;
+
+    client
+        .create_db_instance_read_replica()
+        .db_instance_identifier("switch-replica-db")
+        .source_db_instance_identifier("switch-src-db")
+        .send()
+        .await
+        .expect("create read replica");
+    helpers::wait_for_db_available(&client, "switch-replica-db", 180).await;
+
+    let switched = client
+        .switchover_read_replica()
+        .db_instance_identifier("switch-replica-db")
+        .send()
+        .await
+        .expect("SwitchoverReadReplica");
+    let new_primary = switched.db_instance().expect("db instance");
+    assert_eq!(
+        new_primary.db_instance_identifier(),
+        Some("switch-replica-db")
+    );
+    // The new primary has no upstream and now lists the former primary
+    // as its replica.
+    assert!(new_primary
+        .read_replica_source_db_instance_identifier()
+        .is_none());
+    assert_eq!(
+        new_primary.read_replica_db_instance_identifiers(),
+        &["switch-src-db".to_string()]
+    );
+
+    // Persisted state confirms the swap.
+    let new_primary_describe = client
+        .describe_db_instances()
+        .db_instance_identifier("switch-replica-db")
+        .send()
+        .await
+        .unwrap();
+    let np = &new_primary_describe.db_instances()[0];
+    assert!(np.read_replica_source_db_instance_identifier().is_none());
+    assert_eq!(
+        np.read_replica_db_instance_identifiers(),
+        &["switch-src-db".to_string()]
+    );
+
+    let former_primary_describe = client
+        .describe_db_instances()
+        .db_instance_identifier("switch-src-db")
+        .send()
+        .await
+        .unwrap();
+    let fp = &former_primary_describe.db_instances()[0];
+    assert_eq!(
+        fp.read_replica_source_db_instance_identifier(),
+        Some("switch-replica-db")
+    );
+    assert!(fp.read_replica_db_instance_identifiers().is_empty());
+}
+
+#[tokio::test]
+async fn rds_switchover_read_replica_rejects_non_replica() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "switch-standalone-db").await;
+
+    let err = client
+        .switchover_read_replica()
+        .db_instance_identifier("switch-standalone-db")
+        .send()
+        .await
+        .expect_err("non-replica should be rejected");
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidDBInstanceState")
+    );
+}
