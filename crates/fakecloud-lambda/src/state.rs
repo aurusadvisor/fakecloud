@@ -297,6 +297,11 @@ pub struct LayerVersion {
     pub code_sha256: String,
     #[serde(default)]
     pub code_size: i64,
+    /// `CompatibleArchitectures` declared at publish time. AWS rejects
+    /// `GetFunction` if the function's architecture isn't in this set;
+    /// fakecloud round-trips the field but doesn't enforce.
+    #[serde(default)]
+    pub compatible_architectures: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
