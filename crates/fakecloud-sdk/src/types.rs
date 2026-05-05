@@ -1162,6 +1162,80 @@ pub enum Route53HealthCheckStatusValue {
     Unknown,
 }
 
+/// Response body for `GET /_fakecloud/route53/zones/{id}/dnssec`. Surfaces
+/// the deterministic ECDSA P-256 DNSSEC chain-of-trust material for a
+/// hosted zone with at least one ACTIVE Key Signing Key. Real Route 53
+/// keeps this material inside KMS; fakecloud derives it from the
+/// `(zone_id, ksk_name)` pair so persistence reloads, multiple test
+/// runs, and verifier code see stable values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Route53DnssecMaterialResponse {
+    /// Hosted zone the material belongs to (without the
+    /// `/hostedzone/` prefix).
+    pub hosted_zone_id: String,
+    /// KSK name used to derive the keypair.
+    pub key_signing_key_name: String,
+    /// Algorithm number (always `13` for ECDSAP256SHA256).
+    pub algorithm: u8,
+    /// DNSKEY flags field (always `257` for a KSK).
+    pub flags: u16,
+    /// Standard DNSKEY key tag (RFC 4034 Appendix B).
+    pub key_tag: u16,
+    /// DNSKEY public-key wire bytes (`X || Y`, 64 bytes for P-256),
+    /// base64-encoded — what would appear in the DNSKEY RDATA.
+    pub dnskey_public_key_b64: String,
+    /// SHA-256 DS digest hex over the canonical owner name + DNSKEY
+    /// RDATA. Equivalent to what the parent zone publishes.
+    pub ds_digest_sha256_hex: String,
+}
+
+/// Body for `POST /_fakecloud/route53/zones/{id}/dnssec/sign`. Signs an
+/// RRset under the zone's first ACTIVE KSK and returns the raw RRSIG
+/// fields so tests can verify the signature against
+/// `dnskey_public_key_b64` from `Route53DnssecMaterialResponse`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Route53DnssecSignRequest {
+    /// RRset owner name (e.g., `"www.example.com."`). Trailing dot
+    /// optional — added if missing.
+    pub name: String,
+    /// Record type (`"A"`, `"AAAA"`, `"CNAME"`, `"TXT"`, ...).
+    #[serde(rename = "type")]
+    pub record_type: String,
+    /// Original TTL field for the RRSIG.
+    pub ttl: u32,
+    /// One-or-more RDATA values matching what `ResourceRecord.Value`
+    /// would carry on the wire.
+    pub rdatas: Vec<String>,
+}
+
+/// Response from the DNSSEC sign admin endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Route53DnssecSignResponse {
+    /// Base64-encoded raw `r||s` ECDSA-P256 signature (64 bytes
+    /// decoded).
+    pub signature_b64: String,
+    /// Algorithm number (always `13`).
+    pub algorithm: u8,
+    /// Key tag of the signing KSK.
+    pub key_tag: u16,
+    /// Owner name of the signer (the zone name).
+    pub signer_name: String,
+    /// Unix-time inception (signature validity start).
+    pub inception: u32,
+    /// Unix-time expiration (signature validity end).
+    pub expiration: u32,
+    /// Label count for the RRSIG `Labels` field.
+    pub labels: u8,
+    /// Original TTL echoed back from the request.
+    pub original_ttl: u32,
+    /// Record type echoed back from the request.
+    #[serde(rename = "type")]
+    pub rrset_type: String,
+}
+
 /// Body for `POST /_fakecloud/acm/certificates/{arn-or-id}/status`. The
 /// admin endpoint flips a stored ACM certificate's status (and
 /// optionally records a failure reason) so tests can synchronously

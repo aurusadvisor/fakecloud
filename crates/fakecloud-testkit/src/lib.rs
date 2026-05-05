@@ -320,6 +320,67 @@ impl TestServer {
         resp.status().as_u16()
     }
 
+    /// Fetch the DNSSEC public key + DS digest for a hosted zone via
+    /// `GET /_fakecloud/route53/zones/{id}/dnssec`. Returns `Ok(json)`
+    /// when the zone has at least one ACTIVE KSK, `Err(status_code)`
+    /// otherwise. Tests use this to verify the deterministic chain of
+    /// trust without re-deriving the keypair locally.
+    pub async fn route53_dnssec_material(&self, zone_id: &str) -> Result<serde_json::Value, u16> {
+        let id = zone_id.trim_start_matches("/hostedzone/");
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "{}/_fakecloud/route53/zones/{}/dnssec",
+                self.endpoint, id
+            ))
+            .send()
+            .await
+            .expect("dnssec-material request failed");
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return Err(status);
+        }
+        Ok(resp.json::<serde_json::Value>().await.unwrap())
+    }
+
+    /// Sign an arbitrary RRset with a hosted zone's first ACTIVE KSK
+    /// via `POST /_fakecloud/route53/zones/{id}/dnssec/sign`. Returns
+    /// `Ok(json)` on success or `Err(status_code)` when the zone has
+    /// no ACTIVE KSK / unsupported record type. Used by E2E tests
+    /// that need to verify a real RRSIG signature against the public
+    /// key.
+    pub async fn route53_dnssec_sign(
+        &self,
+        zone_id: &str,
+        name: &str,
+        record_type: &str,
+        ttl: u32,
+        rdatas: &[&str],
+    ) -> Result<serde_json::Value, u16> {
+        let id = zone_id.trim_start_matches("/hostedzone/");
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({
+            "name": name,
+            "type": record_type,
+            "ttl": ttl,
+            "rdatas": rdatas,
+        });
+        let resp = client
+            .post(format!(
+                "{}/_fakecloud/route53/zones/{}/dnssec/sign",
+                self.endpoint, id
+            ))
+            .json(&body)
+            .send()
+            .await
+            .expect("dnssec-sign request failed");
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return Err(status);
+        }
+        Ok(resp.json::<serde_json::Value>().await.unwrap())
+    }
+
     /// Approve an ACM certificate via
     /// `POST /_fakecloud/acm/certificates/{arn-or-id}/approve`. This is
     /// the synchronous equivalent of "the user clicked the validation

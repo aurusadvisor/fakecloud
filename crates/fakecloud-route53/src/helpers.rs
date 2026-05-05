@@ -584,17 +584,6 @@ pub(crate) fn require_zone_and_name(route: &Route) -> Result<(String, String), A
     Ok((strip_zone_prefix(&zone), name))
 }
 
-/// Pick a deterministic 16-bit key tag from the (zone, name) pair so
-/// repeated test runs see a stable value without ever creating real
-/// crypto material.
-pub(crate) fn deterministic_key_tag(zone_id: &str, name: &str) -> i32 {
-    let mut acc: u32 = 0;
-    for b in zone_id.bytes().chain(name.bytes()) {
-        acc = acc.wrapping_mul(31).wrapping_add(b as u32);
-    }
-    (acc & 0xFFFF) as i32
-}
-
 pub(crate) fn no_such_key_signing_key(zone_id: &str, name: &str) -> AwsServiceError {
     aws_error(
         StatusCode::NOT_FOUND,
@@ -1785,4 +1774,66 @@ pub(crate) fn geo_locations() -> &'static [GeoLocationEntry] {
             subdivision_name: "Washington",
         },
     ]
+}
+
+/// Parse a CloudWatch Logs log-group ARN into `(account_id, region,
+/// log_group_name)`. Returns `None` when the ARN doesn't match the
+/// expected service-prefixed shape so the query-log delivery path
+/// silently no-ops on garbage input rather than panicking.
+///
+/// Accepted shape:
+///
+/// ```text
+/// arn:aws:logs:<region>:<account>:log-group:<group-name>[:*]
+/// ```
+pub(crate) fn parse_log_group_arn(arn: &str) -> Option<(String, String, String)> {
+    // arn:aws:logs:us-east-1:000000000000:log-group:/route53/qlog
+    let mut parts = arn.splitn(7, ':');
+    let p0 = parts.next()?;
+    let p1 = parts.next()?;
+    let p2 = parts.next()?;
+    let region = parts.next()?;
+    let account = parts.next()?;
+    let p5 = parts.next()?;
+    let group_with_optional_suffix = parts.next()?;
+    if p0 != "arn" || p1 != "aws" || p2 != "logs" || p5 != "log-group" {
+        return None;
+    }
+    // Trim a trailing `:*` if the caller used the wildcard form.
+    let group = group_with_optional_suffix
+        .trim_end_matches(":*")
+        .to_string();
+    if group.is_empty() {
+        return None;
+    }
+    Some((account.to_string(), region.to_string(), group))
+}
+
+#[cfg(test)]
+mod log_arn_tests {
+    use super::parse_log_group_arn;
+
+    #[test]
+    fn parses_basic_arn() {
+        let parsed =
+            parse_log_group_arn("arn:aws:logs:us-east-1:000000000000:log-group:/route53/qlog")
+                .unwrap();
+        assert_eq!(parsed.0, "000000000000");
+        assert_eq!(parsed.1, "us-east-1");
+        assert_eq!(parsed.2, "/route53/qlog");
+    }
+
+    #[test]
+    fn parses_wildcard_suffix() {
+        let parsed =
+            parse_log_group_arn("arn:aws:logs:eu-west-1:111111111111:log-group:/route53/qlog:*")
+                .unwrap();
+        assert_eq!(parsed.2, "/route53/qlog");
+    }
+
+    #[test]
+    fn rejects_non_logs_arn() {
+        assert!(parse_log_group_arn("arn:aws:s3:::my-bucket").is_none());
+        assert!(parse_log_group_arn("not-an-arn").is_none());
+    }
 }

@@ -113,11 +113,27 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 
 pub struct Route53Service {
     pub(crate) state: SharedRoute53State,
+    /// Optional CloudWatch Logs state. When wired, every TestDNSAnswer
+    /// call against a zone with an active QueryLoggingConfig appends a
+    /// query log record to the configured log group, mirroring real
+    /// Route 53's query logging delivery.
+    pub(crate) logs_state: Option<fakecloud_logs::SharedLogsState>,
 }
 
 impl Route53Service {
     pub fn new(state: SharedRoute53State) -> Self {
-        Self { state }
+        Self {
+            state,
+            logs_state: None,
+        }
+    }
+
+    /// Wire CloudWatch Logs so `TestDNSAnswer` calls against a zone
+    /// with an active QueryLoggingConfig forward their query record
+    /// into the configured log group.
+    pub fn with_logs(mut self, logs: fakecloud_logs::SharedLogsState) -> Self {
+        self.logs_state = Some(logs);
+        self
     }
 
     pub fn shared_state(&self) -> SharedRoute53State {
@@ -129,6 +145,23 @@ impl Default for Route53Service {
     fn default() -> Self {
         Self::new(Arc::new(RwLock::new(Route53Accounts::new())))
     }
+}
+
+/// Bundle of DNSSEC RRSIG fields returned by
+/// `Route53Service::sign_rrset_with_zone_ksk`. Carries enough context
+/// (algorithm, key tag, validity window, signer) for an admin caller
+/// to assemble a full RRSIG wire record.
+#[derive(Debug, Clone)]
+pub struct DnssecSignature {
+    pub signature_b64: String,
+    pub algorithm: u8,
+    pub key_tag: u16,
+    pub signer_name: String,
+    pub inception: u32,
+    pub expiration: u32,
+    pub labels: u8,
+    pub original_ttl: u32,
+    pub rrset_type: String,
 }
 
 #[async_trait]
@@ -741,10 +774,23 @@ impl Route53Service {
 impl Route53Service {
     fn get_change(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
         let id = require_id(route)?;
-        // Mirror real Route53's eventual-consistency window: bump the
-        // read counter, and once a few reads have happened (PROPAGATION
-        // threshold) flip the status from PENDING to INSYNC.
+        // Mirror real Route 53's eventual-consistency window. Two
+        // signals flip a change from PENDING to INSYNC, whichever
+        // fires first:
+        //   * Wall-clock age >= `PROPAGATION_AGE_SECS` since
+        //     `submitted_at`. Real AWS converges in ~60s; we use a
+        //     short window (default 1s, override via
+        //     `FAKECLOUD_ROUTE53_PROPAGATION_SECS`) so polling tests
+        //     observe the transition without dragging out wall-clock
+        //     time.
+        //   * `PROPAGATION_READS` GetChange polls. Lets tests that
+        //     can't sleep (sync drivers, deterministic test runners)
+        //     still drive the transition by polling.
         const PROPAGATION_READS: u32 = 5;
+        let propagation_secs = std::env::var("FAKECLOUD_ROUTE53_PROPAGATION_SECS")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(1);
         let change = {
             let mut state = self.state.write();
             let account = state.accounts.get_mut(DEFAULT_ACCOUNT).ok_or_else(|| {
@@ -762,7 +808,10 @@ impl Route53Service {
                 )
             })?;
             stored.read_count = stored.read_count.saturating_add(1);
-            if stored.status == "PENDING" && stored.read_count >= PROPAGATION_READS {
+            let age_secs = (Utc::now() - stored.submitted_at).num_seconds();
+            if stored.status == "PENDING"
+                && (age_secs >= propagation_secs || stored.read_count >= PROPAGATION_READS)
+            {
                 stored.status = "INSYNC".to_string();
             }
             stored.clone()
@@ -797,6 +846,11 @@ impl Route53Service {
             .cloned()
             .unwrap_or_else(|| "8.8.8.8".to_string());
         let edns0_subnet = req.query_params.get("edns0clientsubnetip").cloned();
+        let dnssec_requested = req
+            .query_params
+            .get("dnssec")
+            .map(|v| matches!(v.as_str(), "true" | "1"))
+            .unwrap_or(false);
         let zone_id = strip_zone_prefix(&zone_id);
         let state = self.state.read();
         let account = state.accounts.get(DEFAULT_ACCOUNT);
@@ -804,6 +858,26 @@ impl Route53Service {
             .and_then(|a| a.hosted_zones.get(&zone_id).cloned())
             .ok_or_else(|| no_such_hosted_zone(&zone_id))?;
         let health_checks = account.map(|a| a.health_checks.clone()).unwrap_or_default();
+        // Capture DNSSEC + query-logging context while we still hold
+        // the read guard so we can drop it before doing any work that
+        // re-enters state (or cross-calls into fakecloud-logs).
+        let dnssec_signing = account
+            .and_then(|a| a.dnssec_status.get(&zone_id).cloned())
+            .map(|s| s == "SIGNING")
+            .unwrap_or(false);
+        let active_ksk: Option<StoredKeySigningKey> = account.and_then(|a| {
+            a.key_signing_keys
+                .values()
+                .filter(|k| k.hosted_zone_id == zone_id && k.status.eq_ignore_ascii_case("ACTIVE"))
+                .min_by(|a, b| a.name.cmp(&b.name))
+                .cloned()
+        });
+        let query_log_arn = account.and_then(|a| {
+            a.query_logging_configs
+                .values()
+                .find(|c| c.hosted_zone_id == zone_id)
+                .map(|c| c.cloud_watch_logs_log_group_arn.clone())
+        });
         drop(state);
         let normalized_name = if record_name.ends_with('.') {
             record_name.clone()
@@ -817,11 +891,33 @@ impl Route53Service {
             .filter(|r| r.name == normalized_name && r.record_type == record_type)
             .collect();
 
+        let original_ttl = candidates.iter().filter_map(|c| c.ttl).min().unwrap_or(300) as u32;
+
         let answers: Vec<String> = if candidates.is_empty() {
             Vec::new()
         } else {
             resolve_routing_policy(&candidates, &health_checks, edns0_subnet.as_deref())
         };
+
+        // Compute RRSIG when DNSSEC is on and the caller asked for it
+        // (via `?dnssec=true`). Real Route 53's TestDNSAnswer doesn't
+        // include RRSIGs by default, so gating behind the flag keeps
+        // existing test fixtures stable.
+        let rrsig_b64 = if dnssec_requested && dnssec_signing && !answers.is_empty() {
+            active_ksk.as_ref().and_then(|ksk| {
+                self.compute_rrsig_for_answers(
+                    &zone.name,
+                    &normalized_name,
+                    &record_type,
+                    original_ttl,
+                    &answers,
+                    ksk,
+                )
+            })
+        } else {
+            None
+        };
+
         let mut body = String::with_capacity(512);
         body.push_str(XML_DECL);
         body.push_str(&format!("<TestDNSAnswerResponse xmlns=\"{NS}\">"));
@@ -842,8 +938,117 @@ impl Route53Service {
                 "UDP"
             }
         ));
+        // Fakecloud extension: surface DNSSEC RRSIG bytes when the
+        // caller asked for them. Real Route 53 doesn't expose this
+        // field; it sits inside the namespace under
+        // `<DnssecSignatures>` so AWS SDKs that don't model it just
+        // ignore it.
+        if let Some(sig) = &rrsig_b64 {
+            body.push_str("<DnssecSignatures>");
+            body.push_str(&format!(
+                "<Algorithm>{}</Algorithm>",
+                crate::dnssec::DNSSEC_ALGORITHM
+            ));
+            if let Some(ksk) = &active_ksk {
+                body.push_str(&format!("<KeyTag>{}</KeyTag>", ksk.key_tag));
+            }
+            body.push_str(&format!("<Signature>{}</Signature>", esc(sig)));
+            body.push_str("</DnssecSignatures>");
+        }
         body.push_str("</TestDNSAnswerResponse>");
+
+        // Query log delivery — best-effort. If logs state isn't wired
+        // (unit-test harness, persistence-only build) we silently
+        // skip; a real server always wires it via `with_logs`.
+        if let (Some(logs_state), Some(arn)) = (&self.logs_state, query_log_arn) {
+            if let Some((account_id, region, group_name)) = parse_log_group_arn(&arn) {
+                let response_code = if answers.is_empty() {
+                    "NXDOMAIN"
+                } else {
+                    "NOERROR"
+                };
+                let protocol = if edns0_subnet.is_some() {
+                    "EDNS0"
+                } else {
+                    "UDP"
+                };
+                // Real Route 53 query log format (space-separated):
+                //   <version> <ts> <zone_id> <name> <type> <rcode>
+                //   <protocol> <edge_location> <client_ip> <ecs_subnet>
+                let now = Utc::now();
+                let line = format!(
+                    "1.0 {ts} {zone} {name} {rtype} {rcode} {proto} FAKECLOUD {client} {ecs}",
+                    ts = now.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                    zone = zone_id,
+                    name = normalized_name,
+                    rtype = record_type,
+                    rcode = response_code,
+                    proto = protocol,
+                    client = resolver_ip,
+                    ecs = edns0_subnet.unwrap_or_else(|| "-".to_string()),
+                );
+                let stream_name = format!("FAKECLOUD/{}", now.format("%Y/%m/%d"));
+                fakecloud_logs::ingest::append_events(
+                    logs_state,
+                    &account_id,
+                    &region,
+                    &group_name,
+                    &stream_name,
+                    &[fakecloud_logs::ingest::IngestEvent {
+                        timestamp_ms: now.timestamp_millis(),
+                        message: line,
+                    }],
+                );
+            }
+        }
+
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+
+    /// Sign the canonical RRset for `answers` with `ksk`. Returns
+    /// base64-encoded raw `r||s` (64 bytes for ECDSA-P256). `None`
+    /// when the key material is unavailable (e.g., legacy snapshots
+    /// pre-dating the DNSSEC fields).
+    fn compute_rrsig_for_answers(
+        &self,
+        zone_name: &str,
+        owner_name: &str,
+        record_type: &str,
+        ttl: u32,
+        answers: &[String],
+        ksk: &StoredKeySigningKey,
+    ) -> Option<String> {
+        if ksk.private_key_pem.is_empty() {
+            return None;
+        }
+        let rtype_code = crate::dnssec::type_code(record_type)?;
+        let rdatas: Vec<Vec<u8>> = answers
+            .iter()
+            .map(|v| crate::dnssec::encode_rdata(record_type, v))
+            .collect();
+        let canonical = crate::dnssec::canonical_rrset_bytes(
+            owner_name,
+            rtype_code,
+            crate::dnssec::CLASS_IN,
+            ttl,
+            &rdatas,
+        );
+        let now = Utc::now().timestamp() as u32;
+        let inception = now;
+        let expiration = now.saturating_add(30 * 24 * 60 * 60); // 30 days
+        let header = crate::dnssec::RrsigHeader {
+            rtype: rtype_code,
+            algorithm: crate::dnssec::DNSSEC_ALGORITHM,
+            labels: crate::dnssec::label_count(owner_name),
+            original_ttl: ttl,
+            sig_expiration: expiration,
+            sig_inception: inception,
+            key_tag: ksk.key_tag as u16,
+            signer_name: zone_name,
+        };
+        let signed = crate::dnssec::rrsig_signed_data(&header, &canonical);
+        let sig = crate::dnssec::sign_with_pkcs8_pem(&ksk.private_key_pem, &signed);
+        Some(crate::dnssec::b64(&sig))
     }
 }
 
@@ -1184,6 +1389,107 @@ impl Route53Service {
             hc.last_failure_reason = last_failure_reason;
         }
         true
+    }
+
+    /// Look up the public DNSSEC material for a zone's first ACTIVE
+    /// KSK (sorted by name). Returns the DNSKEY public key, computed
+    /// key tag, DS digest hex, and the KSK record so admin endpoints
+    /// can surface a stable DNSSEC chain-of-trust to test code.
+    /// Returns `None` if the zone has no ACTIVE KSK.
+    pub fn dnssec_material_for_zone(
+        &self,
+        zone_id: &str,
+    ) -> Option<(StoredKeySigningKey, Vec<u8>, u16, String)> {
+        let state = self.state.read();
+        let account = state.accounts.get(DEFAULT_ACCOUNT)?;
+        let zone_id_clean = strip_zone_prefix(zone_id);
+        // Existence check — return None when the zone is unknown
+        // rather than synthesising bogus material.
+        account.hosted_zones.get(&zone_id_clean)?;
+        let ksk = account
+            .key_signing_keys
+            .values()
+            .filter(|k| {
+                k.hosted_zone_id == zone_id_clean && k.status.eq_ignore_ascii_case("ACTIVE")
+            })
+            .min_by(|a, b| a.name.cmp(&b.name))
+            .cloned()?;
+        let material = crate::dnssec::derive_keypair(&ksk.hosted_zone_id, &ksk.name);
+        let key_tag = ksk.key_tag as u16;
+        let ds_hex = ksk.ds_digest_hex.clone();
+        Some((ksk, material.dnskey_public_key, key_tag, ds_hex))
+    }
+
+    /// Sign an arbitrary RRset with the zone's first ACTIVE KSK.
+    /// Returns the base64 RRSIG bytes plus the tag/algorithm so the
+    /// caller can construct a full RRSIG record. `None` when the zone
+    /// or active KSK is missing or the record type isn't recognised.
+    pub fn sign_rrset_with_zone_ksk(
+        &self,
+        zone_id: &str,
+        owner_name: &str,
+        record_type: &str,
+        ttl: u32,
+        rdata_values: &[String],
+    ) -> Option<DnssecSignature> {
+        let zone_id_clean = strip_zone_prefix(zone_id);
+        let state = self.state.read();
+        let account = state.accounts.get(DEFAULT_ACCOUNT)?;
+        let zone = account.hosted_zones.get(&zone_id_clean)?;
+        let zone_name = zone.name.clone();
+        let ksk = account
+            .key_signing_keys
+            .values()
+            .filter(|k| {
+                k.hosted_zone_id == zone_id_clean && k.status.eq_ignore_ascii_case("ACTIVE")
+            })
+            .min_by(|a, b| a.name.cmp(&b.name))
+            .cloned()?;
+        drop(state);
+        let rtype_code = crate::dnssec::type_code(record_type)?;
+        let normalized_owner = if owner_name.ends_with('.') {
+            owner_name.to_string()
+        } else {
+            format!("{owner_name}.")
+        };
+        let rdatas: Vec<Vec<u8>> = rdata_values
+            .iter()
+            .map(|v| crate::dnssec::encode_rdata(record_type, v))
+            .collect();
+        let canonical = crate::dnssec::canonical_rrset_bytes(
+            &normalized_owner,
+            rtype_code,
+            crate::dnssec::CLASS_IN,
+            ttl,
+            &rdatas,
+        );
+        let now = Utc::now().timestamp() as u32;
+        let inception = now;
+        let expiration = now.saturating_add(30 * 24 * 60 * 60);
+        let labels = crate::dnssec::label_count(&normalized_owner);
+        let header = crate::dnssec::RrsigHeader {
+            rtype: rtype_code,
+            algorithm: crate::dnssec::DNSSEC_ALGORITHM,
+            labels,
+            original_ttl: ttl,
+            sig_expiration: expiration,
+            sig_inception: inception,
+            key_tag: ksk.key_tag as u16,
+            signer_name: &zone_name,
+        };
+        let signed = crate::dnssec::rrsig_signed_data(&header, &canonical);
+        let sig = crate::dnssec::sign_with_pkcs8_pem(&ksk.private_key_pem, &signed);
+        Some(DnssecSignature {
+            signature_b64: crate::dnssec::b64(&sig),
+            algorithm: crate::dnssec::DNSSEC_ALGORITHM,
+            key_tag: ksk.key_tag as u16,
+            signer_name: zone_name,
+            inception,
+            expiration,
+            labels,
+            original_ttl: ttl,
+            rrset_type: record_type.to_string(),
+        })
     }
 
     fn get_health_check_last_failure_reason(
@@ -2091,6 +2397,18 @@ impl Route53Service {
             ));
         }
         let now = Utc::now();
+        // Derive a deterministic ECDSA P-256 keypair so persistence reloads
+        // the same DNSKEY/DS material, then compute the standard DNSSEC
+        // key tag and DS digest for the parent zone to publish.
+        let key_material = crate::dnssec::derive_keypair(&zone_id, &cfg.name);
+        let key_tag = crate::dnssec::key_tag_for(&key_material.dnskey_public_key);
+        let zone_name = account
+            .hosted_zones
+            .get(&zone_id)
+            .map(|z| z.name.clone())
+            .unwrap_or_else(|| ".".to_string());
+        let ds_digest_hex =
+            crate::dnssec::ds_digest_sha256(&zone_name, key_tag, &key_material.dnskey_public_key);
         let ksk = StoredKeySigningKey {
             hosted_zone_id: zone_id.clone(),
             name: cfg.name.clone(),
@@ -2099,7 +2417,10 @@ impl Route53Service {
             caller_reference: cfg.caller_reference,
             created_date: now,
             last_modified_date: now,
-            key_tag: deterministic_key_tag(&zone_id, &cfg.name),
+            key_tag: key_tag as i32,
+            private_key_pem: key_material.private_key_pem,
+            public_key_der: key_material.public_key_der,
+            ds_digest_hex,
         };
         account
             .key_signing_keys

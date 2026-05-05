@@ -177,6 +177,24 @@ pub struct StoredKeySigningKey {
     pub created_date: DateTime<Utc>,
     pub last_modified_date: DateTime<Utc>,
     pub key_tag: i32,
+    /// PKCS#8 PEM-encoded ECDSA P-256 private key (algorithm 13 / RFC
+    /// 6605). Generated deterministically from `(hosted_zone_id, name)`
+    /// so persistence snapshots restore the same DNSKEY/RRSIGs across
+    /// restarts. Not exposed to the AWS-facing XML — only used by the
+    /// `/_fakecloud/route53/zones/{id}/dnssec/*` admin endpoints and the
+    /// signed-RRset machinery surfaced through `TestDNSAnswer`.
+    #[serde(default)]
+    pub private_key_pem: String,
+    /// SubjectPublicKeyInfo DER bytes for the matching public key.
+    /// Stored alongside the private key so consumers can fetch the
+    /// public half without re-deriving it on every read.
+    #[serde(default)]
+    pub public_key_der: Vec<u8>,
+    /// DS record digest (SHA-256, hex) over the canonical DNSKEY RDATA
+    /// for the parent zone to publish. Equivalent to the digest a
+    /// real Route 53 returns alongside the KSK.
+    #[serde(default)]
+    pub ds_digest_hex: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

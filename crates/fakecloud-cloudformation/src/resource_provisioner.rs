@@ -9239,6 +9239,28 @@ impl ResourceProvisioner {
             .unwrap_or("ACTIVE")
             .to_string();
         let now = Utc::now();
+        // Derive the same deterministic ECDSA P-256 KSK material the
+        // direct CreateKeySigningKey path produces so DNSSEC features
+        // (DS digest, RRSIG signing, the
+        // `/_fakecloud/route53/zones/{id}/dnssec` admin endpoint)
+        // round-trip identically through CloudFormation.
+        let key_material = fakecloud_route53::dnssec::derive_keypair(&zone_id, &name);
+        let key_tag = fakecloud_route53::dnssec::key_tag_for(&key_material.dnskey_public_key);
+        let mut accounts = self.route53_state.write();
+        let state = accounts.entry("000000000000");
+        if !state.hosted_zones.contains_key(&zone_id) {
+            return Err(format!("HostedZone {zone_id} does not exist"));
+        }
+        let zone_name = state
+            .hosted_zones
+            .get(&zone_id)
+            .map(|z| z.name.clone())
+            .unwrap_or_else(|| ".".to_string());
+        let ds_digest_hex = fakecloud_route53::dnssec::ds_digest_sha256(
+            &zone_name,
+            key_tag,
+            &key_material.dnskey_public_key,
+        );
         let ksk = fakecloud_route53::StoredKeySigningKey {
             hosted_zone_id: zone_id.clone(),
             name: name.clone(),
@@ -9247,17 +9269,11 @@ impl ResourceProvisioner {
             caller_reference: format!("cfn-{}", Uuid::new_v4()),
             created_date: now,
             last_modified_date: now,
-            // Real Route53 derives a deterministic key tag from the KSK
-            // material; we synthesize a stable one from the (zone, name)
-            // tuple so the value round-trips on read without depending on
-            // signing internals.
-            key_tag: ((zone_id.len() + name.len()) % 65536) as i32,
+            key_tag: key_tag as i32,
+            private_key_pem: key_material.private_key_pem,
+            public_key_der: key_material.public_key_der,
+            ds_digest_hex,
         };
-        let mut accounts = self.route53_state.write();
-        let state = accounts.entry("000000000000");
-        if !state.hosted_zones.contains_key(&zone_id) {
-            return Err(format!("HostedZone {zone_id} does not exist"));
-        }
         state
             .key_signing_keys
             .insert((zone_id.clone(), name.clone()), ksk);
