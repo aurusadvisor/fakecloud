@@ -646,16 +646,22 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
     let security_groups_xml = if cluster.security_group_ids.is_empty() {
         "<SecurityGroups/>".to_string()
     } else {
+        // SecurityGroupMembershipList's member has no xmlName trait, so
+        // awsQuery serializes each entry under the default `<member>`
+        // tag — not `<SecurityGroupMembership>`. Real AWS responses use
+        // `<member>`, and the AWS SDK Rust deserializer treats anything
+        // else as an unknown element and drops the entry, leaving
+        // `cluster.security_groups()` empty on the client side.
         format!(
             "<SecurityGroups>{}</SecurityGroups>",
             cluster
                 .security_group_ids
                 .iter()
                 .map(|sg| format!(
-                    "<SecurityGroupMembership>\
+                    "<member>\
                      <SecurityGroupId>{}</SecurityGroupId>\
                      <Status>active</Status>\
-                     </SecurityGroupMembership>",
+                     </member>",
                     xml_escape(sg)
                 ))
                 .collect::<String>()
