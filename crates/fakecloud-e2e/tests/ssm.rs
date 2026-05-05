@@ -2155,7 +2155,8 @@ async fn ssm_command_invocations() {
         .await
         .unwrap();
 
-    // Send command
+    // Send command — returns Pending immediately, never the synchronous
+    // Success that the pre-async implementation used to fake.
     let resp = client
         .send_command()
         .document_name("e2e-cmd-inv")
@@ -2163,37 +2164,52 @@ async fn ssm_command_invocations() {
         .send()
         .await
         .unwrap();
-    let cmd_id = resp.command().unwrap().command_id().unwrap().to_string();
-
-    // GetCommandInvocation: status advances Pending -> InProgress -> Success
-    // across successive calls (matching real SSM lifecycle).
-    let resp = client
-        .get_command_invocation()
-        .command_id(&cmd_id)
-        .instance_id("i-1234567890abcdef0")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.command_id().unwrap(), cmd_id);
-    assert_eq!(resp.instance_id().unwrap(), "i-1234567890abcdef0");
+    let cmd = resp.command().unwrap();
+    let cmd_id = cmd.command_id().unwrap().to_string();
     assert_eq!(
-        resp.status(),
-        Some(&aws_sdk_ssm::types::CommandInvocationStatus::InProgress)
+        cmd.status(),
+        Some(&aws_sdk_ssm::types::CommandStatus::Pending)
+    );
+    assert_eq!(cmd.status_details(), Some("Pending"));
+
+    // Poll GetCommandInvocation until it reaches Success. The
+    // background task flips Pending -> InProgress after ~500ms and
+    // then Success after another ~1.5s, so we give it up to 10s.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut saw_in_progress = false;
+    let final_status = loop {
+        let resp = client
+            .get_command_invocation()
+            .command_id(&cmd_id)
+            .instance_id("i-1234567890abcdef0")
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().cloned();
+        if status == Some(aws_sdk_ssm::types::CommandInvocationStatus::InProgress) {
+            saw_in_progress = true;
+            assert_eq!(resp.status_details(), Some("In Progress"));
+        }
+        if status == Some(aws_sdk_ssm::types::CommandInvocationStatus::Success) {
+            assert_eq!(resp.status_details(), Some("Success"));
+            assert_eq!(resp.response_code(), 0);
+            break status.unwrap();
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("command never reached Success; last status = {status:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        final_status,
+        aws_sdk_ssm::types::CommandInvocationStatus::Success
+    );
+    assert!(
+        saw_in_progress,
+        "expected to observe at least one InProgress poll along the way"
     );
 
-    let resp = client
-        .get_command_invocation()
-        .command_id(&cmd_id)
-        .instance_id("i-1234567890abcdef0")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        Some(&aws_sdk_ssm::types::CommandInvocationStatus::Success)
-    );
-
-    // ListCommandInvocations
+    // ListCommandInvocations reflects the live (terminal) state.
     let resp = client
         .list_command_invocations()
         .command_id(&cmd_id)
@@ -2201,7 +2217,139 @@ async fn ssm_command_invocations() {
         .await
         .unwrap();
     assert_eq!(resp.command_invocations().len(), 1);
-    assert_eq!(resp.command_invocations()[0].command_id().unwrap(), cmd_id);
+    let inv = &resp.command_invocations()[0];
+    assert_eq!(inv.command_id().unwrap(), cmd_id);
+    assert_eq!(
+        inv.status(),
+        Some(&aws_sdk_ssm::types::CommandInvocationStatus::Success)
+    );
+    assert_eq!(inv.status_details(), Some("Success"));
+
+    // ListCommands picks up the dynamic command-level status too.
+    let resp = client
+        .list_commands()
+        .command_id(&cmd_id)
+        .send()
+        .await
+        .unwrap();
+    let cmd = resp.commands().first().unwrap();
+    assert_eq!(
+        cmd.status(),
+        Some(&aws_sdk_ssm::types::CommandStatus::Success)
+    );
+    assert_eq!(cmd.status_details(), Some("Success"));
+}
+
+#[tokio::test]
+async fn ssm_admin_force_fail_command() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Create document
+    let doc_content = r#"{"schemaVersion":"2.2","mainSteps":[{"action":"aws:runShellScript","name":"run","inputs":{"runCommand":["sleep 60"]}}]}"#;
+    client
+        .create_document()
+        .name("e2e-cmd-fail")
+        .content(doc_content)
+        .document_type(aws_sdk_ssm::types::DocumentType::Command)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .send_command()
+        .document_name("e2e-cmd-fail")
+        .instance_ids("i-aaaaaaaaaaaaaaaa1")
+        .instance_ids("i-bbbbbbbbbbbbbbbb2")
+        .send()
+        .await
+        .unwrap();
+    let cmd_id = resp.command().unwrap().command_id().unwrap().to_string();
+
+    // Force one of the two invocations to Failed via the admin endpoint
+    // before the natural transition completes.
+    let http = reqwest::Client::new();
+    let body = serde_json::json!({
+        "instanceId": "i-aaaaaaaaaaaaaaaa1",
+        "statusDetails": "Script exited with code 7",
+        "standardErrorContent": "boom: missing dependency",
+    });
+    let admin_resp = http
+        .post(format!(
+            "{}/_fakecloud/ssm/commands/{cmd_id}/fail",
+            server.endpoint()
+        ))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(admin_resp.status().is_success());
+    let json: serde_json::Value = admin_resp.json().await.unwrap();
+    assert_eq!(json["updatedInvocations"].as_u64().unwrap(), 1);
+
+    // Failed invocation surfaces the friendly StatusDetails + stderr.
+    let resp = client
+        .get_command_invocation()
+        .command_id(&cmd_id)
+        .instance_id("i-aaaaaaaaaaaaaaaa1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        Some(&aws_sdk_ssm::types::CommandInvocationStatus::Failed)
+    );
+    assert_eq!(resp.status_details(), Some("Script exited with code 7"));
+    assert_eq!(
+        resp.standard_error_content(),
+        Some("boom: missing dependency")
+    );
+    assert_eq!(resp.response_code(), 1);
+
+    // Aggregate command status reflects the failure since one
+    // invocation is now in a terminal failure state.
+    let resp = client
+        .list_commands()
+        .command_id(&cmd_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.commands().first().unwrap().status(),
+        Some(&aws_sdk_ssm::types::CommandStatus::Failed)
+    );
+
+    // Empty body still works — defaults to "Failed" status details and
+    // affects all not-yet-failed invocations.
+    let admin_resp = http
+        .post(format!(
+            "{}/_fakecloud/ssm/commands/{cmd_id}/fail",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert!(admin_resp.status().is_success());
+    let json: serde_json::Value = admin_resp.json().await.unwrap();
+    // The second invocation gets failed; the first is re-failed too
+    // since it's still in the Failed state (admin force-fail is
+    // idempotent — it re-stamps every matching invocation).
+    assert!(json["updatedInvocations"].as_u64().unwrap() >= 1);
+
+    let resp = client
+        .get_command_invocation()
+        .command_id(&cmd_id)
+        .instance_id("i-bbbbbbbbbbbbbbbb2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        Some(&aws_sdk_ssm::types::CommandInvocationStatus::Failed)
+    );
+    assert_eq!(resp.status_details(), Some("Failed"));
 }
 
 #[tokio::test]

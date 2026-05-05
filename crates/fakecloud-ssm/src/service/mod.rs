@@ -66,6 +66,8 @@ impl SsmService {
     /// Admin: force a SendCommand result to a specific terminal status
     /// (e.g. "Failed", "Cancelled", "TimedOut"). Used by tests to
     /// simulate command failures without waiting on a real SSM agent.
+    /// All invocations on the command move to the same status so
+    /// `GetCommandInvocation` reflects the override on the next read.
     /// Returns `true` when the command was found and updated.
     pub fn set_command_status(&self, account_id: &str, command_id: &str, status: &str) -> bool {
         let mut accounts = self.state.write();
@@ -75,10 +77,69 @@ impl SsmService {
             .iter_mut()
             .find(|c| c.command_id == command_id)
         {
+            let now = chrono::Utc::now();
+            let details = commands::friendly_status_details(status);
+            for inv in c.invocations.iter_mut() {
+                inv.status = status.to_string();
+                inv.status_details = details.clone();
+                inv.response_code = match status {
+                    "Success" => 0,
+                    "Pending" | "InProgress" | "Delayed" => -1,
+                    _ => 1,
+                };
+                inv.last_update_at = now;
+            }
             c.status = status.to_string();
             return true;
         }
         false
+    }
+
+    /// Admin: force a single invocation (or all if `instance_id` is
+    /// `None`) to `Failed` with optional friendlier `status_details`
+    /// and `standard_error_content` overrides. Mirrors what a real SSM
+    /// agent would report when a runShellScript step exits non-zero.
+    /// Returns the number of invocations that were updated.
+    pub fn fail_command_invocation(
+        &self,
+        account_id: &str,
+        command_id: &str,
+        instance_id: Option<&str>,
+        status_details: Option<&str>,
+        standard_error_content: Option<&str>,
+    ) -> usize {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        let Some(cmd) = state
+            .commands
+            .iter_mut()
+            .find(|c| c.command_id == command_id)
+        else {
+            return 0;
+        };
+        let now = chrono::Utc::now();
+        let mut updated = 0;
+        for inv in cmd.invocations.iter_mut() {
+            if let Some(iid) = instance_id {
+                if inv.instance_id != iid {
+                    continue;
+                }
+            }
+            inv.status = "Failed".to_string();
+            inv.status_details = status_details
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| commands::friendly_status_details("Failed"));
+            if let Some(err) = standard_error_content {
+                inv.standard_error_content = err.to_string();
+            }
+            inv.response_code = 1;
+            inv.last_update_at = now;
+            updated += 1;
+        }
+        if updated > 0 {
+            cmd.status = commands::aggregate_command_status(&cmd.invocations);
+        }
+        updated
     }
 
     /// Persist current state as a snapshot. Held across the
