@@ -194,6 +194,9 @@ pub async fn handle(
             // Consult any configured gateway response template for the
             // failure category (UNAUTHORIZED for 401, ACCESS_DENIED for
             // 403) so customers can override the status code and body.
+            // If the specific category has no override, fall back to
+            // DEFAULT_4XX — AWS treats it as the catch-all for any 4xx
+            // response that isn't otherwise customized.
             let response_type = match err.status() {
                 StatusCode::UNAUTHORIZED => "UNAUTHORIZED",
                 StatusCode::FORBIDDEN => "ACCESS_DENIED",
@@ -205,7 +208,20 @@ pub async fn handle(
                 &api_id,
                 response_type,
                 &err,
-            );
+            )
+            .or_else(|| {
+                if response_type == "DEFAULT_4XX" {
+                    None
+                } else {
+                    apply_gateway_response_override(
+                        service,
+                        &req.account_id,
+                        &api_id,
+                        "DEFAULT_4XX",
+                        &err,
+                    )
+                }
+            });
             let recorded_status = overridden
                 .as_ref()
                 .map(|r| r.status)
@@ -723,13 +739,17 @@ fn apply_gateway_response_override(
     let accounts = service.state_handle().read();
     let state = accounts.get(account_id)?;
     let value = state.gateway_responses.get(api_id)?.get(response_type)?;
-    // `statusCode` may be a string or numeric per AWS docs; accept both.
+    // `statusCode` may be a string or numeric per AWS docs; accept both
+    // and reject anything that doesn't fit a u16 instead of silently
+    // truncating it.
     let status_code = value
         .get("statusCode")
         .and_then(|v| {
-            v.as_str()
-                .and_then(|s| s.parse::<u16>().ok())
-                .or_else(|| v.as_u64().map(|n| n as u16))
+            v.as_str().and_then(|s| s.parse::<u16>().ok()).or_else(|| {
+                v.as_u64()
+                    .filter(|n| *n <= u16::MAX as u64)
+                    .map(|n| n as u16)
+            })
         })
         .and_then(|n| StatusCode::from_u16(n).ok())
         .unwrap_or_else(|| err.status());
@@ -2013,6 +2033,44 @@ mod tests {
         // missing identity source check.
         assert_eq!(lambda.invocation_count(FN_ARN), 0);
         assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
+    async fn default_4xx_gateway_response_template_falls_back_for_unauthorized() {
+        // No UNAUTHORIZED-specific override is registered, but
+        // DEFAULT_4XX is. AWS treats DEFAULT_4XX as the catch-all for
+        // any uncustomized 4xx, so the missing-token 401 must adopt the
+        // fallback's status and body.
+        let state = build_state("CUSTOM", Some(token_authorizer()));
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mut by_type = BTreeMap::new();
+            by_type.insert(
+                "DEFAULT_4XX".to_string(),
+                serde_json::json!({
+                    "responseType": "DEFAULT_4XX",
+                    "statusCode": 451,
+                    "responseTemplates": {
+                        "application/json": "{\"fallback\":$context.error.messageString}"
+                    }
+                }),
+            );
+            st.gateway_responses
+                .insert(TEST_API_ID.to_string(), by_type);
+        }
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let resp = handle(&service, &make_request(HeaderMap::new()))
+            .await
+            .expect("DEFAULT_4XX fallback must surface as a successful AwsResponse");
+        assert_eq!(resp.status, StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+        let body_bytes = match &resp.body {
+            fakecloud_core::service::ResponseBody::Bytes(b) => b.clone(),
+            _ => panic!("override body should be inline bytes"),
+        };
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(body["fallback"].as_str().unwrap().contains("Authorization"));
     }
 
     #[tokio::test]
