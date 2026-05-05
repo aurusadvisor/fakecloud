@@ -561,6 +561,11 @@ mod tests {
 
     #[test]
     fn invoke_anthropic_returns_message_format() {
+        // Body-shape tests in this module observe the response payload,
+        // so they all must serialize with `invoke_echo_mode_reflects_prompt`,
+        // which mutates the process-global `BEDROCK_ECHO` flag and would
+        // otherwise have them observe the echo branch mid-flip.
+        let _g = echo_lock().lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "anthropic.claude-3", b"{}").unwrap();
         let v: Value =
@@ -572,6 +577,7 @@ mod tests {
 
     #[test]
     fn invoke_amazon_titan_text_returns_results() {
+        let _g = echo_lock().lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "amazon.titan-text-express-v1", b"{}").unwrap();
         let v: Value =
@@ -593,6 +599,7 @@ mod tests {
 
     #[test]
     fn invoke_meta_returns_generation() {
+        let _g = echo_lock().lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "meta.llama3", b"{}").unwrap();
         let v: Value =
@@ -602,6 +609,7 @@ mod tests {
 
     #[test]
     fn invoke_cohere_returns_generations() {
+        let _g = echo_lock().lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "cohere.command", b"{}").unwrap();
         let v: Value =
@@ -611,6 +619,7 @@ mod tests {
 
     #[test]
     fn invoke_mistral_returns_outputs() {
+        let _g = echo_lock().lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "mistral.7b", b"{}").unwrap();
         let v: Value =
@@ -620,6 +629,7 @@ mod tests {
 
     #[test]
     fn invoke_unknown_provider_returns_generic() {
+        let _g = echo_lock().lock();
         let s = shared();
         let resp = invoke_model(&s, &req(), "stability.diffusion", b"{}").unwrap();
         let v: Value =

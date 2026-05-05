@@ -624,6 +624,10 @@ impl TestServer {
         aws_sdk_dynamodb::Client::new(&self.aws_config().await)
     }
 
+    pub async fn dynamodb_streams_client(&self) -> aws_sdk_dynamodbstreams::Client {
+        aws_sdk_dynamodbstreams::Client::new(&self.aws_config().await)
+    }
+
     pub async fn lambda_client(&self) -> aws_sdk_lambda::Client {
         aws_sdk_lambda::Client::new(&self.aws_config().await)
     }
