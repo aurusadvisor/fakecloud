@@ -447,6 +447,74 @@ impl Drop for ConcurrencyGuard {
 /// `$LATEST`) to a concrete numeric version string. Aliases with a
 /// `RoutingConfig.AdditionalVersionWeights` table do a weighted pick
 /// across the alias's primary `function_version` plus the additional
+/// True when `prev` is byte-equivalent to `live` for every field
+/// that `PublishVersion` would otherwise capture into a new snapshot.
+/// Used to short-circuit a no-op publish (AWS-style idempotency:
+/// re-publishing without any change returns the previous version
+/// unchanged). The comparison spans code identity (sha + size),
+/// configuration (runtime/handler/role/timeout/memory/env/layers/...)
+/// and every advanced field round-tripped through
+/// `function_config_json`. The caller is responsible for resolving
+/// the `effective_description` (caller-supplied override wins over
+/// the live `$LATEST` description, matching real PublishVersion
+/// semantics).
+fn function_config_unchanged_for_publish(
+    prev: &LambdaFunction,
+    live: &LambdaFunction,
+    effective_description: &str,
+) -> bool {
+    prev.code_sha256 == live.code_sha256
+        && prev.code_size == live.code_size
+        && prev.image_uri == live.image_uri
+        && prev.package_type == live.package_type
+        && prev.runtime == live.runtime
+        && prev.role == live.role
+        && prev.handler == live.handler
+        && prev.description == effective_description
+        && prev.timeout == live.timeout
+        && prev.memory_size == live.memory_size
+        && prev.environment == live.environment
+        && prev.architectures == live.architectures
+        && prev.layers.len() == live.layers.len()
+        && prev
+            .layers
+            .iter()
+            .zip(live.layers.iter())
+            .all(|(a, b)| a.arn == b.arn && a.code_size == b.code_size)
+        && prev.tracing_mode == live.tracing_mode
+        && prev.kms_key_arn == live.kms_key_arn
+        && prev.ephemeral_storage_size == live.ephemeral_storage_size
+        && prev.vpc_config == live.vpc_config
+        && prev.dead_letter_config_arn == live.dead_letter_config_arn
+        && prev.file_system_configs == live.file_system_configs
+        && prev.logging_config == live.logging_config
+        && prev.image_config == live.image_config
+        && prev.signing_profile_version_arn == live.signing_profile_version_arn
+        && prev.signing_job_arn == live.signing_job_arn
+        && prev.runtime_version_config == live.runtime_version_config
+        && snap_start_apply_on_eq(prev.snap_start.as_ref(), live.snap_start.as_ref())
+}
+
+/// Compare two `SnapStart` configs by `ApplyOn` only — that's the
+/// caller-supplied knob. `OptimizationStatus` is server-side state
+/// that PublishVersion mutates on snapshots (flipping to "On" when
+/// ApplyOn=PublishedVersions) while $LATEST stays "Off", so a deep
+/// equality check here would never match on a SnapStart-enabled
+/// function and PublishVersion would never be idempotent. Treating
+/// `None` and `{ApplyOn:"None"}` as equivalent matches AWS, which
+/// emits the latter when the field is unset.
+fn snap_start_apply_on_eq(prev: Option<&Value>, live: Option<&Value>) -> bool {
+    let prev_apply = prev
+        .and_then(|v| v.get("ApplyOn"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("None");
+    let live_apply = live
+        .and_then(|v| v.get("ApplyOn"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("None");
+    prev_apply == live_apply
+}
+
 /// versions in the weight map. Returns `None` for `$LATEST` /
 /// unqualified invokes (caller uses the live `$LATEST` config).
 pub(crate) fn resolve_qualifier_to_version(
@@ -1140,21 +1208,84 @@ impl LambdaService {
         &self,
         function_name: &str,
         account_id: &str,
+        qualifier: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(account_id);
         let region = state.region.clone();
-        let account_id = state.account_id.clone();
+        let account_id_owned = state.account_id.clone();
+
+        // Qualifier=N targets a single immutable version snapshot; the
+        // live $LATEST function and other versions stay put. AWS only
+        // accepts numeric qualifiers here — alias targets are deleted
+        // via DeleteAlias, and `$LATEST` is rejected as
+        // InvalidParameterValueException.
+        if let Some(q) = qualifier {
+            if q == "$LATEST" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    "$LATEST version cannot be deleted without deleting the function.",
+                ));
+            }
+            if !q.chars().all(|c| c.is_ascii_digit()) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!(
+                        "Value '{q}' at 'qualifier' failed to satisfy constraint: Member must satisfy regular expression pattern: (|[a-zA-Z0-9$_-]+)"
+                    ),
+                ));
+            }
+            // Live function must exist or AWS 404s before checking the version.
+            if !state.functions.contains_key(function_name) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!(
+                        "Function not found: arn:aws:lambda:{region}:{account_id_owned}:function:{function_name}:{q}"
+                    ),
+                ));
+            }
+            let snap_existed = state
+                .function_version_snapshots
+                .get_mut(function_name)
+                .map(|m| m.remove(q).is_some())
+                .unwrap_or(false);
+            if !snap_existed {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFoundException",
+                    format!(
+                        "Function not found: arn:aws:lambda:{region}:{account_id_owned}:function:{function_name}:{q}"
+                    ),
+                ));
+            }
+            // Drop the version from the ordered list too so
+            // ListVersionsByFunction reflects the deletion.
+            if let Some(list) = state.function_versions.get_mut(function_name) {
+                list.retain(|v| v != q);
+            }
+            return Ok(AwsResponse::json(StatusCode::NO_CONTENT, ""));
+        }
+
         if state.functions.remove(function_name).is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ResourceNotFoundException",
                 format!(
-                    "Function not found: arn:aws:lambda:{}:{}:function:{}",
-                    region, account_id, function_name
+                    "Function not found: arn:aws:lambda:{region}:{account_id_owned}:function:{function_name}"
                 ),
             ));
         }
+        // Drop all numbered versions + their snapshots so the function
+        // is gone end-to-end (AWS deletes everything when no Qualifier
+        // is supplied).
+        state.function_versions.remove(function_name);
+        state.function_version_snapshots.remove(function_name);
+        // Aliases on this function disappear too.
+        let prefix = format!("{function_name}:");
+        state.aliases.retain(|k, _| !k.starts_with(&prefix));
 
         // Clean up any running container for this function
         if let Some(ref runtime) = self.runtime {
@@ -1493,12 +1624,42 @@ impl LambdaService {
             .get(function_name)
             .cloned()
             .unwrap_or_default();
-        let next: u64 = existing
-            .iter()
-            .filter_map(|v| v.parse::<u64>().ok())
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let latest_version = existing.iter().filter_map(|v| v.parse::<u64>().ok()).max();
+
+        // PublishVersion is idempotent on AWS: if `$LATEST` hasn't
+        // changed since the most recent published version, return that
+        // existing snapshot instead of bumping the counter. We compare
+        // every field that PublishVersion would otherwise carry into
+        // the new snapshot — code identity, description, runtime,
+        // handler, role, env, memory/timeout, layers, image config,
+        // VPC, EFS, logging, tracing, kms, ephemeral storage — so a
+        // config-only change (e.g. UpdateFunctionConfiguration bumping
+        // memory) still produces a fresh version. This keeps deploy
+        // pipelines that re-publish on every CI run from leaking a
+        // fresh numbered version per build when the underlying
+        // artifact + config are identical.
+        if let Some(latest_num) = latest_version {
+            let latest_str = latest_num.to_string();
+            if let Some(prev_snap) = state
+                .function_version_snapshots
+                .get(function_name)
+                .and_then(|m| m.get(&latest_str))
+                .cloned()
+            {
+                let effective_desc = description_override
+                    .clone()
+                    .unwrap_or_else(|| func.description.clone());
+                if function_config_unchanged_for_publish(&prev_snap, func, &effective_desc) {
+                    let mut config = self.function_config_json(&prev_snap);
+                    config["Version"] = json!(latest_str);
+                    config["FunctionArn"] = json!(format!("{}:{latest_str}", func.function_arn));
+                    config["MasterArn"] = json!(func.function_arn);
+                    return Ok(AwsResponse::json(StatusCode::CREATED, config.to_string()));
+                }
+            }
+        }
+
+        let next: u64 = latest_version.unwrap_or(0) + 1;
         let next_str = next.to_string();
 
         // Snapshot the function config + code for the new immutable version.
@@ -1716,7 +1877,11 @@ impl AwsService for LambdaService {
                 req.region.as_str(),
                 req.query_params.get("Qualifier").map(String::as_str),
             ),
-            "DeleteFunction" => self.delete_function(resource_name.as_deref().unwrap_or(""), aid),
+            "DeleteFunction" => self.delete_function(
+                resource_name.as_deref().unwrap_or(""),
+                aid,
+                req.query_params.get("Qualifier").map(String::as_str),
+            ),
             "Invoke" => {
                 let invocation_type = InvocationType::from_header(
                     req.headers
@@ -1747,11 +1912,20 @@ impl AwsService for LambdaService {
                 self.publish_version(resource_name.as_deref().unwrap_or(""), aid, &req)
             }
             "AddPermission" => self.add_permission(resource_name.as_deref().unwrap_or(""), &req),
-            "GetPolicy" => self.get_policy(resource_name.as_deref().unwrap_or(""), aid),
+            "GetPolicy" => self.get_policy(
+                resource_name.as_deref().unwrap_or(""),
+                aid,
+                req.query_params.get("Qualifier").map(String::as_str),
+            ),
             "RemovePermission" => {
                 // Path: /2015-03-31/functions/{name}/policy/{sid}
                 let sid = req.path_segments.get(4).cloned().unwrap_or_default();
-                self.remove_permission(resource_name.as_deref().unwrap_or(""), &sid, aid)
+                self.remove_permission(
+                    resource_name.as_deref().unwrap_or(""),
+                    &sid,
+                    aid,
+                    req.query_params.get("Qualifier").map(String::as_str),
+                )
             }
             "CreateEventSourceMapping" => self.create_event_source_mapping(&req),
             "ListEventSourceMappings" => self.list_event_source_mappings(aid),

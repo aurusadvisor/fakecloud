@@ -548,3 +548,280 @@ async fn lambda_update_function_code_with_image_uri_clears_size_and_sha() {
         &aws_sdk_lambda::types::PackageType::Image
     );
 }
+
+fn make_zip_with(payload: &[u8]) -> Vec<u8> {
+    // Each call returns different ZIP bytes when `payload` differs, which
+    // bumps `CodeSha256` so PublishVersion stops being a no-op idempotent
+    // re-publish on the second call. Real callers do this implicitly via
+    // CI bumping the artifact between deploys.
+    let buf = Vec::new();
+    let cursor = std::io::Cursor::new(buf);
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("index.py", options).unwrap();
+    writer.write_all(payload).unwrap();
+    let cursor = writer.finish().unwrap();
+    cursor.into_inner()
+}
+
+#[tokio::test]
+async fn lambda_publish_version_snapshots_and_lists() {
+    // End-to-end PublishVersion / ListVersionsByFunction / Get* with
+    // Qualifier / DeleteFunction(Qualifier) / idempotent re-publish /
+    // PreconditionFailedException on stale CodeSha256.
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("ver-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_zip_with(b"v0\n")))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Newly-created function has $LATEST and no numbered versions.
+    let listed = client
+        .list_versions_by_function()
+        .function_name("ver-fn")
+        .send()
+        .await
+        .unwrap();
+    let versions: Vec<String> = listed
+        .versions()
+        .iter()
+        .map(|v| v.version().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(versions, vec!["$LATEST".to_string()]);
+
+    // PublishVersion returns Version="1" with FunctionArn ending in :1.
+    let v1 = client
+        .publish_version()
+        .function_name("ver-fn")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(v1.version().unwrap(), "1");
+    assert!(v1.function_arn().unwrap().ends_with(":1"));
+    let v1_sha = v1.code_sha256().unwrap().to_string();
+
+    // GetFunction(Qualifier="1") returns the v1 snapshot config.
+    let v1_get = client
+        .get_function()
+        .function_name("ver-fn")
+        .qualifier("1")
+        .send()
+        .await
+        .unwrap();
+    let v1_cfg = v1_get.configuration().unwrap();
+    assert_eq!(v1_cfg.version().unwrap(), "1");
+    assert!(v1_cfg.function_arn().unwrap().ends_with(":1"));
+    assert_eq!(v1_cfg.code_sha256().unwrap(), v1_sha);
+
+    // Mutate $LATEST: UpdateFunctionConfiguration on description must
+    // not mutate the v1 snapshot.
+    client
+        .update_function_configuration()
+        .function_name("ver-fn")
+        .description("after-v1")
+        .send()
+        .await
+        .unwrap();
+
+    let v1_recheck = client
+        .get_function_configuration()
+        .function_name("ver-fn")
+        .qualifier("1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(v1_recheck.description().unwrap_or(""), "");
+    assert_eq!(v1_recheck.code_sha256().unwrap(), v1_sha);
+
+    // PublishVersion with same code+description is idempotent: returns v1.
+    // We reset the description to keep parity with the v1 snapshot first.
+    client
+        .update_function_configuration()
+        .function_name("ver-fn")
+        .description("")
+        .send()
+        .await
+        .unwrap();
+    let again = client
+        .publish_version()
+        .function_name("ver-fn")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.version().unwrap(), "1");
+
+    // UpdateFunctionCode with new bytes -> bumps $LATEST sha.
+    let new_zip = make_zip_with(b"v2-payload\n");
+    client
+        .update_function_code()
+        .function_name("ver-fn")
+        .zip_file(Blob::new(new_zip))
+        .send()
+        .await
+        .unwrap();
+
+    // Stale CodeSha256 precondition -> 412 PreconditionFailedException.
+    let stale = client
+        .publish_version()
+        .function_name("ver-fn")
+        .code_sha256(v1_sha.clone())
+        .send()
+        .await;
+    assert!(stale.is_err(), "expected PreconditionFailedException");
+    let err_str = format!("{:?}", stale.err().unwrap());
+    assert!(
+        err_str.contains("PreconditionFailed"),
+        "expected PreconditionFailed, got {err_str}"
+    );
+
+    // PublishVersion without preconditions -> v2.
+    let v2 = client
+        .publish_version()
+        .function_name("ver-fn")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(v2.version().unwrap(), "2");
+    assert!(v2.function_arn().unwrap().ends_with(":2"));
+    assert_ne!(v2.code_sha256().unwrap(), v1_sha);
+
+    // ListVersionsByFunction returns 3 entries: $LATEST, 1, 2 with
+    // full FunctionConfiguration each (not just version strings).
+    let listed = client
+        .list_versions_by_function()
+        .function_name("ver-fn")
+        .send()
+        .await
+        .unwrap();
+    let entries = listed.versions();
+    assert_eq!(entries.len(), 3);
+    let versions: Vec<&str> = entries.iter().map(|v| v.version().unwrap_or("")).collect();
+    assert_eq!(versions, vec!["$LATEST", "1", "2"]);
+    // Each entry carries a Runtime / Handler / Role — i.e. a full
+    // FunctionConfiguration, not just a version label.
+    for v in entries {
+        assert_eq!(v.runtime().unwrap().as_str(), "python3.12");
+        assert_eq!(v.handler().unwrap(), "index.handler");
+    }
+
+    // DeleteFunction(Qualifier="1") drops only that version.
+    client
+        .delete_function()
+        .function_name("ver-fn")
+        .qualifier("1")
+        .send()
+        .await
+        .unwrap();
+
+    let listed = client
+        .list_versions_by_function()
+        .function_name("ver-fn")
+        .send()
+        .await
+        .unwrap();
+    let versions: Vec<&str> = listed
+        .versions()
+        .iter()
+        .map(|v| v.version().unwrap_or(""))
+        .collect();
+    assert_eq!(versions, vec!["$LATEST", "2"]);
+
+    // GetFunction(Qualifier="1") now 404s.
+    let missing_v1 = client
+        .get_function()
+        .function_name("ver-fn")
+        .qualifier("1")
+        .send()
+        .await;
+    assert!(missing_v1.is_err());
+
+    // DeleteFunction without Qualifier removes everything.
+    client
+        .delete_function()
+        .function_name("ver-fn")
+        .send()
+        .await
+        .unwrap();
+    assert!(client
+        .get_function()
+        .function_name("ver-fn")
+        .send()
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn lambda_alias_targets_published_version_snapshot() {
+    // Aliases pointing at a numbered version must resolve to the
+    // immutable snapshot at GetFunction time even after $LATEST is
+    // rewritten — a key reason version snapshots exist at all.
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("alias-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_zip_with(b"alias-v1\n")))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let v1 = client
+        .publish_version()
+        .function_name("alias-fn")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(v1.version().unwrap(), "1");
+    let v1_sha = v1.code_sha256().unwrap().to_string();
+
+    // Create alias prod -> 1.
+    client
+        .create_alias()
+        .function_name("alias-fn")
+        .name("prod")
+        .function_version("1")
+        .send()
+        .await
+        .unwrap();
+
+    // Mutate $LATEST.
+    client
+        .update_function_code()
+        .function_name("alias-fn")
+        .zip_file(Blob::new(make_zip_with(b"alias-v2\n")))
+        .send()
+        .await
+        .unwrap();
+
+    // GetFunction(Qualifier="prod") must hit the v1 snapshot, not $LATEST.
+    let via_alias = client
+        .get_function()
+        .function_name("alias-fn")
+        .qualifier("prod")
+        .send()
+        .await
+        .unwrap();
+    let cfg = via_alias.configuration().unwrap();
+    assert_eq!(cfg.code_sha256().unwrap(), v1_sha);
+    assert!(cfg.function_arn().unwrap().ends_with(":1"));
+}
