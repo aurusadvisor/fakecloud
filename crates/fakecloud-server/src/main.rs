@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::Extension;
+use axum::response::IntoResponse;
 use axum::Router;
 use clap::Parser;
 use md5::Digest;
@@ -1354,7 +1355,7 @@ async fn main() {
         } else {
             None
         };
-    let mut logs_service = LogsService::new(logs_state, delivery_for_logs);
+    let mut logs_service = LogsService::new(logs_state.clone(), delivery_for_logs);
     if let Some(store) = logs_snapshot_store {
         logs_service = logs_service.with_snapshot_store(store);
     }
@@ -2108,9 +2109,9 @@ async fn main() {
     let cloudfront_service = Arc::new(CloudFrontService::new(cloudfront_state.clone()));
     registry.register(cloudfront_service.clone());
 
-    let route53_service = Arc::new(fakecloud_route53::Route53Service::new(
-        route53_state.clone(),
-    ));
+    let route53_service = Arc::new(
+        fakecloud_route53::Route53Service::new(route53_state.clone()).with_logs(logs_state.clone()),
+    );
     registry.register(route53_service.clone());
 
     let acm_service = Arc::new(fakecloud_acm::AcmService::new(acm_state.clone()));
@@ -5329,6 +5330,77 @@ async fn main() {
                             axum::http::StatusCode::NO_CONTENT
                         } else {
                             axum::http::StatusCode::NOT_FOUND
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/route53/zones/{id}/dnssec",
+            axum::routing::get({
+                let svc = route53_service.clone();
+                move |axum::extract::Path(id): axum::extract::Path<String>| {
+                    let svc = svc.clone();
+                    async move {
+                        match svc.dnssec_material_for_zone(&id) {
+                            Some((ksk, dnskey_public_key, key_tag, ds_hex)) => {
+                                let body = types::Route53DnssecMaterialResponse {
+                                    hosted_zone_id: ksk.hosted_zone_id,
+                                    key_signing_key_name: ksk.name,
+                                    algorithm: fakecloud_route53::dnssec::DNSSEC_ALGORITHM,
+                                    flags: fakecloud_route53::dnssec::DNSKEY_FLAGS_KSK,
+                                    key_tag,
+                                    dnskey_public_key_b64: fakecloud_route53::dnssec::b64(
+                                        &dnskey_public_key,
+                                    ),
+                                    ds_digest_sha256_hex: ds_hex,
+                                };
+                                (axum::http::StatusCode::OK, axum::Json(body)).into_response()
+                            }
+                            None => (
+                                axum::http::StatusCode::NOT_FOUND,
+                                "no ACTIVE KSK for zone",
+                            )
+                                .into_response(),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/route53/zones/{id}/dnssec/sign",
+            axum::routing::post({
+                let svc = route53_service.clone();
+                move |axum::extract::Path(id): axum::extract::Path<String>,
+                      axum::Json(body): axum::Json<types::Route53DnssecSignRequest>| {
+                    let svc = svc.clone();
+                    async move {
+                        match svc.sign_rrset_with_zone_ksk(
+                            &id,
+                            &body.name,
+                            &body.record_type,
+                            body.ttl,
+                            &body.rdatas,
+                        ) {
+                            Some(sig) => {
+                                let resp = types::Route53DnssecSignResponse {
+                                    signature_b64: sig.signature_b64,
+                                    algorithm: sig.algorithm,
+                                    key_tag: sig.key_tag,
+                                    signer_name: sig.signer_name,
+                                    inception: sig.inception,
+                                    expiration: sig.expiration,
+                                    labels: sig.labels,
+                                    original_ttl: sig.original_ttl,
+                                    rrset_type: sig.rrset_type,
+                                };
+                                (axum::http::StatusCode::OK, axum::Json(resp)).into_response()
+                            }
+                            None => (
+                                axum::http::StatusCode::NOT_FOUND,
+                                "no ACTIVE KSK or unknown record type",
+                            )
+                                .into_response(),
                         }
                     }
                 }
