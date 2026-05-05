@@ -15,6 +15,7 @@ use fakecloud_aws::arn::Arn;
 use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 
+use crate::evaluator::RateLimiter;
 use crate::state::{
     AccountState, ApiKey, IpSet, RegexPatternSet, RuleGroup, SharedWafv2State, Wafv2Accounts,
     WebAcl,
@@ -80,15 +81,34 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 
 pub struct Wafv2Service {
     state: SharedWafv2State,
+    rate_limiter: Arc<RateLimiter>,
 }
 
 impl Wafv2Service {
     pub fn new(state: SharedWafv2State) -> Self {
-        Self { state }
+        Self::with_rate_limiter(state, Arc::new(RateLimiter::new()))
+    }
+
+    /// Construct with an externally-owned rate limiter so the server can
+    /// share a single `RateLimiter` between this service and the admin
+    /// `/_fakecloud/wafv2/evaluate` endpoint.
+    pub fn with_rate_limiter(state: SharedWafv2State, rate_limiter: Arc<RateLimiter>) -> Self {
+        Self {
+            state,
+            rate_limiter,
+        }
     }
 
     pub fn shared_state(&self) -> SharedWafv2State {
         Arc::clone(&self.state)
+    }
+
+    /// Shared, in-process [`RateLimiter`] used by `RateBasedStatement`
+    /// evaluation. Every dataplane caller (ALB, API Gateway, CloudFront) and
+    /// the test admin endpoint must use this same instance so all WAFv2
+    /// evaluations through this server share their counters.
+    pub fn rate_limiter(&self) -> Arc<RateLimiter> {
+        Arc::clone(&self.rate_limiter)
     }
 }
 

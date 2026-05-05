@@ -775,6 +775,7 @@ pub(crate) fn evaluate_waf_outcome(
         query,
         source_ip: peer_addr.ip(),
         country: None,
+        body_size_bytes: body.len() as u64,
     };
     let detailed = waf_evaluate_detailed(&req, &snap.web_acl, &snap.ipsets, &snap.regex_sets);
     if !detailed.count_rules.is_empty() {

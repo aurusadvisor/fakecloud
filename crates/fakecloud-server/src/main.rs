@@ -347,6 +347,11 @@ async fn main() {
     let wafv2_state: fakecloud_wafv2::SharedWafv2State = Arc::new(parking_lot::RwLock::new(
         fakecloud_wafv2::Wafv2Accounts::new(),
     ));
+    // Shared in-process rate-limit counter for `RateBasedStatement` rules.
+    // Created here so the AwsService instance and the
+    // `/_fakecloud/wafv2/evaluate` admin endpoint share their state.
+    let wafv2_rate_limiter: Arc<fakecloud_wafv2::RateLimiter> =
+        Arc::new(fakecloud_wafv2::RateLimiter::new());
 
     let athena_state: fakecloud_athena::SharedAthenaState = Arc::new(parking_lot::RwLock::new(
         fakecloud_athena::AthenaAccounts::new(),
@@ -2125,7 +2130,10 @@ async fn main() {
         );
     registry.register(Arc::new(app_autoscaling_service));
 
-    let wafv2_service = fakecloud_wafv2::Wafv2Service::new(wafv2_state.clone());
+    let wafv2_service = fakecloud_wafv2::Wafv2Service::with_rate_limiter(
+        wafv2_state.clone(),
+        wafv2_rate_limiter.clone(),
+    );
     registry.register(Arc::new(wafv2_service));
 
     let athena_service = fakecloud_athena::AthenaService::new(athena_state.clone());
@@ -2598,7 +2606,7 @@ async fn main() {
 
     let config = DispatchConfig {
         region: cli.region,
-        account_id: cli.account_id,
+        account_id: cli.account_id.clone(),
         verify_sigv4: cli.verify_sigv4,
         iam_mode,
         credential_resolver: Some(
@@ -5180,6 +5188,27 @@ async fn main() {
                 }
             }),
         )
+        // WAFv2 evaluator admin endpoint. Phase W1 ships only the
+        // evaluator; the dataplane integrations (ALB, API Gateway,
+        // CloudFront) land in W2. This endpoint lets tests call into the
+        // evaluator directly without spinning up a real dataplane: pass a
+        // synthetic request and a `WebACL` ARN, get back the WafVerdict.
+        .route(
+            "/_fakecloud/wafv2/evaluate",
+            axum::routing::post({
+                let waf_state = wafv2_state.clone();
+                let limiter = wafv2_rate_limiter.clone();
+                let default_account = cli.account_id.clone();
+                move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let waf_state = waf_state.clone();
+                    let limiter = limiter.clone();
+                    let default_account = default_account.clone();
+                    async move {
+                        wafv2_evaluate_admin(&waf_state, &limiter, &default_account, &body)
+                    }
+                }
+            }),
+        )
         .route(
             "/_fakecloud/route53/health-checks/{id}/status",
             axum::routing::post({
@@ -5429,6 +5458,205 @@ fn install_panic_hook() {
 /// scans stdout for the first line starting with this prefix to discover
 /// the OS-assigned port when the server was launched with `--addr :0`.
 const PORT_HANDSHAKE_PREFIX: &str = "FAKECLOUD_PORT=";
+
+/// Body shape accepted by `POST /_fakecloud/wafv2/evaluate`:
+///
+/// ```json
+/// {
+///   "webAclArn": "...",
+///   "accountId": "000000000000",      // optional, defaults to server account
+///   "request": {
+///     "method": "POST",                 // optional, default "GET"
+///     "uri": "/admin/users",            // optional, default "/"
+///     "query": "id=1",                  // optional
+///     "sourceIp": "10.1.2.3",           // optional, default 127.0.0.1
+///     "headers": [["X-Forwarded-For", "..."]], // optional
+///     "body": "...",                    // optional, base64-encoded if `bodyB64`
+///     "bodyB64": "Li4u",                // optional, alternative to `body`
+///     "bodySize": 12345,                // optional, defaults to body.len()
+///     "country": "DE",                  // optional, also overridable via header
+///     "nowEpochSecs": 1700000000        // optional, default = system clock
+///   }
+/// }
+/// ```
+///
+/// The `country` header `x-fakecloud-geo-country` on the synthetic request
+/// is honored as an override, matching the dataplane behavior that lands
+/// in W2 (real GeoIP lookup is out of scope for W1).
+fn wafv2_evaluate_admin(
+    waf_state: &fakecloud_wafv2::SharedWafv2State,
+    rate_limiter: &Arc<fakecloud_wafv2::RateLimiter>,
+    default_account: &str,
+    body: &serde_json::Value,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    use axum::http::StatusCode;
+
+    let bad = |msg: &str| -> (StatusCode, axum::Json<serde_json::Value>) {
+        (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": msg})),
+        )
+    };
+
+    let Some(arn) = body.get("webAclArn").and_then(|v| v.as_str()) else {
+        return bad("`webAclArn` is required");
+    };
+    let account_id = body
+        .get("accountId")
+        .and_then(|v| v.as_str())
+        .unwrap_or(default_account);
+    let req_obj = body
+        .get("request")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    let method = req_obj
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("GET")
+        .to_string();
+    let uri = req_obj
+        .get("uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let query = req_obj
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let source_ip_str = req_obj
+        .get("sourceIp")
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1");
+    let Ok(source_ip) = source_ip_str.parse::<std::net::IpAddr>() else {
+        return bad("`request.sourceIp` is not a valid IP address");
+    };
+
+    // Headers come in as either [[name, val], ...] or {name: val} for ergonomics.
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(arr) = req_obj.get("headers").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(pair) = item.as_array() {
+                if pair.len() == 2 {
+                    if let (Some(k), Some(v)) = (pair[0].as_str(), pair[1].as_str()) {
+                        headers.push((k.to_string(), v.to_string()));
+                    }
+                }
+            } else if let Some(obj) = item.as_object() {
+                if let (Some(k), Some(v)) = (
+                    obj.get("name").and_then(|x| x.as_str()),
+                    obj.get("value").and_then(|x| x.as_str()),
+                ) {
+                    headers.push((k.to_string(), v.to_string()));
+                }
+            }
+        }
+    } else if let Some(obj) = req_obj.get("headers").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(v) = v.as_str() {
+                headers.push((k.clone(), v.to_string()));
+            }
+        }
+    }
+
+    // Body: prefer raw `body` string, fall back to base64-encoded `bodyB64`.
+    let body_bytes: Vec<u8> = if let Some(b64) = req_obj.get("bodyB64").and_then(|v| v.as_str()) {
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64) {
+            Ok(b) => b,
+            Err(_) => return bad("`request.bodyB64` is not valid base64"),
+        }
+    } else if let Some(s) = req_obj.get("body").and_then(|v| v.as_str()) {
+        s.as_bytes().to_vec()
+    } else {
+        Vec::new()
+    };
+    let body_size = req_obj
+        .get("bodySize")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(body_bytes.len() as u64);
+
+    // Country override precedence: explicit `country` field, else the
+    // `x-fakecloud-geo-country` header on the synthetic request.
+    let country_explicit = req_obj
+        .get("country")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let country_header = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(fakecloud_wafv2::FAKECLOUD_GEO_COUNTRY_HEADER))
+        .map(|(_, v)| v.clone());
+    let country = country_explicit.or(country_header);
+
+    let now_epoch_secs = req_obj
+        .get("nowEpochSecs")
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        });
+
+    // Snapshot the WebACL plus the IpSets and RegexPatternSets it might
+    // reference. We hold the read lock only long enough to clone what we
+    // need — evaluation itself does not need the lock.
+    let snapshot = {
+        let state = waf_state.read();
+        let Some(account) = state.accounts.get(account_id) else {
+            return bad("account not found");
+        };
+        let acl = account.web_acls.values().find(|a| a.arn == arn).cloned();
+        let ip_sets: std::collections::HashMap<String, fakecloud_wafv2::IpSet> = account
+            .ip_sets
+            .values()
+            .map(|s| (s.arn.clone(), s.clone()))
+            .collect();
+        let regex_sets: std::collections::HashMap<String, fakecloud_wafv2::RegexPatternSet> =
+            account
+                .regex_pattern_sets
+                .values()
+                .map(|s| (s.arn.clone(), s.clone()))
+                .collect();
+        (acl, ip_sets, regex_sets)
+    };
+    let (acl, ip_sets, regex_sets) = snapshot;
+    let Some(acl) = acl else {
+        return bad("WebACL not found");
+    };
+
+    let request = fakecloud_wafv2::WafRequest {
+        method: &method,
+        uri: &uri,
+        headers: &headers,
+        body: &body_bytes,
+        query: &query,
+        source_ip,
+        country: country.as_deref(),
+        body_size_bytes: body_size,
+    };
+    let verdict = fakecloud_wafv2::evaluate_web_acl(
+        &acl,
+        &request,
+        &ip_sets,
+        &regex_sets,
+        rate_limiter,
+        now_epoch_secs,
+    );
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "action": verdict.action.as_str(),
+            "blocked": verdict.blocked,
+            "terminatingRuleId": verdict.terminating_rule_id,
+            "labels": verdict.labels,
+            "countRules": verdict.count_rules,
+            "customResponseStatus": verdict.custom_response_status,
+            "customResponseBodyKey": verdict.custom_response_body_key,
+        })),
+    )
+}
 
 /// Bind a `TcpListener` and return the listener together with the address
 /// Email dispatcher used by Cognito's verification flow: append a
