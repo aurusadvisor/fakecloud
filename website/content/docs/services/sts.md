@@ -8,9 +8,9 @@ fakecloud implements **11 of 11** STS operations at 100% Smithy conformance.
 
 ## Supported features
 
-- **AssumeRole** — with session name, duration, policies, external ID
-- **AssumeRoleWithWebIdentity** — OIDC federation
-- **AssumeRoleWithSAML** — SAML federation
+- **AssumeRole** — with session name, duration, policies, external ID; the role's trust policy is evaluated before credentials are issued (Principal, Condition, ExternalId, MFA, service-linked roles)
+- **AssumeRoleWithWebIdentity** — OIDC federation; JWT `iss` is matched against a registered `OpenIDConnectProvider` and `aud` against its `client_id_list`; trust policy is enforced with `<provider>:aud` / `<provider>:sub` context keys
+- **AssumeRoleWithSAML** — SAML federation; the named provider must exist, audience is matched against the provider metadata's `entityID`, and the trust policy is enforced with `saml:aud` / `saml:iss` context keys
 - **GetSessionToken** — temporary credentials
 - **GetFederationToken** — federated user credentials
 - **GetCallerIdentity** — account ID, user ARN, user ID

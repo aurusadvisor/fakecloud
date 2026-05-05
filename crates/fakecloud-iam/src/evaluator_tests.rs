@@ -1229,8 +1229,30 @@ fn not_principal_with_account_root() {
 
 #[test]
 fn not_principal_with_unrecognized_type_safe_skips() {
-    // NotPrincipal with only Federated type (unrecognized) ->
-    // empty refs list -> statement skipped safely.
+    // NotPrincipal with only CanonicalUser (still unrecognized) ->
+    // empty refs list -> statement skipped safely. Federated is now
+    // recognized (F1) so we use CanonicalUser to keep covering the
+    // safe-skip path.
+    let alice = principal_in(ACCT_A, "alice");
+    let resource = json!({
+        "Statement": [{
+            "Effect": "Allow",
+            "NotPrincipal": {"CanonicalUser": "abc123"},
+            "Action": "s3:GetObject",
+            "Resource": "*"
+        }]
+    });
+    assert_eq!(
+        eval_cross(None, Some(resource), &alice, ACCT_A),
+        Decision::ImplicitDeny
+    );
+}
+
+#[test]
+fn not_principal_federated_excludes_federated_callers() {
+    // F1: NotPrincipal with Federated now actually filters federated
+    // callers. A non-federated caller (alice) doesn't match the
+    // federated entry, so the statement applies and the Allow fires.
     let alice = principal_in(ACCT_A, "alice");
     let resource = json!({
         "Statement": [{
@@ -1242,7 +1264,7 @@ fn not_principal_with_unrecognized_type_safe_skips() {
     });
     assert_eq!(
         eval_cross(None, Some(resource), &alice, ACCT_A),
-        Decision::ImplicitDeny
+        Decision::Allow
     );
 }
 
