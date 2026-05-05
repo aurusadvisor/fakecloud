@@ -613,17 +613,55 @@ impl OrganizationsService {
             })
             .unwrap_or_default();
         // AWS caps MaxResults at 20 for ListCreateAccountStatus and
-        // defaults to 20 when unset. Match that so SDK pagination
-        // tests don't have to special-case fakecloud.
-        let max_results = body
-            .get("MaxResults")
-            .and_then(|v| v.as_u64())
-            .map(|n| n.clamp(1, 20) as usize)
-            .unwrap_or(20);
-        let next_token = body
-            .get("NextToken")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        // defaults to 20 when unset. Reject out-of-range values with
+        // InvalidInputException so callers see the same wire error
+        // they would from real AWS, instead of silently clamping.
+        let max_results = match body.get("MaxResults") {
+            None | Some(Value::Null) => 20,
+            Some(v) => {
+                let n = v.as_u64().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidInputException",
+                        "MaxResults must be a positive integer between 1 and 20.",
+                    )
+                })?;
+                if !(1..=20).contains(&n) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidInputException",
+                        "MaxResults must be between 1 and 20.",
+                    ));
+                }
+                n as usize
+            }
+        };
+        // NextToken must round-trip a token we previously emitted.
+        // Reject anything we didn't mint (non-numeric, negative, etc.)
+        // up front so callers learn about a typo instead of silently
+        // re-reading page 1.
+        let next_token = match body.get("NextToken") {
+            None | Some(Value::Null) => None,
+            Some(v) => {
+                let s = v.as_str().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidInputException",
+                        "NextToken must be a string.",
+                    )
+                })?;
+                // Tokens we mint are positive offset integers (see
+                // fakecloud_core::pagination::paginate).
+                if s.parse::<usize>().is_err() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidInputException",
+                        "NextToken is not a valid pagination token.",
+                    ));
+                }
+                Some(s.to_string())
+            }
+        };
 
         let guard = self.state.read();
         let org = self.require_member(&guard, &req.account_id)?;
@@ -2873,6 +2911,46 @@ mod tests {
             .clone();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["Id"].as_str().unwrap(), request_id);
+    }
+
+    #[tokio::test]
+    async fn list_create_account_status_rejects_out_of_range_max_results() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        for bad in [json!(0), json!(21), json!(-1), json!("five")] {
+            let err = expect_err(
+                svc.handle(req_with(
+                    "111111111111",
+                    "ListCreateAccountStatus",
+                    json!({"MaxResults": bad}),
+                ))
+                .await,
+            );
+            assert_eq!(err.code(), "InvalidInputException");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_create_account_status_rejects_invalid_next_token() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        let err = expect_err(
+            svc.handle(req_with(
+                "111111111111",
+                "ListCreateAccountStatus",
+                json!({"NextToken": "not-a-number"}),
+            ))
+            .await,
+        );
+        assert_eq!(err.code(), "InvalidInputException");
+        // Numeric NextToken is accepted (round-trips a token we minted).
+        svc.handle(req_with(
+            "111111111111",
+            "ListCreateAccountStatus",
+            json!({"NextToken": "0"}),
+        ))
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
