@@ -24,6 +24,20 @@ fakecloud implements **146 of 146** SSM operations at 100% Smithy conformance.
 
 JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 
+## RunCommand lifecycle
+
+`SendCommand` returns `Pending` immediately, then a background task flips the command (and each per-instance invocation) to `InProgress` after ~500ms and `Success` after another ~1.5s. `GetCommandInvocation`, `ListCommandInvocations`, and `ListCommands` all read live state, so polling clients see the same lifecycle they'd hit on real AWS — no canned `Success` shortcut.
+
+To simulate failures from a test, hit the admin endpoint:
+
+```bash
+curl -X POST "$ENDPOINT/_fakecloud/ssm/commands/$CMD_ID/fail" \
+  -H "content-type: application/json" \
+  -d '{"instanceId":"i-...","statusDetails":"Script exited with code 7","standardErrorContent":"boom"}'
+```
+
+`instanceId`, `statusDetails`, and `standardErrorContent` are all optional. See [introspection reference](/docs/reference/introspection/#ssm).
+
 ## SecureString encryption
 
 SecureString parameters are encrypted through the KMS hook on `PutParameter`

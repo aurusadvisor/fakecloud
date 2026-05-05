@@ -87,6 +87,11 @@ pub struct SsmCommand {
     pub parameters: BTreeMap<String, Vec<String>>,
     pub status: String,
     pub requested_date_time: DateTime<Utc>,
+    /// When the command's results stop being readable. Defaults to
+    /// `requested_date_time + 1h` for snapshots written before this
+    /// field existed so old data still deserializes cleanly.
+    #[serde(default = "default_command_expiry")]
+    pub expires_after: DateTime<Utc>,
     pub comment: Option<String>,
     pub output_s3_bucket_name: Option<String>,
     pub output_s3_key_prefix: Option<String>,
@@ -97,6 +102,31 @@ pub struct SsmCommand {
     pub targets: Vec<serde_json::Value>,
     pub document_hash: Option<String>,
     pub document_hash_type: Option<String>,
+    /// Per-instance invocation state. One entry per `InstanceIds`
+    /// member; updated independently by the async transition task or
+    /// by the admin force-fail endpoint.
+    #[serde(default)]
+    pub invocations: Vec<SsmCommandInvocation>,
+}
+
+fn default_command_expiry() -> DateTime<Utc> {
+    chrono::Utc::now() + chrono::Duration::seconds(3600)
+}
+
+/// One execution of a command on a single managed instance. The
+/// real SSM API exposes this via `GetCommandInvocation` and
+/// `ListCommandInvocations`; per-invocation status diverges from the
+/// parent command status when only some instances fail.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SsmCommandInvocation {
+    pub instance_id: String,
+    pub status: String,
+    pub status_details: String,
+    pub standard_output_content: String,
+    pub standard_error_content: String,
+    pub response_code: i64,
+    pub requested_date_time: DateTime<Utc>,
+    pub last_update_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

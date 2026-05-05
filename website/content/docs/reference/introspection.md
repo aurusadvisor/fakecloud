@@ -86,6 +86,15 @@ curl http://localhost:4566/_fakecloud/health
 | ----------------------------------------------------- | ------ | ----------- |
 | `/_fakecloud/secretsmanager/rotation-scheduler/tick`  | POST   | Rotate secrets whose rotation schedule is due. |
 
+## SSM
+
+| Endpoint                                              | Method | Description |
+| ----------------------------------------------------- | ------ | ----------- |
+| `/_fakecloud/ssm/commands/{command_id}/status`        | POST   | Force a `SendCommand` to a specific status. Body: `{"accountId":"...", "status":"Failed"}`. |
+| `/_fakecloud/ssm/commands/{command_id}/fail`          | POST   | Fail one (or all) command invocations. Body: `{"accountId":"?", "instanceId":"?", "statusDetails":"?", "standardErrorContent":"?"}`. Returns `{"updatedInvocations":N}`. |
+
+`SendCommand` runs through `Pending` -> `InProgress` -> `Success` automatically over ~2 seconds. The `/fail` endpoint lets tests inject a non-zero exit at any point — by default it stamps every invocation, or pass `instanceId` to target one. `statusDetails` overrides the friendly status string (e.g. `"Script exited with code 7"`); `standardErrorContent` is exposed via `GetCommandInvocation`.
+
 ## SES
 
 | Endpoint                   | Method | Description |

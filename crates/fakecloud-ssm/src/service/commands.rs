@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use chrono::Utc;
 use http::StatusCode;
@@ -8,9 +9,85 @@ use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
-use crate::state::{SsmCommand, SsmState};
+use crate::state::{SsmCommand, SsmCommandInvocation, SsmState};
 
 use super::{missing, SsmService};
+
+/// Delay before a freshly submitted command flips from `Pending` to
+/// `InProgress`. Real SSM takes a few seconds; we keep this small so
+/// E2E tests don't drag.
+const PENDING_TO_IN_PROGRESS: Duration = Duration::from_millis(500);
+
+/// Delay between `InProgress` and the terminal `Success` state.
+const IN_PROGRESS_TO_SUCCESS: Duration = Duration::from_millis(1500);
+
+/// Map a machine-readable status to the friendlier `StatusDetails`
+/// string AWS returns. Anything unrecognised passes through unchanged.
+pub(crate) fn friendly_status_details(status: &str) -> String {
+    match status {
+        "Pending" => "Pending",
+        "InProgress" => "In Progress",
+        "Delayed" => "Delayed",
+        "Success" => "Success",
+        "Cancelled" => "Cancelled",
+        "Cancelling" => "Cancelling",
+        "Failed" => "Failed",
+        "TimedOut" => "Timed Out",
+        "AccessDenied" => "Access Denied",
+        "DeliveryTimedOut" => "Delivery Timed Out",
+        "ExecutionTimedOut" => "Execution Timed Out",
+        "Incomplete" => "Incomplete",
+        "NoInstancesInTag" => "No Instances In Tag",
+        "LimitExceeded" => "Limit Exceeded",
+        other => other,
+    }
+    .to_string()
+}
+
+/// Aggregate per-invocation statuses into a single command-level
+/// status. Mirrors the rule AWS uses: any failure dominates a success,
+/// any in-progress dominates pending. This keeps `ListCommands`
+/// consistent with `ListCommandInvocations` even after admin force-fail.
+pub(super) fn aggregate_command_status(invocations: &[SsmCommandInvocation]) -> String {
+    if invocations.is_empty() {
+        return "Pending".to_string();
+    }
+    let mut has_pending = false;
+    let mut has_in_progress = false;
+    let mut has_success = false;
+    let mut failure: Option<&str> = None;
+    for inv in invocations {
+        match inv.status.as_str() {
+            "Pending" => has_pending = true,
+            "InProgress" | "Delayed" => has_in_progress = true,
+            "Success" => has_success = true,
+            // Any non-success terminal state is a "failure" for the
+            // parent command. First one wins so we expose the most
+            // informative reason.
+            "Failed" | "TimedOut" | "Cancelled" | "Cancelling" | "AccessDenied"
+            | "DeliveryTimedOut" | "ExecutionTimedOut" | "Incomplete" | "NoInstancesInTag"
+            | "LimitExceeded"
+                if failure.is_none() =>
+            {
+                failure = Some(inv.status.as_str());
+            }
+            _ => {}
+        }
+    }
+    if let Some(f) = failure {
+        return f.to_string();
+    }
+    if has_in_progress || (has_pending && has_success) {
+        return "InProgress".to_string();
+    }
+    if has_pending {
+        return "Pending".to_string();
+    }
+    if has_success {
+        return "Success".to_string();
+    }
+    "Pending".to_string()
+}
 
 /// All fields of a `SendCommand` request, parsed and validated.
 struct SendCommandInput {
@@ -131,17 +208,32 @@ impl SsmService {
             input.instance_ids.clone()
         };
 
+        let expires = now + chrono::Duration::seconds(input.timeout.unwrap_or(3600));
+        let invocations: Vec<SsmCommandInvocation> = effective_instance_ids
+            .iter()
+            .map(|iid| SsmCommandInvocation {
+                instance_id: iid.clone(),
+                status: "Pending".to_string(),
+                status_details: friendly_status_details("Pending"),
+                standard_output_content: String::new(),
+                standard_error_content: String::new(),
+                response_code: -1,
+                requested_date_time: now,
+                last_update_at: now,
+            })
+            .collect();
+
         let cmd = SsmCommand {
             command_id: command_id.clone(),
             document_name: input.document_name.clone(),
             instance_ids: effective_instance_ids.clone(),
             parameters: input.parameters.clone(),
-            // Real SSM returns `Pending` on submit; transitions to
-            // `InProgress` and then `Success` (or `Failed`) as the
-            // agent reports back. fakecloud auto-advances the state
-            // on each read so callers see realistic lifecycle.
+            // Real SSM returns `Pending` on submit; a background task
+            // flips this to `InProgress` and then `Success` after a
+            // short delay so polling clients see the natural lifecycle.
             status: "Pending".to_string(),
             requested_date_time: now,
+            expires_after: expires,
             comment: input.comment.clone(),
             output_s3_bucket_name: input.output_s3_bucket.clone(),
             output_s3_key_prefix: input.output_s3_prefix.clone(),
@@ -152,13 +244,33 @@ impl SsmService {
             targets: input.targets.clone(),
             document_hash: input.document_hash.clone(),
             document_hash_type: input.document_hash_type.clone(),
+            invocations,
         };
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        state.commands.push(cmd);
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            state.commands.push(cmd);
+        }
 
-        let expires = now + chrono::Duration::seconds(input.timeout.unwrap_or(3600));
+        // Spawn the lifecycle transition. Detached on purpose — clients
+        // poll `GetCommandInvocation`; we don't await completion here.
+        // When the test harness runs a `send_command` outside a tokio
+        // runtime (e.g. plain `#[test]`), `try_current` returns `Err`
+        // and the command stays `Pending` forever, which the unit tests
+        // assert against directly.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let state_handle = self.state.clone();
+            let account_id = req.account_id.clone();
+            let cid = command_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(PENDING_TO_IN_PROGRESS).await;
+                advance_pending_to_in_progress(&state_handle, &account_id, &cid);
+                tokio::time::sleep(IN_PROGRESS_TO_SUCCESS).await;
+                advance_in_progress_to_success(&state_handle, &account_id, &cid);
+            });
+        }
+
         let mut cmd_obj = json!({
             "CommandId": command_id,
             "DocumentName": input.document_name,
@@ -166,7 +278,7 @@ impl SsmService {
             "Targets": input.targets,
             "Parameters": input.parameters,
             "Status": "Pending",
-            "StatusDetails": "Pending",
+            "StatusDetails": friendly_status_details("Pending"),
             "RequestedDateTime": now.timestamp_millis() as f64 / 1000.0,
             "ExpiresAfter": expires.timestamp_millis() as f64 / 1000.0,
             "MaxConcurrency": input.max_concurrency.clone().unwrap_or_default(),
@@ -220,25 +332,22 @@ impl SsmService {
                 true
             })
             .map(|c| {
-                let expires = c.requested_date_time
-                    + chrono::Duration::seconds(c.timeout_seconds.unwrap_or(3600));
-                let v = json!({
+                json!({
                     "CommandId": c.command_id,
                     "DocumentName": c.document_name,
                     "InstanceIds": c.instance_ids,
                     "Targets": c.targets,
                     "Parameters": c.parameters,
                     "Status": c.status,
-                    "StatusDetails": c.status,
+                    "StatusDetails": friendly_status_details(&c.status),
                     "RequestedDateTime": c.requested_date_time.timestamp_millis() as f64 / 1000.0,
-                    "ExpiresAfter": expires.timestamp_millis() as f64 / 1000.0,
+                    "ExpiresAfter": c.expires_after.timestamp_millis() as f64 / 1000.0,
                     "Comment": c.comment,
                     "OutputS3Region": c.output_s3_region,
                     "OutputS3BucketName": c.output_s3_bucket_name,
                     "OutputS3KeyPrefix": c.output_s3_key_prefix,
                     "DeliveryTimedOutCount": 0,
-                });
-                v
+                })
             })
             .collect();
 
@@ -278,26 +387,6 @@ impl SsmService {
         let plugin_name = body["PluginName"].as_str();
         validate_optional_string_length("PluginName", plugin_name, 4, 500)?;
 
-        // Auto-advance lifecycle so callers polling Get see Pending
-        // -> InProgress -> Success across successive reads. This runs
-        // under the write lock to avoid clobbering admin-set
-        // `Failed` / `Cancelled` statuses.
-        {
-            let mut accounts = self.state.write();
-            let state = accounts.get_or_create(&req.account_id);
-            if let Some(c) = state
-                .commands
-                .iter_mut()
-                .find(|c| c.command_id == command_id)
-            {
-                c.status = match c.status.as_str() {
-                    "Pending" => "InProgress".to_string(),
-                    "InProgress" => "Success".to_string(),
-                    other => other.to_string(),
-                };
-            }
-        }
-
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -313,15 +402,6 @@ impl SsmService {
                 )
             })?;
 
-        // Check instance is part of the command
-        if !cmd.instance_ids.contains(&instance_id.to_string()) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvocationDoesNotExist",
-                "An error occurred (InvocationDoesNotExist) when calling the GetCommandInvocation operation",
-            ));
-        }
-
         // Validate plugin name if provided
         if let Some(pn) = plugin_name {
             let known_plugins = ["aws:runShellScript", "aws:runPowerShellScript"];
@@ -334,23 +414,34 @@ impl SsmService {
             }
         }
 
-        let response_code = match cmd.status.as_str() {
-            "Success" => 0,
-            "Failed" => 1,
-            _ => -1,
-        };
-        Ok(AwsResponse::ok_json(json!({
+        let inv = cmd
+            .invocations
+            .iter()
+            .find(|i| i.instance_id == instance_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvocationDoesNotExist",
+                    "An error occurred (InvocationDoesNotExist) when calling the GetCommandInvocation operation",
+                )
+            })?;
+
+        let mut resp = json!({
             "CommandId": cmd.command_id,
             "InstanceId": instance_id,
             "DocumentName": cmd.document_name,
-            "Status": cmd.status,
-            "StatusDetails": cmd.status,
-            "ResponseCode": response_code,
-            "StandardOutputContent": "",
+            "Status": inv.status,
+            "StatusDetails": inv.status_details,
+            "ResponseCode": inv.response_code,
+            "StandardOutputContent": inv.standard_output_content,
             "StandardOutputUrl": "",
-            "StandardErrorContent": "",
+            "StandardErrorContent": inv.standard_error_content,
             "StandardErrorUrl": "",
-        })))
+        });
+        if let Some(pn) = plugin_name {
+            resp["PluginName"] = json!(pn);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn list_command_invocations(
@@ -377,14 +468,14 @@ impl SsmService {
                 }
             })
             .flat_map(|c| {
-                c.instance_ids.iter().map(|iid| {
+                c.invocations.iter().map(|inv| {
                     json!({
                         "CommandId": c.command_id,
-                        "InstanceId": iid,
+                        "InstanceId": inv.instance_id,
                         "DocumentName": c.document_name,
-                        "Status": c.status,
-                        "StatusDetails": c.status,
-                        "RequestedDateTime": c.requested_date_time.timestamp_millis() as f64 / 1000.0,
+                        "Status": inv.status,
+                        "StatusDetails": inv.status_details,
+                        "RequestedDateTime": inv.requested_date_time.timestamp_millis() as f64 / 1000.0,
                         "Comment": c.comment,
                     })
                 })
@@ -407,6 +498,11 @@ impl SsmService {
             .as_str()
             .ok_or_else(|| missing("CommandId"))?;
         validate_string_length("CommandId", command_id, 36, 36)?;
+        let instance_filter: Option<Vec<String>> = body["InstanceIds"].as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        });
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -415,11 +511,73 @@ impl SsmService {
             .iter_mut()
             .find(|c| c.command_id == command_id)
         {
-            cmd.status = "Cancelled".to_string();
+            let now = Utc::now();
+            for inv in cmd.invocations.iter_mut() {
+                if let Some(filter) = &instance_filter {
+                    if !filter.is_empty() && !filter.contains(&inv.instance_id) {
+                        continue;
+                    }
+                }
+                // Cancellation only applies before terminal states.
+                if matches!(inv.status.as_str(), "Pending" | "InProgress" | "Delayed") {
+                    inv.status = "Cancelled".to_string();
+                    inv.status_details = friendly_status_details("Cancelled");
+                    inv.last_update_at = now;
+                }
+            }
+            cmd.status = aggregate_command_status(&cmd.invocations);
         }
 
         Ok(AwsResponse::ok_json(json!({})))
     }
 
     // ===== Maintenance Window operations =====
+}
+
+/// Flip pending invocations + parent command to `InProgress`. Skips any
+/// invocation that has already moved into a terminal state via the
+/// admin force-fail endpoint or `CancelCommand`.
+fn advance_pending_to_in_progress(
+    state: &crate::state::SharedSsmState,
+    account_id: &str,
+    command_id: &str,
+) {
+    let mut accounts = state.write();
+    let st = accounts.get_or_create(account_id);
+    let Some(cmd) = st.commands.iter_mut().find(|c| c.command_id == command_id) else {
+        return;
+    };
+    let now = Utc::now();
+    for inv in cmd.invocations.iter_mut() {
+        if inv.status == "Pending" {
+            inv.status = "InProgress".to_string();
+            inv.status_details = friendly_status_details("InProgress");
+            inv.last_update_at = now;
+        }
+    }
+    cmd.status = aggregate_command_status(&cmd.invocations);
+}
+
+/// Flip in-flight invocations + parent command to `Success`. Same
+/// terminal-state guard as the pending->in-progress hop.
+fn advance_in_progress_to_success(
+    state: &crate::state::SharedSsmState,
+    account_id: &str,
+    command_id: &str,
+) {
+    let mut accounts = state.write();
+    let st = accounts.get_or_create(account_id);
+    let Some(cmd) = st.commands.iter_mut().find(|c| c.command_id == command_id) else {
+        return;
+    };
+    let now = Utc::now();
+    for inv in cmd.invocations.iter_mut() {
+        if matches!(inv.status.as_str(), "Pending" | "InProgress" | "Delayed") {
+            inv.status = "Success".to_string();
+            inv.status_details = friendly_status_details("Success");
+            inv.response_code = 0;
+            inv.last_update_at = now;
+        }
+    }
+    cmd.status = aggregate_command_status(&cmd.invocations);
 }

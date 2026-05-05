@@ -1119,6 +1119,7 @@ async fn main() {
             None
         };
     let ssm_state_for_admin = ssm_state.clone();
+    let ssm_state_for_fail = ssm_state.clone();
     let mut ssm_service = SsmService::new(ssm_state)
         .with_secretsmanager(secretsmanager_state.clone())
         .with_kms_hook(kms_hook_for_services.clone());
@@ -3292,6 +3293,34 @@ async fn main() {
                     let svc = fakecloud_ssm::SsmService::new(ss);
                     let updated = svc.set_command_status(account, &command_id, &body.status);
                     axum::Json(types::SetSsmCommandStatusResponse { updated })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ssm/commands/{command_id}/fail",
+            axum::routing::post({
+                let ss = ssm_state_for_fail;
+                move |axum::extract::Path(command_id): axum::extract::Path<String>,
+                      body: Option<axum::Json<types::FailSsmCommandRequest>>| async move {
+                    let body = body.map(|b| b.0).unwrap_or_default();
+                    // Default to the server's configured account so
+                    // tests don't have to thread the ID through every
+                    // admin call. Falls back to "000000000000" only on
+                    // the off chance state initialisation hasn't yet
+                    // populated a default.
+                    let default_account = ss.read().default_account_id().to_string();
+                    let account = body.account_id.as_deref().unwrap_or(&default_account);
+                    let svc = fakecloud_ssm::SsmService::new(ss.clone());
+                    let updated = svc.fail_command_invocation(
+                        account,
+                        &command_id,
+                        body.instance_id.as_deref(),
+                        body.status_details.as_deref(),
+                        body.standard_error_content.as_deref(),
+                    );
+                    axum::Json(types::FailSsmCommandResponse {
+                        updated_invocations: updated,
+                    })
                 }
             }),
         )

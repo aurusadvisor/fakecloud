@@ -283,6 +283,26 @@ pub struct SetSsmCommandStatusResponse {
     pub updated: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailSsmCommandRequest {
+    pub account_id: Option<String>,
+    /// Optional: target a single invocation. When `None`, every
+    /// invocation on the command is flipped to `Failed`.
+    pub instance_id: Option<String>,
+    /// Optional friendly status detail (e.g. "Script exited with code 7").
+    /// Defaults to "Failed".
+    pub status_details: Option<String>,
+    /// Optional captured stderr to expose via `GetCommandInvocation`.
+    pub standard_error_content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailSsmCommandResponse {
+    pub updated_invocations: usize,
+}
+
 // ── EventBridge ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

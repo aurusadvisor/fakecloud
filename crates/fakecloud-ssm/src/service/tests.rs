@@ -2057,20 +2057,10 @@ fn get_command_invocation_success() {
     let svc = make_service();
     let cmd_id = send_command(&svc, "AWS-RunShellScript");
 
-    // Real SSM cycles Pending -> InProgress -> Success across polls.
-    // fakecloud auto-advances on every Get; two reads pin the
-    // InProgress and Success states respectively.
-    let req = make_request(
-        "GetCommandInvocation",
-        json!({
-            "CommandId": cmd_id,
-            "InstanceId": "i-1234567890abcdef0",
-        }),
-    );
-    let resp = svc.get_command_invocation(&req).unwrap();
-    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["Status"].as_str().unwrap(), "InProgress");
-
+    // Without a tokio runtime the async transition task isn't
+    // spawned, so the invocation stays at `Pending` and exposes the
+    // friendly StatusDetails. The async transition is exercised in
+    // the E2E suite where the runtime is real.
     let req = make_request(
         "GetCommandInvocation",
         json!({
@@ -2082,8 +2072,100 @@ fn get_command_invocation_success() {
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["CommandId"].as_str().unwrap(), cmd_id);
     assert_eq!(body["InstanceId"].as_str().unwrap(), "i-1234567890abcdef0");
+    assert_eq!(body["Status"].as_str().unwrap(), "Pending");
+    assert_eq!(body["StatusDetails"].as_str().unwrap(), "Pending");
+    assert_eq!(body["ResponseCode"].as_i64().unwrap(), -1);
+}
+
+#[test]
+fn get_command_invocation_reflects_admin_force_success() {
+    let svc = make_service();
+    let cmd_id = send_command(&svc, "AWS-RunShellScript");
+
+    // Admin override flips the lifecycle into Success without waiting
+    // on the spawned transition task; per-invocation StatusDetails
+    // matches AWS's friendlier human-facing string.
+    assert!(svc.set_command_status("123456789012", &cmd_id, "Success"));
+
+    let req = make_request(
+        "GetCommandInvocation",
+        json!({
+            "CommandId": cmd_id,
+            "InstanceId": "i-1234567890abcdef0",
+        }),
+    );
+    let resp = svc.get_command_invocation(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["Status"].as_str().unwrap(), "Success");
+    assert_eq!(body["StatusDetails"].as_str().unwrap(), "Success");
     assert_eq!(body["ResponseCode"].as_i64().unwrap(), 0);
+}
+
+#[test]
+fn fail_command_invocation_marks_single_instance() {
+    let svc = make_service();
+    // Two-instance command so we can verify the per-instance flag flow.
+    let req = make_request(
+        "SendCommand",
+        json!({
+            "DocumentName": "AWS-RunShellScript",
+            "InstanceIds": ["i-1111111111111111a", "i-2222222222222222b"],
+        }),
+    );
+    let resp = svc.send_command(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let cmd_id = body["Command"]["CommandId"].as_str().unwrap().to_string();
+
+    let updated = svc.fail_command_invocation(
+        "123456789012",
+        &cmd_id,
+        Some("i-1111111111111111a"),
+        Some("Script exited with code 7"),
+        Some("boom"),
+    );
+    assert_eq!(updated, 1);
+
+    let req = make_request(
+        "GetCommandInvocation",
+        json!({
+            "CommandId": cmd_id,
+            "InstanceId": "i-1111111111111111a",
+        }),
+    );
+    let resp = svc.get_command_invocation(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Status"].as_str().unwrap(), "Failed");
+    assert_eq!(
+        body["StatusDetails"].as_str().unwrap(),
+        "Script exited with code 7"
+    );
+    assert_eq!(body["StandardErrorContent"].as_str().unwrap(), "boom");
+    assert_eq!(body["ResponseCode"].as_i64().unwrap(), 1);
+
+    // The other instance is untouched.
+    let req = make_request(
+        "GetCommandInvocation",
+        json!({
+            "CommandId": cmd_id,
+            "InstanceId": "i-2222222222222222b",
+        }),
+    );
+    let resp = svc.get_command_invocation(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Status"].as_str().unwrap(), "Pending");
+
+    // Aggregate command status surfaces the failure.
+    let req = make_request("ListCommands", json!({"CommandId": cmd_id}));
+    let resp = svc.list_commands(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Commands"][0]["Status"].as_str().unwrap(), "Failed");
+}
+
+#[test]
+fn fail_command_invocation_unknown_command_returns_zero() {
+    let svc = make_service();
+    let updated = svc.fail_command_invocation("123456789012", "no-such-id", None, None, None);
+    assert_eq!(updated, 0);
 }
 
 #[test]
@@ -2104,23 +2186,22 @@ fn send_command_starts_pending() {
 fn set_command_status_overrides_lifecycle() {
     let svc = make_service();
     let cmd_id = send_command(&svc, "AWS-RunShellScript");
-    // Force a Failed status before any polling.
+    // Force a Failed status. ListCommands and GetCommandInvocation
+    // both pick up the override since they read the live state.
     let updated = svc.set_command_status("123456789012", &cmd_id, "Failed");
     assert!(updated);
-    // Even after multiple GetCommandInvocation polls (which would
-    // normally advance Pending -> InProgress -> Success), the forced
-    // status sticks since the auto-advance only fires when status is
-    // Pending or InProgress.
-    for _ in 0..3 {
-        let req = make_request(
-            "GetCommandInvocation",
-            json!({
-                "CommandId": cmd_id,
-                "InstanceId": "i-0000000000000000a",
-            }),
-        );
-        let _ = svc.get_command_invocation(&req);
-    }
+    let req = make_request(
+        "GetCommandInvocation",
+        json!({
+            "CommandId": cmd_id,
+            "InstanceId": "i-1234567890abcdef0",
+        }),
+    );
+    let resp = svc.get_command_invocation(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Status"].as_str().unwrap(), "Failed");
+    assert_eq!(body["StatusDetails"].as_str().unwrap(), "Failed");
+
     let req = make_request("ListCommands", json!({"CommandId": cmd_id}));
     let resp = svc.list_commands(&req).unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
