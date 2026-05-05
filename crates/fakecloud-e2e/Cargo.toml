@@ -68,4 +68,5 @@ p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 mail-parser = "0.10"
 rsa = { workspace = true }
 rand = { workspace = true }
+serde_urlencoded = "0.7"
 x509-cert = { version = "0.2", features = ["pem"] }

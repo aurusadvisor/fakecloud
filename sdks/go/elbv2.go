@@ -46,3 +46,20 @@ func (c *ELBv2Client) GetRules(ctx context.Context) (*Elbv2RulesResponse, error)
 	}
 	return &out, nil
 }
+
+// FlushAccessLogsResponse is the response from a `POST` to the
+// /_fakecloud/elbv2/access-logs/flush admin endpoint.
+type FlushAccessLogsResponse struct {
+	Flushed bool `json:"flushed"`
+}
+
+// FlushAccessLogs forces every buffered access-log + connection-log
+// line to flush to S3 right now, bypassing the periodic 60-second
+// timer. Returns Flushed=true when a logger is wired and the flush ran.
+func (c *ELBv2Client) FlushAccessLogs(ctx context.Context) (*FlushAccessLogsResponse, error) {
+	var out FlushAccessLogsResponse
+	if err := c.fc.doPost(ctx, "/_fakecloud/elbv2/access-logs/flush", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

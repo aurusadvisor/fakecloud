@@ -568,6 +568,17 @@ final class Elbv2Client
             $this->http->get('/_fakecloud/elbv2/rules')
         );
     }
+
+    /**
+     * Force every buffered access-log + connection-log line to flush
+     * to S3 right now, bypassing the periodic 60-second timer.
+     */
+    public function flushAccessLogs(): Elbv2FlushAccessLogsResponse
+    {
+        return Elbv2FlushAccessLogsResponse::fromArray(
+            $this->http->postEmpty('/_fakecloud/elbv2/access-logs/flush')
+        );
+    }
 }
 
 /**

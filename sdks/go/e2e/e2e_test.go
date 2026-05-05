@@ -164,6 +164,29 @@ func TestE2ERDS(t *testing.T) {
 		t.Fatalf("CreateDBInstance failed: %v", err)
 	}
 
+	// CreateDBInstance is async since v0.13.1; poll DescribeDBInstances
+	// until the container is up so the introspection endpoint sees the
+	// populated container_id and host_port.
+	deadline := time.Now().Add(240 * time.Second)
+	ready := false
+	var lastErr error
+	for time.Now().Before(deadline) {
+		desc, derr := rdsClient.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{
+			DBInstanceIdentifier: aws.String("sdk-go-rds-db"),
+		})
+		if derr == nil && len(desc.DBInstances) > 0 &&
+			desc.DBInstances[0].DBInstanceStatus != nil &&
+			*desc.DBInstances[0].DBInstanceStatus == "available" {
+			ready = true
+			break
+		}
+		lastErr = derr
+		time.Sleep(1 * time.Second)
+	}
+	if !ready {
+		t.Fatalf("timed out waiting for DB instance to become available; last describe error: %v", lastErr)
+	}
+
 	fc := fakecloud.New(fakecloudURL)
 	resp, err := fc.RDS().GetInstances(ctx)
 	if err != nil {
@@ -487,8 +510,16 @@ func TestE2ESES(t *testing.T) {
 		o.BaseEndpoint = aws.String(fakecloudURL)
 	})
 
+	// Verify the sender so X2's MailFromDomainNotVerified gate is happy.
+	_, err := sesClient.CreateEmailIdentity(ctx, &sesv2.CreateEmailIdentityInput{
+		EmailIdentity: aws.String("sender@example.com"),
+	})
+	if err != nil {
+		t.Fatalf("CreateEmailIdentity failed: %v", err)
+	}
+
 	// Send email via SES v2
-	_, err := sesClient.SendEmail(ctx, &sesv2.SendEmailInput{
+	_, err = sesClient.SendEmail(ctx, &sesv2.SendEmailInput{
 		FromEmailAddress: aws.String("sender@example.com"),
 		Destination: &sestypes.Destination{
 			ToAddresses: []string{"recipient@example.com"},

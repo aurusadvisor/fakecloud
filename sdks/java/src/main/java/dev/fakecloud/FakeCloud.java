@@ -21,6 +21,7 @@ import dev.fakecloud.Types.EcrImagesResponse;
 import dev.fakecloud.Types.EcrPullThroughRulesResponse;
 import dev.fakecloud.Types.EcrRepositoriesResponse;
 import dev.fakecloud.Types.EcsClustersResponse;
+import dev.fakecloud.Types.Elbv2FlushAccessLogsResponse;
 import dev.fakecloud.Types.Elbv2ListenersResponse;
 import dev.fakecloud.Types.Elbv2LoadBalancersResponse;
 import dev.fakecloud.Types.Elbv2RulesResponse;
@@ -537,6 +538,15 @@ public final class FakeCloud {
 
         public Elbv2RulesResponse getRules() {
             return http.get("/_fakecloud/elbv2/rules", Elbv2RulesResponse.class);
+        }
+
+        /**
+         * Force every buffered access-log + connection-log line to flush
+         * to S3 right now, bypassing the periodic 60-second timer.
+         */
+        public Elbv2FlushAccessLogsResponse flushAccessLogs() {
+            return http.postEmpty(
+                    "/_fakecloud/elbv2/access-logs/flush", Elbv2FlushAccessLogsResponse.class);
         }
     }
 

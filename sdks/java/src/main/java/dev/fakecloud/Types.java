@@ -565,6 +565,14 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Elbv2RulesResponse(List<Elbv2Rule> rules) {}
 
+    /**
+     * Response from {@code POST /_fakecloud/elbv2/access-logs/flush}.
+     * {@code flushed} is true when an access-log buffer was wired and the
+     * synchronous flush ran; false when no logger was configured.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Elbv2FlushAccessLogsResponse(boolean flushed) {}
+
     // ── Route 53 ─────────────────────────────────────────────────
 
     /**

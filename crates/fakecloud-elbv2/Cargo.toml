@@ -15,11 +15,13 @@ fakecloud-wafv2 = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+flate2 = { workspace = true }
 http = { workspace = true }
 http-body-util = "0.1"
 hyper = { workspace = true }
 hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy", "http1"] }
 parking_lot = { workspace = true }
+rand = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
