@@ -6,7 +6,7 @@ weight = 24
 
 fakecloud implements CloudFront's REST-XML control plane focused on the operations real applications and Terraform stacks rely on: distribution lifecycle, invalidations, alias and web ACL association, tags, the full policy resource surface (OAC + Cache/OriginRequest/ResponseHeaders/ContinuousDeployment), CloudFront Functions, public keys + key groups, key value stores, legacy origin access identities, per-distribution monitoring subscriptions, the legacy RTMP streaming distributions, field-level encryption configs + profiles, realtime log configs, VPC origins, anycast IP lists, trust stores, resource policies, connection groups, domain association + DNS verification, managed certificate details, and the promote-staging distribution swap. 147 operations.
 
-**Status: Batches 1-6b shipped.** Distribution tenants and connection functions are deferred to a later batch.
+**Status: Batches 1-6b shipped, plus ConnectionFunctions and real `boa_engine`-backed `TestFunction` / `TestConnectionFunction` execution.** Distribution tenants are deferred to a later batch.
 
 ## Supported today
 
@@ -20,7 +20,8 @@ fakecloud implements CloudFront's REST-XML control plane focused on the operatio
 - **Origin Request Policy** — `CreateOriginRequestPolicy`, `GetOriginRequestPolicy`, `GetOriginRequestPolicyConfig`, `UpdateOriginRequestPolicy`, `DeleteOriginRequestPolicy`, `ListOriginRequestPolicies`. Managed `Managed-CORS-S3Origin`, `Managed-CORS-CustomOrigin`, `Managed-AllViewer`, `Managed-UserAgentRefererHeaders`, `Managed-AllViewerExceptHostHeader` pre-seeded.
 - **Response Headers Policy** — `CreateResponseHeadersPolicy`, `GetResponseHeadersPolicy`, `GetResponseHeadersPolicyConfig`, `UpdateResponseHeadersPolicy`, `DeleteResponseHeadersPolicy`, `ListResponseHeadersPolicies`. Managed `Managed-SimpleCORS`, `Managed-CORS-With-Preflight`, `Managed-SecurityHeadersPolicy` pre-seeded.
 - **Continuous Deployment Policy** — `CreateContinuousDeploymentPolicy`, `GetContinuousDeploymentPolicy`, `GetContinuousDeploymentPolicyConfig`, `UpdateContinuousDeploymentPolicy`, `DeleteContinuousDeploymentPolicy`, `ListContinuousDeploymentPolicies`.
-- **CloudFront Functions** — `CreateFunction`, `DescribeFunction`, `GetFunction` (returns raw source bytes), `UpdateFunction`, `DeleteFunction`, `ListFunctions`, `PublishFunction` (DEVELOPMENT -> LIVE), `TestFunction` (no-op execution returning the supplied event verbatim).
+- **CloudFront Functions** — `CreateFunction`, `DescribeFunction`, `GetFunction` (returns raw source bytes), `UpdateFunction`, `DeleteFunction`, `ListFunctions`, `PublishFunction` (DEVELOPMENT -> LIVE), `TestFunction`. `TestFunction` executes the user's `function handler(event) { ... }` against the supplied `EventObject` via an embedded `boa_engine` JavaScript runtime: the handler return value is JSON-encoded into `<FunctionOutput>`, thrown errors land in `<FunctionErrorMessage>`, and `console.log` / `console.error` lines are captured into `<FunctionExecutionLogs>`. `<ComputeUtilization>` reports a 0..=100 share of the per-request CPU budget on success and saturates past 100 on failure. Execution is capped by boa's loop-iteration and recursion limits plus a 250ms wall-clock guard (looser than AWS's ~1ms production budget so CI runners with noisy neighbours don't false-alarm; tests rely on the cap to kill `while(1){}`).
+- **Connection Functions** — `CreateConnectionFunction`, `DescribeConnectionFunction`, `GetConnectionFunction` (raw source), `UpdateConnectionFunction`, `DeleteConnectionFunction`, `ListConnectionFunctions`, `PublishConnectionFunction`, `TestConnectionFunction`. `TestConnectionFunction` runs the same `boa_engine` runtime against the supplied `ConnectionObject` and emits the parallel `<ConnectionFunctionOutput>` / `<ConnectionFunctionErrorMessage>` / `<ConnectionFunctionExecutionLogs>` / `<ComputeUtilization>` shape.
 - **Public Keys + Key Groups** — full CRUD with `CallerReference` immutability on update.
 - **Key Value Stores** — `CreateKeyValueStore` (with optional `ImportSource`), `DescribeKeyValueStore`, `UpdateKeyValueStore`, `DeleteKeyValueStore`, `ListKeyValueStores`.
 - **Legacy Origin Access Identities** — `CreateCloudFrontOriginAccessIdentity`, `Get`, `GetConfig`, `Update`, `Delete`, `List`.
@@ -91,6 +92,5 @@ aws --endpoint-url http://localhost:4566 cloudfront list-invalidations --distrib
 | Surface                                | Status                  |
 |----------------------------------------|-------------------------|
 | Distribution Tenants                   | deferred                |
-| Connection Functions                   | deferred                |
 
 There is no edge data plane: requests against a CloudFront distribution domain are not actually proxied to origins. Use ELBv2's in-process data plane for HTTP request matching tests today.
