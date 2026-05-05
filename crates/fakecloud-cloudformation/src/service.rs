@@ -617,10 +617,17 @@ impl CloudFormationService {
             .or_insert_with(|| stack_name.clone());
         parameters
             .entry("AWS::Partition".to_string())
-            .or_insert_with(|| "aws".to_string());
+            .or_insert_with(|| template::partition_for_region(&req.region).to_string());
         parameters
             .entry("AWS::URLSuffix".to_string())
-            .or_insert_with(|| "amazonaws.com".to_string());
+            .or_insert_with(|| template::url_suffix_for_region(&req.region).to_string());
+        // NotificationARNs is array-typed; pseudo_value parses it back
+        // out of JSON. Always set so a `Ref: AWS::NotificationARNs`
+        // returns the request's actual list (or an empty array).
+        parameters.insert(
+            "AWS::NotificationARNs".to_string(),
+            serde_json::to_string(&notification_arns).unwrap_or_else(|_| "[]".to_string()),
+        );
 
         // First pass: parse to get resource definitions (without physical ID resolution)
         let parsed = template::parse_template(template_body, &parameters).map_err(|e| {
@@ -944,11 +951,41 @@ impl CloudFormationService {
         input
             .parameters
             .entry("AWS::Partition".to_string())
-            .or_insert_with(|| "aws".to_string());
+            .or_insert_with(|| template::partition_for_region(&req.region).to_string());
         input
             .parameters
             .entry("AWS::URLSuffix".to_string())
-            .or_insert_with(|| "amazonaws.com".to_string());
+            .or_insert_with(|| template::url_suffix_for_region(&req.region).to_string());
+        // Seed AWS::NotificationARNs from the update payload, falling
+        // back to whatever the existing stack carries when the request
+        // omits the param. Encoded as JSON so pseudo_value can split it
+        // back into the array shape Ref returns.
+        if !input.notification_arns.is_empty() {
+            input.parameters.insert(
+                "AWS::NotificationARNs".to_string(),
+                serde_json::to_string(&input.notification_arns)
+                    .unwrap_or_else(|_| "[]".to_string()),
+            );
+        } else {
+            // Carry the existing stack's notification ARNs forward so the
+            // pseudo-param keeps its previous value across updates.
+            let existing: Vec<String> = {
+                let accounts = self.state.read();
+                accounts
+                    .get(&req.account_id)
+                    .and_then(|s| {
+                        s.stacks
+                            .values()
+                            .find(|st| st.stack_id == found_stack_id)
+                            .map(|st| st.notification_arns.clone())
+                    })
+                    .unwrap_or_default()
+            };
+            input.parameters.insert(
+                "AWS::NotificationARNs".to_string(),
+                serde_json::to_string(&existing).unwrap_or_else(|_| "[]".to_string()),
+            );
+        }
 
         let parsed =
             template::parse_template(&input.template_body, &input.parameters).map_err(|e| {
