@@ -10,6 +10,10 @@ mod helpers;
 
 use helpers::TestServer;
 
+use aws_sdk_cognitoidentityprovider::types::{
+    ExplicitAuthFlowsType, PasswordPolicyType, UserPoolPolicyType,
+};
+
 #[tokio::test]
 async fn create_rest_api_round_trip() {
     let server = TestServer::start().await;
@@ -247,4 +251,327 @@ async fn get_export_returns_openapi_with_real_paths() {
     assert!(params
         .iter()
         .any(|p| p["name"] == "limit" && p["in"] == "query"));
+}
+
+// ── Authorizer enforcement (Phase R1) ──
+//
+// Drives the data plane through real HTTP requests so we exercise the
+// facade routing (host header `{api-id}.execute-api...`), the authorizer
+// machinery, and the integration handoff end-to-end. Lambda authorizers
+// would require a Docker runtime; the unit tests in
+// `fakecloud_apigateway::data_plane::tests` cover Allow/Deny against a
+// stub LambdaDelivery, so the e2e cases focus on the wiring fakecloud
+// owns: status codes, header plumbing, and the Cognito JWT path that
+// runs entirely in-process via the StateBackedJwtVerifier.
+
+/// Build a synthetic execute-api Host header so the
+/// `ApiGatewayFacade` routes the unsigned request to v1.
+fn execute_api_host(api_id: &str) -> String {
+    format!("{api_id}.execute-api.us-east-1.amazonaws.com")
+}
+
+/// Stand up an API with a single `/items` resource, the requested
+/// authorization config on its GET method, and a MOCK integration so
+/// allowed requests succeed without needing a backend Lambda.
+async fn provision_protected_api(
+    client: &aws_sdk_apigateway::Client,
+    auth_type: &str,
+    authorizer_id: Option<&str>,
+) -> String {
+    let api = client
+        .create_rest_api()
+        .name("auth-test")
+        .send()
+        .await
+        .expect("create_rest_api");
+    let api_id = api.id().unwrap().to_string();
+    let root = api.root_resource_id().unwrap().to_string();
+    let resource = client
+        .create_resource()
+        .rest_api_id(&api_id)
+        .parent_id(&root)
+        .path_part("items")
+        .send()
+        .await
+        .expect("create_resource");
+    let res_id = resource.id().unwrap().to_string();
+    let mut put_method = client
+        .put_method()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .authorization_type(auth_type);
+    if let Some(aid) = authorizer_id {
+        put_method = put_method.authorizer_id(aid);
+    }
+    put_method.send().await.expect("put_method");
+    client
+        .put_integration()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .r#type(aws_sdk_apigateway::types::IntegrationType::Mock)
+        .send()
+        .await
+        .expect("put_integration");
+    client
+        .create_deployment()
+        .rest_api_id(&api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .expect("create_deployment");
+    api_id
+}
+
+#[tokio::test]
+async fn data_plane_allows_method_without_authorizer() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+    let api_id = provision_protected_api(&client, "NONE", None).await;
+
+    let http = reqwest::Client::new();
+    let resp = http
+        .get(format!("{}/prod/items", server.endpoint()))
+        .header("host", execute_api_host(&api_id))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn data_plane_token_authorizer_missing_header_returns_401() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+
+    // Create a TOKEN authorizer pointing at a non-existent Lambda;
+    // identity-source enforcement runs before the Lambda invocation, so
+    // the missing token must short-circuit to 401 without needing a
+    // real backend.
+    let api = client
+        .create_rest_api()
+        .name("auth-token-401")
+        .send()
+        .await
+        .expect("create_rest_api");
+    let api_id = api.id().unwrap().to_string();
+    let root = api.root_resource_id().unwrap().to_string();
+
+    let authorizer = client
+        .create_authorizer()
+        .rest_api_id(&api_id)
+        .name("tok-auth")
+        .r#type(aws_sdk_apigateway::types::AuthorizerType::Token)
+        .authorizer_uri("arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:nope/invocations")
+        .identity_source("method.request.header.Authorization")
+        .send()
+        .await
+        .expect("create_authorizer");
+    let auth_id = authorizer.id().unwrap().to_string();
+
+    let resource = client
+        .create_resource()
+        .rest_api_id(&api_id)
+        .parent_id(&root)
+        .path_part("items")
+        .send()
+        .await
+        .expect("create_resource");
+    let res_id = resource.id().unwrap().to_string();
+
+    client
+        .put_method()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .authorization_type("CUSTOM")
+        .authorizer_id(&auth_id)
+        .send()
+        .await
+        .expect("put_method");
+    client
+        .put_integration()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .r#type(aws_sdk_apigateway::types::IntegrationType::Mock)
+        .send()
+        .await
+        .expect("put_integration");
+    client
+        .create_deployment()
+        .rest_api_id(&api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .expect("create_deployment");
+
+    let http = reqwest::Client::new();
+    let resp = http
+        .get(format!("{}/prod/items", server.endpoint()))
+        .header("host", execute_api_host(&api_id))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn data_plane_cognito_authorizer_accepts_real_jwt_and_rejects_garbage() {
+    use aws_sdk_cognitoidentityprovider::types::AuthFlowType;
+
+    let server = TestServer::start().await;
+    let cog = server.cognito_client().await;
+    let apigw = server.apigateway_client().await;
+
+    // Stand up a Cognito user pool with a usable password policy and a
+    // user we can sign in as.
+    let pool = cog
+        .create_user_pool()
+        .pool_name("apigw-cognito")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create_user_pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+    let pool_arn = format!("arn:aws:cognito-idp:us-east-1:000000000000:userpool/{pool_id}");
+    let app = cog
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("c")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create_user_pool_client");
+    let client_id = app
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+    cog.admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("alice")
+        .send()
+        .await
+        .expect("admin_create_user");
+    cog.admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("alice")
+        .password("secret1")
+        .permanent(true)
+        .send()
+        .await
+        .expect("admin_set_user_password");
+    let auth = cog
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "alice")
+        .auth_parameters("PASSWORD", "secret1")
+        .send()
+        .await
+        .expect("admin_initiate_auth");
+    let id_token = auth
+        .authentication_result()
+        .and_then(|r| r.id_token())
+        .expect("id_token must be present after admin_initiate_auth")
+        .to_string();
+
+    // Stand up a REST API protected by a COGNITO_USER_POOLS authorizer
+    // pointing at the pool we just provisioned.
+    let api = apigw
+        .create_rest_api()
+        .name("auth-cognito")
+        .send()
+        .await
+        .expect("create_rest_api");
+    let api_id = api.id().unwrap().to_string();
+    let root = api.root_resource_id().unwrap().to_string();
+
+    let authorizer = apigw
+        .create_authorizer()
+        .rest_api_id(&api_id)
+        .name("cog-auth")
+        .r#type(aws_sdk_apigateway::types::AuthorizerType::CognitoUserPools)
+        .provider_arns(&pool_arn)
+        .identity_source("method.request.header.Authorization")
+        .send()
+        .await
+        .expect("create_authorizer");
+    let auth_id = authorizer.id().unwrap().to_string();
+
+    let resource = apigw
+        .create_resource()
+        .rest_api_id(&api_id)
+        .parent_id(&root)
+        .path_part("items")
+        .send()
+        .await
+        .expect("create_resource");
+    let res_id = resource.id().unwrap().to_string();
+    apigw
+        .put_method()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .authorization_type("COGNITO_USER_POOLS")
+        .authorizer_id(&auth_id)
+        .send()
+        .await
+        .expect("put_method");
+    apigw
+        .put_integration()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .r#type(aws_sdk_apigateway::types::IntegrationType::Mock)
+        .send()
+        .await
+        .expect("put_integration");
+    apigw
+        .create_deployment()
+        .rest_api_id(&api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .expect("create_deployment");
+
+    let http = reqwest::Client::new();
+
+    // Tampered JWT must short-circuit at signature verification.
+    let bad = http
+        .get(format!("{}/prod/items", server.endpoint()))
+        .header("host", execute_api_host(&api_id))
+        .header("authorization", "Bearer not-a-real-jwt")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(bad.status(), 401);
+
+    // Real pool-issued JWT must verify against the in-process JWKS and
+    // let the request through to the MOCK integration.
+    let good = http
+        .get(format!("{}/prod/items", server.endpoint()))
+        .header("host", execute_api_host(&api_id))
+        .header("authorization", format!("Bearer {id_token}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(good.status(), 200);
 }
