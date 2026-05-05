@@ -388,6 +388,12 @@ pub struct SesState {
     /// VDM recommendations (read-only, lazily seeded once on first read).
     #[serde(default)]
     pub vdm_recommendations: Vec<VdmRecommendation>,
+    /// Running count of recipients dropped because they were on the
+    /// suppression list (gated by the effective `SuppressedReasons`
+    /// filter). Surfaced through the introspection endpoint so tests can
+    /// assert the gate fired.
+    #[serde(default)]
+    pub suppressed_drops_total: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -483,6 +489,7 @@ impl SesState {
             deliverability_dashboard: DeliverabilityDashboard::default(),
             deliverability_test_reports: BTreeMap::new(),
             vdm_recommendations: Vec::new(),
+            suppressed_drops_total: 0,
         }
     }
 
@@ -491,6 +498,52 @@ impl SesState {
         let account_id = std::mem::take(&mut self.account_id);
         let region = std::mem::take(&mut self.region);
         *self = Self::new(&account_id, &region);
+    }
+
+    /// Effective `SuppressedReasons` for a send. Configuration-set scope
+    /// wins when populated; otherwise we fall back to the account-level
+    /// list. An empty list at both scopes is treated as "enforce both
+    /// reasons" (BOUNCE + COMPLAINT) — that matches the historical
+    /// fakecloud contract, and AWS callers who never call
+    /// PutAccountSuppressionAttributes still expect the suppression list
+    /// they explicitly populated to take effect.
+    pub fn effective_suppressed_reasons(&self, config_set_name: Option<&str>) -> Vec<String> {
+        if let Some(name) = config_set_name {
+            if let Some(cs) = self.configuration_sets.get(name) {
+                if !cs.suppressed_reasons.is_empty() {
+                    return cs.suppressed_reasons.clone();
+                }
+            }
+        }
+        if !self.account_settings.suppressed_reasons.is_empty() {
+            return self.account_settings.suppressed_reasons.clone();
+        }
+        vec!["BOUNCE".to_string(), "COMPLAINT".to_string()]
+    }
+
+    /// Look up `address` against the suppression list (case-insensitive,
+    /// trimmed). Returns the matching `SuppressedDestination` only when
+    /// the stored reason is enforced under the effective filter for the
+    /// supplied configuration-set scope.
+    pub fn suppressed_match(
+        &self,
+        address: &str,
+        config_set_name: Option<&str>,
+    ) -> Option<&SuppressedDestination> {
+        let key = address.trim().to_ascii_lowercase();
+        let entry = self.suppressed_destinations.iter().find_map(|(k, v)| {
+            if k.trim().eq_ignore_ascii_case(&key) {
+                Some(v)
+            } else {
+                None
+            }
+        })?;
+        let reasons = self.effective_suppressed_reasons(config_set_name);
+        if reasons.iter().any(|r| r == &entry.reason) {
+            Some(entry)
+        } else {
+            None
+        }
     }
 }
 

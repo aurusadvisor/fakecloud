@@ -128,18 +128,31 @@ impl SesV2Service {
         None
     }
 
-    /// Returns `true` if `address` (or its domain) is on the account's
-    /// suppression list. Mirrors SES behavior where suppression is keyed
-    /// by exact address; we don't currently honor per-config-set
-    /// suppression overrides because the underlying state only tracks
-    /// account-level suppression.
-    pub(super) fn address_is_suppressed(&self, account_id: &str, address: &str) -> bool {
+    /// Returns `true` if `address` is on the account suppression list
+    /// AND its stored reason matches the effective `SuppressedReasons`
+    /// filter (configuration-set scope first, then account-level
+    /// fallback). Address lookup is case-insensitive.
+    pub(super) fn address_is_suppressed(
+        &self,
+        account_id: &str,
+        address: &str,
+        config_set_name: Option<&str>,
+    ) -> bool {
         let accounts = self.state.read();
         let Some(state) = accounts.get(account_id) else {
             return false;
         };
-        let trimmed = address.trim();
-        state.suppressed_destinations.contains_key(trimmed)
+        let bare = extract_email_address(address);
+        state.suppressed_match(bare, config_set_name).is_some()
+    }
+
+    /// Increment the suppression-drop counter on the account state.
+    /// Surfaced via the introspection endpoint so tests can assert the
+    /// gate fired without scraping logs.
+    pub(super) fn bump_suppression_drop(&self, account_id: &str) {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        state.suppressed_drops_total = state.suppressed_drops_total.saturating_add(1);
     }
 
     /// Reject sends where the sender is not a verified identity. Mirrors
@@ -254,10 +267,14 @@ impl SesV2Service {
         }
 
         // Single-recipient path: any suppressed recipient kills the send.
-        // Real SES surfaces this as `MessageRejected`.
+        // Real SES surfaces this as `MessageRejected`. Suppression is
+        // gated by the effective `SuppressedReasons` filter — if the
+        // address was suppressed for `COMPLAINT` but the config set only
+        // enforces `BOUNCE`, the send proceeds.
         for r in &recipients {
             let addr = extract_email_address(r);
-            if self.address_is_suppressed(&req.account_id, addr) {
+            if self.address_is_suppressed(&req.account_id, addr, config_set_name.as_deref()) {
+                self.bump_suppression_drop(&req.account_id);
                 return Ok(Self::json_error(
                     StatusCode::BAD_REQUEST,
                     "MessageRejected",
@@ -398,11 +415,14 @@ impl SesV2Service {
 
             // Drop entries with any suppressed recipient. Mirrors SES,
             // which fails the bulk entry rather than the whole batch.
+            // Honors the effective `SuppressedReasons` filter so callers
+            // can scope suppression to BOUNCE-only or COMPLAINT-only.
             let any_suppressed = recipients.iter().any(|r| {
                 let addr = extract_email_address(r);
-                self.address_is_suppressed(&req.account_id, addr)
+                self.address_is_suppressed(&req.account_id, addr, config_set_name.as_deref())
             });
             if any_suppressed {
+                self.bump_suppression_drop(&req.account_id);
                 results.push(json!({
                     "Status": "MESSAGE_REJECTED",
                     "Error": "Address is on the suppression list",

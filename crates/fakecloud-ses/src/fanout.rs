@@ -146,13 +146,19 @@ pub fn classify_recipients(recipients: &[String]) -> (Vec<SesEventType>, bool) {
     (events, suppress)
 }
 
-/// Check if any recipient is on the suppression list.
-/// Returns the suppressed address if found.
-pub fn check_suppression_list(ses_state: &SharedSesState, recipients: &[String]) -> Option<String> {
+/// Check if any recipient is on the suppression list AND the stored
+/// reason is enforced under the effective `SuppressedReasons` filter
+/// (configuration-set scope first, then account-level fallback). Lookup
+/// is case-insensitive. Returns the suppressed address if found.
+pub fn check_suppression_list(
+    ses_state: &SharedSesState,
+    recipients: &[String],
+    config_set_name: Option<&str>,
+) -> Option<String> {
     let mas = ses_state.read();
     let state = mas.default_ref();
     for addr in recipients {
-        if state.suppressed_destinations.contains_key(addr) {
+        if state.suppressed_match(addr, config_set_name).is_some() {
             return Some(addr.clone());
         }
     }
@@ -273,12 +279,22 @@ pub fn process_send_events(
         None => return false, // No config set, no event destinations to fan out to
     };
 
-    // Check suppression list
-    if let Some(suppressed_addr) = check_suppression_list(&ctx.ses_state, &email.to) {
+    // Check suppression list with the effective reasons filter
+    if let Some(suppressed_addr) =
+        check_suppression_list(&ctx.ses_state, &email.to, Some(config_set.as_str()))
+    {
         tracing::info!(
             address = %suppressed_addr,
+            config_set = %config_set,
             "SES: recipient is on suppression list, generating bounce"
         );
+        // Increment the suppression-drop counter so introspection /
+        // /_fakecloud/ses/metrics callers can observe the gate firing.
+        {
+            let mut mas = ctx.ses_state.write();
+            let state = mas.default_mut();
+            state.suppressed_drops_total = state.suppressed_drops_total.saturating_add(1);
+        }
         let bounce_event = build_ses_event(SesEventType::Bounce, email);
         deliver_event(ctx, &bounce_event, SesEventType::Bounce, &config_set);
         return true;
@@ -502,6 +518,7 @@ mod tests {
                 "ok@example.com".to_string(),
                 "blocked@example.com".to_string(),
             ],
+            None,
         );
         assert_eq!(hit.as_deref(), Some("blocked@example.com"));
     }
@@ -509,8 +526,104 @@ mod tests {
     #[test]
     fn check_suppression_list_none_when_clean() {
         let state = shared_state();
-        let hit = check_suppression_list(&state, &["ok@example.com".to_string()]);
+        let hit = check_suppression_list(&state, &["ok@example.com".to_string()], None);
         assert!(hit.is_none());
+    }
+
+    #[test]
+    fn check_suppression_list_skips_when_reason_filter_excludes() {
+        // Address suppressed for COMPLAINT, but the resolved config set
+        // only enforces BOUNCE — fanout must not bounce that recipient.
+        let state = shared_state();
+        {
+            let mut mas = state.write();
+            let st = mas.default_mut();
+            st.suppressed_destinations.insert(
+                "blocked@example.com".to_string(),
+                SuppressedDestination {
+                    email_address: "blocked@example.com".to_string(),
+                    reason: "COMPLAINT".to_string(),
+                    last_update_time: Utc::now(),
+                },
+            );
+            st.configuration_sets.insert(
+                "bounce-only".to_string(),
+                crate::state::ConfigurationSet {
+                    name: "bounce-only".to_string(),
+                    sending_enabled: true,
+                    tls_policy: "OPTIONAL".to_string(),
+                    sending_pool_name: None,
+                    custom_redirect_domain: None,
+                    https_policy: None,
+                    suppressed_reasons: vec!["BOUNCE".to_string()],
+                    reputation_metrics_enabled: false,
+                    vdm_options: None,
+                    archive_arn: None,
+                },
+            );
+        }
+        let hit = check_suppression_list(
+            &state,
+            &["blocked@example.com".to_string()],
+            Some("bounce-only"),
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn check_suppression_list_account_fallback_when_config_set_empty() {
+        // Config set has no suppressed_reasons; fall back to account
+        // scope which only enforces COMPLAINT.
+        let state = shared_state();
+        {
+            let mut mas = state.write();
+            let st = mas.default_mut();
+            st.suppressed_destinations.insert(
+                "blocked@example.com".to_string(),
+                SuppressedDestination {
+                    email_address: "blocked@example.com".to_string(),
+                    reason: "BOUNCE".to_string(),
+                    last_update_time: Utc::now(),
+                },
+            );
+            st.account_settings.suppressed_reasons = vec!["COMPLAINT".to_string()];
+            st.configuration_sets.insert(
+                "passthrough".to_string(),
+                crate::state::ConfigurationSet {
+                    name: "passthrough".to_string(),
+                    sending_enabled: true,
+                    tls_policy: "OPTIONAL".to_string(),
+                    sending_pool_name: None,
+                    custom_redirect_domain: None,
+                    https_policy: None,
+                    suppressed_reasons: Vec::new(),
+                    reputation_metrics_enabled: false,
+                    vdm_options: None,
+                    archive_arn: None,
+                },
+            );
+        }
+        let hit = check_suppression_list(
+            &state,
+            &["blocked@example.com".to_string()],
+            Some("passthrough"),
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn check_suppression_list_case_insensitive() {
+        let state = shared_state();
+        state.write().default_mut().suppressed_destinations.insert(
+            "Blocked@Example.com".to_string(),
+            SuppressedDestination {
+                email_address: "Blocked@Example.com".to_string(),
+                reason: "BOUNCE".to_string(),
+                last_update_time: Utc::now(),
+            },
+        );
+        let hit = check_suppression_list(&state, &["BLOCKED@example.COM".to_string()], None);
+        assert_eq!(hit.as_deref(), Some("BLOCKED@example.COM"));
     }
 
     fn make_identity(name: &str, config_set: Option<&str>) -> crate::state::EmailIdentity {

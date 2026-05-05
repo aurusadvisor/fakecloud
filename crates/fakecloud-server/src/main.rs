@@ -2753,6 +2753,19 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/ses/metrics",
+            axum::routing::get({
+                let ss = ses_emails_state.clone();
+                move || async move {
+                    let mas = ss.read();
+                    let state = mas.default_ref();
+                    axum::Json(serde_json::json!({
+                        "suppressedDropsTotal": state.suppressed_drops_total,
+                    }))
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/ses/identities/{name}/mail-from-status",
             axum::routing::post({
                 let ss = ses_emails_state.clone();
