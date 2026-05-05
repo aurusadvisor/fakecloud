@@ -1178,6 +1178,7 @@ impl RdsService {
 
             // ── Database read replicas ──
             "PromoteReadReplica" => promote_read_replica_action(self, &aid, req, &rid),
+            "SwitchoverReadReplica" => switchover_read_replica_action(self, &aid, req, &rid),
             "StartDBInstance" | "StopDBInstance" => {
                 if let Some(id) = get_param(req, "DBInstanceIdentifier") {
                     let (event_id, categories, msg) = if action == "StartDBInstance" {
@@ -1451,9 +1452,6 @@ impl RdsService {
             "DisableHttpEndpoint" => Ok(xml_response("DisableHttpEndpoint", "    <HttpEndpointEnabled>false</HttpEndpointEnabled>".to_string(), &rid)),
             "EnableHttpEndpoint" => Ok(xml_response("EnableHttpEndpoint", "    <HttpEndpointEnabled>true</HttpEndpointEnabled>".to_string(), &rid)),
 
-            // ── Read replicas ──
-            "SwitchoverReadReplica" => promote_read_replica_action(self, &aid, req, &rid),
-
             _ => Err(AwsServiceError::action_not_implemented("rds", &action)),
         }
     }
@@ -1474,13 +1472,13 @@ fn set_cluster_status(svc: &RdsService, account_id: &str, cluster_id: &str, stat
     }
 }
 
-/// PromoteReadReplica + SwitchoverReadReplica share the same shape:
-/// resolve the named instance, ensure it's actually a replica, clear
-/// the source pointer, optionally update backup config, and trim the
-/// instance from its source's replica list. AWS distinguishes the two
-/// (Switchover keeps the source as a new replica of the new primary
-/// while Promote standalone-promotes), but both produce a promoted
-/// replica with no upstream — we model the standalone path for both.
+/// `PromoteReadReplica`: detach the named replica from its source so it
+/// becomes a standalone primary. Clears the replica's source pointer,
+/// trims it out of the source's replica list, optionally applies the
+/// backup-retention/window overrides, emits the standard RDS-EVENT-0008
+/// promotion event, and returns the now-standalone instance with a
+/// `modifying` status (matching AWS, which keeps the instance briefly
+/// in `modifying` before flipping back to `available`).
 fn promote_read_replica_action(
     svc: &RdsService,
     account_id: &str,
@@ -1493,46 +1491,167 @@ fn promote_read_replica_action(
         get_param(req, "BackupRetentionPeriod").and_then(|v| v.parse::<i32>().ok());
     let preferred_window = get_param(req, "PreferredBackupWindow");
 
-    let mut accounts = svc.state_handle().write();
-    let state = accounts.get_or_create(account_id);
-    let source_id = state
-        .instances
-        .get(&id)
-        .and_then(|i| i.read_replica_source_db_instance_identifier.clone());
-    let instance = state.instances.get_mut(&id).ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::NOT_FOUND,
-            "DBInstanceNotFound",
-            format!("DBInstance {id} not found."),
-        )
-    })?;
-    if instance
-        .read_replica_source_db_instance_identifier
-        .is_none()
-    {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "InvalidDBInstanceState",
-            format!("DB instance {id} is not a read replica."),
-        ));
-    }
-    instance.read_replica_source_db_instance_identifier = None;
-    if let Some(retention) = backup_retention {
-        instance.backup_retention_period = retention;
-    }
-    if let Some(window) = preferred_window {
-        instance.preferred_backup_window = window;
-    }
-    let xml = crate::service::db_instance_xml(instance, Some("modifying"));
-    if let Some(source_id) = source_id {
-        if let Some(src) = state.instances.get_mut(&source_id) {
-            src.read_replica_db_instance_identifiers
-                .retain(|r| r != &id);
+    let (xml, instance_arn) = {
+        let mut accounts = svc.state_handle().write();
+        let state = accounts.get_or_create(account_id);
+        let source_id = state
+            .instances
+            .get(&id)
+            .and_then(|i| i.read_replica_source_db_instance_identifier.clone());
+        let instance = state.instances.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "DBInstanceNotFound",
+                format!("DBInstance {id} not found."),
+            )
+        })?;
+        if instance
+            .read_replica_source_db_instance_identifier
+            .is_none()
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidDBInstanceState",
+                format!("DB instance {id} is not a read replica."),
+            ));
         }
-    }
-    drop(accounts);
+        instance.read_replica_source_db_instance_identifier = None;
+        if let Some(retention) = backup_retention {
+            instance.backup_retention_period = retention;
+        }
+        if let Some(window) = preferred_window {
+            instance.preferred_backup_window = window;
+        }
+        let arn = instance.db_instance_arn.clone();
+        let xml = crate::service::db_instance_xml(instance, Some("modifying"));
+        if let Some(source_id) = source_id {
+            if let Some(src) = state.instances.get_mut(&source_id) {
+                src.read_replica_db_instance_identifiers
+                    .retain(|r| r != &id);
+            }
+        }
+        (xml, arn)
+    };
+
+    svc.emit_event(
+        RdsSourceType::DbInstance,
+        &id,
+        &instance_arn,
+        "RDS-EVENT-0008",
+        &["notification"],
+        "DB instance promoted to standalone",
+    );
+
     Ok(xml_response(
         "PromoteReadReplica",
+        format!("    <DBInstance>\n{xml}    </DBInstance>"),
+        rid,
+    ))
+}
+
+/// `SwitchoverReadReplica`: swap the replica<->primary relationship for
+/// the named instance and its source. The replica becomes the new
+/// primary (no upstream); the former primary becomes a replica of the
+/// new primary; any other replicas of the old primary are re-pointed
+/// at the new primary so the topology stays consistent. Returns the
+/// now-promoted replica's `<DBInstance>` per the AWS API shape and
+/// emits an RDS event on the new primary.
+fn switchover_read_replica_action(
+    svc: &RdsService,
+    account_id: &str,
+    req: &AwsRequest,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id =
+        get_param(req, "DBInstanceIdentifier").ok_or_else(|| missing("DBInstanceIdentifier"))?;
+
+    let (xml, instance_arn) = {
+        let mut accounts = svc.state_handle().write();
+        let state = accounts.get_or_create(account_id);
+
+        let (source_id, sibling_replicas) = match state.instances.get(&id) {
+            Some(inst) => {
+                let Some(source_id) = inst.read_replica_source_db_instance_identifier.clone()
+                else {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidDBInstanceState",
+                        format!("DB instance {id} is not a read replica."),
+                    ));
+                };
+                let siblings = state
+                    .instances
+                    .get(&source_id)
+                    .map(|src| {
+                        src.read_replica_db_instance_identifiers
+                            .iter()
+                            .filter(|r| *r != &id)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                (source_id, siblings)
+            }
+            None => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBInstanceNotFound",
+                    format!("DBInstance {id} not found."),
+                ));
+            }
+        };
+
+        // The new primary keeps every replica that used to belong to
+        // the old primary, plus the old primary itself.
+        let mut new_primary_replicas = sibling_replicas.clone();
+        new_primary_replicas.push(source_id.clone());
+
+        // Promote the replica: clear its source pointer, take over the
+        // replica list. Take the ARN before we mutate the source.
+        let (new_primary_xml, new_primary_arn) = {
+            let new_primary = state.instances.get_mut(&id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBInstanceNotFound",
+                    format!("DBInstance {id} not found."),
+                )
+            })?;
+            new_primary.read_replica_source_db_instance_identifier = None;
+            new_primary.read_replica_db_instance_identifiers = new_primary_replicas;
+            let arn = new_primary.db_instance_arn.clone();
+            let xml = crate::service::db_instance_xml(new_primary, Some("modifying"));
+            (xml, arn)
+        };
+
+        // Demote the former primary: it now points at the replica and
+        // hosts no replicas of its own.
+        if let Some(former_primary) = state.instances.get_mut(&source_id) {
+            former_primary.read_replica_source_db_instance_identifier = Some(id.clone());
+            former_primary.read_replica_db_instance_identifiers.clear();
+        }
+
+        // Re-point any sibling replicas at the new primary so the
+        // cluster topology stays consistent.
+        for sibling in &sibling_replicas {
+            if let Some(s) = state.instances.get_mut(sibling) {
+                s.read_replica_source_db_instance_identifier = Some(id.clone());
+            }
+        }
+
+        (new_primary_xml, new_primary_arn)
+    };
+
+    svc.emit_event(
+        RdsSourceType::DbInstance,
+        &id,
+        &instance_arn,
+        "RDS-EVENT-0071",
+        &["notification"],
+        "A read replica has been switched over to a primary",
+    );
+
+    Ok(xml_response(
+        "SwitchoverReadReplica",
         format!("    <DBInstance>\n{xml}    </DBInstance>"),
         rid,
     ))
@@ -2702,22 +2821,106 @@ mod tests {
     }
 
     #[test]
-    fn switchover_read_replica_uses_promote_path() {
+    fn switchover_read_replica_swaps_primary_and_replica_roles() {
         let svc = svc();
         seed_replica(&svc, "replica-1", "source-1");
+        let resp = svc
+            .handle_extra_action(&req(
+                "SwitchoverReadReplica",
+                &[("DBInstanceIdentifier", "replica-1")],
+            ))
+            .expect("SwitchoverReadReplica");
+        assert!(resp.status.is_success());
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.starts_with("<SwitchoverReadReplicaResponse"));
+        assert!(body.contains("<DBInstanceIdentifier>replica-1</DBInstanceIdentifier>"));
+
+        let accounts = svc.state_handle().read();
+        let state = accounts.get("000000000000").unwrap();
+        // The former replica is the new primary: no upstream, owns the
+        // former primary as a replica.
+        let new_primary = state.instances.get("replica-1").unwrap();
+        assert!(new_primary
+            .read_replica_source_db_instance_identifier
+            .is_none());
+        assert_eq!(
+            new_primary.read_replica_db_instance_identifiers,
+            vec!["source-1".to_string()]
+        );
+        // The former primary is now a replica of the new primary.
+        let former_primary = state.instances.get("source-1").unwrap();
+        assert_eq!(
+            former_primary.read_replica_source_db_instance_identifier,
+            Some("replica-1".to_string())
+        );
+        assert!(former_primary
+            .read_replica_db_instance_identifiers
+            .is_empty());
+    }
+
+    #[test]
+    fn switchover_read_replica_repoints_sibling_replicas() {
+        let svc = svc();
+        seed_replica(&svc, "replica-a", "source-1");
+        // Add a second replica off the same source.
+        seed_replica(&svc, "replica-b", "source-1");
+        // `seed_replica` overwrites the source's replica list each call,
+        // so re-set it to include both replicas.
+        {
+            let mut accounts = svc.state_handle().write();
+            let state = accounts.get_or_create("000000000000");
+            let src = state.instances.get_mut("source-1").unwrap();
+            src.read_replica_db_instance_identifiers =
+                vec!["replica-a".to_string(), "replica-b".to_string()];
+        }
+
         svc.handle_extra_action(&req(
             "SwitchoverReadReplica",
-            &[("DBInstanceIdentifier", "replica-1")],
+            &[("DBInstanceIdentifier", "replica-a")],
         ))
         .expect("SwitchoverReadReplica");
+
         let accounts = svc.state_handle().read();
-        let replica = accounts
-            .get("000000000000")
-            .unwrap()
-            .instances
-            .get("replica-1")
-            .unwrap();
-        assert!(replica.read_replica_source_db_instance_identifier.is_none());
+        let state = accounts.get("000000000000").unwrap();
+        let new_primary = state.instances.get("replica-a").unwrap();
+        // New primary owns both the former primary and the sibling
+        // replica.
+        let mut owned = new_primary.read_replica_db_instance_identifiers.clone();
+        owned.sort();
+        assert_eq!(owned, vec!["replica-b".to_string(), "source-1".to_string()]);
+        // Sibling now points at the new primary.
+        let sibling = state.instances.get("replica-b").unwrap();
+        assert_eq!(
+            sibling.read_replica_source_db_instance_identifier,
+            Some("replica-a".to_string())
+        );
+    }
+
+    #[test]
+    fn switchover_read_replica_rejects_non_replica() {
+        let svc = svc();
+        seed_replica(&svc, "replica-1", "source-1");
+        let err = svc
+            .handle_extra_action(&req(
+                "SwitchoverReadReplica",
+                &[("DBInstanceIdentifier", "source-1")],
+            ))
+            .err()
+            .expect("non-replica should be rejected");
+        assert_eq!(err.code(), "InvalidDBInstanceState");
+    }
+
+    #[test]
+    fn switchover_read_replica_unknown_instance_returns_not_found() {
+        let svc = svc();
+        let err = svc
+            .handle_extra_action(&req(
+                "SwitchoverReadReplica",
+                &[("DBInstanceIdentifier", "ghost")],
+            ))
+            .err()
+            .expect("unknown instance should be rejected");
+        assert_eq!(err.code(), "DBInstanceNotFound");
     }
 
     #[test]
