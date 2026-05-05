@@ -20,6 +20,18 @@ pub struct SsmParameter {
     pub data_type: String, // "text" or "aws:ec2:image"
     pub tier: String,      // "Standard", "Advanced", "Intelligent-Tiering"
     pub policies: Option<String>,
+    /// Whether the `ExpirationNotification` event has already been
+    /// emitted for the current Policies list. Reset whenever the
+    /// parameter is overwritten so updated policies fire fresh
+    /// notifications. Snapshots from before this field existed
+    /// deserialize as `false`.
+    #[serde(default)]
+    pub expiration_notified: bool,
+    /// Whether the `NoChangeNotification` event has already been
+    /// emitted for the current value. Reset whenever the parameter is
+    /// overwritten so the inactivity window restarts on each update.
+    #[serde(default)]
+    pub no_change_notified: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -444,6 +456,25 @@ pub struct SsmState {
     pub managed_instances: BTreeMap<String, ManagedInstance>,
     pub execution_previews: BTreeMap<String, ExecutionPreview>,
     pub execution_preview_counter: u64,
+    /// Local log of parameter-policy notification events. Real AWS sends
+    /// these to EventBridge; we record them in-memory so tests can
+    /// inspect notification fan-out via the admin endpoint. Defaults to
+    /// empty when deserializing snapshots from before this field
+    /// existed.
+    #[serde(default)]
+    pub parameter_policy_events: Vec<ParameterPolicyEvent>,
+}
+
+/// One emission of a parameter-policy notification (Expiration/
+/// ExpirationNotification/NoChangeNotification). Captured at PutParameter
+/// time and at read time when an Expiration ages out a parameter.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ParameterPolicyEvent {
+    pub parameter_name: String,
+    pub parameter_arn: String,
+    pub event_type: String,
+    pub message: String,
+    pub created_at: DateTime<Utc>,
 }
 
 impl SsmState {
@@ -483,6 +514,7 @@ impl SsmState {
             managed_instances: BTreeMap::new(),
             execution_previews: BTreeMap::new(),
             execution_preview_counter: 0,
+            parameter_policy_events: Vec::new(),
         };
         state.seed_defaults();
         state
@@ -521,6 +553,7 @@ impl SsmState {
         self.managed_instances.clear();
         self.execution_previews.clear();
         self.execution_preview_counter = 0;
+        self.parameter_policy_events.clear();
         self.seed_defaults();
     }
 
@@ -687,6 +720,8 @@ impl SsmState {
                 data_type: "text".to_string(),
                 tier: "Standard".to_string(),
                 policies: None,
+                expiration_notified: false,
+                no_change_notified: false,
             },
         );
     }

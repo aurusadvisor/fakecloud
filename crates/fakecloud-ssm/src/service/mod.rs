@@ -142,6 +142,30 @@ impl SsmService {
         updated
     }
 
+    /// Admin: read out the parameter-policy event log for the given
+    /// account. Used by tests to verify that Expiration deletions and
+    /// notification windows actually fired without standing up an
+    /// EventBridge target. Reads also tick the lazy policy evaluator so
+    /// callers don't have to issue a Get* call first.
+    pub fn parameter_policy_events(
+        &self,
+        account_id: &str,
+    ) -> Vec<crate::state::ParameterPolicyEvent> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        parameters::purge_expired_params(state);
+        parameters::tick_policy_notifications(state);
+        state.parameter_policy_events.clone()
+    }
+
+    /// Admin: drop the recorded parameter-policy event log for the
+    /// given account. Tests use this to reset between assertions.
+    pub fn clear_parameter_policy_events(&self, account_id: &str) {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        state.parameter_policy_events.clear();
+    }
+
     /// Persist current state as a snapshot. Held across the
     /// clone-serialize-write sequence to prevent stale-last writes,
     /// with serde + file I/O offloaded to the blocking pool.

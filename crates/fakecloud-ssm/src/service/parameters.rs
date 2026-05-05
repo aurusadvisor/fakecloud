@@ -9,27 +9,176 @@ use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
-use crate::state::{SsmParameter, SsmParameterVersion, SsmState};
+use crate::state::{ParameterPolicyEvent, SsmParameter, SsmParameterVersion, SsmState};
 
 use super::{missing, SsmService, PARAMETER_VERSION_LIMIT};
 
-/// Parse the `Expiration` policy timestamp from the parameter's `Policies`
-/// JSON. The wire format is an array of `{Type, Version, Attributes:{...}}`
-/// objects; for `Type=Expiration` the `Attributes.Timestamp` field is an
-/// ISO 8601 string. Returns `None` for any malformed/missing data — we
-/// fail open rather than rejecting parameters with unparseable policies.
-fn extract_expiration(policies_str: &str) -> Option<chrono::DateTime<Utc>> {
-    let value: Value = serde_json::from_str(policies_str).ok()?;
-    for policy in value.as_array()? {
-        if policy["Type"].as_str() == Some("Expiration") {
-            if let Some(ts) = policy["Attributes"]["Timestamp"].as_str() {
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
-                    return Some(dt.with_timezone(&Utc));
-                }
+/// One parsed entry from the `Policies` JSON array on `PutParameter`.
+/// AWS supports three policy types — Expiration deletes the parameter
+/// at a specific instant; ExpirationNotification fires an EventBridge
+/// event in the run-up to expiry; NoChangeNotification fires when a
+/// parameter goes too long without being updated.
+#[derive(Debug, Clone)]
+pub(crate) enum ParsedPolicy {
+    Expiration(chrono::DateTime<Utc>),
+    ExpirationNotification { before: i64, unit: PolicyUnit },
+    NoChangeNotification { after: i64, unit: PolicyUnit },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PolicyUnit {
+    Days,
+    Hours,
+    /// fakecloud-only extension: lets E2E tests trigger notification
+    /// thresholds in seconds rather than waiting hours.
+    Minutes,
+    /// fakecloud-only extension; same rationale as `Minutes`.
+    Seconds,
+}
+
+impl PolicyUnit {
+    fn to_duration(self, n: i64) -> chrono::Duration {
+        match self {
+            PolicyUnit::Days => chrono::Duration::days(n),
+            PolicyUnit::Hours => chrono::Duration::hours(n),
+            PolicyUnit::Minutes => chrono::Duration::minutes(n),
+            PolicyUnit::Seconds => chrono::Duration::seconds(n),
+        }
+    }
+}
+
+/// Error helper: build the AWS-shaped `InvalidPolicyAttributeException`
+/// reply. Used both for malformed JSON and for individual
+/// missing/unparseable attributes within a well-formed array.
+fn invalid_policy_error(detail: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidPolicyAttributeException",
+        detail.into(),
+    )
+}
+
+/// Parse and validate the `Policies` JSON string on `PutParameter`.
+/// Returns the parsed policy list. Empty/`None` input is OK and yields
+/// an empty list. Malformed JSON or unrecognized policy shapes raise
+/// `InvalidPolicyAttributeException` to match the real API.
+pub(crate) fn parse_policies(policies_str: &str) -> Result<Vec<ParsedPolicy>, AwsServiceError> {
+    let value: Value = serde_json::from_str(policies_str)
+        .map_err(|e| invalid_policy_error(format!("Policies must be valid JSON: {e}")))?;
+    let arr = value
+        .as_array()
+        .ok_or_else(|| invalid_policy_error("Policies must be a JSON array."))?;
+
+    let mut parsed = Vec::with_capacity(arr.len());
+    for (i, policy) in arr.iter().enumerate() {
+        let kind = policy["Type"].as_str().ok_or_else(|| {
+            invalid_policy_error(format!(
+                "Policy at index {i} is missing required field 'Type'."
+            ))
+        })?;
+        let attrs = &policy["Attributes"];
+        if !attrs.is_object() {
+            return Err(invalid_policy_error(format!(
+                "Policy at index {i} is missing required field 'Attributes'."
+            )));
+        }
+        match kind {
+            "Expiration" => {
+                let ts = attrs["Timestamp"].as_str().ok_or_else(|| {
+                    invalid_policy_error(format!(
+                        "Expiration policy at index {i} requires Attributes.Timestamp."
+                    ))
+                })?;
+                let dt = chrono::DateTime::parse_from_rfc3339(ts).map_err(|e| {
+                    invalid_policy_error(format!(
+                        "Expiration policy at index {i} has invalid Timestamp: {e}"
+                    ))
+                })?;
+                parsed.push(ParsedPolicy::Expiration(dt.with_timezone(&Utc)));
+            }
+            "ExpirationNotification" => {
+                let (n, unit) = parse_window_attrs(attrs, "Before", i, kind)?;
+                parsed.push(ParsedPolicy::ExpirationNotification { before: n, unit });
+            }
+            "NoChangeNotification" => {
+                let (n, unit) = parse_window_attrs(attrs, "After", i, kind)?;
+                parsed.push(ParsedPolicy::NoChangeNotification { after: n, unit });
+            }
+            other => {
+                return Err(invalid_policy_error(format!(
+                    "Policy at index {i} has unsupported Type: {other}. \
+                     Valid types: Expiration, ExpirationNotification, NoChangeNotification."
+                )));
             }
         }
     }
-    None
+    Ok(parsed)
+}
+
+/// Pull a `{<key>: number, "Unit": "Days"|"Hours"}` pair out of a
+/// notification policy's `Attributes` block. Used by both
+/// ExpirationNotification (`Before`) and NoChangeNotification (`After`).
+fn parse_window_attrs(
+    attrs: &Value,
+    key: &str,
+    idx: usize,
+    kind: &str,
+) -> Result<(i64, PolicyUnit), AwsServiceError> {
+    // AWS accepts the numeric attribute as either a JSON number or a
+    // stringified integer (the SSM PutParameter docs describe the
+    // attribute values as strings, but real callers send both).
+    let n = if let Some(n) = attrs[key].as_i64() {
+        n
+    } else if let Some(s) = attrs[key].as_str() {
+        s.parse::<i64>().map_err(|_| {
+            invalid_policy_error(format!(
+                "{kind} policy at index {idx} has non-numeric {key}: {s}"
+            ))
+        })?
+    } else {
+        return Err(invalid_policy_error(format!(
+            "{kind} policy at index {idx} requires Attributes.{key}."
+        )));
+    };
+    if n <= 0 {
+        return Err(invalid_policy_error(format!(
+            "{kind} policy at index {idx} requires {key} > 0."
+        )));
+    }
+    let unit_str = attrs["Unit"].as_str().ok_or_else(|| {
+        invalid_policy_error(format!(
+            "{kind} policy at index {idx} requires Attributes.Unit."
+        ))
+    })?;
+    let unit = match unit_str {
+        "Days" => PolicyUnit::Days,
+        "Hours" => PolicyUnit::Hours,
+        // fakecloud-only extensions: AWS proper accepts only Days/Hours,
+        // but Minutes/Seconds let E2E tests verify notification firing
+        // without sitting on the runner for an hour.
+        "Minutes" => PolicyUnit::Minutes,
+        "Seconds" => PolicyUnit::Seconds,
+        other => {
+            return Err(invalid_policy_error(format!(
+                "{kind} policy at index {idx} has unsupported Unit: {other}. \
+                 Valid units: Days, Hours (fakecloud extensions: Minutes, Seconds)."
+            )));
+        }
+    };
+    Ok((n, unit))
+}
+
+/// Convenience wrapper used by read paths: parse `policies` (if any)
+/// and return the Expiration timestamp if one is set. Silently ignores
+/// malformed JSON — at this point the param was already accepted, so
+/// we don't want to re-fail the read.
+fn extract_expiration(policies_str: &str) -> Option<chrono::DateTime<Utc>> {
+    parse_policies(policies_str).ok().and_then(|policies| {
+        policies.into_iter().find_map(|p| match p {
+            ParsedPolicy::Expiration(ts) => Some(ts),
+            _ => None,
+        })
+    })
 }
 
 /// Returns true if the parameter has an `Expiration` policy whose timestamp
@@ -41,6 +190,167 @@ pub(crate) fn is_param_expired(p: &SsmParameter) -> bool {
         .as_deref()
         .and_then(extract_expiration)
         .is_some_and(|exp| exp < Utc::now())
+}
+
+/// On `PutParameter`, record a "Policy registered" event for each
+/// supplied policy so callers can verify (via the admin endpoint) that
+/// the server saw and accepted them. Notification policies still
+/// require a separate threshold-crossing event; this is the
+/// at-creation receipt.
+pub(crate) fn record_policy_events(
+    state: &mut SsmState,
+    name: &str,
+    arn: &str,
+    policies: &[ParsedPolicy],
+) {
+    let now = Utc::now();
+    for policy in policies {
+        let (event_type, message) = match policy {
+            ParsedPolicy::Expiration(ts) => (
+                "ExpirationRegistered",
+                format!(
+                    "Parameter {name} registered with Expiration at {}.",
+                    ts.to_rfc3339()
+                ),
+            ),
+            ParsedPolicy::ExpirationNotification { before, unit } => (
+                "ExpirationNotificationRegistered",
+                format!(
+                    "Parameter {name} registered ExpirationNotification window of {before} {}.",
+                    unit_str(*unit)
+                ),
+            ),
+            ParsedPolicy::NoChangeNotification { after, unit } => (
+                "NoChangeNotificationRegistered",
+                format!(
+                    "Parameter {name} registered NoChangeNotification window of {after} {}.",
+                    unit_str(*unit)
+                ),
+            ),
+        };
+        state.parameter_policy_events.push(ParameterPolicyEvent {
+            parameter_name: name.to_string(),
+            parameter_arn: arn.to_string(),
+            event_type: event_type.to_string(),
+            message,
+            created_at: now,
+        });
+    }
+}
+
+fn unit_str(u: PolicyUnit) -> &'static str {
+    match u {
+        PolicyUnit::Days => "Days",
+        PolicyUnit::Hours => "Hours",
+        PolicyUnit::Minutes => "Minutes",
+        PolicyUnit::Seconds => "Seconds",
+    }
+}
+
+/// Lazy-fire notification policy events for every parameter in
+/// `state`. Called from every read path; cheap when no parameters
+/// have policies.
+///
+/// `ExpirationNotification` fires when `now >= expiration - window`.
+/// `NoChangeNotification` fires when `now >= last_modified + window`.
+/// Both are guarded by per-parameter "already-fired" flags that get
+/// reset on overwrite.
+pub(crate) fn tick_policy_notifications(state: &mut SsmState) {
+    let now = Utc::now();
+    for param in state.parameters.values_mut() {
+        let Some(policies_str) = param.policies.as_deref() else {
+            continue;
+        };
+        let Ok(policies) = parse_policies(policies_str) else {
+            continue;
+        };
+
+        // Find an Expiration timestamp to anchor ExpirationNotification.
+        let expiration_at = policies.iter().find_map(|p| match p {
+            ParsedPolicy::Expiration(ts) => Some(*ts),
+            _ => None,
+        });
+
+        for policy in &policies {
+            match policy {
+                ParsedPolicy::ExpirationNotification { before, unit } => {
+                    if param.expiration_notified {
+                        continue;
+                    }
+                    let Some(exp) = expiration_at else { continue };
+                    let window = unit.to_duration(*before);
+                    if now >= exp - window {
+                        state.parameter_policy_events.push(ParameterPolicyEvent {
+                            parameter_name: param.name.clone(),
+                            parameter_arn: param.arn.clone(),
+                            event_type: "ExpirationNotification".to_string(),
+                            message: format!(
+                                "Parameter {} is within {} {} of its Expiration ({}).",
+                                param.name,
+                                before,
+                                unit_str(*unit),
+                                exp.to_rfc3339()
+                            ),
+                            created_at: now,
+                        });
+                        param.expiration_notified = true;
+                    }
+                }
+                ParsedPolicy::NoChangeNotification { after, unit } => {
+                    if param.no_change_notified {
+                        continue;
+                    }
+                    let window = unit.to_duration(*after);
+                    if now >= param.last_modified + window {
+                        state.parameter_policy_events.push(ParameterPolicyEvent {
+                            parameter_name: param.name.clone(),
+                            parameter_arn: param.arn.clone(),
+                            event_type: "NoChangeNotification".to_string(),
+                            message: format!(
+                                "Parameter {} has gone {} {} without an update.",
+                                param.name,
+                                after,
+                                unit_str(*unit)
+                            ),
+                            created_at: now,
+                        });
+                        param.no_change_notified = true;
+                    }
+                }
+                ParsedPolicy::Expiration(_) => {}
+            }
+        }
+    }
+}
+
+/// Sweep expired parameters out of `state` and record one
+/// `Expiration` policy event per deletion. Real AWS deletes expired
+/// advanced-tier parameters at the scheduled time, so reads must
+/// observe the deletion. Returns the names that were removed for
+/// callers that want to log them.
+pub(crate) fn purge_expired_params(state: &mut SsmState) -> Vec<String> {
+    let now = Utc::now();
+    let expired: Vec<String> = state
+        .parameters
+        .iter()
+        .filter(|(_, p)| is_param_expired(p))
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in &expired {
+        if let Some(removed) = state.parameters.remove(name) {
+            state.parameter_policy_events.push(ParameterPolicyEvent {
+                parameter_name: removed.name.clone(),
+                parameter_arn: removed.arn.clone(),
+                event_type: "Expiration".to_string(),
+                message: format!(
+                    "Parameter {} reached its Expiration policy and was deleted.",
+                    removed.name
+                ),
+                created_at: now,
+            });
+        }
+    }
+    expired
 }
 
 /// Build the JSON `Parameter` body for a historical version of `param`.
@@ -86,6 +396,11 @@ struct PutParameterInput {
     data_type_explicit: bool,
     tier: String,
     policies: Option<String>,
+    /// Pre-parsed `policies` view, populated by ``from_body`` when the
+    /// caller supplied a non-empty Policies array. Notification policies
+    /// fan out to ``state.parameter_policy_events`` after the parameter
+    /// is committed; Expiration policies drive lazy deletion on read.
+    parsed_policies: Vec<ParsedPolicy>,
     tags: Option<Vec<(String, String)>>,
 }
 
@@ -153,6 +468,29 @@ impl PutParameterInput {
                 .collect()
         });
 
+        let tier = body["Tier"].as_str().unwrap_or("Standard").to_string();
+
+        // Parse + validate the Policies JSON up front so PutParameter
+        // can return InvalidPolicyAttributeException without touching
+        // state. Empty/absent Policies -> empty list -> no-op.
+        let policies = body["Policies"].as_str().map(|s| s.to_string());
+        let parsed_policies = match policies.as_deref() {
+            Some(s) if !s.trim().is_empty() => parse_policies(s)?,
+            _ => Vec::new(),
+        };
+
+        // AWS only allows policies on Advanced-tier parameters. The
+        // real API rejects this with ValidationException; we mirror
+        // that.
+        if !parsed_policies.is_empty() && tier != "Advanced" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "Policies are only supported on Advanced-tier parameters. \
+                 Set Tier=Advanced when including Policies.",
+            ));
+        }
+
         Ok(Self {
             name,
             value,
@@ -163,8 +501,9 @@ impl PutParameterInput {
             allowed_pattern: body["AllowedPattern"].as_str().map(|s| s.to_string()),
             data_type,
             data_type_explicit,
-            tier: body["Tier"].as_str().unwrap_or("Standard").to_string(),
-            policies: body["Policies"].as_str().map(|s| s.to_string()),
+            tier,
+            policies,
+            parsed_policies,
             tags,
         })
     }
@@ -257,6 +596,14 @@ fn apply_overwrite(
     if input.data_type_explicit {
         existing.data_type = input.data_type;
     }
+    // Always replace the policy list on overwrite. AWS treats Policies
+    // as a wholesale property of the current value: passing a fresh
+    // array swaps them out, omitting it clears them. Reset the
+    // emitted-event flags so updated policies and the new value each
+    // get a fresh notification window.
+    existing.policies = input.policies;
+    existing.expiration_notified = false;
+    existing.no_change_notified = false;
 
     Ok(AwsResponse::ok_json(json!({
         "Version": existing.version,
@@ -300,6 +647,8 @@ fn create_new_parameter(
         data_type: input.data_type,
         tier: input.tier,
         policies: input.policies,
+        expiration_notified: false,
+        no_change_notified: false,
     })
 }
 
@@ -332,18 +681,34 @@ impl SsmService {
             );
         }
 
-        if let Some(existing) = lookup_param_mut(&mut state.parameters, &input.name) {
-            return apply_overwrite(existing, input);
-        }
+        // Hold on to the parsed policies + identifying metadata before
+        // the input is consumed by overwrite/create. We use them after
+        // the parameter is stored to fan out notification events.
+        let parsed_policies = input.parsed_policies.clone();
+        let param_name_for_events = input.name.clone();
+        let param_arn_for_events = param_arn(&req.region, &state.account_id, &input.name);
 
-        let tier_for_response = input.tier.clone();
-        let name = input.name.clone();
-        let param = create_new_parameter(&req.region, &state.account_id, input)?;
-        state.parameters.insert(name, param);
-        Ok(AwsResponse::ok_json(json!({
-            "Version": 1,
-            "Tier": tier_for_response,
-        })))
+        let resp = if let Some(existing) = lookup_param_mut(&mut state.parameters, &input.name) {
+            apply_overwrite(existing, input)?
+        } else {
+            let tier_for_response = input.tier.clone();
+            let name = input.name.clone();
+            let param = create_new_parameter(&req.region, &state.account_id, input)?;
+            state.parameters.insert(name, param);
+            AwsResponse::ok_json(json!({
+                "Version": 1,
+                "Tier": tier_for_response,
+            }))
+        };
+
+        record_policy_events(
+            state,
+            &param_name_for_events,
+            &param_arn_for_events,
+            &parsed_policies,
+        );
+
+        Ok(resp)
     }
 
     /// Encrypt a SecureString value via the configured KMS hook. Returns
@@ -557,16 +922,16 @@ impl SsmService {
             );
         }
 
-        let accounts = self.state.read();
-        let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        // Take the write lock so the lazy-policy sweep (delete expired,
+        // emit notifications) can mutate state in line with this read.
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        purge_expired_params(state);
+        tick_policy_notifications(state);
 
         // Handle ARN-style names directly (they contain many colons)
         if raw_name.starts_with("arn:aws:ssm:") {
             let param = resolve_param_by_name_or_arn(state, raw_name)?;
-            if is_param_expired(param) {
-                return Err(param_not_found(raw_name));
-            }
             return Ok(AwsResponse::ok_json(json!({
                 "Parameter": self.render_param_to_json(param, true, with_decryption, &req.region, &req.account_id),
             })));
@@ -582,9 +947,6 @@ impl SsmService {
         // Try looking up by name or by ARN - use raw_name in error for full context
         let param = resolve_param_by_name_or_arn(state, base_name)
             .map_err(|_| param_not_found(raw_name))?;
-        if is_param_expired(param) {
-            return Err(param_not_found(raw_name));
-        }
 
         match selector {
             ParamSelector::None => Ok(AwsResponse::ok_json(json!({
@@ -670,9 +1032,10 @@ impl SsmService {
             ));
         }
 
-        let accounts = self.state.read();
-        let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        purge_expired_params(state);
+        tick_policy_notifications(state);
         let mut parameters = Vec::new();
         let mut invalid = Vec::new();
         let mut seen_names = std::collections::HashSet::new();
@@ -692,26 +1055,20 @@ impl SsmService {
                     }
                     ParamSelector::None => {
                         if let Some(param) = lookup_param(&state.parameters, base_name) {
-                            if is_param_expired(param) {
-                                invalid.push(raw_name.to_string());
-                            } else {
-                                parameters.push(self.render_param_to_json(
-                                    param,
-                                    true,
-                                    with_decryption,
-                                    &req.region,
-                                    &req.account_id,
-                                ));
-                            }
+                            parameters.push(self.render_param_to_json(
+                                param,
+                                true,
+                                with_decryption,
+                                &req.region,
+                                &req.account_id,
+                            ));
                         } else {
                             invalid.push(raw_name.to_string());
                         }
                     }
                     ParamSelector::Version(ver) => {
                         if let Some(param) = lookup_param(&state.parameters, base_name) {
-                            if is_param_expired(param) {
-                                invalid.push(raw_name.to_string());
-                            } else if param.version == ver {
+                            if param.version == ver {
                                 parameters.push(self.render_param_to_json(
                                     param,
                                     true,
@@ -738,10 +1095,6 @@ impl SsmService {
                     }
                     ParamSelector::Label(ref label) => {
                         if let Some(param) = lookup_param(&state.parameters, base_name) {
-                            if is_param_expired(param) {
-                                invalid.push(raw_name.to_string());
-                                continue;
-                            }
                             let mut found = false;
                             for (ver, labels) in &param.labels {
                                 if labels.contains(label) {
@@ -820,13 +1173,13 @@ impl SsmService {
             validate_parameter_filters_by_path(f)?;
         }
 
-        let accounts = self.state.read();
-        let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        purge_expired_params(state);
+        tick_policy_notifications(state);
         let all_params: Vec<&SsmParameter> = state
             .parameters
             .values()
-            .filter(|p| !is_param_expired(p))
             .filter(|p| param_matches_path(p, path, recursive))
             .filter(|p| apply_parameter_filters(p, filters.as_ref()))
             .collect();
@@ -916,9 +1269,10 @@ impl SsmService {
             validate_parameter_filters(filters)?;
         }
 
-        let accounts = self.state.read();
-        let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        purge_expired_params(state);
+        tick_policy_notifications(state);
 
         // Check if any filter explicitly targets /aws/ prefix paths
         let targets_aws_prefix = param_filters.as_ref().is_some_and(|filters| {
@@ -997,9 +1351,10 @@ impl SsmService {
         }
         let max_results = max_results.unwrap_or(50) as usize;
 
-        let accounts = self.state.read();
-        let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        purge_expired_params(state);
+        tick_policy_notifications(state);
         let param = state
             .parameters
             .get(name)
