@@ -1,8 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use fakecloud_core::pagination::paginate;
 use http::StatusCode;
+use rand::Rng;
 use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
@@ -11,6 +14,13 @@ use crate::state::{
     MemberAccount, OrgError, OrganizationState, OrganizationalUnit, Policy,
     SharedOrganizationsState, FEATURE_SET_ALL, POLICY_TYPE_SCP,
 };
+
+/// Bounds for the synthetic delay before a `CreateAccount` request
+/// flips from `IN_PROGRESS` to `SUCCEEDED`. Real AWS takes minutes; a
+/// 1-2s window is enough for SDK callers to observe the IN_PROGRESS
+/// phase via at least one poll without making tests slow.
+const CREATE_ACCOUNT_MIN_DELAY: Duration = Duration::from_millis(1000);
+const CREATE_ACCOUNT_MAX_DELAY: Duration = Duration::from_millis(2000);
 
 /// Single source of truth for supported Organizations actions.
 /// Enforcement of attached SCPs ships in Batch 4.
@@ -509,7 +519,12 @@ impl OrganizationsService {
         let mut guard = self.state.write();
         self.require_member_management(&guard, &req.account_id)?;
         let org = guard.as_mut().expect("management gate proved Some");
-        let status = org.create_account(&email, &name, None);
+        let status = org.begin_create_account(&email, &name, None);
+        let request_id = status.id.clone();
+        drop(guard);
+
+        self.spawn_create_account_completion(request_id);
+
         Ok(AwsResponse::ok_json(json!({
             "CreateAccountStatus": create_account_status_payload(&status),
         })))
@@ -527,10 +542,41 @@ impl OrganizationsService {
         // GovCloud partition; we mint one alongside the commercial id
         // so callers see both, matching the real AWS response.
         let gov_id = org.next_account_id();
-        let status = org.create_account(&email, &name, Some(gov_id));
+        let status = org.begin_create_account(&email, &name, Some(gov_id));
+        let request_id = status.id.clone();
+        drop(guard);
+
+        self.spawn_create_account_completion(request_id);
+
         Ok(AwsResponse::ok_json(json!({
             "CreateAccountStatus": create_account_status_payload(&status),
         })))
+    }
+
+    /// Spawn a background tokio task that flips `request_id` from
+    /// `IN_PROGRESS` to `SUCCEEDED` after a synthetic 1-2s delay,
+    /// enrolling the reserved account id (and GovCloud paired id, if
+    /// any) into `state.accounts`. Mirrors the async shape of real
+    /// AWS `CreateAccount` so SDK callers can observe both phases.
+    fn spawn_create_account_completion(&self, request_id: String) {
+        let state = self.state.clone();
+        let delay = {
+            let mut rng = rand::thread_rng();
+            let span = CREATE_ACCOUNT_MAX_DELAY.saturating_sub(CREATE_ACCOUNT_MIN_DELAY);
+            let jitter_millis = if span.is_zero() {
+                0
+            } else {
+                rng.gen_range(0..=span.as_millis() as u64)
+            };
+            CREATE_ACCOUNT_MIN_DELAY + Duration::from_millis(jitter_millis)
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let mut guard = state.write();
+            if let Some(org) = guard.as_mut() {
+                org.complete_create_account(&request_id);
+            }
+        });
     }
 
     fn describe_create_account_status(
@@ -540,20 +586,15 @@ impl OrganizationsService {
         let body = req.json_body();
         let request_id = required_str(&body, "CreateAccountRequestId")?.to_string();
 
-        let mut guard = self.state.write();
-        let org = guard.as_mut().ok_or_else(organizations_not_in_use)?;
-        if !org.accounts.contains_key(&req.account_id) {
-            return Err(organizations_not_in_use());
-        }
-        let status = org
-            .complete_or_describe_create_account(&request_id)
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "CreateAccountStatusNotFoundException",
-                    format!("Create account status with id {request_id} was not found."),
-                )
-            })?;
+        let guard = self.state.read();
+        let org = self.require_member(&guard, &req.account_id)?;
+        let status = org.describe_create_account(&request_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "CreateAccountStatusNotFoundException",
+                format!("Create account status with id {request_id} was not found."),
+            )
+        })?;
         Ok(AwsResponse::ok_json(json!({
             "CreateAccountStatus": create_account_status_payload(&status),
         })))
@@ -571,21 +612,71 @@ impl OrganizationsService {
                     .collect()
             })
             .unwrap_or_default();
+        // AWS caps MaxResults at 20 for ListCreateAccountStatus and
+        // defaults to 20 when unset. Reject out-of-range values with
+        // InvalidInputException so callers see the same wire error
+        // they would from real AWS, instead of silently clamping.
+        let max_results = match body.get("MaxResults") {
+            None | Some(Value::Null) => 20,
+            Some(v) => {
+                let n = v.as_u64().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidInputException",
+                        "MaxResults must be a positive integer between 1 and 20.",
+                    )
+                })?;
+                if !(1..=20).contains(&n) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidInputException",
+                        "MaxResults must be between 1 and 20.",
+                    ));
+                }
+                n as usize
+            }
+        };
+        // NextToken must round-trip a token we previously emitted.
+        // Reject anything we didn't mint (non-numeric, negative, etc.)
+        // up front so callers learn about a typo instead of silently
+        // re-reading page 1.
+        let next_token = match body.get("NextToken") {
+            None | Some(Value::Null) => None,
+            Some(v) => {
+                let s = v.as_str().ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidInputException",
+                        "NextToken must be a string.",
+                    )
+                })?;
+                // Tokens we mint are positive offset integers (see
+                // fakecloud_core::pagination::paginate).
+                if s.parse::<usize>().is_err() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidInputException",
+                        "NextToken is not a valid pagination token.",
+                    ));
+                }
+                Some(s.to_string())
+            }
+        };
 
         let guard = self.state.read();
-        let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
-        if !org.accounts.contains_key(&req.account_id) {
-            return Err(organizations_not_in_use());
-        }
-        let statuses: Vec<Value> = org
+        let org = self.require_member(&guard, &req.account_id)?;
+        let filtered: Vec<Value> = org
             .create_account_requests
             .values()
             .filter(|s| states.is_empty() || states.iter().any(|st| st == &s.state))
             .map(create_account_status_payload)
             .collect();
-        Ok(AwsResponse::ok_json(
-            json!({ "CreateAccountStatuses": statuses }),
-        ))
+        let (page, token) = paginate(&filtered, next_token.as_deref(), max_results);
+        let mut body = json!({ "CreateAccountStatuses": page });
+        if let Some(t) = token {
+            body["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(body))
     }
 
     fn close_account(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -2666,6 +2757,35 @@ mod tests {
         serde_json::from_slice(resp.body.expect_bytes()).unwrap()
     }
 
+    /// Poll `DescribeCreateAccountStatus` until the request reaches a
+    /// terminal state, with a timeout. Mirrors how SDK callers observe
+    /// the async `CreateAccount` lifecycle in fakecloud.
+    async fn poll_until_terminal(svc: &Arc<OrganizationsService>, request_id: &str) -> Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let resp = svc
+                .handle(req_with(
+                    "111111111111",
+                    "DescribeCreateAccountStatus",
+                    json!({"CreateAccountRequestId": request_id}),
+                ))
+                .await
+                .unwrap();
+            let body = body_value(resp);
+            let state = body["CreateAccountStatus"]["State"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            if state == "SUCCEEDED" || state == "FAILED" {
+                return body;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("CreateAccount {request_id} did not terminate before deadline");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     #[tokio::test]
     async fn create_account_starts_in_progress_then_describes_succeeded() {
         let (svc, _state) = OrganizationsService::shared();
@@ -2686,47 +2806,37 @@ mod tests {
         let new_account_id = status["AccountId"].as_str().unwrap().to_string();
         assert_eq!(new_account_id.len(), 12);
 
-        // First Describe should flip the status to SUCCEEDED.
-        let resp = svc
-            .handle(req_with(
-                "111111111111",
-                "DescribeCreateAccountStatus",
-                json!({"CreateAccountRequestId": request_id}),
-            ))
-            .await
-            .unwrap();
-        let body = body_value(resp);
+        let body = poll_until_terminal(&svc, &request_id).await;
         assert_eq!(
             body["CreateAccountStatus"]["State"].as_str().unwrap(),
             "SUCCEEDED"
         );
         assert!(body["CreateAccountStatus"]["CompletedTimestamp"].is_number());
+        assert_eq!(
+            body["CreateAccountStatus"]["AccountId"].as_str().unwrap(),
+            new_account_id
+        );
     }
 
     #[tokio::test]
     async fn create_account_only_management_account_can_call() {
         let (svc, _state) = OrganizationsService::shared();
         create_org_with_root(&svc).await;
-        // Enroll a non-management account first.
-        svc.handle(req_with(
-            "111111111111",
-            "CreateAccount",
-            json!({"Email": "non-mgmt@example.com", "AccountName": "NonMgmt"}),
-        ))
-        .await
-        .unwrap();
-        // Find the new id via list.
+        // Enroll a non-management account first and wait for it to succeed.
         let resp = svc
-            .handle(req_with("111111111111", "ListAccounts", json!({})))
+            .handle(req_with(
+                "111111111111",
+                "CreateAccount",
+                json!({"Email": "non-mgmt@example.com", "AccountName": "NonMgmt"}),
+            ))
             .await
             .unwrap();
-        let listed = body_value(resp);
-        let new_id = listed["Accounts"]
-            .as_array()
+        let request_id = body_value(resp)["CreateAccountStatus"]["Id"]
+            .as_str()
             .unwrap()
-            .iter()
-            .find(|a| a["Name"].as_str() == Some("NonMgmt"))
-            .unwrap()["Id"]
+            .to_string();
+        let body = poll_until_terminal(&svc, &request_id).await;
+        let new_id = body["CreateAccountStatus"]["AccountId"]
             .as_str()
             .unwrap()
             .to_string();
@@ -2771,14 +2881,9 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["Id"].as_str().unwrap(), request_id);
 
-        // Flip to SUCCEEDED via Describe, then refilter.
-        svc.handle(req_with(
-            "111111111111",
-            "DescribeCreateAccountStatus",
-            json!({"CreateAccountRequestId": request_id}),
-        ))
-        .await
-        .unwrap();
+        // Wait for the spawned completion task to flip the status, then
+        // re-filter for IN_PROGRESS — the new request should drop out.
+        poll_until_terminal(&svc, &request_id).await;
         let resp = svc
             .handle(req_with(
                 "111111111111",
@@ -2791,6 +2896,111 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+        // SUCCEEDED filter should now contain it.
+        let resp = svc
+            .handle(req_with(
+                "111111111111",
+                "ListCreateAccountStatus",
+                json!({"States": ["SUCCEEDED"]}),
+            ))
+            .await
+            .unwrap();
+        let arr = body_value(resp)["CreateAccountStatuses"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["Id"].as_str().unwrap(), request_id);
+    }
+
+    #[tokio::test]
+    async fn list_create_account_status_rejects_out_of_range_max_results() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        for bad in [json!(0), json!(21), json!(-1), json!("five")] {
+            let err = expect_err(
+                svc.handle(req_with(
+                    "111111111111",
+                    "ListCreateAccountStatus",
+                    json!({"MaxResults": bad}),
+                ))
+                .await,
+            );
+            assert_eq!(err.code(), "InvalidInputException");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_create_account_status_rejects_invalid_next_token() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        let err = expect_err(
+            svc.handle(req_with(
+                "111111111111",
+                "ListCreateAccountStatus",
+                json!({"NextToken": "not-a-number"}),
+            ))
+            .await,
+        );
+        assert_eq!(err.code(), "InvalidInputException");
+        // Numeric NextToken is accepted (round-trips a token we minted).
+        svc.handle(req_with(
+            "111111111111",
+            "ListCreateAccountStatus",
+            json!({"NextToken": "0"}),
+        ))
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_create_account_status_paginates_with_max_results() {
+        let (svc, _state) = OrganizationsService::shared();
+        create_org_with_root(&svc).await;
+        // Fire three CreateAccount requests so we have something to page over.
+        let mut request_ids = Vec::new();
+        for i in 0..3 {
+            let resp = svc
+                .handle(req_with(
+                    "111111111111",
+                    "CreateAccount",
+                    json!({"Email": format!("p{i}@example.com"), "AccountName": format!("P{i}")}),
+                ))
+                .await
+                .unwrap();
+            request_ids.push(
+                body_value(resp)["CreateAccountStatus"]["Id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        // First page: MaxResults=2 -> 2 entries + NextToken.
+        let resp = svc
+            .handle(req_with(
+                "111111111111",
+                "ListCreateAccountStatus",
+                json!({"MaxResults": 2}),
+            ))
+            .await
+            .unwrap();
+        let body = body_value(resp);
+        assert_eq!(body["CreateAccountStatuses"].as_array().unwrap().len(), 2);
+        let next = body["NextToken"].as_str().unwrap().to_string();
+
+        // Second page: same MaxResults + the token returns the remaining one
+        // and no further token.
+        let resp = svc
+            .handle(req_with(
+                "111111111111",
+                "ListCreateAccountStatus",
+                json!({"MaxResults": 2, "NextToken": next}),
+            ))
+            .await
+            .unwrap();
+        let body = body_value(resp);
+        assert_eq!(body["CreateAccountStatuses"].as_array().unwrap().len(), 1);
+        assert!(body.get("NextToken").is_none());
     }
 
     #[tokio::test]
@@ -2805,7 +3015,12 @@ mod tests {
             ))
             .await
             .unwrap();
-        let new_id = body_value(new_resp)["CreateAccountStatus"]["AccountId"]
+        let request_id = body_value(new_resp)["CreateAccountStatus"]["Id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let body = poll_until_terminal(&svc, &request_id).await;
+        let new_id = body["CreateAccountStatus"]["AccountId"]
             .as_str()
             .unwrap()
             .to_string();
@@ -2854,7 +3069,12 @@ mod tests {
             ))
             .await
             .unwrap();
-        let new_id = body_value(new_resp)["CreateAccountStatus"]["AccountId"]
+        let request_id = body_value(new_resp)["CreateAccountStatus"]["Id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let body = poll_until_terminal(&svc, &request_id).await;
+        let new_id = body["CreateAccountStatus"]["AccountId"]
             .as_str()
             .unwrap()
             .to_string();

@@ -5305,7 +5305,12 @@ impl ResourceProvisioner {
         let org = org_lock
             .as_mut()
             .ok_or_else(|| "Organization not yet created".to_string())?;
-        let status = org.create_account(&email, &name, None);
+        // CFN provisioning is its own asynchronous flow; we don't need
+        // a second layer of poll-for-completion on top. Begin the
+        // request and immediately drive it to SUCCEEDED so the rest of
+        // this provisioner sees a fully enrolled account.
+        let pending = org.begin_create_account(&email, &name, None);
+        let status = org.complete_create_account(&pending.id).unwrap_or(pending);
         let account_id = status
             .account_id
             .clone()
