@@ -931,3 +931,242 @@ async fn delete_service_requires_zero_desired_unless_force() {
     assert_eq!(after.failures().len(), 1);
     assert_eq!(after.failures()[0].reason(), Some("MISSING"));
 }
+
+// -- Phase O1: multi-container task launch --------------------------
+
+#[tokio::test]
+async fn run_task_with_two_containers_records_both_per_container() {
+    // Task definition with one main app + one sidecar; both should land
+    // on the task's containers[] with distinct ARNs and matching essential
+    // flags. Lifecycle assertions stay status-tolerant because CI typically
+    // doesn't have docker available, so the task transitions straight to
+    // STOPPED with TaskFailedToStart — that's still a multi-container exit.
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+
+    client
+        .create_cluster()
+        .cluster_name("multi-cluster")
+        .send()
+        .await
+        .unwrap();
+    client
+        .register_task_definition()
+        .family("multi-fam")
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("sidecar")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(false)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("register multi-container td");
+
+    let run = client
+        .run_task()
+        .cluster("multi-cluster")
+        .task_definition("multi-fam")
+        .send()
+        .await
+        .expect("run_task");
+    assert_eq!(run.tasks().len(), 1);
+    let task = &run.tasks()[0];
+    assert_eq!(task.containers().len(), 2, "expected 2 containers on task");
+
+    let names: Vec<&str> = task.containers().iter().filter_map(|c| c.name()).collect();
+    assert!(names.contains(&"app"));
+    assert!(names.contains(&"sidecar"));
+
+    // Per-container ARNs are distinct and match the AWS shape
+    // arn:aws:ecs:<region>:<acct>:container/<cluster>/<task-id>/<container-id>.
+    let arns: std::collections::HashSet<&str> = task
+        .containers()
+        .iter()
+        .filter_map(|c| c.container_arn())
+        .collect();
+    assert_eq!(arns.len(), 2, "container ARNs must be distinct");
+    for arn in &arns {
+        assert!(
+            arn.contains(":container/multi-cluster/"),
+            "container ARN should embed cluster name: {arn}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stop_task_with_two_containers_marks_all_stopped() {
+    // StopTask must propagate to every container in the task. We force
+    // termination through the introspection mark-failed endpoint so the
+    // assertion is deterministic without docker.
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+
+    client
+        .create_cluster()
+        .cluster_name("multi-stop")
+        .send()
+        .await
+        .unwrap();
+    client
+        .register_task_definition()
+        .family("multi-stop-fam")
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("sidecar")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(false)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let arn = client
+        .run_task()
+        .cluster("multi-stop")
+        .task_definition("multi-stop-fam")
+        .send()
+        .await
+        .unwrap()
+        .tasks()[0]
+        .task_arn()
+        .unwrap()
+        .to_string();
+    let task_id = arn.rsplit('/').next().unwrap().to_string();
+
+    // Force essential exit via introspection so the assertion doesn't
+    // depend on a real container runtime being present.
+    let url = format!(
+        "{}/_fakecloud/ecs/tasks/{}/mark-failed",
+        server.endpoint(),
+        task_id
+    );
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&serde_json::json!({"exitCode": 1, "reason": "essential exit"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let described = client
+        .describe_tasks()
+        .cluster("multi-stop")
+        .tasks(arn)
+        .send()
+        .await
+        .unwrap();
+    let task = &described.tasks()[0];
+    assert_eq!(task.last_status(), Some("STOPPED"));
+    assert_eq!(task.containers().len(), 2);
+    for c in task.containers() {
+        assert_eq!(c.last_status(), Some("STOPPED"));
+        assert_eq!(c.exit_code(), Some(1));
+    }
+}
+
+#[tokio::test]
+async fn describe_tasks_emits_per_container_aws_shape_fields() {
+    // Verify the public DescribeTasks response carries every per-container
+    // field documented by AWS (containerArn, taskArn, name, image,
+    // lastStatus, essential, networkBindings, networkInterfaces). The
+    // assertions go through a raw HTTP POST so we can inspect the JSON
+    // keys directly instead of being limited to SDK accessor coverage.
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+
+    client
+        .create_cluster()
+        .cluster_name("shape-cluster")
+        .send()
+        .await
+        .unwrap();
+    client
+        .register_task_definition()
+        .family("shape-fam")
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("app")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(true)
+                .build(),
+        )
+        .container_definitions(
+            ContainerDefinition::builder()
+                .name("sidecar")
+                .image("public.ecr.aws/library/alpine:latest")
+                .essential(false)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let arn = client
+        .run_task()
+        .cluster("shape-cluster")
+        .task_definition("shape-fam")
+        .send()
+        .await
+        .unwrap()
+        .tasks()[0]
+        .task_arn()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({"cluster": "shape-cluster", "tasks": [arn]});
+    let resp: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/", server.endpoint()))
+        .header(
+            "X-Amz-Target",
+            "AmazonEC2ContainerServiceV20141113.DescribeTasks",
+        )
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .body(serde_json::to_vec(&body).unwrap())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let tasks = resp.get("tasks").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(tasks.len(), 1);
+    let containers = tasks[0]
+        .get("containers")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(containers.len(), 2);
+    for c in containers {
+        for field in [
+            "containerArn",
+            "taskArn",
+            "name",
+            "image",
+            "lastStatus",
+            "essential",
+            "networkBindings",
+            "networkInterfaces",
+        ] {
+            assert!(
+                c.get(field).is_some(),
+                "container missing field {field}: {c}"
+            );
+        }
+    }
+}

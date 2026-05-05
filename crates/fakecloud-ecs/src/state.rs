@@ -453,6 +453,11 @@ pub struct Container {
     pub network_interfaces: Vec<Value>,
     pub health_status: Option<String>,
     pub managed_agents: Option<Value>,
+    /// Resolved image digest captured at pull time. AWS surfaces this on
+    /// DescribeTasks so callers can pin which exact image revision a task
+    /// is running. `None` until the runtime resolves it post-pull.
+    #[serde(default)]
+    pub image_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

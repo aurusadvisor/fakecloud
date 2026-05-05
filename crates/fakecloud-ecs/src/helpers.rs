@@ -532,6 +532,9 @@ pub(crate) fn container_to_json(container: &Container) -> Value {
     map.insert("taskArn".into(), json!(container.task_arn));
     map.insert("name".into(), json!(container.name));
     map.insert("image".into(), json!(container.image));
+    if let Some(ref digest) = container.image_digest {
+        map.insert("imageDigest".into(), json!(digest));
+    }
     map.insert("lastStatus".into(), json!(container.last_status));
     map.insert("essential".into(), json!(container.essential));
     if let Some(code) = container.exit_code {
@@ -683,6 +686,7 @@ pub(crate) fn spawn_service_tasks(
                 network_interfaces: Vec::new(),
                 health_status: Some("UNKNOWN".into()),
                 managed_agents: None,
+                image_digest: None,
             })
             .collect();
         let awslogs = container_defs.iter().find_map(|def| {
