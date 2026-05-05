@@ -89,8 +89,9 @@ pub fn parse_template_with_resolution(
     // Expand `Fn::ForEach::*` macros (template transform). New resources
     // and properties land in place before the rest of resolution sees the
     // template, so a ForEach-emitted resource works exactly like a
-    // hand-authored one.
-    let value = expand_for_each(&value, &BTreeMap::new())?;
+    // hand-authored one. Parameters flow in so the items list can be a
+    // `Ref` to a CommaDelimitedList parameter.
+    let value = expand_for_each(&value, &BTreeMap::new(), parameters)?;
 
     let description = value
         .get("Description")
@@ -249,7 +250,7 @@ pub fn parse_outputs(
     // Expand Fn::ForEach in Outputs so resolve picks up macro-emitted
     // entries. Callers pass the raw template value, which may still
     // contain unexpanded ForEach macros.
-    let template_owned = expand_for_each(template, &BTreeMap::new())?;
+    let template_owned = expand_for_each(template, &BTreeMap::new(), parameters)?;
     let template = &template_owned;
     let outputs_obj = match template.get("Outputs").and_then(|v| v.as_object()) {
         Some(o) => o,
@@ -494,7 +495,11 @@ fn stringify_value(value: &Value, parameters: &BTreeMap<String, String>) -> Stri
 /// bodies via `bindings`, so `${OuterVar}` resolves inside an inner
 /// loop's body. Each call resolves its own loop variable's iterations
 /// before recursing into the emitted entries.
-fn expand_for_each(value: &Value, bindings: &BTreeMap<String, String>) -> Result<Value, String> {
+fn expand_for_each(
+    value: &Value,
+    bindings: &BTreeMap<String, String>,
+    parameters: &BTreeMap<String, String>,
+) -> Result<Value, String> {
     match value {
         Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
@@ -512,13 +517,21 @@ fn expand_for_each(value: &Value, bindings: &BTreeMap<String, String>) -> Result
                     let loop_var = arr[0].as_str().ok_or_else(|| {
                         format!("Fn::ForEach::{loop_name} loop variable must be a string")
                     })?;
-                    let items = arr[1].as_array().ok_or_else(|| {
-                        format!("Fn::ForEach::{loop_name} second argument must be an array")
-                    })?;
+                    // The items list may be a literal array OR a `Ref`
+                    // to a CommaDelimitedList parameter (AWS-supported).
+                    // Resolve the latter against `parameters` by
+                    // splitting on `,` so the loop iterates the same
+                    // values the template author wrote.
+                    let items_owned: Vec<Value> =
+                        resolve_for_each_items(&arr[1], parameters).ok_or_else(|| {
+                            format!(
+                                "Fn::ForEach::{loop_name} second argument must be an array or a Ref to a CommaDelimitedList parameter"
+                            )
+                        })?;
                     let body = arr[2].as_object().ok_or_else(|| {
                         format!("Fn::ForEach::{loop_name} third argument must be an object")
                     })?;
-                    for item in items {
+                    for item in &items_owned {
                         let item_str = match item {
                             Value::String(s) => s.clone(),
                             other => other.to_string(),
@@ -532,7 +545,7 @@ fn expand_for_each(value: &Value, bindings: &BTreeMap<String, String>) -> Result
                         // wrapping them under the unresolved macro key).
                         let body_value = Value::Object(body.clone());
                         let substituted = substitute_loop_vars_in_value(&body_value, &next);
-                        let expanded = expand_for_each(&substituted, &next)?;
+                        let expanded = expand_for_each(&substituted, &next, parameters)?;
                         if let Value::Object(emitted) = expanded {
                             for (ek, ev) in emitted {
                                 out.insert(ek, ev);
@@ -541,14 +554,14 @@ fn expand_for_each(value: &Value, bindings: &BTreeMap<String, String>) -> Result
                     }
                     continue;
                 }
-                out.insert(k.clone(), expand_for_each(v, bindings)?);
+                out.insert(k.clone(), expand_for_each(v, bindings, parameters)?);
             }
             Ok(Value::Object(out))
         }
         Value::Array(arr) => {
             let mut out = Vec::with_capacity(arr.len());
             for v in arr {
-                out.push(expand_for_each(v, bindings)?);
+                out.push(expand_for_each(v, bindings, parameters)?);
             }
             Ok(Value::Array(out))
         }
@@ -556,13 +569,48 @@ fn expand_for_each(value: &Value, bindings: &BTreeMap<String, String>) -> Result
     }
 }
 
-/// Substitute every `${var}` token in a string against `bindings`.
-/// Unknown vars stay verbatim so non-loop substitutions (`Fn::Sub`,
-/// resource physical IDs) handle them later.
+/// Resolve the `items` argument of an `Fn::ForEach` macro. Accepts:
+/// - A literal JSON array — returned as-is.
+/// - `{ "Ref": "<name>" }` against a parameter holding either a comma
+///   delimited list (`CommaDelimitedList` / `List<*>`) or a single
+///   value. Splits on `,` and trims whitespace so parameters set as
+///   `"a, b, c"` iterate cleanly.
+///
+/// Returns `None` for any other shape (e.g. an object that isn't a
+/// `Ref`, or a `Ref` to an undefined parameter), letting the caller
+/// surface a precise error.
+fn resolve_for_each_items(
+    value: &Value,
+    parameters: &BTreeMap<String, String>,
+) -> Option<Vec<Value>> {
+    if let Some(arr) = value.as_array() {
+        return Some(arr.clone());
+    }
+    if let Some(map) = value.as_object() {
+        if let Some(name) = map.get("Ref").and_then(|v| v.as_str()) {
+            let raw = parameters.get(name)?;
+            return Some(
+                raw.split(',')
+                    .map(|p| Value::String(p.trim().to_string()))
+                    .collect(),
+            );
+        }
+    }
+    None
+}
+
+/// Substitute every `${var}` and `&{var}` token in a string against
+/// `bindings`. Both forms are AWS-supported for `Fn::ForEach` loop
+/// variables — `&{}` exists so identifiers with non-alphanumeric
+/// characters can interpolate into resource logical IDs without
+/// colliding with Fn::Sub's `${}` syntax. Unknown vars stay verbatim
+/// so non-loop substitutions (Fn::Sub, resource physical IDs) handle
+/// them later.
 fn substitute_loop_vars(s: &str, bindings: &BTreeMap<String, String>) -> String {
     let mut result = s.to_string();
     for (k, v) in bindings {
         result = result.replace(&format!("${{{k}}}"), v);
+        result = result.replace(&format!("&{{{k}}}"), v);
     }
     result
 }
@@ -776,7 +824,7 @@ pub fn resolve_resource_properties_with_attrs(
     };
     // Re-expand ForEach so the resource we look up matches the post-
     // expansion logical IDs from the original parse.
-    let value = expand_for_each(&value, &BTreeMap::new())?;
+    let value = expand_for_each(&value, &BTreeMap::new(), parameters)?;
 
     let resources_obj = value
         .get("Resources")
@@ -3124,6 +3172,77 @@ Resources:
         assert_eq!(
             reresolved.properties["QueueName"],
             Value::String("alpha-q".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_for_each_resolves_ref_to_comma_delimited_list_param() {
+        // CommaDelimitedList parameters are a documented ForEach input
+        // shape. Stack passes the value as a single string; ForEach
+        // must split it before iterating.
+        let template = r#"{
+            "Parameters": {"Names": {"Type": "CommaDelimitedList"}},
+            "Resources": {
+                "Fn::ForEach::Q": [
+                    "N",
+                    {"Ref": "Names"},
+                    {
+                        "${N}Queue": {
+                            "Type": "AWS::SQS::Queue",
+                            "Properties": {"QueueName": "${N}-q"}
+                        }
+                    }
+                ]
+            }
+        }"#;
+        let mut params = BTreeMap::new();
+        params.insert("Names".to_string(), "alpha,beta,gamma".to_string());
+        let parsed = parse_template(template, &params).unwrap();
+        let names: Vec<&str> = parsed
+            .resources
+            .iter()
+            .map(|r| r.logical_id.as_str())
+            .collect();
+        for v in ["alphaQueue", "betaQueue", "gammaQueue"] {
+            assert!(names.contains(&v), "missing {v} in {names:?}");
+        }
+    }
+
+    #[test]
+    fn fn_for_each_ampersand_substitution_form() {
+        // AWS supports `&{Var}` in addition to `${Var}` for ForEach
+        // loop variable substitution; needed when the surrounding
+        // template separately uses ${}-style for Fn::Sub.
+        let template = r#"{
+            "Resources": {
+                "Fn::ForEach::Q": [
+                    "Name",
+                    ["alpha", "beta"],
+                    {
+                        "&{Name}Queue": {
+                            "Type": "AWS::SQS::Queue",
+                            "Properties": {"QueueName": "&{Name}"}
+                        }
+                    }
+                ]
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        let names: Vec<&str> = parsed
+            .resources
+            .iter()
+            .map(|r| r.logical_id.as_str())
+            .collect();
+        assert!(names.contains(&"alphaQueue"), "got: {names:?}");
+        assert!(names.contains(&"betaQueue"), "got: {names:?}");
+        let alpha = parsed
+            .resources
+            .iter()
+            .find(|r| r.logical_id == "alphaQueue")
+            .unwrap();
+        assert_eq!(
+            alpha.properties["QueueName"],
+            Value::String("alpha".to_string())
         );
     }
 
