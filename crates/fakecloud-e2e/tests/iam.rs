@@ -2830,3 +2830,362 @@ async fn iam_get_access_key_last_used() {
     let json = output.stdout_json();
     assert_eq!(json["UserName"], "lastused-user");
 }
+
+// ─── F1: STS trust-policy enforcement ──────────────────────────────────
+//
+// AWS gates AssumeRole / AssumeRoleWithSAML / AssumeRoleWithWebIdentity
+// behind the role's trust policy. These tests pin the new behavior end
+// to end against a running fakecloud server: a Deny in the trust policy
+// must turn into AccessDenied, ExternalId / MFA conditions must be
+// enforced, service-linked roles refuse non-service callers, and the
+// federated entry points reject mis-issued tokens.
+
+#[tokio::test]
+async fn sts_assume_role_trust_policy_explicit_deny_returns_access_denied() {
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+    let sts = server.sts_client().await;
+
+    // Trust policy denies everyone explicitly — Deny must beat the
+    // earlier Allow regardless of who calls.
+    let trust = r#"{"Version":"2012-10-17","Statement":[
+        {"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"},
+        {"Effect":"Deny","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}
+    ]}"#;
+    let role = iam
+        .create_role()
+        .role_name("trust-deny-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+    let role_arn = role.role().unwrap().arn().to_string();
+
+    let err = sts
+        .assume_role()
+        .role_arn(&role_arn)
+        .role_session_name("denied")
+        .send()
+        .await
+        .unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("AccessDenied"),
+        "expected AccessDenied for explicit-deny trust policy, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn sts_assume_role_trust_policy_external_id_required() {
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+    let sts = server.sts_client().await;
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{
+        "Effect":"Allow",
+        "Principal":{"AWS":"*"},
+        "Action":"sts:AssumeRole",
+        "Condition":{"StringEquals":{"sts:ExternalId":"shared-secret"}}
+    }]}"#;
+    let role = iam
+        .create_role()
+        .role_name("ext-id-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+    let role_arn = role.role().unwrap().arn().to_string();
+
+    // Missing ExternalId -> denied.
+    let err = sts
+        .assume_role()
+        .role_arn(&role_arn)
+        .role_session_name("missing-eid")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("AccessDenied"));
+
+    // Wrong ExternalId -> denied.
+    let err = sts
+        .assume_role()
+        .role_arn(&role_arn)
+        .role_session_name("wrong-eid")
+        .external_id("nope")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("AccessDenied"));
+
+    // Correct ExternalId -> allowed.
+    let resp = sts
+        .assume_role()
+        .role_arn(&role_arn)
+        .role_session_name("ok-eid")
+        .external_id("shared-secret")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp
+        .credentials()
+        .unwrap()
+        .access_key_id()
+        .starts_with("FSIA"));
+}
+
+#[tokio::test]
+async fn sts_assume_role_trust_policy_mfa_required() {
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+    let sts = server.sts_client().await;
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{
+        "Effect":"Allow",
+        "Principal":{"AWS":"*"},
+        "Action":"sts:AssumeRole",
+        "Condition":{"Bool":{"aws:MultiFactorAuthPresent":"true"}}
+    }]}"#;
+    let role = iam
+        .create_role()
+        .role_name("mfa-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+    let role_arn = role.role().unwrap().arn().to_string();
+
+    // No MFA -> denied.
+    let err = sts
+        .assume_role()
+        .role_arn(&role_arn)
+        .role_session_name("no-mfa")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("AccessDenied"));
+
+    // MFA supplied -> allowed.
+    let resp = sts
+        .assume_role()
+        .role_arn(&role_arn)
+        .role_session_name("with-mfa")
+        .serial_number("arn:aws:iam::123456789012:mfa/admin")
+        .token_code("123456")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp
+        .credentials()
+        .unwrap()
+        .access_key_id()
+        .starts_with("FSIA"));
+}
+
+#[tokio::test]
+async fn sts_assume_role_service_linked_role_blocks_non_service_caller() {
+    // Service-linked roles (path /aws-service-role/<service>/...) are
+    // only assumable by the matching service; a generic caller must
+    // get AccessDenied even with a permissive trust policy.
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+    let sts = server.sts_client().await;
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{
+        "Effect":"Allow","Principal":{"Service":"ecs.amazonaws.com"},
+        "Action":"sts:AssumeRole"
+    }]}"#;
+    let role = iam
+        .create_role()
+        .role_name("AWSServiceRoleForECS")
+        .path("/aws-service-role/ecs.amazonaws.com/")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+    let role_arn = role.role().unwrap().arn().to_string();
+
+    let err = sts
+        .assume_role()
+        .role_arn(&role_arn)
+        .role_session_name("not-ecs")
+        .send()
+        .await
+        .unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("AccessDenied"),
+        "service-linked role must reject non-service caller, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn sts_assume_role_with_web_identity_rejects_unregistered_issuer() {
+    // F1: a JWT whose `iss` doesn't map to any registered
+    // OpenIDConnectProvider must be rejected with InvalidIdentityToken.
+    let server = TestServer::start().await;
+    let sts = server.sts_client().await;
+
+    use base64::Engine;
+    let header =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(br#"{"iss":"https://unknown-issuer.example.com","aud":"my-app","sub":"user-1"}"#);
+    let token = format!("{header}.{payload}.");
+
+    let err = sts
+        .assume_role_with_web_identity()
+        .role_arn("arn:aws:iam::123456789012:role/oidc-role")
+        .role_session_name("oidc")
+        .web_identity_token(&token)
+        .send()
+        .await
+        .unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("InvalidIdentityToken"),
+        "unregistered issuer must error InvalidIdentityToken, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn sts_assume_role_with_web_identity_rejects_unknown_audience() {
+    // F1: even with a registered OIDC provider, the JWT's `aud` claim
+    // must be in the provider's client_id_list, otherwise reject.
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+    let sts = server.sts_client().await;
+
+    iam.create_open_id_connect_provider()
+        .url("https://accounts.google.com")
+        .client_id_list("known-client-id")
+        .thumbprint_list("0".repeat(40))
+        .send()
+        .await
+        .unwrap();
+
+    use base64::Engine;
+    let header =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(br#"{"iss":"https://accounts.google.com","aud":"wrong-aud","sub":"u1"}"#);
+    let token = format!("{header}.{payload}.");
+
+    let err = sts
+        .assume_role_with_web_identity()
+        .role_arn("arn:aws:iam::123456789012:role/oidc-role")
+        .role_session_name("oidc")
+        .web_identity_token(&token)
+        .send()
+        .await
+        .unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("InvalidIdentityToken"),
+        "audience mismatch must error InvalidIdentityToken, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn sts_assume_role_with_web_identity_accepts_array_audience() {
+    // RFC 7519 §4.1.3: JWT `aud` may be a JSON array. Real Google /
+    // Auth0 / Cognito tokens use the array form. The audience check
+    // must accept any entry that's in the provider's client_id_list.
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+    let sts = server.sts_client().await;
+
+    iam.create_open_id_connect_provider()
+        .url("https://accounts.google.com")
+        .client_id_list("primary-client-id")
+        .thumbprint_list("0".repeat(40))
+        .send()
+        .await
+        .unwrap();
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{
+        "Effect":"Allow",
+        "Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/accounts.google.com"},
+        "Action":"sts:AssumeRoleWithWebIdentity"
+    }]}"#;
+    iam.create_role()
+        .role_name("oidc-array-aud-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+
+    use base64::Engine;
+    let header =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        br#"{"iss":"https://accounts.google.com","aud":["other-client","primary-client-id"],"sub":"u1"}"#,
+    );
+    let token = format!("{header}.{payload}.");
+
+    let resp = sts
+        .assume_role_with_web_identity()
+        .role_arn("arn:aws:iam::123456789012:role/oidc-array-aud-role")
+        .role_session_name("array-aud")
+        .web_identity_token(&token)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp
+        .credentials()
+        .unwrap()
+        .access_key_id()
+        .starts_with("FSIA"));
+}
+
+#[tokio::test]
+async fn sts_assume_role_with_web_identity_succeeds_when_iss_aud_match() {
+    // F1: with a registered OIDC provider whose client_id_list contains
+    // the JWT `aud`, AssumeRoleWithWebIdentity must succeed and the
+    // returned creds must trace back to a federated session.
+    let server = TestServer::start().await;
+    let iam = server.iam_client().await;
+    let sts = server.sts_client().await;
+
+    iam.create_open_id_connect_provider()
+        .url("https://accounts.google.com")
+        .client_id_list("my-app-id")
+        .thumbprint_list("0".repeat(40))
+        .send()
+        .await
+        .unwrap();
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{
+        "Effect":"Allow",
+        "Principal":{"Federated":"arn:aws:iam::123456789012:oidc-provider/accounts.google.com"},
+        "Action":"sts:AssumeRoleWithWebIdentity",
+        "Condition":{"StringEquals":{"accounts.google.com:aud":"my-app-id"}}
+    }]}"#;
+    iam.create_role()
+        .role_name("oidc-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+
+    use base64::Engine;
+    let header =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        br#"{"iss":"https://accounts.google.com","aud":"my-app-id","sub":"google-user-7"}"#,
+    );
+    let token = format!("{header}.{payload}.");
+
+    let resp = sts
+        .assume_role_with_web_identity()
+        .role_arn("arn:aws:iam::123456789012:role/oidc-role")
+        .role_session_name("oidc-sess")
+        .web_identity_token(&token)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp
+        .credentials()
+        .unwrap()
+        .access_key_id()
+        .starts_with("FSIA"));
+}

@@ -151,6 +151,7 @@ The resource's owning account is parsed from the ARN; S3 ARNs have an empty acco
 - **S3 bucket policies** are stored by `PutBucketPolicy` and updated by `DeleteBucketPolicy`. `GetBucketPolicy` returns the raw JSON.
 - **SNS topic policies** are stored in the topic's `Policy` attribute by `SetTopicAttributes` (full document) or by `AddPermission` / `RemovePermission` (incremental statements). `GetTopicAttributes` returns them.
 - **Lambda function policies** are built incrementally by `AddPermission`: fakecloud composes a canonical `{"Version":"2012-10-17","Statement":[...]}` document from `(StatementId, Action, Principal, SourceArn?, SourceAccount?)` so the existing evaluator reads it without a Lambda-specific fork. `SourceArn` becomes an `ArnLike` `Condition` on `aws:SourceArn`, and `SourceAccount` becomes a `StringEquals` `Condition` on `aws:SourceAccount` — both are already in the operator set. `GetPolicy` returns the composed document; `RemovePermission` strips the matching `Sid` and leaves an empty `Statement` array behind, matching AWS.
+- **IAM role trust policies** (`assume_role_policy_document`) are evaluated on every `AssumeRole`, `AssumeRoleWithSAML`, and `AssumeRoleWithWebIdentity` call before STS issues credentials. The trust policy is the *only* authorization source for role assumption — identity policies do not factor in. Caller principal, action (`sts:AssumeRole*`), `Condition` keys (`sts:ExternalId`, `sts:RoleSessionName`, `sts:SourceIdentity`, `aws:MultiFactorAuthPresent`, `aws:SourceAccount`), and federation-specific keys (`saml:aud`, `saml:iss`, `<provider>:aud`, `<provider>:sub`) are all populated. `AssumeRoleWithWebIdentity` additionally requires the JWT's `iss` to match a registered `OpenIDConnectProvider` and `aud` to be in its `client_id_list`; service-linked roles (path `/aws-service-role/<service>/...`) refuse non-service callers regardless of trust-policy contents.
 
 **Principal matching.** Resource policies use `Principal` / `NotPrincipal` keys that identity policies don't. The evaluator supports the shapes resource policies actually use in practice:
 
@@ -163,10 +164,11 @@ The resource's owning account is parsed from the ARN; S3 ARNs have an empty acco
 | `"Principal": {"AWS": "arn:aws:iam::ACCOUNT:user/alice"}` | Exact principal ARN match |
 | `"Principal": {"AWS": [...]}` | List form — any entry matches |
 | `"Principal": {"Service": "events.amazonaws.com"}` | Matches an assumed-role principal whose ARN contains the service host (covers EventBridge -> SNS and similar service-linked role scenarios) |
+| `"Principal": {"Federated": "<provider>"}` | Matches a federated session minted by `AssumeRoleWithSAML` / `AssumeRoleWithWebIdentity` whose provider ARN equals `<provider>`. Used by IAM role trust policies. |
 
-`NotPrincipal` is fully evaluated — a statement with `NotPrincipal` applies to all callers **except** those matching any entry in the list (the exact inverse of `Principal`). The classic AWS pattern `Deny` + `NotPrincipal` ("deny everyone except this user") works correctly. `NotPrincipal` entries with unrecognized principal types (`Federated`, `CanonicalUser`) are dropped from the match list; if all entries are unrecognized the statement is skipped with a `fakecloud::iam::audit` debug log and never silently grants.
+`NotPrincipal` is fully evaluated — a statement with `NotPrincipal` applies to all callers **except** those matching any entry in the list (the exact inverse of `Principal`). The classic AWS pattern `Deny` + `NotPrincipal` ("deny everyone except this user") works correctly. `NotPrincipal` entries with unrecognized principal types (`CanonicalUser`) are dropped from the match list; if all entries are unrecognized the statement is skipped with a `fakecloud::iam::audit` debug log and never silently grants.
 
-`Principal` types other than `AWS` / `Service` (`Federated`, `CanonicalUser`) fall through to "doesn't match" for the same reason.
+`Principal` types other than `AWS` / `Service` / `Federated` (`CanonicalUser`) fall through to "doesn't match" for the same reason.
 
 `Condition` blocks on resource-policy statements are evaluated with the same operator set and global condition keys as identity policies — the condition entry points are shared.
 

@@ -157,6 +157,14 @@ pub(crate) enum PrincipalRef {
     /// including the service host, matching how AWS builds
     /// service-linked role ARNs).
     Service(String),
+    /// `"Principal": {"Federated": "arn:aws:iam::ACCOUNT:saml-provider/Idp"}`
+    /// or `{"Federated": "accounts.google.com"}` /
+    /// `{"Federated": "cognito-identity.amazonaws.com"}`. Matches a
+    /// federated principal whose ARN equals the named SAML/OIDC
+    /// provider — STS sets the principal ARN to the provider when
+    /// minting the trust-policy evaluation request for
+    /// AssumeRoleWithSAML / AssumeRoleWithWebIdentity.
+    Federated(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,6 +317,11 @@ fn parse_principal(value: &Value) -> Vec<PrincipalRef> {
                     "Service" => {
                         for s in coerce_string_list(v) {
                             out.push(PrincipalRef::Service(s));
+                        }
+                    }
+                    "Federated" => {
+                        for s in coerce_string_list(v) {
+                            out.push(PrincipalRef::Federated(s));
                         }
                     }
                     other => {
@@ -741,7 +754,18 @@ fn principal_matches(refs: &[PrincipalRef], principal: &Principal) -> bool {
         PrincipalRef::AwsAccountRoot(account) => &principal.account_id == account,
         PrincipalRef::AwsArn(arn) => &principal.arn == arn,
         PrincipalRef::Service(service) => principal_is_service(principal, service),
+        PrincipalRef::Federated(provider) => principal_is_federated(principal, provider),
     })
+}
+
+/// Match a `"Federated"` principal. STS injects the federated provider
+/// (SAML provider ARN, OIDC issuer URL, or `cognito-identity.amazonaws.com`)
+/// as the principal ARN when evaluating trust policies for
+/// `AssumeRoleWithSAML` / `AssumeRoleWithWebIdentity`. We require the
+/// principal to be of type `FederatedUser` and its ARN to equal the
+/// provider — never silently grant.
+fn principal_is_federated(principal: &Principal, provider: &str) -> bool {
+    matches!(principal.principal_type, PrincipalType::FederatedUser) && principal.arn == provider
 }
 
 /// Approximate match for a `"Service"` principal. AWS represents a

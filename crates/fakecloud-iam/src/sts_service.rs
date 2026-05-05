@@ -466,6 +466,15 @@ impl StsService {
                     .service_keys
                     .insert("sts:sourceidentity".to_string(), vec![src.clone()]);
             }
+            // `aws:SourceAccount` — the calling account (cross-account
+            // confused-deputy guard). Trust policies on third-party-
+            // hosted roles commonly gate on this so a service running
+            // in a tenant account can't impersonate the integration
+            // owner.
+            context.service_keys.insert(
+                "aws:sourceaccount".to_string(),
+                vec![caller_principal.account_id.clone()],
+            );
 
             let eval_req = EvalRequest {
                 principal: &caller_principal,
@@ -576,7 +585,7 @@ impl StsService {
             )
         })?;
         validate_string_length("webIdentityToken", web_identity_token, 4, 20000)?;
-        let _web_identity_token = web_identity_token.clone();
+        let web_identity_token_owned = web_identity_token.clone();
 
         // Validate optional Policy
         validate_optional_string_length(
@@ -631,6 +640,145 @@ impl StsService {
         );
         let assumed_role_id_str = format!("{}:{}", role_id, role_session_name);
 
+        // Decode the JWT for trust-policy enforcement and to figure out
+        // which OIDC provider vouched for the assertion. We never verify
+        // signatures — fakecloud is not a security boundary — but we
+        // require enough structure to extract `iss` and `aud` so the
+        // trust policy gate can fire on real AWS-shaped policies.
+        let jwt = decode_jwt(&web_identity_token_owned);
+
+        // Pick the federated provider ARN. Preference order:
+        //   1. JWT iss matched against a registered OpenIDConnectProvider —
+        //      we use the provider's stored ARN.
+        //   2. Caller-supplied ProviderId param (legacy IdP host name).
+        //   3. Synthetic placeholder so policies that just check for "any
+        //      federated session" still bind. This branch only fires for
+        //      tokens that aren't real JWTs — real OIDC clients hit (1).
+        let provider_id_param = req.query_params.get("ProviderId").cloned();
+        let oidc_match = jwt.as_ref().and_then(|c| c.iss.as_deref()).and_then(|iss| {
+            find_oidc_provider(&accounts, iss).map(|(_, p)| (iss.to_string(), p.clone()))
+        });
+
+        // If we have a JWT with an `iss` claim, the issuer MUST resolve
+        // to a registered OIDC provider — anything else is a federation
+        // misconfiguration and AWS rejects with InvalidIdentityToken.
+        if let Some(ref claims) = jwt {
+            if let Some(ref iss) = claims.iss {
+                if oidc_match.is_none() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidIdentityToken",
+                        format!("No OpenIDConnect provider found in your account for issuer {iss}"),
+                    ));
+                }
+                // Audience must overlap with the provider's
+                // client_id_list when the provider has any client IDs
+                // configured. Empty list means "accept any aud"
+                // (matches AWS for legacy/uninitialized providers).
+                // Tokens carry every audience claim the IdP issued the
+                // assertion to (RFC 7519 array form), so any one
+                // matching client_id_list entry is enough.
+                if let Some((ref _iss, ref provider)) = oidc_match {
+                    if !provider.client_id_list.is_empty() {
+                        let any_match = claims
+                            .aud
+                            .iter()
+                            .any(|aud| provider.client_id_list.iter().any(|c| c == aud));
+                        if !any_match {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "InvalidIdentityToken",
+                                format!(
+                                    "Incorrect token audience: not in client_id_list for provider {}",
+                                    provider.arn
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        let federated_provider = oidc_match
+            .as_ref()
+            .map(|(_iss, p)| p.arn.clone())
+            .or(provider_id_param.clone())
+            .unwrap_or_else(|| format!("arn:aws:iam::{}:oidc-provider/web-identity", account_id));
+
+        // Trust-policy gate: same shape as AssumeRole, but the caller
+        // principal is the federated provider and the action is
+        // `sts:AssumeRoleWithWebIdentity`. Service-linked roles are
+        // never assumable via web identity, so we don't replicate the
+        // SLR shortcut from `assume_role`.
+        let target_state = accounts.get_or_create(&account_id);
+        if let Some(role) = target_state.roles.get(role_name).cloned() {
+            let trust_doc = PolicyDocument::parse(&role.assume_role_policy_document);
+            let caller_principal = federated_principal(&federated_provider, &account_id);
+            let mut context = RequestContext {
+                aws_principal_arn: Some(caller_principal.arn.clone()),
+                aws_principal_account: Some(caller_principal.account_id.clone()),
+                aws_principal_type: Some(caller_principal.principal_type.as_str().to_string()),
+                aws_federated_provider: Some(federated_provider.clone()),
+                ..Default::default()
+            };
+            context.service_keys.insert(
+                "sts:rolesessionname".to_string(),
+                vec![role_session_name.clone()],
+            );
+            // Per-provider `<provider>:aud`/`<provider>:sub` keys —
+            // AWS exposes these scoped to the issuer host so policies
+            // can write `accounts.google.com:aud`, `cognito-identity.amazonaws.com:sub`,
+            // etc. We key off the registered provider URL (no scheme)
+            // when we matched one, otherwise the caller-supplied
+            // ProviderId.
+            let key_prefix = oidc_match
+                .as_ref()
+                .map(|(_iss, p)| normalize_issuer(&p.url))
+                .or_else(|| provider_id_param.as_deref().map(normalize_issuer));
+            if let Some(prefix) = key_prefix {
+                if let Some(ref claims) = jwt {
+                    if !claims.aud.is_empty() {
+                        // `aud` is multi-valued (RFC 7519); surface
+                        // every audience so a `StringEquals` /
+                        // `ForAnyValue:StringEquals` condition matches
+                        // whichever entry the policy names.
+                        context
+                            .service_keys
+                            .insert(format!("{prefix}:aud"), claims.aud.clone());
+                    }
+                    if let Some(ref sub) = claims.sub {
+                        context
+                            .service_keys
+                            .insert(format!("{prefix}:sub"), vec![sub.clone()]);
+                        context.aws_userid = Some(sub.clone());
+                    }
+                    if let Some(amr) = claims.raw.get("amr").and_then(|v| v.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    }) {
+                        context.service_keys.insert(format!("{prefix}:amr"), amr);
+                    }
+                }
+            }
+            let eval_req = EvalRequest {
+                principal: &caller_principal,
+                action: "sts:AssumeRoleWithWebIdentity".to_string(),
+                resource: role_arn.clone(),
+                context,
+            };
+            if !matches!(
+                evaluate_resource_policy_only(&trust_doc, &eval_req),
+                Decision::Allow
+            ) {
+                return Err(trust_policy_denied(
+                    "sts:AssumeRoleWithWebIdentity",
+                    &caller_principal.arn,
+                    role_arn,
+                ));
+            }
+        }
+
         let target_state = accounts.get_or_create(&account_id);
         target_state.credential_identities.insert(
             creds.access_key_id.clone(),
@@ -640,20 +788,11 @@ impl StsService {
                 account_id: account_id.clone(),
             },
         );
-        // `aws:FederatedProvider` is the OIDC provider ARN (or the
-        // friendly host name when supplied via `ProviderId`). Real AWS
-        // populates it from the registered OIDC provider used during
-        // token validation; this emulator carries the caller-supplied
-        // ProviderId verbatim, falling back to a synthetic OIDC
-        // provider ARN keyed off the role's account when absent so a
-        // policy condition that just checks for "any federated session"
-        // still has a value to bind to.
-        let federated_provider = req.query_params.get("ProviderId").cloned().or_else(|| {
-            Some(format!(
-                "arn:aws:iam::{}:oidc-provider/web-identity",
-                account_id
-            ))
-        });
+        // `aws:FederatedProvider` is the OIDC provider ARN (preferred)
+        // or the caller-supplied ProviderId (legacy idp host name).
+        // Falls back to a synthetic ARN so policies that simply check
+        // for "any federated session" still have a value to bind to.
+        let federated_provider = Some(federated_provider);
         target_state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
@@ -747,9 +886,11 @@ impl StsService {
         let expiration_at = compute_expiration_at(req, DEFAULT_ASSUME_ROLE_DURATION)?;
         let expiration = format_expiration(expiration_at);
 
-        // Decode the SAML assertion to extract the RoleSessionName
+        // Decode the SAML assertion to extract the RoleSessionName plus
+        // the issuer/audience claims used for trust-policy enforcement.
         let role_session_name =
             extract_saml_session_name(saml_assertion).unwrap_or_else(|| "saml-session".to_string());
+        let saml_claims = extract_saml_claims(saml_assertion);
 
         let partition = partition_for_region(&req.region);
         let creds = StsCredentials::generate();
@@ -767,6 +908,75 @@ impl StsService {
             partition, account_id, role_name, &role_session_name
         );
         let assumed_role_id_str = format!("{}:{}", role_id, role_session_name);
+
+        // If the named SAML provider IS registered, enforce its
+        // metadata-derived audience against the assertion's
+        // `<Audience>` claim. Unregistered providers fall through —
+        // tests still in the pre-F1 era (and AWS itself, when the
+        // provider was nuked between assertion issue and use) get a
+        // soft pass; the trust policy below still gates the call.
+        if let Some(provider) = find_saml_provider(&accounts, &saml_provider_arn) {
+            if let Some(expected_aud) = expected_saml_audience(&provider.saml_metadata_document) {
+                if let Some(ref got) = saml_claims.audience {
+                    if got != &expected_aud {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidIdentityToken",
+                            format!(
+                                "SAML assertion audience '{got}' does not match SAML provider '{}'",
+                                provider.arn
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Trust-policy gate: caller principal is the SAML provider,
+        // action is `sts:AssumeRoleWithSAML`. Trust policies typically
+        // gate on `saml:aud` / `saml:iss` plus `aws:FederatedProvider`.
+        let target_state = accounts.get_or_create(&account_id);
+        if let Some(role) = target_state.roles.get(role_name).cloned() {
+            let trust_doc = PolicyDocument::parse(&role.assume_role_policy_document);
+            let caller_principal = federated_principal(&saml_provider_arn, &account_id);
+            let mut context = RequestContext {
+                aws_principal_arn: Some(caller_principal.arn.clone()),
+                aws_principal_account: Some(caller_principal.account_id.clone()),
+                aws_principal_type: Some(caller_principal.principal_type.as_str().to_string()),
+                aws_federated_provider: Some(saml_provider_arn.clone()),
+                ..Default::default()
+            };
+            if let Some(ref aud) = saml_claims.audience {
+                context
+                    .service_keys
+                    .insert("saml:aud".to_string(), vec![aud.clone()]);
+            }
+            if let Some(ref iss) = saml_claims.issuer {
+                context
+                    .service_keys
+                    .insert("saml:iss".to_string(), vec![iss.clone()]);
+            }
+            context.service_keys.insert(
+                "sts:rolesessionname".to_string(),
+                vec![role_session_name.clone()],
+            );
+            let eval_req = EvalRequest {
+                principal: &caller_principal,
+                action: "sts:AssumeRoleWithSAML".to_string(),
+                resource: role_arn.clone(),
+                context,
+            };
+            if !matches!(
+                evaluate_resource_policy_only(&trust_doc, &eval_req),
+                Decision::Allow
+            ) {
+                return Err(trust_policy_denied(
+                    "sts:AssumeRoleWithSAML",
+                    &caller_principal.arn,
+                    role_arn,
+                ));
+            }
+        }
 
         let target_state = accounts.get_or_create(&account_id);
         target_state.credential_identities.insert(
@@ -1187,6 +1397,226 @@ fn extract_account_from_arn(arn: &str) -> Option<String> {
     }
 }
 
+/// Decoded view of the trusted bits of a SAML assertion. We only pull the
+/// `Issuer` and `Audience` so the trust policy and OIDC-style lookups can
+/// gate on them — full assertion verification (signature, NotBefore /
+/// NotOnOrAfter, etc.) is out of scope for the emulator.
+#[derive(Debug, Clone, Default)]
+struct SamlClaims {
+    issuer: Option<String>,
+    audience: Option<String>,
+}
+
+/// Pull `Issuer` and `Audience` out of a base64-encoded SAML assertion.
+/// Returns whatever fields could be extracted (both fields are optional);
+/// callers decide what to do when one is missing.
+fn extract_saml_claims(saml_b64: &str) -> SamlClaims {
+    use base64::Engine;
+    let mut claims = SamlClaims::default();
+    let decoded = match base64::engine::general_purpose::STANDARD.decode(saml_b64) {
+        Ok(b) => b,
+        Err(_) => return claims,
+    };
+    let xml_str = match String::from_utf8(decoded) {
+        Ok(s) => s,
+        Err(_) => return claims,
+    };
+    claims.issuer = extract_xml_text_after(&xml_str, "Issuer");
+    claims.audience = extract_xml_text_after(&xml_str, "Audience");
+    claims
+}
+
+/// Find the first occurrence of an opening tag with `local_name` (with or
+/// without an XML namespace prefix) and return its text content. Used by
+/// the SAML claim extractor — matches the same pragmatic, prefix-tolerant
+/// approach as `extract_saml_session_name`.
+fn extract_xml_text_after(xml: &str, local_name: &str) -> Option<String> {
+    // Try `<local_name`, `<saml:local_name`, `<saml2:local_name`, etc by
+    // scanning for `<` followed by the local name preceded by either `:`
+    // or just `<`.
+    let mut search_from = 0;
+    while let Some(idx) = xml[search_from..].find('<') {
+        let abs = search_from + idx;
+        let after_lt = &xml[abs + 1..];
+        // Strip optional namespace prefix.
+        let tag_start = after_lt
+            .split_once(':')
+            .map(|(_pfx, rest)| rest)
+            .unwrap_or(after_lt);
+        if let Some(after_name) = tag_start.strip_prefix(local_name) {
+            // Verify the next char ends the local name (whitespace, '>', '/').
+            let valid_terminator = after_name
+                .chars()
+                .next()
+                .map(|c| c == '>' || c == ' ' || c == '/' || c == '\t' || c == '\n')
+                .unwrap_or(false);
+            if valid_terminator {
+                let gt_pos = after_lt.find('>')?;
+                let content_start = abs + 1 + gt_pos + 1;
+                let next_lt = xml[content_start..].find('<')?;
+                let value = xml[content_start..content_start + next_lt].trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        search_from = abs + 1;
+    }
+    None
+}
+
+/// Decoded JWT claims we care about for `AssumeRoleWithWebIdentity`.
+/// We never verify the signature — fakecloud is not a security boundary —
+/// but we DO require the token to be a syntactically valid JWT with an
+/// `iss` claim so trust-policy enforcement has something to bind to.
+#[derive(Debug, Clone, Default)]
+struct JwtClaims {
+    iss: Option<String>,
+    /// `aud` per RFC 7519 §4.1.3 may be either a single string or a JSON
+    /// array of strings. Real-world IdPs (Google, Auth0, Cognito) all
+    /// emit the array form regularly, so we carry every entry and
+    /// match against any of them when validating.
+    aud: Vec<String>,
+    sub: Option<String>,
+    raw: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Parse a base64url-encoded JWT into its `iss`/`aud`/`sub` claims.
+/// Returns `None` when the token is not a 3-segment JWT or the payload
+/// is not JSON. We accept both unpadded base64url (canonical) and the
+/// padded variant some libraries emit.
+fn decode_jwt(token: &str) -> Option<JwtClaims> {
+    use base64::Engine;
+    let segments: Vec<&str> = token.split('.').collect();
+    if segments.len() != 3 {
+        return None;
+    }
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(segments[1])
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(segments[1]))
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    let map = json.as_object()?.clone();
+    let str_field = |k: &str| map.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    // RFC 7519 §4.1.3: `aud` is either a string or a JSON array of
+    // strings. Accept both shapes — Google, Auth0, and Cognito all
+    // emit the array form.
+    let aud = match map.get("aud") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some(JwtClaims {
+        iss: str_field("iss"),
+        aud,
+        sub: str_field("sub"),
+        raw: map,
+    })
+}
+
+/// Normalize an OIDC issuer URL for comparison with a registered
+/// `OpenIDConnectProvider` URL. AWS stores the URL without scheme and
+/// without trailing slash, while JWT `iss` claims usually carry
+/// `https://`. We strip both ends so callers can do an equality check.
+fn normalize_issuer(value: &str) -> String {
+    let no_scheme = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .unwrap_or(value);
+    no_scheme.trim_end_matches('/').to_string()
+}
+
+/// Find a registered OIDC provider whose URL matches the given JWT
+/// `iss` claim. Searches across every account's IAM state — federation
+/// is a global concern, and the calling account doesn't necessarily own
+/// the provider record.
+fn find_oidc_provider<'a>(
+    accounts: &'a fakecloud_core::multi_account::MultiAccountState<IamState>,
+    issuer: &str,
+) -> Option<(&'a str, &'a crate::state::OidcProvider)> {
+    let normalized = normalize_issuer(issuer);
+    for (acct_id, state) in accounts.iter() {
+        for provider in state.oidc_providers.values() {
+            if normalize_issuer(&provider.url) == normalized {
+                return Some((acct_id, provider));
+            }
+        }
+    }
+    None
+}
+
+/// Find a registered SAML provider by ARN. Same cross-account scan as
+/// the OIDC variant — SAML provider ARNs name the provider's owning
+/// account in the ARN itself.
+fn find_saml_provider<'a>(
+    accounts: &'a fakecloud_core::multi_account::MultiAccountState<IamState>,
+    arn: &str,
+) -> Option<&'a crate::state::SamlProvider> {
+    for (_acct_id, state) in accounts.iter() {
+        if let Some(provider) = state.saml_providers.get(arn) {
+            return Some(provider);
+        }
+    }
+    None
+}
+
+/// Pull the expected audience out of a SAML provider's metadata
+/// document. Real metadata uses `entityID="..."` on the `<EntityDescriptor>`
+/// root element to name the IdP — AWS treats it as the audience the
+/// assertion must be addressed to. We use a best-effort string scan
+/// rather than full XML parsing; the metadata format is stable and
+/// callers that want the strict path can supply a SAML provider with
+/// no metadata, in which case we skip the audience check.
+fn expected_saml_audience(metadata: &str) -> Option<String> {
+    let needle = "entityID=";
+    let pos = metadata.find(needle)?;
+    let after = &metadata[pos + needle.len()..];
+    let quote = after.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &after[1..];
+    let end = rest.find(quote)?;
+    let value = rest[..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// Build the synthetic federated `Principal` we hand to the trust-policy
+/// evaluator for `AssumeRoleWithSAML` / `AssumeRoleWithWebIdentity`. The
+/// ARN is the federated provider (SAML provider ARN or OIDC issuer);
+/// `principal_type` is `FederatedUser`, which is what
+/// [`PrincipalRef::Federated`] matches against.
+fn federated_principal(provider_arn: &str, account_id: &str) -> Principal {
+    Principal {
+        arn: provider_arn.to_string(),
+        user_id: provider_arn.to_string(),
+        account_id: account_id.to_string(),
+        principal_type: PrincipalType::FederatedUser,
+        source_identity: None,
+        tags: None,
+    }
+}
+
+/// Produce the AWS-style AccessDenied error returned when the role's
+/// trust policy refuses an STS AssumeRole* call.
+fn trust_policy_denied(action: &str, caller_arn: &str, role_arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::FORBIDDEN,
+        "AccessDenied",
+        format!(
+            "User: {} is not authorized to perform: {} on resource: {}",
+            caller_arn, action, role_arn
+        ),
+    )
+}
+
 /// Extract the RoleSessionName from a base64-encoded SAML assertion.
 fn extract_saml_session_name(saml_b64: &str) -> Option<String> {
     use base64::Engine;
@@ -1572,7 +2002,8 @@ mod tests {
     #[tokio::test]
     async fn assume_role_with_web_identity() {
         let (svc, state) = make_sts_service();
-        let role_arn = create_role_in_state(&state, "web-role");
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRoleWithWebIdentity"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "web-role", trust);
 
         let req = sts_request(
             "AssumeRoleWithWebIdentity",
@@ -2024,7 +2455,8 @@ mod tests {
         use base64::Engine;
         use fakecloud_core::auth::CredentialResolver;
         let (svc, state) = make_sts_service();
-        let role_arn = create_role_in_state(&state, "saml-role");
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRoleWithSAML"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "saml-role", trust);
         let saml_xml = r#"<?xml version="1.0"?><samlp:Response><Assertion><AttributeStatement><Attribute Name="https://aws.amazon.com/SAML/Attributes/RoleSessionName"><AttributeValue>jane</AttributeValue></Attribute></AttributeStatement></Assertion></samlp:Response>"#;
         let saml_b64 = base64::engine::general_purpose::STANDARD.encode(saml_xml);
         let provider_arn = "arn:aws:iam::123456789012:saml-provider/idp";
@@ -2063,7 +2495,8 @@ mod tests {
         use crate::credential_resolver::IamCredentialResolver;
         use fakecloud_core::auth::CredentialResolver;
         let (svc, state) = make_sts_service();
-        let role_arn = create_role_in_state(&state, "oidc-role");
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRoleWithWebIdentity"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "oidc-role", trust);
         let req = sts_request(
             "AssumeRoleWithWebIdentity",
             vec![
