@@ -941,6 +941,13 @@ fn add_cluster_to_replication_group_updates_members_and_count() {
             cluster_mode: None,
             data_tiering_enabled: None,
             notification_topic_status: None,
+            cache_parameter_group_name: None,
+            cache_subnet_group_name: None,
+            security_group_ids: Vec::new(),
+            preferred_maintenance_window: None,
+            snapshot_name: None,
+            snapshot_arns: Vec::new(),
+            auto_minor_version_upgrade: true,
         },
     );
 
@@ -1007,6 +1014,13 @@ async fn delete_cache_cluster_removes_cluster_from_replication_group() {
                 cluster_mode: None,
                 data_tiering_enabled: None,
                 notification_topic_status: None,
+                cache_parameter_group_name: None,
+                cache_subnet_group_name: None,
+                security_group_ids: Vec::new(),
+                preferred_maintenance_window: None,
+                snapshot_name: None,
+                snapshot_arns: Vec::new(),
+                auto_minor_version_upgrade: true,
             },
         );
     }
@@ -1098,6 +1112,13 @@ fn service_with_replication_group(group_id: &str, num_clusters: i32) -> ElastiCa
                 cluster_mode: None,
                 data_tiering_enabled: None,
                 notification_topic_status: None,
+                cache_parameter_group_name: None,
+                cache_subnet_group_name: None,
+                security_group_ids: Vec::new(),
+                preferred_maintenance_window: None,
+                snapshot_name: None,
+                snapshot_arns: Vec::new(),
+                auto_minor_version_upgrade: true,
             },
         );
     }
@@ -1367,6 +1388,13 @@ fn replication_group_xml_emits_dynamic_encryption_and_kms() {
             cluster_mode: Some("enabled".to_string()),
             data_tiering_enabled: Some(false),
             notification_topic_status: None,
+            cache_parameter_group_name: Some("default.redis7".to_string()),
+            cache_subnet_group_name: Some("default".to_string()),
+            security_group_ids: vec!["sg-aaaa".to_string()],
+            preferred_maintenance_window: Some("sun:23:00-mon:01:30".to_string()),
+            snapshot_name: None,
+            snapshot_arns: Vec::new(),
+            auto_minor_version_upgrade: true,
         },
     );
     let xml =
@@ -2799,6 +2827,90 @@ async fn create_replication_group_missing_description_errors() {
     assert!(svc.create_replication_group(&req).await.is_err());
 }
 
+#[tokio::test]
+async fn create_replication_group_rejects_num_node_groups_out_of_range() {
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let svc = ElastiCacheService::new(shared);
+    // Default Redis 7.1 caps at 500; reject anything above.
+    let req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "huge-rg"),
+            ("ReplicationGroupDescription", "too many shards"),
+            ("NumNodeGroups", "1000000"),
+        ],
+    );
+    match svc.create_replication_group(&req).await {
+        Ok(_) => panic!("expected NumNodeGroups=1000000 to be rejected"),
+        Err(e) => assert_eq!(e.status(), http::StatusCode::BAD_REQUEST),
+    }
+
+    let req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "zero-rg"),
+            ("ReplicationGroupDescription", "zero shards"),
+            ("NumNodeGroups", "0"),
+        ],
+    );
+    match svc.create_replication_group(&req).await {
+        Ok(_) => panic!("expected NumNodeGroups=0 to be rejected"),
+        Err(e) => assert_eq!(e.status(), http::StatusCode::BAD_REQUEST),
+    }
+}
+
+#[test]
+fn max_node_groups_matches_engine_version() {
+    // Redis < 5.0.6 was capped at 90 shards. Reject the request the same
+    // way real AWS would for callers pinning to those legacy versions.
+    assert_eq!(super::max_node_groups_for("redis", "3.2.10"), 90);
+    assert_eq!(super::max_node_groups_for("redis", "5.0.0"), 90);
+    assert_eq!(super::max_node_groups_for("redis", "5.0.5"), 90);
+    // 5.0.6 is the threshold where AWS lifted the cap.
+    assert_eq!(super::max_node_groups_for("redis", "5.0.6"), 500);
+    assert_eq!(super::max_node_groups_for("redis", "6.2"), 500);
+    assert_eq!(super::max_node_groups_for("redis", "7.1"), 500);
+    // Valkey is unaffected; cap is always 500.
+    assert_eq!(super::max_node_groups_for("valkey", "7.0"), 500);
+    assert_eq!(super::max_node_groups_for("valkey", "8.0"), 500);
+    // Memcached doesn't have replication groups, but the helper is total.
+    assert_eq!(super::max_node_groups_for("memcached", "1.6.22"), 500);
+    // Unparseable versions fall back to the safe modern ceiling.
+    assert_eq!(super::max_node_groups_for("redis", "garbage"), 500);
+}
+
+#[tokio::test]
+async fn create_replication_group_rejects_num_node_groups_above_legacy_redis_cap() {
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let svc = ElastiCacheService::new(shared);
+    // 100 shards on Redis 5.0.5 must be rejected (90 ceiling), but allowed
+    // on Redis 7.1 (500 ceiling) so we know the cap is engine-version-aware.
+    let req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "legacy-rg"),
+            ("ReplicationGroupDescription", "legacy redis"),
+            ("EngineVersion", "5.0.5"),
+            ("NumNodeGroups", "100"),
+        ],
+    );
+    match svc.create_replication_group(&req).await {
+        Ok(_) => panic!("Redis 5.0.5 should cap NumNodeGroups at 90"),
+        Err(e) => {
+            assert_eq!(e.status(), http::StatusCode::BAD_REQUEST);
+            assert!(
+                e.message().contains("90"),
+                "error must mention engine-specific cap, got: {}",
+                e.message()
+            );
+        }
+    }
+}
+
 // Build a ReplicationGroup as if `CreateReplicationGroup` had run, by
 // running the same parsing path the handler does (sans runtime). Used
 // by the persistence round-trip tests below to exercise every input
@@ -2900,6 +3012,17 @@ fn replication_group_from_request(req: &AwsRequest) -> crate::state::Replication
         cluster_mode,
         data_tiering_enabled,
         notification_topic_status: None,
+        cache_parameter_group_name: optional_query_param(req, "CacheParameterGroupName"),
+        cache_subnet_group_name: optional_query_param(req, "CacheSubnetGroupName"),
+        security_group_ids: parse_query_list_param(req, "SecurityGroupIds", "SecurityGroupId"),
+        preferred_maintenance_window: optional_query_param(req, "PreferredMaintenanceWindow"),
+        snapshot_name: optional_query_param(req, "SnapshotName"),
+        snapshot_arns: parse_query_list_param(req, "SnapshotArns", "SnapshotArn"),
+        auto_minor_version_upgrade: parse_optional_bool(
+            optional_query_param(req, "AutoMinorVersionUpgrade").as_deref(),
+        )
+        .unwrap()
+        .unwrap_or(true),
     }
 }
 

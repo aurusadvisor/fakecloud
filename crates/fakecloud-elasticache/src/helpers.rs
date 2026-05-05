@@ -959,7 +959,6 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
     let status = xml_escape(&g.status);
     let endpoint_address = xml_escape(&g.endpoint_address);
     let endpoint_port = g.endpoint_port;
-    let primary_cluster = xml_escape(g.member_clusters.first().map(|s| s.as_str()).unwrap_or(""));
     let primary_az_xml = xml_escape(&primary_az);
     let automatic_failover = if g.automatic_failover_enabled {
         "enabled"
@@ -990,7 +989,56 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
     } else {
         "false"
     };
+    let auto_minor_version_upgrade = if g.auto_minor_version_upgrade {
+        "true"
+    } else {
+        "false"
+    };
+    let engine = xml_escape(&g.engine);
     let arn = xml_escape(&g.arn);
+
+    // Emit one NodeGroup per shard. AWS numbers them 0001..N in
+    // padded form regardless of cluster_enabled. The same primary
+    // endpoint is reused since fakecloud runs a single backing
+    // container per replication group. Clamp at AWS's documented
+    // 500-shard ceiling so a corrupt stored value can't cause an
+    // unbounded XML allocation here.
+    const MAX_SHARDS: i32 = 500;
+    let shard_count = g.num_node_groups.clamp(1, MAX_SHARDS);
+    let node_groups_inner: String = (1..=shard_count)
+        .map(|shard| {
+            // Pull the matching member cluster id when possible so multi-shard
+            // describe responses round-trip the requested NumNodeGroups.
+            let primary_cluster = g
+                .member_clusters
+                .get((shard - 1) as usize)
+                .map(|s| s.as_str())
+                .unwrap_or_else(|| g.member_clusters.first().map(|s| s.as_str()).unwrap_or(""));
+            format!(
+                "<NodeGroup>\
+                 <NodeGroupId>{shard:04}</NodeGroupId>\
+                 <Status>available</Status>\
+                 <PrimaryEndpoint>\
+                 <Address>{endpoint_address}</Address>\
+                 <Port>{endpoint_port}</Port>\
+                 </PrimaryEndpoint>\
+                 <ReaderEndpoint>\
+                 <Address>{endpoint_address}</Address>\
+                 <Port>{endpoint_port}</Port>\
+                 </ReaderEndpoint>\
+                 <NodeGroupMembers>\
+                 <NodeGroupMember>\
+                 <CacheClusterId>{primary_cluster}</CacheClusterId>\
+                 <CacheNodeId>0001</CacheNodeId>\
+                 <PreferredAvailabilityZone>{primary_az_xml}</PreferredAvailabilityZone>\
+                 <CurrentRole>primary</CurrentRole>\
+                 </NodeGroupMember>\
+                 </NodeGroupMembers>\
+                 </NodeGroup>",
+                primary_cluster = xml_escape(primary_cluster),
+            )
+        })
+        .collect();
 
     format!(
         "<ReplicationGroupId>{id}</ReplicationGroupId>\
@@ -999,28 +1047,7 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
          <Status>{status}</Status>\
          {replication_group_create_time_xml}\
          <MemberClusters>{member_clusters_xml}</MemberClusters>\
-         <NodeGroups>\
-         <NodeGroup>\
-         <NodeGroupId>0001</NodeGroupId>\
-         <Status>available</Status>\
-         <PrimaryEndpoint>\
-         <Address>{endpoint_address}</Address>\
-         <Port>{endpoint_port}</Port>\
-         </PrimaryEndpoint>\
-         <ReaderEndpoint>\
-         <Address>{endpoint_address}</Address>\
-         <Port>{endpoint_port}</Port>\
-         </ReaderEndpoint>\
-         <NodeGroupMembers>\
-         <NodeGroupMember>\
-         <CacheClusterId>{primary_cluster}</CacheClusterId>\
-         <CacheNodeId>0001</CacheNodeId>\
-         <PreferredAvailabilityZone>{primary_az_xml}</PreferredAvailabilityZone>\
-         <CurrentRole>primary</CurrentRole>\
-         </NodeGroupMember>\
-         </NodeGroupMembers>\
-         </NodeGroup>\
-         </NodeGroups>\
+         <NodeGroups>{node_groups_inner}</NodeGroups>\
          <AutomaticFailover>{automatic_failover}</AutomaticFailover>\
          <MultiAZ>{multi_az}</MultiAZ>\
          <SnapshotRetentionLimit>{snapshot_retention}</SnapshotRetentionLimit>\
@@ -1030,6 +1057,8 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
          <AuthTokenEnabled>{auth_token_enabled}</AuthTokenEnabled>\
          <TransitEncryptionEnabled>{transit_enc}</TransitEncryptionEnabled>\
          <AtRestEncryptionEnabled>{at_rest_enc}</AtRestEncryptionEnabled>\
+         <AutoMinorVersionUpgrade>{auto_minor_version_upgrade}</AutoMinorVersionUpgrade>\
+         <Engine>{engine}</Engine>\
          {kms_xml}\
          {user_groups_xml}\
          {log_delivery_xml}\

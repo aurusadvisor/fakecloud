@@ -704,6 +704,158 @@ async fn elasticache_delete_nonexistent_replication_group_errors() {
 }
 
 #[tokio::test]
+async fn elasticache_create_replication_group_round_trips_extended_fields() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let create_resp = client
+        .create_replication_group()
+        .replication_group_id("ext-rg")
+        .replication_group_description("extended fields")
+        .engine("redis")
+        .engine_version("7.1")
+        .auth_token("supersecret")
+        .transit_encryption_enabled(true)
+        .at_rest_encryption_enabled(true)
+        .kms_key_id("arn:aws:kms:us-east-1:123456789012:key/abc-123")
+        .multi_az_enabled(true)
+        .automatic_failover_enabled(true)
+        .num_node_groups(3)
+        .replicas_per_node_group(1)
+        .port(6390)
+        .preferred_maintenance_window("sun:23:00-mon:01:30")
+        .snapshot_retention_limit(7)
+        .snapshot_window("03:00-04:00")
+        .send()
+        .await
+        .unwrap();
+
+    let group = create_resp.replication_group().expect("replication group");
+    // Server emits these on the create response too. Verify the fields
+    // that AWS exposes via the SDK round-trip from the request.
+    assert_eq!(
+        group.transit_encryption_enabled(),
+        Some(true),
+        "TransitEncryptionEnabled must be echoed"
+    );
+    assert_eq!(
+        group.at_rest_encryption_enabled(),
+        Some(true),
+        "AtRestEncryptionEnabled must be echoed"
+    );
+    assert_eq!(
+        group.kms_key_id(),
+        Some("arn:aws:kms:us-east-1:123456789012:key/abc-123")
+    );
+    assert_eq!(
+        group.auth_token_enabled(),
+        Some(true),
+        "AuthTokenEnabled flips on whenever AuthToken is supplied"
+    );
+    assert_eq!(group.cluster_enabled(), Some(true));
+
+    // DescribeReplicationGroups should reflect the same persisted fields.
+    let describe_resp = client
+        .describe_replication_groups()
+        .replication_group_id("ext-rg")
+        .send()
+        .await
+        .unwrap();
+    let groups = describe_resp.replication_groups();
+    assert_eq!(groups.len(), 1);
+    let described = &groups[0];
+    assert_eq!(described.transit_encryption_enabled(), Some(true));
+    assert_eq!(described.at_rest_encryption_enabled(), Some(true));
+    assert_eq!(
+        described.kms_key_id(),
+        Some("arn:aws:kms:us-east-1:123456789012:key/abc-123")
+    );
+    assert_eq!(described.auth_token_enabled(), Some(true));
+    assert_eq!(
+        described.multi_az(),
+        Some(&aws_sdk_elasticache::types::MultiAzStatus::Enabled)
+    );
+    assert_eq!(
+        described.automatic_failover(),
+        Some(&aws_sdk_elasticache::types::AutomaticFailoverStatus::Enabled)
+    );
+    assert_eq!(described.cluster_enabled(), Some(true));
+    assert_eq!(described.engine(), Some("redis"));
+    // num_node_groups=3 -> 3 NodeGroups with shard ids 0001..0003.
+    let node_groups = described.node_groups();
+    assert_eq!(node_groups.len(), 3, "NumNodeGroups must drive shard count");
+    let ids: Vec<&str> = node_groups
+        .iter()
+        .filter_map(|n| n.node_group_id())
+        .collect();
+    assert!(ids.contains(&"0001"));
+    assert!(ids.contains(&"0002"));
+    assert!(ids.contains(&"0003"));
+    assert_eq!(described.snapshot_retention_limit(), Some(7));
+    assert_eq!(described.snapshot_window(), Some("03:00-04:00"));
+    // AuthToken is never echoed on describe, even when stored internally.
+    // SDK has no field for it, so the test inherently asserts that.
+}
+
+#[tokio::test]
+async fn elasticache_create_replication_group_round_trips_log_delivery() {
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let cw_details = aws_sdk_elasticache::types::CloudWatchLogsDestinationDetails::builder()
+        .log_group("/aws/elasticache/slow")
+        .build();
+    let dest = aws_sdk_elasticache::types::DestinationDetails::builder()
+        .cloud_watch_logs_details(cw_details)
+        .build();
+    let log_cfg = aws_sdk_elasticache::types::LogDeliveryConfigurationRequest::builder()
+        .log_type(aws_sdk_elasticache::types::LogType::SlowLog)
+        .destination_type(aws_sdk_elasticache::types::DestinationType::CloudWatchLogs)
+        .destination_details(dest)
+        .log_format(aws_sdk_elasticache::types::LogFormat::Json)
+        .enabled(true)
+        .build();
+
+    client
+        .create_replication_group()
+        .replication_group_id("log-rg")
+        .replication_group_description("log delivery round-trip")
+        .log_delivery_configurations(log_cfg)
+        .send()
+        .await
+        .unwrap();
+
+    let describe_resp = client
+        .describe_replication_groups()
+        .replication_group_id("log-rg")
+        .send()
+        .await
+        .unwrap();
+    let groups = describe_resp.replication_groups();
+    assert_eq!(groups.len(), 1);
+    let log_configs = groups[0].log_delivery_configurations();
+    assert_eq!(log_configs.len(), 1, "expected one log delivery config");
+    let cfg = &log_configs[0];
+    assert_eq!(
+        cfg.log_type(),
+        Some(&aws_sdk_elasticache::types::LogType::SlowLog)
+    );
+    assert_eq!(
+        cfg.destination_type(),
+        Some(&aws_sdk_elasticache::types::DestinationType::CloudWatchLogs)
+    );
+    assert_eq!(
+        cfg.log_format(),
+        Some(&aws_sdk_elasticache::types::LogFormat::Json)
+    );
+    let log_group = cfg
+        .destination_details()
+        .and_then(|d| d.cloud_watch_logs_details())
+        .and_then(|c| c.log_group());
+    assert_eq!(log_group, Some("/aws/elasticache/slow"));
+}
+
+#[tokio::test]
 async fn elasticache_global_replication_group_lifecycle() {
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
