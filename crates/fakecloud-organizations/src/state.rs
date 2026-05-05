@@ -476,9 +476,9 @@ impl OrganizationState {
 
     /// Move a live handshake from `OPEN` into `new_state`. Caller decides
     /// whether the transition is allowed for the current API caller —
-    /// this just enforces lifecycle (open -> terminal) and stamps
-    /// `expiration_timestamp` to now on accept/decline/cancel so the
-    /// resolved-at moment is recoverable.
+    /// this just enforces lifecycle (open -> terminal). The original
+    /// `ExpirationTimestamp` is preserved (it's the 15-day deadline,
+    /// not a resolved-at marker).
     pub fn resolve_handshake(&mut self, id: &str, new_state: &str) -> Result<Handshake, OrgError> {
         let handshake = self
             .handshakes
@@ -491,7 +491,6 @@ impl OrganizationState {
             return Err(OrgError::InvalidHandshakeState(new_state.to_string()));
         }
         handshake.state = new_state.to_string();
-        handshake.expiration_timestamp = Utc::now();
         let snapshot = handshake.clone();
         if new_state == "ACCEPTED" && !self.accounts.contains_key(&snapshot.target_account_id) {
             let now = Utc::now();
