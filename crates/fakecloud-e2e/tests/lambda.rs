@@ -359,3 +359,192 @@ async fn lambda_add_get_remove_permission_roundtrip() {
         .await;
     assert!(err.is_err());
 }
+
+fn make_python_zip_returning(payload: &str) -> Vec<u8> {
+    // A second-flavor zip whose handler returns a payload-derived value,
+    // so callers can confirm UpdateFunctionCode actually swapped the code
+    // bundle (rather than just the metadata).
+    let buf = Vec::new();
+    let cursor = std::io::Cursor::new(buf);
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("index.py", options).unwrap();
+    writer
+        .write_all(
+            format!("def handler(event, context):\n    return {{\"payload\": \"{payload}\"}}\n")
+                .as_bytes(),
+        )
+        .unwrap();
+    let cursor = writer.finish().unwrap();
+    cursor.into_inner()
+}
+
+#[tokio::test]
+async fn lambda_update_function_code_replaces_zip_and_recomputes_hash() {
+    // Fresh zip -> CodeSha256 + CodeSize must move; same zip again ->
+    // RevisionId stays put. GetFunctionConfiguration round-trips the new
+    // hash, proving the update persisted in state and not just the
+    // immediate response.
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    let initial_zip = make_python_zip();
+    client
+        .create_function()
+        .function_name("upd-code")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/r")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(initial_zip.clone()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let pre = client
+        .get_function_configuration()
+        .function_name("upd-code")
+        .send()
+        .await
+        .unwrap();
+    let pre_sha = pre.code_sha256().unwrap().to_string();
+    let pre_rev = pre.revision_id().unwrap().to_string();
+    let pre_size = pre.code_size();
+    assert_eq!(pre_size, initial_zip.len() as i64);
+
+    // Replace with a different zip -- CodeSha256 + CodeSize must change,
+    // RevisionId must rotate.
+    let new_zip = make_python_zip_returning("v2");
+    let updated = client
+        .update_function_code()
+        .function_name("upd-code")
+        .zip_file(Blob::new(new_zip.clone()))
+        .send()
+        .await
+        .unwrap();
+    let post_sha = updated.code_sha256().unwrap().to_string();
+    let post_rev = updated.revision_id().unwrap().to_string();
+    assert_ne!(post_sha, pre_sha, "CodeSha256 should change");
+    assert_ne!(post_rev, pre_rev, "RevisionId should rotate on real change");
+    assert_eq!(updated.code_size(), new_zip.len() as i64);
+
+    // Persisted in state.
+    let cfg = client
+        .get_function_configuration()
+        .function_name("upd-code")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cfg.code_sha256().unwrap(), post_sha);
+    assert_eq!(cfg.code_size(), new_zip.len() as i64);
+
+    // Same bytes again -> RevisionId must stay put.
+    let same = client
+        .update_function_code()
+        .function_name("upd-code")
+        .zip_file(Blob::new(new_zip.clone()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(same.revision_id().unwrap(), post_rev);
+    assert_eq!(same.code_sha256().unwrap(), post_sha);
+}
+
+#[tokio::test]
+async fn lambda_update_function_code_with_s3_descriptor_rotates_hash() {
+    // S3Bucket+S3Key swap fingerprints the descriptor; a different
+    // descriptor must rotate CodeSha256 / RevisionId, identical
+    // descriptor must not.
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("upd-s3")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/r")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let pre_sha = client
+        .get_function_configuration()
+        .function_name("upd-s3")
+        .send()
+        .await
+        .unwrap()
+        .code_sha256()
+        .unwrap()
+        .to_string();
+
+    let updated = client
+        .update_function_code()
+        .function_name("upd-s3")
+        .s3_bucket("deploy-bucket")
+        .s3_key("lambdas/v2.zip")
+        .send()
+        .await
+        .unwrap();
+    let post_sha = updated.code_sha256().unwrap().to_string();
+    assert_ne!(post_sha, pre_sha);
+
+    // Adding S3ObjectVersion changes the descriptor, so the hash rotates.
+    let versioned = client
+        .update_function_code()
+        .function_name("upd-s3")
+        .s3_bucket("deploy-bucket")
+        .s3_key("lambdas/v2.zip")
+        .s3_object_version("ver-abc123")
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(versioned.code_sha256().unwrap(), post_sha);
+}
+
+#[tokio::test]
+async fn lambda_update_function_code_with_image_uri_clears_size_and_sha() {
+    // Real AWS reports CodeSize=0 and an empty CodeSha256 for image
+    // functions; verify UpdateFunctionCode lines those fields up when
+    // swapping to a new image URI.
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    client
+        .create_function()
+        .function_name("upd-img")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/r")
+        .handler("index.handler")
+        .package_type(aws_sdk_lambda::types::PackageType::Image)
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .image_uri("old.example.com/image:1")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let updated = client
+        .update_function_code()
+        .function_name("upd-img")
+        .image_uri("new.example.com/image:2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.code_size(), 0);
+    assert_eq!(updated.code_sha256().unwrap_or(""), "");
+    assert_eq!(
+        updated.package_type().unwrap(),
+        &aws_sdk_lambda::types::PackageType::Image
+    );
+}
