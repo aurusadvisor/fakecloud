@@ -145,9 +145,12 @@ impl CognitoService {
         // token-issuing path (InitiateAuth, RespondToAuthChallenge,
         // AdminInitiateAuth, GetTokensFromRefreshToken, OAuth2 token
         // grant) signs with a real RS256 signature out of the box.
-        // Real AWS Cognito assigns the keypair at pool creation time too.
-        let signing_key_pem = crate::jwt::generate_pool_signing_key();
-        let signing_kid = format!("{pool_id}-key-1");
+        // Real AWS Cognito assigns the keypair at pool creation time
+        // and derives the JWKS `kid` from a hash of the public half so
+        // it stays stable across snapshots.
+        let signing = crate::jwt::generate_pool_signing_key();
+        let signing_key_pem = signing.private_key_pem;
+        let signing_kid = signing.kid;
         let pool = UserPool {
             id: pool_id.clone(),
             name: pool_name.to_string(),

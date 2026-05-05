@@ -4724,7 +4724,9 @@ async fn cognito_well_known_jwks_returns_public_key() {
     assert_eq!(key["alg"], "RS256");
     assert_eq!(key["kty"], "RSA");
     assert_eq!(key["use"], "sig");
-    assert!(key["kid"].as_str().unwrap().contains(&pool_id));
+    let kid = key["kid"].as_str().expect("kid string");
+    assert_eq!(kid.len(), 16, "kid is the 16-hex-char SHA-256 prefix");
+    assert!(kid.chars().all(|c| c.is_ascii_hexdigit()));
     assert!(key["n"].as_str().unwrap().len() > 100);
     assert!(!key["e"].as_str().unwrap().is_empty());
 }
@@ -4760,6 +4762,156 @@ async fn cognito_well_known_openid_configuration_uses_pool_region() {
         .as_array()
         .unwrap();
     assert_eq!(algs[0], "RS256");
+}
+
+/// Y1: every JWT issued by the pool is real RS256-signed against the
+/// per-pool RSA-2048 keypair. End-to-end shape:
+///   1. CreateUserPool -> pool gets a freshly-generated keypair.
+///   2. AdminInitiateAuth issues real ID + access tokens.
+///   3. The pool's JWKS endpoint serves the matching public key.
+///   4. Tokens verify cryptographically with that public key.
+#[tokio::test]
+async fn cognito_jwt_is_real_rs256_signed() {
+    use base64::Engine as _;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::sha2::Sha256;
+    use rsa::signature::Verifier;
+    use rsa::traits::PublicKeyParts;
+    use rsa::{BigUint, RsaPublicKey};
+
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("rs256-pool")
+        .send()
+        .await
+        .expect("create user pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let upc = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("rs256-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = upc
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("rs256user")
+        .temporary_password("TempP@ss1!")
+        .send()
+        .await
+        .expect("create user");
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("rs256user")
+        .password("Permanent1!")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    let auth = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(aws_sdk_cognitoidentityprovider::types::AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "rs256user")
+        .auth_parameters("PASSWORD", "Permanent1!")
+        .send()
+        .await
+        .expect("auth");
+    let result = auth.authentication_result().expect("authentication result");
+    let id_token = result.id_token().expect("id token").to_string();
+    let access_token = result.access_token().expect("access token").to_string();
+
+    // Header is base64url JSON; assert AWS-shaped fields.
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header_segment = id_token.split('.').next().expect("header segment");
+    let header_bytes = b64.decode(header_segment).expect("header decodes");
+    let header: serde_json::Value = serde_json::from_slice(&header_bytes).expect("header JSON");
+    assert_eq!(header["alg"], "RS256", "header.alg must be RS256");
+    assert_eq!(header["typ"], "JWT", "header.typ must be JWT");
+    let kid = header["kid"].as_str().expect("kid present");
+    assert_eq!(kid.len(), 16, "kid is 16-hex-char SHA-256 prefix: {kid}");
+    assert!(
+        kid.chars().all(|c| c.is_ascii_hexdigit()),
+        "kid must be lowercase hex: {kid}"
+    );
+
+    // Pull the matching public key from the pool's JWKS endpoint —
+    // the same path AWS-side SDKs (aws-jwt-verify, jose, etc.) hit.
+    let http = reqwest::Client::new();
+    let jwks: serde_json::Value = http
+        .get(format!(
+            "{}/{}/.well-known/jwks.json",
+            server.endpoint(),
+            pool_id
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let jwk = jwks["keys"]
+        .as_array()
+        .and_then(|keys| keys.iter().find(|k| k["kid"] == kid))
+        .expect("JWKS exposes the kid we signed with");
+
+    let n_bytes = b64.decode(jwk["n"].as_str().unwrap()).expect("n decodes");
+    let e_bytes = b64.decode(jwk["e"].as_str().unwrap()).expect("e decodes");
+    let n = BigUint::from_bytes_be(&n_bytes);
+    let e = BigUint::from_bytes_be(&e_bytes);
+    let public_key = RsaPublicKey::new(n, e).expect("valid RSA public key");
+    assert_eq!(
+        public_key.n().bits(),
+        2048,
+        "Cognito mints 2048-bit keys; got {}",
+        public_key.n().bits()
+    );
+    let verifying_key = VerifyingKey::<Sha256>::new(public_key);
+
+    // Verify both ID and access token against the JWKS-published public key.
+    for (label, token) in [("id_token", &id_token), ("access_token", &access_token)] {
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "{label} must be a three-segment JWT");
+        let signing_input = format!("{}.{}", parts[0], parts[1]);
+        let sig_bytes = b64.decode(parts[2]).expect("sig decodes");
+        let signature = Signature::try_from(sig_bytes.as_slice()).expect("sig parses");
+        verifying_key
+            .verify(signing_input.as_bytes(), &signature)
+            .unwrap_or_else(|err| {
+                panic!("{label} signature must verify against pool's JWKS public key: {err}")
+            });
+    }
+
+    // Finally, prove the verification is non-trivial: tampering the
+    // payload breaks the signature against the same public key.
+    let id_parts: Vec<&str> = id_token.split('.').collect();
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&b64.decode(id_parts[1]).unwrap()).unwrap();
+    payload["sub"] = serde_json::json!("attacker");
+    let tampered_payload = b64.encode(payload.to_string().as_bytes());
+    let tampered_input = format!("{}.{}", id_parts[0], tampered_payload);
+    let sig_bytes = b64.decode(id_parts[2]).unwrap();
+    let signature = Signature::try_from(sig_bytes.as_slice()).unwrap();
+    verifying_key
+        .verify(tampered_input.as_bytes(), &signature)
+        .expect_err("tampered payload must NOT verify");
 }
 
 #[tokio::test]

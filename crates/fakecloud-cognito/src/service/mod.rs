@@ -18,7 +18,6 @@ use base64::Engine;
 use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
@@ -1523,11 +1522,13 @@ struct TokenSet {
     refresh_token: String,
 }
 
-/// Generate Cognito ID/Access/Refresh tokens. When `signing` is supplied
-/// (the pool's PKCS#8 PEM + stable kid), the JWTs are signed with real
-/// RS256 so SDK-side JWKS verification round-trips. Pre-existing pools
-/// without a stored key fall back to a placeholder signature so test
-/// fixtures keep parsing.
+/// Generate Cognito ID/Access/Refresh tokens. `signing` is the pool's
+/// PKCS#8 PEM + JWKS kid; production callers always pass `Some` because
+/// `CreateUserPool` allocates a keypair eagerly and
+/// `ensure_pool_signing_key` backfills any legacy snapshot. When `None`
+/// (only reachable from in-process unit tests that intentionally skip
+/// keygen for speed), we synthesize a one-shot keypair so the resulting
+/// JWT still has a real RS256 signature — never a placeholder.
 fn generate_tokens(
     pool_id: &str,
     client_id: &str,
@@ -1540,9 +1541,15 @@ fn generate_tokens(
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
     let iss = format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}");
-    let kid = signing
-        .map(|(_, k)| k.to_string())
-        .unwrap_or_else(|| "fakecloud-key-1".to_string());
+
+    let owned_signing = signing
+        .map(|(p, k)| (p.to_string(), k.to_string()))
+        .unwrap_or_else(|| {
+            let key = crate::jwt::generate_pool_signing_key();
+            (key.private_key_pem, key.kid)
+        });
+    let pem = owned_signing.0.as_str();
+    let kid = owned_signing.1.as_str();
 
     let id_header = json!({"kid": kid, "alg": "RS256", "typ": "JWT"});
     let id_payload = json!({
@@ -1556,7 +1563,7 @@ fn generate_tokens(
         "iat": now,
         "jti": jti,
     });
-    let id_token = sign_jwt(&id_header, &id_payload, &b64url, signing.map(|(p, _)| p));
+    let id_token = sign_jwt(&id_header, &id_payload, pem);
 
     let access_jti = Uuid::new_v4().to_string();
     let access_header = json!({"kid": kid, "alg": "RS256", "typ": "JWT"});
@@ -1570,12 +1577,7 @@ fn generate_tokens(
         "exp": now + 3600,
         "iat": now,
     });
-    let access_token = sign_jwt(
-        &access_header,
-        &access_payload,
-        &b64url,
-        signing.map(|(p, _)| p),
-    );
+    let access_token = sign_jwt(&access_header, &access_payload, pem);
 
     let mut refresh_bytes = Vec::with_capacity(72);
     for _ in 0..5 {
@@ -1590,29 +1592,22 @@ fn generate_tokens(
     }
 }
 
-fn sign_jwt(
-    header: &Value,
-    payload: &Value,
-    engine: &base64::engine::general_purpose::GeneralPurpose,
-    private_key_pem: Option<&str>,
-) -> String {
-    if let Some(pem) = private_key_pem {
-        return crate::jwt::sign_rs256(header, payload, pem);
-    }
-    let header_b64 = engine.encode(header.to_string().as_bytes());
-    let payload_b64 = engine.encode(payload.to_string().as_bytes());
-    let signing_input = format!("{header_b64}.{payload_b64}");
-    let mut hasher = Sha256::new();
-    hasher.update(signing_input.as_bytes());
-    let signature = hasher.finalize();
-    let sig_b64 = engine.encode(signature);
-    format!("{header_b64}.{payload_b64}.{sig_b64}")
+/// Sign a Cognito-shaped JWT with the pool's PKCS#8 private key.
+/// Always RS256 — there is no placeholder fallback, callers must pass
+/// a valid pool PEM.
+fn sign_jwt(header: &Value, payload: &Value, private_key_pem: &str) -> String {
+    crate::jwt::sign_rs256(header, payload, private_key_pem)
+        .expect("pool PEM must be a valid PKCS#8 RSA private key")
 }
 
 /// Look up a pool's signing key, generating one off the runtime thread if
 /// missing. Returns `(pkcs8_pem, kid)` for callers that need to sign a
 /// JWT or render a JWKS document. The expensive RSA-2048 keygen only
 /// runs once per pool — subsequent calls hit the cache.
+///
+/// Pre-Y1 snapshots may have a stored PEM with no `kid`, or neither;
+/// we fill in whatever's missing so the JWKS document and the JWT
+/// header always agree on a stable kid derived from the public key.
 pub async fn ensure_pool_signing_key(
     state: &SharedCognitoState,
     pool_id: &str,
@@ -1636,7 +1631,15 @@ pub async fn ensure_pool_signing_key(
     for (_, account) in mas.iter_mut() {
         if let Some(pool) = account.user_pools.get_mut(pool_id) {
             if pool.signing_key_pem.is_none() {
-                pool.signing_key_pem = Some(generated.clone());
+                pool.signing_key_pem = Some(generated.private_key_pem.clone());
+                pool.signing_kid = Some(generated.kid.clone());
+            } else if pool.signing_kid.is_none() {
+                // PEM was carried forward from an older snapshot but
+                // the kid wasn't — re-derive it from the public half
+                // so JWKS and JWT header stay consistent.
+                if let Some(pem) = pool.signing_key_pem.as_deref() {
+                    pool.signing_kid = derive_kid_from_pem(pem);
+                }
             }
             if let (Some(p), Some(k)) = (&pool.signing_key_pem, &pool.signing_kid) {
                 result = Some((p.clone(), k.clone()));
@@ -1645,6 +1648,16 @@ pub async fn ensure_pool_signing_key(
         }
     }
     result
+}
+
+/// Re-derive a pool's `kid` from a stored PEM. Used to backfill
+/// older snapshots that predate the deterministic kid scheme.
+fn derive_kid_from_pem(pem: &str) -> Option<String> {
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+    let private_key = RsaPrivateKey::from_pkcs8_pem(pem).ok()?;
+    let public_key = RsaPublicKey::from(&private_key);
+    Some(crate::jwt::compute_kid(&public_key))
 }
 
 /// JWKS document for a pool (`{"keys": [<jwk>]}`). Triggers lazy keypair
@@ -1917,13 +1930,23 @@ fn build_client_credentials_access_token(
     region: &str,
     signing: Option<(&str, &str)>,
 ) -> String {
-    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
     let iss = format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}");
-    let kid = signing
-        .map(|(_, k)| k.to_string())
-        .unwrap_or_else(|| "fakecloud-key-1".to_string());
+
+    // Synthesize a keypair on the fly when callers haven't loaded one
+    // (only happens on legacy snapshots that lack a stored PEM and
+    // pre-date `ensure_pool_signing_key`). Production paths always
+    // pass `Some`.
+    let owned_signing = signing
+        .map(|(p, k)| (p.to_string(), k.to_string()))
+        .unwrap_or_else(|| {
+            let key = crate::jwt::generate_pool_signing_key();
+            (key.private_key_pem, key.kid)
+        });
+    let pem = owned_signing.0.as_str();
+    let kid = owned_signing.1.as_str();
+
     let header = json!({"kid": kid, "alg": "RS256", "typ": "JWT"});
     let payload = json!({
         "sub": client_id,
@@ -1935,7 +1958,7 @@ fn build_client_credentials_access_token(
         "exp": now + 3600,
         "iat": now,
     });
-    sign_jwt(&header, &payload, &b64url, signing.map(|(p, _)| p))
+    sign_jwt(&header, &payload, pem)
 }
 
 #[derive(Debug, Clone)]

@@ -661,7 +661,15 @@ fn jwt_id_token_payload_contains_required_fields() {
     let payload: Value = serde_json::from_slice(&b64url.decode(parts[1]).unwrap()).unwrap();
 
     assert_eq!(header["alg"], "RS256");
-    assert_eq!(header["kid"], "fakecloud-key-1");
+    // No `signing` was passed, so generate_tokens synthesized a fresh
+    // keypair on the fly. The kid is the deterministic 16-hex-char
+    // SHA-256 prefix of the public key's SPKI DER.
+    let kid = header["kid"].as_str().unwrap();
+    assert_eq!(kid.len(), 16, "kid must be 16 hex chars: {kid}");
+    assert!(
+        kid.chars().all(|c| c.is_ascii_hexdigit()),
+        "kid must be lowercase hex: {kid}"
+    );
     assert_eq!(payload["sub"], "sub-uuid");
     assert_eq!(payload["aud"], "client123");
     assert_eq!(payload["cognito:username"], "user1");
@@ -6716,7 +6724,14 @@ fn jwks_endpoint_returns_pool_public_key() {
     assert_eq!(key["alg"], "RS256");
     assert_eq!(key["use"], "sig");
     assert_eq!(key["e"], "AQAB");
-    assert_eq!(key["kid"], format!("{pool_id}-key-1"));
+    // kid is the deterministic SHA-256 prefix of the pool's public
+    // SubjectPublicKeyInfo DER, not derived from `pool_id`.
+    let kid = key["kid"].as_str().expect("kid must be a string");
+    assert_eq!(kid.len(), 16, "kid must be 16 hex chars: {kid}");
+    assert!(
+        kid.chars().all(|c| c.is_ascii_hexdigit()),
+        "kid must be lowercase hex: {kid}"
+    );
 }
 
 #[test]
