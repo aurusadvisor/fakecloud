@@ -87,6 +87,10 @@ pub struct SsmCommand {
     pub parameters: BTreeMap<String, Vec<String>>,
     pub status: String,
     pub requested_date_time: DateTime<Utc>,
+    /// When the command's results stop being readable. Defaults to
+    /// `requested_date_time + 1h` for snapshots written before this
+    /// field existed so old data still deserializes cleanly.
+    #[serde(default = "default_command_expiry")]
     pub expires_after: DateTime<Utc>,
     pub comment: Option<String>,
     pub output_s3_bucket_name: Option<String>,
@@ -103,6 +107,10 @@ pub struct SsmCommand {
     /// by the admin force-fail endpoint.
     #[serde(default)]
     pub invocations: Vec<SsmCommandInvocation>,
+}
+
+fn default_command_expiry() -> DateTime<Utc> {
+    chrono::Utc::now() + chrono::Duration::seconds(3600)
 }
 
 /// One execution of a command on a single managed instance. The
