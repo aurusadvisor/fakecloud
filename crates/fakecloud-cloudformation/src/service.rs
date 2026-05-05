@@ -1373,23 +1373,23 @@ pub(crate) fn apply_resource_updates(
         .map(|r| (r.logical_id.clone(), r.attributes.clone()))
         .collect();
 
-    // Create new resources
+    // Create new resources / update resources that already exist
     for resource_def in new_resource_defs {
-        if !old_logical_ids.contains(&resource_def.logical_id) {
-            let resolved_def = template::resolve_resource_properties_with_attrs(
-                resource_def,
-                template_body,
-                parameters,
-                &physical_ids,
-                &attributes,
+        let resolved_def = template::resolve_resource_properties_with_attrs(
+            resource_def,
+            template_body,
+            parameters,
+            &physical_ids,
+            &attributes,
+        )
+        .map_err(|e| {
+            format!(
+                "Failed to resolve resource {}: {e}",
+                resource_def.logical_id
             )
-            .map_err(|e| {
-                format!(
-                    "Failed to resolve resource {}: {e}",
-                    resource_def.logical_id
-                )
-            })?;
+        })?;
 
+        if !old_logical_ids.contains(&resource_def.logical_id) {
             match provisioner.create_resource(&resolved_def) {
                 Ok(stack_resource) => {
                     physical_ids.insert(
@@ -1411,6 +1411,47 @@ pub(crate) fn apply_resource_updates(
                         "Failed to create resource {}: {e}",
                         resource_def.logical_id
                     ));
+                }
+            }
+        } else {
+            // Resource exists in both old and new templates — try to apply
+            // an in-place update. The provisioner returns `Ok(None)` for
+            // resource types that don't support updates yet; in that case
+            // the existing resource stays as-is so the rest of the stack
+            // continues to validate.
+            let existing = stack
+                .resources
+                .iter()
+                .find(|r| r.logical_id == resource_def.logical_id)
+                .cloned();
+            if let Some(existing) = existing {
+                match provisioner.update_resource(&existing, &resolved_def) {
+                    Ok(Some(updated)) => {
+                        physical_ids
+                            .insert(updated.logical_id.clone(), updated.physical_id.clone());
+                        attributes.insert(updated.logical_id.clone(), updated.attributes.clone());
+                        if let Some(slot) = stack
+                            .resources
+                            .iter_mut()
+                            .find(|r| r.logical_id == updated.logical_id)
+                        {
+                            *slot = updated;
+                        }
+                    }
+                    Ok(None) => {
+                        // Resource type has no update path — leave the
+                        // existing physical resource untouched.
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to update resource {} during update: {e}",
+                            resource_def.logical_id
+                        );
+                        return Err(format!(
+                            "Failed to update resource {}: {e}",
+                            resource_def.logical_id
+                        ));
+                    }
                 }
             }
         }

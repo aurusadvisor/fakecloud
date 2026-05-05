@@ -73,7 +73,8 @@ use fakecloud_iam::{
 use fakecloud_kinesis::{build_stream_shards, KinesisConsumer, KinesisStream, SharedKinesisState};
 use fakecloud_kms::{KmsAlias, KmsKey, SharedKmsState};
 use fakecloud_lambda::{
-    EventSourceMapping, FunctionAlias, FunctionUrlConfig, Layer, LayerVersion, SharedLambdaState,
+    AttachedLayer, EventSourceMapping, FunctionAlias, FunctionUrlConfig, Layer, LayerVersion,
+    SharedLambdaState,
 };
 use fakecloud_logs::{
     Delivery, DeliveryDestination, DeliverySource, Destination, LogStream, MetricFilter,
@@ -315,6 +316,253 @@ fn parse_lambda_function_name(input: &str) -> String {
         }
     }
     input.to_string()
+}
+
+/// All AWS::Lambda::Function CFN properties parsed and pre-defaulted into
+/// their lambda-state shapes. Mirrors the lambda service's
+/// `CreateFunctionInput` so create + update share one parse path.
+struct LambdaFunctionProps {
+    runtime: String,
+    role: String,
+    handler: String,
+    description: String,
+    timeout: i64,
+    memory_size: i64,
+    package_type: String,
+    tags: BTreeMap<String, String>,
+    environment: BTreeMap<String, String>,
+    architectures: Vec<String>,
+    /// Decoded `Code.ZipFile` bytes (base64 → raw). `None` when the
+    /// caller specified `Code.S3Bucket`/`Code.S3Key` or `Code.ImageUri`
+    /// instead — the create/update path resolves S3 separately.
+    code_zip: Option<Vec<u8>>,
+    s3_bucket: Option<String>,
+    s3_key: Option<String>,
+    image_uri: Option<String>,
+    layers: Vec<String>,
+    tracing_mode: Option<String>,
+    kms_key_arn: Option<String>,
+    ephemeral_storage_size: Option<i64>,
+    vpc_config: Option<serde_json::Value>,
+    snap_start: Option<serde_json::Value>,
+    dead_letter_config_arn: Option<String>,
+    file_system_configs: Vec<serde_json::Value>,
+    logging_config: Option<serde_json::Value>,
+}
+
+/// Parse the `Properties` value of an `AWS::Lambda::Function` resource
+/// into a `LambdaFunctionProps`. Defaults match the AWS Lambda
+/// CreateFunction API: `python3.12` runtime, `index.handler` handler,
+/// `Zip` package type, `x86_64` architecture, 3s timeout, 128MB memory.
+fn parse_lambda_function_props(props: &serde_json::Value) -> Result<LambdaFunctionProps, String> {
+    let runtime = props
+        .get("Runtime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("python3.12")
+        .to_string();
+    let role = props
+        .get("Role")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let handler = props
+        .get("Handler")
+        .and_then(|v| v.as_str())
+        .unwrap_or("index.handler")
+        .to_string();
+    let description = props
+        .get("Description")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let timeout = props.get("Timeout").and_then(|v| v.as_i64()).unwrap_or(3);
+    let memory_size = props
+        .get("MemorySize")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(128);
+    let architectures = props
+        .get("Architectures")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec!["x86_64".to_string()]);
+    let package_type = props
+        .get("PackageType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Zip")
+        .to_string();
+    let environment = props
+        .get("Environment")
+        .and_then(|v| v.get("Variables"))
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect::<BTreeMap<String, String>>()
+        })
+        .unwrap_or_default();
+
+    // CFN tags ride as `[{Key, Value}, ...]`; flatten to the map shape
+    // the lambda crate stores tags in.
+    let tags: BTreeMap<String, String> = props
+        .get("Tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let k = t.get("Key").and_then(|v| v.as_str())?.to_string();
+                    let v = t.get("Value").and_then(|v| v.as_str())?.to_string();
+                    Some((k, v))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let code = props.get("Code");
+    // CFN's `Code.ZipFile` is the raw source code inline (per the
+    // CloudFormation user guide), not base64 like the Lambda
+    // CreateFunction API. We store it as the raw bytes — fakecloud's
+    // Lambda runtime is content-agnostic and just needs *some* deployable
+    // payload to execute.
+    let code_zip = code
+        .and_then(|c| c.get("ZipFile"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.as_bytes().to_vec());
+    let s3_bucket = code
+        .and_then(|c| c.get("S3Bucket"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let s3_key = code
+        .and_then(|c| c.get("S3Key"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    // ImageUri is only meaningful for `PackageType=Image`. Mirroring the
+    // lambda service path, drop it on Zip functions so GetFunction
+    // doesn't return ECR metadata for a ZIP-based function.
+    let image_uri = if package_type == "Image" {
+        code.and_then(|c| c.get("ImageUri"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+    if package_type == "Image" && image_uri.is_none() {
+        return Err("Code.ImageUri is required when PackageType is Image".to_string());
+    }
+
+    let layers: Vec<String> = props
+        .get("Layers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let tracing_mode = props
+        .get("TracingConfig")
+        .and_then(|v| v.get("Mode"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let kms_key_arn = props
+        .get("KmsKeyArn")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let ephemeral_storage_size = props
+        .get("EphemeralStorage")
+        .and_then(|v| v.get("Size"))
+        .and_then(|v| v.as_i64());
+    let vpc_config = props.get("VpcConfig").filter(|v| v.is_object()).cloned();
+    let snap_start = props.get("SnapStart").filter(|v| v.is_object()).cloned();
+    let dead_letter_config_arn = props
+        .get("DeadLetterConfig")
+        .and_then(|v| v.get("TargetArn"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let file_system_configs = props
+        .get("FileSystemConfigs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let logging_config = props
+        .get("LoggingConfig")
+        .filter(|v| v.is_object())
+        .cloned();
+
+    Ok(LambdaFunctionProps {
+        runtime,
+        role,
+        handler,
+        description,
+        timeout,
+        memory_size,
+        package_type,
+        tags,
+        environment,
+        architectures,
+        code_zip,
+        s3_bucket,
+        s3_key,
+        image_uri,
+        layers,
+        tracing_mode,
+        kms_key_arn,
+        ephemeral_storage_size,
+        vpc_config,
+        snap_start,
+        dead_letter_config_arn,
+        file_system_configs,
+        logging_config,
+    })
+}
+
+/// Compute base64-encoded SHA-256 of code bytes — matches what the
+/// lambda service stores in `LambdaFunction.code_sha256`.
+fn sha256_b64(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(bytes);
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hash)
+}
+
+/// Look up the `code_size` for an attached layer-version ARN by walking
+/// the in-process lambda state. Falls back to 0 when the ARN is
+/// unparseable or the layer/version is unknown — same fallback as the
+/// lambda service helper.
+fn layer_code_size(
+    accounts: &fakecloud_core::multi_account::MultiAccountState<fakecloud_lambda::LambdaState>,
+    arn: &str,
+) -> i64 {
+    // arn:aws:lambda:<region>:<account>:layer:<name>:<version>
+    let Some(rest) = arn.strip_prefix("arn:aws:lambda:") else {
+        return 0;
+    };
+    let mut parts = rest.split(':');
+    let _region = parts.next();
+    let Some(account) = parts.next() else {
+        return 0;
+    };
+    if parts.next() != Some("layer") {
+        return 0;
+    }
+    let Some(name) = parts.next() else {
+        return 0;
+    };
+    let Some(ver_str) = parts.next() else {
+        return 0;
+    };
+    let Ok(ver) = ver_str.parse::<i64>() else {
+        return 0;
+    };
+    accounts
+        .get(account)
+        .and_then(|s| s.layers.get(name))
+        .and_then(|l| l.versions.iter().find(|v| v.version == ver))
+        .map(|v| v.code_size)
+        .unwrap_or(0)
 }
 
 /// What a resource provisioner returns. The physical id is what `Ref` resolves
@@ -588,6 +836,32 @@ impl ResourceProvisioner {
             service_token,
             attributes: res.attributes,
         })
+    }
+
+    /// Apply a property update to an existing stack resource. Returns
+    /// `Ok(Some(updated))` when the resource type supports in-place updates
+    /// (the caller swaps the resulting `StackResource` for the old one) or
+    /// `Ok(None)` when the type has no update path defined (the caller
+    /// leaves the existing resource alone). `Err` propagates a
+    /// resource-level failure up to the stack-level UPDATE_FAILED status.
+    pub fn update_resource(
+        &self,
+        existing: &StackResource,
+        new_def: &ResourceDefinition,
+    ) -> Result<Option<StackResource>, String> {
+        let result = match new_def.resource_type.as_str() {
+            "AWS::Lambda::Function" => Some(self.update_lambda_function(existing, new_def)?),
+            _ => None,
+        };
+
+        Ok(result.map(|res| StackResource {
+            logical_id: existing.logical_id.clone(),
+            physical_id: res.physical_id,
+            resource_type: existing.resource_type.clone(),
+            status: "UPDATE_COMPLETE".to_string(),
+            service_token: existing.service_token.clone(),
+            attributes: res.attributes,
+        }))
     }
 
     /// Resolve a `Fn::GetAtt` against a previously provisioned resource.
@@ -2943,91 +3217,79 @@ impl ResourceProvisioner {
                 )
             });
 
-        let runtime = props
-            .get("Runtime")
-            .and_then(|v| v.as_str())
-            .unwrap_or("provided.al2023")
-            .to_string();
-        let role = props
-            .get("Role")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let handler = props
-            .get("Handler")
-            .and_then(|v| v.as_str())
-            .unwrap_or("index.handler")
-            .to_string();
-        let description = props
-            .get("Description")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let timeout = props.get("Timeout").and_then(|v| v.as_i64()).unwrap_or(3);
-        let memory_size = props
-            .get("MemorySize")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(128);
-        let architectures = props
-            .get("Architectures")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| vec!["x86_64".to_string()]);
-        let package_type = props
-            .get("PackageType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Zip")
-            .to_string();
-        let environment = props
-            .get("Environment")
-            .and_then(|v| v.get("Variables"))
-            .and_then(|v| v.as_object())
-            .map(|o| {
-                o.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect::<BTreeMap<String, String>>()
-            })
-            .unwrap_or_default();
-
+        let cfg = parse_lambda_function_props(props)?;
         let function_arn = format!(
             "arn:aws:lambda:{}:{}:function:{}",
             self.region, self.account_id, function_name
         );
 
+        // Resolve `Code.S3Bucket` + `Code.S3Key` against the in-process S3 state
+        // so a stack that uploads code via `AWS::S3::Bucket` + `AWS::S3::Object`
+        // (or any S3 PutObject before CreateStack) hydrates `code_zip` from the
+        // real bytes. ZipFile (already decoded by parse_lambda_function_props)
+        // wins over S3 if both are present, mirroring AWS validation order.
+        let code_zip = if cfg.code_zip.is_some() {
+            cfg.code_zip.clone()
+        } else if let (Some(bucket_name), Some(key)) = (&cfg.s3_bucket, &cfg.s3_key) {
+            Some(self.read_s3_object_bytes(bucket_name, key).map_err(|e| {
+                format!("Failed to read Code.S3Bucket={bucket_name} Code.S3Key={key}: {e}")
+            })?)
+        } else {
+            None
+        };
+
+        // Hash the actual ZIP bytes when available; image-based functions
+        // leave the sha empty (matching the lambda CreateFunction code path
+        // when neither ZipFile nor S3 source is supplied).
+        let (code_sha256, code_size) = match &code_zip {
+            Some(bytes) => (sha256_b64(bytes), bytes.len() as i64),
+            None => (String::new(), 0),
+        };
+
+        // Resolve attached layer ARNs to their current code_size so
+        // GetFunctionConfiguration echoes the right size without a
+        // second state lookup.
+        let layers: Vec<AttachedLayer> = {
+            let accounts = self.lambda_state.read();
+            cfg.layers
+                .iter()
+                .map(|arn| AttachedLayer {
+                    arn: arn.clone(),
+                    code_size: layer_code_size(&accounts, arn),
+                })
+                .collect()
+        };
+
         let func = fakecloud_lambda::LambdaFunction {
             function_name: function_name.clone(),
             function_arn: function_arn.clone(),
-            runtime,
-            role,
-            handler,
-            description,
-            timeout,
-            memory_size,
-            code_sha256: String::new(),
-            code_size: 0,
+            runtime: cfg.runtime,
+            role: cfg.role,
+            handler: cfg.handler,
+            description: cfg.description,
+            timeout: cfg.timeout,
+            memory_size: cfg.memory_size,
+            code_sha256,
+            code_size,
             version: "$LATEST".to_string(),
             last_modified: Utc::now(),
-            tags: BTreeMap::new(),
-            environment,
-            architectures,
-            package_type,
-            code_zip: None,
-            image_uri: None,
+            tags: cfg.tags,
+            environment: cfg.environment,
+            architectures: cfg.architectures,
+            package_type: cfg.package_type,
+            code_zip,
+            image_uri: cfg.image_uri,
             policy: None,
-            layers: Vec::new(),
+            layers,
             revision_id: Uuid::new_v4().to_string(),
-            tracing_mode: None,
-            kms_key_arn: None,
-            ephemeral_storage_size: None,
-            vpc_config: None,
-            snap_start: None,
-            dead_letter_config_arn: None,
-            file_system_configs: Vec::new(),
-            logging_config: None,
+            tracing_mode: cfg.tracing_mode,
+            kms_key_arn: cfg.kms_key_arn,
+            ephemeral_storage_size: cfg.ephemeral_storage_size,
+            vpc_config: cfg.vpc_config,
+            snap_start: cfg.snap_start,
+            dead_letter_config_arn: cfg.dead_letter_config_arn,
+            file_system_configs: cfg.file_system_configs,
+            logging_config: cfg.logging_config,
             image_config: None,
             signing_profile_version_arn: None,
             signing_job_arn: None,
@@ -3043,9 +3305,96 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         state.functions.insert(function_name.clone(), func);
 
+        // Capture every GetAtt-resolvable attribute eagerly. Output
+        // resolution happens after `provision_stack_resources` returns
+        // and only sees `StackResource.attributes`, so any attribute the
+        // template's `Outputs` need must be in this map.
         Ok(ProvisionResult::new(function_name.clone())
             .with("Arn", function_arn)
-            .with("FunctionName", function_name))
+            .with("FunctionName", function_name)
+            .with("Version", "$LATEST"))
+    }
+
+    /// Apply a CFN template-driven update to an existing Lambda function.
+    /// Mirrors `UpdateFunctionConfiguration` + `UpdateFunctionCode`:
+    /// rewrite mutable configuration fields from the new template, re-hash
+    /// any new code bytes, bump `revision_id` and `last_modified`. The
+    /// function's ARN, name, and `$LATEST` version stay put — those are
+    /// the immutable identity of the resource as far as CloudFormation
+    /// is concerned.
+    fn update_lambda_function(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let function_name = existing.physical_id.clone();
+        let cfg = parse_lambda_function_props(props)?;
+
+        let new_code_zip = if cfg.code_zip.is_some() {
+            cfg.code_zip.clone()
+        } else if let (Some(bucket_name), Some(key)) = (&cfg.s3_bucket, &cfg.s3_key) {
+            Some(self.read_s3_object_bytes(bucket_name, key).map_err(|e| {
+                format!("Failed to read Code.S3Bucket={bucket_name} Code.S3Key={key}: {e}")
+            })?)
+        } else {
+            None
+        };
+
+        let resolved_layers: Vec<AttachedLayer> = {
+            let accounts = self.lambda_state.read();
+            cfg.layers
+                .iter()
+                .map(|arn| AttachedLayer {
+                    arn: arn.clone(),
+                    code_size: layer_code_size(&accounts, arn),
+                })
+                .collect()
+        };
+
+        let mut accounts = self.lambda_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let func = state.functions.get_mut(&function_name).ok_or_else(|| {
+            format!("Cannot update {function_name}: function does not exist in lambda state")
+        })?;
+
+        func.runtime = cfg.runtime;
+        func.role = cfg.role;
+        func.handler = cfg.handler;
+        func.description = cfg.description;
+        func.timeout = cfg.timeout;
+        func.memory_size = cfg.memory_size;
+        func.environment = cfg.environment;
+        func.architectures = cfg.architectures;
+        func.package_type = cfg.package_type;
+        func.tracing_mode = cfg.tracing_mode;
+        func.kms_key_arn = cfg.kms_key_arn;
+        func.ephemeral_storage_size = cfg.ephemeral_storage_size;
+        func.vpc_config = cfg.vpc_config;
+        func.snap_start = cfg.snap_start;
+        func.dead_letter_config_arn = cfg.dead_letter_config_arn;
+        func.file_system_configs = cfg.file_system_configs;
+        func.logging_config = cfg.logging_config;
+        func.layers = resolved_layers;
+        if cfg.image_uri.is_some() {
+            func.image_uri = cfg.image_uri;
+        }
+        if !cfg.tags.is_empty() {
+            func.tags = cfg.tags;
+        }
+        if let Some(bytes) = new_code_zip {
+            func.code_sha256 = sha256_b64(&bytes);
+            func.code_size = bytes.len() as i64;
+            func.code_zip = Some(bytes);
+        }
+        func.last_modified = Utc::now();
+        func.revision_id = Uuid::new_v4().to_string();
+
+        let function_arn = func.function_arn.clone();
+        Ok(ProvisionResult::new(function_name.clone())
+            .with("Arn", function_arn)
+            .with("FunctionName", function_name)
+            .with("Version", "$LATEST"))
     }
 
     fn delete_lambda_function(&self, physical_id: &str) -> Result<(), String> {
@@ -3053,6 +3402,33 @@ impl ResourceProvisioner {
         let state = accounts.default_mut();
         state.functions.remove(physical_id);
         Ok(())
+    }
+
+    /// Look up an S3 object's bytes from the in-process S3 state. Used by
+    /// the Lambda function provisioner to hydrate `Code.S3Bucket` /
+    /// `Code.S3Key` references into real ZIP content. Returns an error
+    /// string when the bucket or key is missing so the CFN error
+    /// surfaces back to the caller.
+    fn read_s3_object_bytes(&self, bucket: &str, key: &str) -> Result<Vec<u8>, String> {
+        let mut accounts = self.s3_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let body_ref = {
+            let b = state
+                .buckets
+                .get(bucket)
+                .ok_or_else(|| format!("S3 bucket {bucket} does not exist"))?;
+            let object = b
+                .objects
+                .get(key)
+                .ok_or_else(|| format!("S3 object s3://{bucket}/{key} does not exist"))?;
+            object.body.clone()
+        };
+        // `read_body` consults the body cache (which is owned by the state),
+        // so re-borrow `state` after dropping the bucket borrow above.
+        state
+            .read_body(&body_ref)
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("S3 read failed: {e}"))
     }
 
     fn create_lambda_permission(
