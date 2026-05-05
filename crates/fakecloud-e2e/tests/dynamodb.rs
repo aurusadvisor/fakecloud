@@ -1112,6 +1112,309 @@ async fn dynamodb_transact_write_items() {
     assert!(resp.item().is_none());
 }
 
+/// TransactWriteItems must be all-or-nothing: when a later operation
+/// fails its ConditionExpression, no earlier writes commit. The SDK
+/// surfaces failures via `TransactionCanceledException` whose
+/// `CancellationReasons` array aligns 1:1 with the input
+/// `TransactItems` and tags each entry with `None` or
+/// `ConditionalCheckFailed`.
+#[tokio::test]
+async fn dynamodb_transact_write_items_atomic_rollback_on_condition_failure() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("TransactRollback")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Two-op transaction: a Put that would succeed, followed by a
+    // ConditionCheck guaranteed to fail. The whole transaction must be
+    // rejected and the first Put must NOT commit.
+    let err = client
+        .transact_write_items()
+        .transact_items(
+            TransactWriteItem::builder()
+                .put(
+                    Put::builder()
+                        .table_name("TransactRollback")
+                        .item("pk", AttributeValue::S("first".to_string()))
+                        .item("v", AttributeValue::S("written".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .transact_items(
+            TransactWriteItem::builder()
+                .condition_check(
+                    aws_sdk_dynamodb::types::ConditionCheck::builder()
+                        .table_name("TransactRollback")
+                        .key("pk", AttributeValue::S("never-existed".to_string()))
+                        .condition_expression("attribute_exists(pk)")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect_err("transaction must fail");
+
+    let svc = err.into_service_error();
+    let cancelled = match svc {
+        aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError::TransactionCanceledException(e) => e,
+        other => panic!("expected TransactionCanceledException, got {other:?}"),
+    };
+    let reasons = cancelled.cancellation_reasons();
+    assert_eq!(reasons.len(), 2, "one reason per TransactItem");
+    assert_eq!(reasons[0].code(), Some("None"));
+    assert_eq!(reasons[1].code(), Some("ConditionalCheckFailed"));
+
+    // Verify the first Put did NOT commit.
+    let resp = client
+        .get_item()
+        .table_name("TransactRollback")
+        .key("pk", AttributeValue::S("first".to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.item().is_none(),
+        "TransactWriteItems must be all-or-nothing — the first Put must not have committed"
+    );
+}
+
+/// When a Put/Update/Delete carries
+/// `ReturnValuesOnConditionCheckFailure=ALL_OLD` and its
+/// `ConditionExpression` rejects the request, the offending item
+/// surfaces back through `CancellationReasons[i].Item` so SDK callers
+/// can branch on the existing state without an extra round-trip.
+#[tokio::test]
+async fn dynamodb_transact_write_items_returns_old_item_on_condition_failure() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("TransactReturnOld")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Seed an existing item.
+    client
+        .put_item()
+        .table_name("TransactReturnOld")
+        .item("pk", AttributeValue::S("k".to_string()))
+        .item("v", AttributeValue::S("old-value".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    // attribute_not_exists guard fails because the item is already
+    // there; ALL_OLD asks fakecloud to attach the live item.
+    let err = client
+        .transact_write_items()
+        .transact_items(
+            TransactWriteItem::builder()
+                .put(
+                    Put::builder()
+                        .table_name("TransactReturnOld")
+                        .item("pk", AttributeValue::S("k".to_string()))
+                        .item("v", AttributeValue::S("new-value".to_string()))
+                        .condition_expression("attribute_not_exists(pk)")
+                        .return_values_on_condition_check_failure(
+                            aws_sdk_dynamodb::types::ReturnValuesOnConditionCheckFailure::AllOld,
+                        )
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect_err("attribute_not_exists must fail");
+
+    let cancelled = match err.into_service_error() {
+        aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError::TransactionCanceledException(e) => e,
+        other => panic!("expected TransactionCanceledException, got {other:?}"),
+    };
+    let reason = &cancelled.cancellation_reasons()[0];
+    assert_eq!(reason.code(), Some("ConditionalCheckFailed"));
+    let item = reason
+        .item()
+        .expect("ALL_OLD must surface the existing item");
+    assert_eq!(
+        item.get("v").unwrap().as_s().unwrap(),
+        "old-value",
+        "the surfaced item must reflect the live state pre-transaction"
+    );
+}
+
+/// Each successful Put/Update/Delete inside a TransactWriteItems must
+/// emit a DynamoDB Streams record so consumers (Lambda
+/// EventSourceMapping, Kinesis adapters, change-data-capture
+/// pipelines) see the same event-stream regardless of whether the
+/// write came in via PutItem or via a transaction.
+#[tokio::test]
+async fn dynamodb_transact_write_items_emits_stream_records() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let streams = server.dynamodb_streams_client().await;
+
+    let table_name = "TransactStreams";
+    ddb.create_table()
+        .table_name(table_name)
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .stream_specification(
+            StreamSpecification::builder()
+                .stream_enabled(true)
+                .stream_view_type(StreamViewType::NewAndOldImages)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let table = ddb
+        .describe_table()
+        .table_name(table_name)
+        .send()
+        .await
+        .unwrap();
+    let stream_arn = table
+        .table()
+        .unwrap()
+        .latest_stream_arn()
+        .unwrap()
+        .to_string();
+
+    // Seed a row so we can both Put a new key and Delete an existing
+    // key inside the same transaction.
+    ddb.put_item()
+        .table_name(table_name)
+        .item("pk", AttributeValue::S("seed".to_string()))
+        .send()
+        .await
+        .unwrap();
+
+    ddb.transact_write_items()
+        .transact_items(
+            TransactWriteItem::builder()
+                .put(
+                    Put::builder()
+                        .table_name(table_name)
+                        .item("pk", AttributeValue::S("inserted".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .transact_items(
+            TransactWriteItem::builder()
+                .delete(
+                    Delete::builder()
+                        .table_name(table_name)
+                        .key("pk", AttributeValue::S("seed".to_string()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let desc = streams
+        .describe_stream()
+        .stream_arn(&stream_arn)
+        .send()
+        .await
+        .unwrap();
+    let shard_id = desc
+        .stream_description()
+        .unwrap()
+        .shards()
+        .first()
+        .unwrap()
+        .shard_id()
+        .unwrap()
+        .to_string();
+    let it = streams
+        .get_shard_iterator()
+        .stream_arn(&stream_arn)
+        .shard_id(&shard_id)
+        .shard_iterator_type(aws_sdk_dynamodbstreams::types::ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+    let records = streams
+        .get_records()
+        .shard_iterator(it.shard_iterator().unwrap())
+        .send()
+        .await
+        .unwrap();
+    let r = records.records();
+
+    // Seed PutItem -> 1 INSERT, transaction -> 1 INSERT + 1 REMOVE = 3.
+    assert_eq!(
+        r.len(),
+        3,
+        "one stream record per write, including each transact-item"
+    );
+    assert_eq!(r[0].event_name().unwrap().as_str(), "INSERT"); // seed
+    assert_eq!(r[1].event_name().unwrap().as_str(), "INSERT"); // transact Put
+    assert_eq!(r[2].event_name().unwrap().as_str(), "REMOVE"); // transact Delete
+}
+
 #[tokio::test]
 async fn dynamodb_ttl_lifecycle() {
     let server = TestServer::start().await;
