@@ -491,14 +491,49 @@ pub async fn dispatch(
                                 "IAM policy evaluation denied request"
                             );
                             if config.iam_mode.is_strict() {
+                                // Real AWS includes an "Encoded
+                                // authorization failure message" suffix
+                                // on AccessDeniedException — an opaque
+                                // base64+zlib JSON blob that the caller
+                                // can pass to STS
+                                // `DecodeAuthorizationMessage` to
+                                // recover the structured deny reason
+                                // (action, principal, matched
+                                // statements, condition context). We
+                                // produce the same blob inline so
+                                // existing tooling that decodes deny
+                                // reasons works against fakecloud.
+                                let context_summary = serde_json::json!({
+                                    "aws:PrincipalArn": principal.arn,
+                                    "aws:PrincipalAccount": principal.account_id,
+                                    "aws:RequestedRegion": condition_context
+                                        .aws_requested_region
+                                        .clone()
+                                        .unwrap_or_default(),
+                                    "aws:SecureTransport": condition_context
+                                        .aws_secure_transport
+                                        .unwrap_or(false),
+                                    "aws:Action": iam_action.action_string(),
+                                    "aws:Resource": iam_action.resource,
+                                    "decision": format!("{:?}", decision),
+                                });
+                                let action_string = iam_action.action_string();
+                                let encoded = crate::auth_message::encode_deny(
+                                    matches!(decision, crate::auth::IamDecision::ExplicitDeny),
+                                    Some(&action_string),
+                                    Some(&principal.arn),
+                                    Vec::new(),
+                                    Some(context_summary),
+                                );
                                 return build_error_response(
                                     StatusCode::FORBIDDEN,
                                     "AccessDeniedException",
                                     &format!(
-                                        "User: {} is not authorized to perform: {} on resource: {}",
+                                        "User: {} is not authorized to perform: {} on resource: {} Encoded authorization failure message: {}",
                                         principal.arn,
                                         iam_action.action_string(),
-                                        iam_action.resource
+                                        iam_action.resource,
+                                        encoded,
                                     ),
                                     &request_id,
                                     detected.protocol,

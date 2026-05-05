@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod auth_message;
 pub mod delivery;
 pub mod dispatch;
 pub mod ecr_uri;

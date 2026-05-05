@@ -3139,9 +3139,11 @@ version = "0.13.3"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "fakecloud-aws",
+ "flate2",
  "http 1.4.0",
  "http-body-util",
  "md-5 0.10.6",

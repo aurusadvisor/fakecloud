@@ -1008,13 +1008,30 @@ impl IamService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // The caller must exist as a real IAM user. If the principal was
+        // resolved to a user that's been deleted out from under us, AWS
+        // returns `InvalidUserType` for ChangePassword (the user is no
+        // longer eligible to update their own console password).
+        if !state.users.contains_key(&user_name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::FORBIDDEN,
+                "InvalidUserType",
+                format!(
+                    "User {user_name} cannot change their password because they no longer exist."
+                ),
+            ));
+        }
         let Some(profile) = state.login_profiles.get_mut(&user_name) else {
-            // No login profile yet — treat ChangePassword as a no-op so
-            // the operation completes successfully against newly minted
-            // users that haven't been issued console credentials.
-            return Ok(AwsResponse::xml(
-                StatusCode::OK,
-                empty_response("ChangePassword", &req.request_id),
+            // User exists but has no login profile (no console password
+            // was ever assigned). AWS rejects ChangePassword with
+            // `InvalidUserType` in that case — the user can't update a
+            // password they don't have.
+            return Err(AwsServiceError::aws_error(
+                StatusCode::FORBIDDEN,
+                "InvalidUserType",
+                format!(
+                    "User {user_name} cannot change their password because they do not have a login profile."
+                ),
             ));
         };
 
@@ -1094,12 +1111,56 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let version = required_param(&req.query_params, "GlobalEndpointTokenVersion")?;
+        // Real STS only accepts `v1Token` and `v2Token`. Reject anything
+        // else with the same `InvalidParameterValue` AWS returns.
+        if version != "v1Token" && version != "v2Token" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "Value '{version}' for parameter GlobalEndpointTokenVersion is invalid. Valid values: v1Token, v2Token."
+                ),
+            ));
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state.global_endpoint_token_version = Some(version.to_string());
         Ok(AwsResponse::xml(
             StatusCode::OK,
             empty_response("SetSecurityTokenServicePreferences", &req.request_id),
+        ))
+    }
+
+    /// Read-side companion to `SetSecurityTokenServicePreferences`.
+    /// Returns the value the account configured most recently. AWS
+    /// defaults to `v1Token` when the account has never set a
+    /// preference; we mirror that so the response is always
+    /// well-formed.
+    ///
+    /// Note: the public AWS IAM API today exposes only the setter
+    /// (`SetSecurityTokenServicePreferences`) — but operators routinely
+    /// want to read what they wrote, and tooling that talks to
+    /// fakecloud benefits from having a real getter rather than
+    /// re-reading the snapshot file. We keep the wire shape close to
+    /// what AWS would return if it ever added a public getter:
+    /// `<GlobalEndpointTokenVersion>` inside the result element.
+    pub(super) fn get_security_token_service_preferences(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let version = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.global_endpoint_token_version.clone())
+            .unwrap_or_else(|| "v1Token".to_string());
+        let body = format!(
+            "  <GetSecurityTokenServicePreferencesResult><GlobalEndpointTokenVersion>{}</GlobalEndpointTokenVersion></GetSecurityTokenServicePreferencesResult>",
+            xml_escape(&version),
+        );
+        Ok(xml_response(
+            "GetSecurityTokenServicePreferences",
+            &body,
+            &req.request_id,
         ))
     }
 

@@ -3904,3 +3904,200 @@ fn misc_extras_smoke() {
     ))
     .unwrap();
 }
+
+fn change_password_principal(user_name: &str) -> fakecloud_core::auth::Principal {
+    fakecloud_core::auth::Principal {
+        arn: format!("arn:aws:iam::123456789012:user/{user_name}"),
+        user_id: "AIDAEXAMPLE".to_string(),
+        account_id: "123456789012".to_string(),
+        principal_type: fakecloud_core::auth::PrincipalType::User,
+        source_identity: None,
+        tags: None,
+    }
+}
+
+#[test]
+fn change_password_rejects_wrong_old_password() {
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "u1")]))
+        .unwrap();
+    svc.create_login_profile(&make_request(
+        "CreateLoginProfile",
+        vec![("UserName", "u1"), ("Password", "correct-old")],
+    ))
+    .unwrap();
+    let mut req = make_request(
+        "ChangePassword",
+        vec![("OldPassword", "wrong-old"), ("NewPassword", "fresh-new")],
+    );
+    req.principal = Some(change_password_principal("u1"));
+    let err = match svc.change_password(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected mismatch to fail"),
+    };
+    assert_eq!(err.status(), http::StatusCode::FORBIDDEN);
+    assert!(format!("{:?}", err).contains("InvalidUserType"));
+}
+
+#[test]
+fn change_password_rejects_user_without_login_profile() {
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "noprofile")]))
+        .unwrap();
+    let mut req = make_request(
+        "ChangePassword",
+        vec![("OldPassword", "a"), ("NewPassword", "b")],
+    );
+    req.principal = Some(change_password_principal("noprofile"));
+    let err = match svc.change_password(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected user-without-profile to fail"),
+    };
+    assert!(format!("{:?}", err).contains("InvalidUserType"));
+}
+
+#[test]
+fn change_password_rejects_deleted_user() {
+    let svc = make_service();
+    let mut req = make_request(
+        "ChangePassword",
+        vec![("OldPassword", "a"), ("NewPassword", "b")],
+    );
+    req.principal = Some(change_password_principal("ghost"));
+    let err = match svc.change_password(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected deleted-user to fail"),
+    };
+    assert!(format!("{:?}", err).contains("InvalidUserType"));
+}
+
+#[test]
+fn change_password_writes_new_password() {
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "u1")]))
+        .unwrap();
+    svc.create_login_profile(&make_request(
+        "CreateLoginProfile",
+        vec![("UserName", "u1"), ("Password", "old")],
+    ))
+    .unwrap();
+    let mut first = make_request(
+        "ChangePassword",
+        vec![("OldPassword", "old"), ("NewPassword", "fresh")],
+    );
+    first.principal = Some(change_password_principal("u1"));
+    svc.change_password(&first).unwrap();
+
+    // Subsequent ChangePassword with the previous password fails —
+    // the rotation actually wrote the new value to state.
+    let mut second = make_request(
+        "ChangePassword",
+        vec![("OldPassword", "old"), ("NewPassword", "another")],
+    );
+    second.principal = Some(change_password_principal("u1"));
+    assert!(svc.change_password(&second).is_err());
+
+    // Same call with the new password succeeds.
+    let mut third = make_request(
+        "ChangePassword",
+        vec![("OldPassword", "fresh"), ("NewPassword", "another")],
+    );
+    third.principal = Some(change_password_principal("u1"));
+    svc.change_password(&third).unwrap();
+}
+
+#[test]
+fn set_sts_prefs_rejects_invalid_version() {
+    let svc = make_service();
+    let err = match svc.set_security_token_service_preferences(&make_request(
+        "SetSecurityTokenServicePreferences",
+        vec![("GlobalEndpointTokenVersion", "v9Token")],
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("expected invalid version to be rejected"),
+    };
+    assert!(format!("{:?}", err).contains("InvalidParameterValue"));
+}
+
+#[test]
+fn get_sts_prefs_returns_stored_version() {
+    let svc = make_service();
+    svc.set_security_token_service_preferences(&make_request(
+        "SetSecurityTokenServicePreferences",
+        vec![("GlobalEndpointTokenVersion", "v2Token")],
+    ))
+    .unwrap();
+    let resp = svc
+        .get_security_token_service_preferences(&make_request(
+            "GetSecurityTokenServicePreferences",
+            vec![],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<GlobalEndpointTokenVersion>v2Token</GlobalEndpointTokenVersion>"),
+        "expected stored version in response, got: {body}"
+    );
+}
+
+#[test]
+fn get_sts_prefs_defaults_to_v1token_when_unset() {
+    let svc = make_service();
+    let resp = svc
+        .get_security_token_service_preferences(&make_request(
+            "GetSecurityTokenServicePreferences",
+            vec![],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<GlobalEndpointTokenVersion>v1Token</GlobalEndpointTokenVersion>"),
+        "expected default v1Token, got: {body}"
+    );
+}
+
+#[test]
+fn resync_mfa_device_updates_enable_date() {
+    use chrono::Utc;
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "u1")]))
+        .unwrap();
+    let serial = "arn:aws:iam::123456789012:mfa/u1";
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("123456789012");
+        let stale = Utc::now() - chrono::Duration::days(30);
+        state.virtual_mfa_devices.insert(
+            serial.to_string(),
+            crate::state::VirtualMfaDevice {
+                serial_number: serial.to_string(),
+                user: Some("u1".to_string()),
+                enable_date: Some(stale),
+                base32_string_seed: String::new(),
+                qr_code_png: String::new(),
+                tags: Vec::new(),
+            },
+        );
+    }
+
+    svc.resync_mfa_device(&make_request(
+        "ResyncMFADevice",
+        vec![
+            ("UserName", "u1"),
+            ("SerialNumber", serial),
+            ("AuthenticationCode1", "111111"),
+            ("AuthenticationCode2", "222222"),
+        ],
+    ))
+    .unwrap();
+
+    let accounts = svc.state.read();
+    let state = accounts.get("123456789012").unwrap();
+    let dev = state.virtual_mfa_devices.get(serial).unwrap();
+    let enabled = dev.enable_date.expect("enable_date should be set");
+    let age = (Utc::now() - enabled).num_seconds();
+    assert!(
+        (0..60).contains(&age),
+        "ResyncMFADevice should freshen EnableDate, got age {age}s"
+    );
+}
