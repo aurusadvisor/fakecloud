@@ -492,7 +492,27 @@ fn function_config_unchanged_for_publish(
         && prev.signing_profile_version_arn == live.signing_profile_version_arn
         && prev.signing_job_arn == live.signing_job_arn
         && prev.runtime_version_config == live.runtime_version_config
-        && prev.snap_start == live.snap_start
+        && snap_start_apply_on_eq(prev.snap_start.as_ref(), live.snap_start.as_ref())
+}
+
+/// Compare two `SnapStart` configs by `ApplyOn` only — that's the
+/// caller-supplied knob. `OptimizationStatus` is server-side state
+/// that PublishVersion mutates on snapshots (flipping to "On" when
+/// ApplyOn=PublishedVersions) while $LATEST stays "Off", so a deep
+/// equality check here would never match on a SnapStart-enabled
+/// function and PublishVersion would never be idempotent. Treating
+/// `None` and `{ApplyOn:"None"}` as equivalent matches AWS, which
+/// emits the latter when the field is unset.
+fn snap_start_apply_on_eq(prev: Option<&Value>, live: Option<&Value>) -> bool {
+    let prev_apply = prev
+        .and_then(|v| v.get("ApplyOn"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("None");
+    let live_apply = live
+        .and_then(|v| v.get("ApplyOn"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("None");
+    prev_apply == live_apply
 }
 
 /// versions in the weight map. Returns `None` for `$LATEST` /

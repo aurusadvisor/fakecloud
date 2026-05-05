@@ -1732,6 +1732,39 @@ async fn publish_version_idempotent_when_latest_unchanged() {
 }
 
 #[tokio::test]
+async fn publish_version_idempotent_with_snap_start_published_versions() {
+    // PublishVersion mutates OptimizationStatus="On" on the snapshot
+    // when SnapStart.ApplyOn=PublishedVersions, while $LATEST keeps
+    // "Off". A naive deep-equality on snap_start would treat that
+    // post-publish $LATEST -> snapshot delta as a real change, minting
+    // a fresh version on every redundant call. The fix is to compare
+    // ApplyOn only, since that's the caller-controlled field.
+    let svc = LambdaService::new(make_state());
+    let body = json!({
+        "FunctionName": "snap-fn",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "Code": {},
+        "SnapStart": { "ApplyOn": "PublishedVersions" }
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::POST, "/2015-03-31/functions/snap-fn/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let v1: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v1["Version"], "1");
+
+    // Re-publish with no changes -> still v1 (idempotent), even
+    // though the snapshot had OptimizationStatus flipped to "On".
+    let req = make_request(Method::POST, "/2015-03-31/functions/snap-fn/versions", "{}");
+    let resp = svc.handle(req).await.unwrap();
+    let again: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(again["Version"], "1");
+}
+
+#[tokio::test]
 async fn publish_version_creates_new_version_on_config_only_change() {
     // PublishVersion idempotency must not collapse a config-only
     // change (memory, env, etc.) to the previous snapshot — AWS
