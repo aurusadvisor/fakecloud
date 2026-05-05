@@ -1,5 +1,5 @@
 {
-  "variants_passed": 40284,
+  "variants_passed": 40232,
   "total_variants": 82182,
   "per_service": {
     "kinesis": {
@@ -107,7 +107,7 @@
       "total": 447
     },
     "ssm": {
-      "passed": 5077,
+      "passed": 5025,
       "total": 5309
     },
     "events": {

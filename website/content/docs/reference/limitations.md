@@ -14,11 +14,13 @@ If you want real email sending, use SES (which also records to `/_fakecloud/ses/
 
 ## SSM Session Manager data plane
 
-`StartSession` and `ResumeSession` return `501 OperationNotSupportedException`
-by default. Real Session Manager hands you a websocket URL backed by an SSM
+`StartSession` and `ResumeSession` return `500 InternalServerError` by
+default. Real Session Manager hands you a websocket URL backed by an SSM
 agent on the target instance; fakecloud doesn't run that agent or the
 websocket relay, and returning a fake stream URL would make integration
-tests think the session was live.
+tests think the session was live. The error code is intentionally
+`InternalServerError` (declared in the SSM Smithy model for these
+operations) so SDK clients deserialize a known shape.
 
 Two opt-in modes keep round-trip flows working:
 

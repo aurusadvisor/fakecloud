@@ -32,12 +32,18 @@ fn echo_mode_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// We use `InternalServerError` rather than a fakecloud-specific code because
+/// the SSM Smithy model only declares `InternalServerError`, `InvalidDocument`,
+/// and `TargetNotConnected` for StartSession/ResumeSession. Picking a code
+/// outside that set would break Smithy conformance and produce undeclared
+/// errors in SDK client deserialization.
 fn not_implemented_session_error(action: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "OperationNotSupportedException",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "InternalServerError",
         format!(
-            "{action} via SSM data plane is not implemented in fakecloud. \
+            "{action} via SSM data plane is not implemented in fakecloud — \
+             there is no real websocket server backing the stream URL. \
              Use admin endpoint POST /_fakecloud/ssm/sessions/inject to inject a session, \
              or set {ECHO_MODE_ENV}=1 for echo mode. See {SSM_SESSION_DOCS_URL}"
         ),

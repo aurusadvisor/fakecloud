@@ -40,10 +40,14 @@ curl -X POST "$ENDPOINT/_fakecloud/ssm/commands/$CMD_ID/fail" \
 
 ## Session Manager
 
-`StartSession` and `ResumeSession` return `501 OperationNotSupportedException`
-by default. fakecloud doesn't run a real SSM data-plane websocket, and
-returning a fake stream URL would lull integration tests into thinking the
-session was live. Two escape hatches keep round-trip flows working:
+`StartSession` and `ResumeSession` return `500 InternalServerError` by default.
+fakecloud doesn't run a real SSM data-plane websocket, and returning a fake
+stream URL would lull integration tests into thinking the session was live.
+We use `InternalServerError` rather than a fakecloud-specific error code
+because the SSM Smithy model only declares `InternalServerError`,
+`InvalidDocument`, and `TargetNotConnected` for these operations — picking a
+code outside that set would break SDK error deserialization. The error
+message points at the escape hatches:
 
 **Echo mode** — set `FAKECLOUD_SSM_SESSION_ECHO=1` to make `StartSession` /
 `ResumeSession` succeed with a sentinel token (`fakecloud-echo-mode-not-real-websocket`).

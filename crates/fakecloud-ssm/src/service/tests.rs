@@ -1414,7 +1414,7 @@ fn expect_err(result: Result<AwsResponse, AwsServiceError>) -> AwsServiceError {
 }
 
 #[test]
-fn start_session_returns_501_without_echo_mode() {
+fn start_session_returns_internal_error_without_echo_mode() {
     // Belt-and-braces in case a parallel test polluted the env. The
     // module guards `serial_test` aren't on the workspace dev-deps yet,
     // so we just remove and verify the default path.
@@ -1423,15 +1423,18 @@ fn start_session_returns_501_without_echo_mode() {
     let svc = make_service();
     let req = make_request("StartSession", json!({ "Target": "i-001" }));
     let err = expect_err(svc.start_session(&req));
-    assert_eq!(err.status(), http::StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(err.code(), "OperationNotSupportedException");
+    // We use InternalServerError (declared in the SSM Smithy model) instead
+    // of a fakecloud-specific error code so SDK clients deserialize a known
+    // shape and conformance variants stay green.
+    assert_eq!(err.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(err.code(), "InternalServerError");
     // The error message must point at the documented escape hatches.
     assert!(err.message().contains("FAKECLOUD_SSM_SESSION_ECHO"));
     assert!(err.message().contains("/_fakecloud/ssm/sessions/inject"));
 }
 
 #[test]
-fn resume_session_returns_501_without_echo_mode() {
+fn resume_session_returns_internal_error_without_echo_mode() {
     std::env::remove_var("FAKECLOUD_SSM_SESSION_ECHO");
 
     let svc = make_service();
@@ -1440,7 +1443,8 @@ fn resume_session_returns_501_without_echo_mode() {
         json!({ "SessionId": "session-000000000001" }),
     );
     let err = expect_err(svc.resume_session(&req));
-    assert_eq!(err.status(), http::StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(err.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(err.code(), "InternalServerError");
 }
 
 #[test]
