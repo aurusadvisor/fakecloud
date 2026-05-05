@@ -413,6 +413,119 @@ fn repository_policy_allows_empty_policy_denies() {
     ));
 }
 
+#[test]
+fn check_repo_policy_same_account_passes_without_policy() {
+    use super::check_repo_policy;
+    // Same-account caller: policy is irrelevant (real ECR falls back to
+    // the caller's IAM identity policies for the same-account path).
+    let res = check_repo_policy(
+        "111111111111",
+        "111111111111",
+        "arn:aws:ecr:us-east-1:111111111111:repository/app",
+        "app",
+        None,
+        "ecr:BatchGetImage",
+    );
+    assert!(res.is_ok());
+}
+
+#[test]
+fn check_repo_policy_cross_account_no_policy_returns_not_found() {
+    use super::check_repo_policy;
+    let err = check_repo_policy(
+        "111111111111",
+        "222222222222",
+        "arn:aws:ecr:us-east-1:111111111111:repository/app",
+        "app",
+        None,
+        "ecr:BatchGetImage",
+    )
+    .expect_err("expected error");
+    assert_eq!(err.code(), "RepositoryPolicyNotFoundException");
+}
+
+#[test]
+fn check_repo_policy_cross_account_explicit_allow_passes() {
+    use super::check_repo_policy;
+    let policy = r#"{
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::222222222222:root"},
+            "Action": "ecr:BatchGetImage",
+            "Resource": "*"
+        }]
+    }"#;
+    let res = check_repo_policy(
+        "111111111111",
+        "222222222222",
+        "arn:aws:ecr:us-east-1:111111111111:repository/app",
+        "app",
+        Some(policy),
+        "ecr:BatchGetImage",
+    );
+    assert!(res.is_ok());
+}
+
+#[test]
+fn check_repo_policy_cross_account_implicit_deny_returns_access_denied() {
+    use super::check_repo_policy;
+    // Policy exists but doesn't grant the requested action: ECR returns
+    // AccessDeniedException, not RepositoryPolicyNotFoundException.
+    let policy = r#"{
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::333333333333:root"},
+            "Action": "ecr:BatchGetImage",
+            "Resource": "*"
+        }]
+    }"#;
+    let err = check_repo_policy(
+        "111111111111",
+        "222222222222",
+        "arn:aws:ecr:us-east-1:111111111111:repository/app",
+        "app",
+        Some(policy),
+        "ecr:BatchGetImage",
+    )
+    .expect_err("expected error");
+    assert_eq!(err.code(), "AccessDeniedException");
+}
+
+#[test]
+fn check_repo_policy_cross_account_explicit_deny_returns_access_denied() {
+    use super::check_repo_policy;
+    // Explicit Deny in the resource policy beats any matching Allow.
+    let policy = r#"{
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::222222222222:root"},
+                "Action": "ecr:BatchGetImage",
+                "Resource": "*"
+            },
+            {
+                "Effect": "Deny",
+                "Principal": {"AWS": "arn:aws:iam::222222222222:root"},
+                "Action": "ecr:BatchGetImage",
+                "Resource": "*"
+            }
+        ]
+    }"#;
+    let err = check_repo_policy(
+        "111111111111",
+        "222222222222",
+        "arn:aws:ecr:us-east-1:111111111111:repository/app",
+        "app",
+        Some(policy),
+        "ecr:BatchGetImage",
+    )
+    .expect_err("expected error");
+    assert_eq!(err.code(), "AccessDeniedException");
+}
+
 // ── Replication: PutImage trigger + DescribeImageReplicationStatus ──
 
 #[cfg(test)]
@@ -693,6 +806,11 @@ mod repo_policy_enforcement_tests {
 
     #[test]
     fn batch_get_image_cross_account_blocked_when_no_policy() {
+        // Real ECR distinguishes "no resource policy at all" from "policy
+        // exists but denies": the former returns
+        // RepositoryPolicyNotFoundException so the cross-account caller can
+        // tell the owner hasn't shared the repo, while the latter returns
+        // AccessDeniedException.
         let (svc, _state) = fixture(None);
         let req = make_request(
             "BatchGetImage",
@@ -707,8 +825,8 @@ mod repo_policy_enforcement_tests {
             Err(e) => e,
             Ok(_) => panic!("expected denial"),
         };
-        assert_eq!(err.status(), StatusCode::FORBIDDEN);
-        assert_eq!(err.code(), "AccessDeniedException");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), "RepositoryPolicyNotFoundException");
     }
 
     #[test]
@@ -785,8 +903,73 @@ mod repo_policy_enforcement_tests {
             Err(e) => e,
             Ok(_) => panic!("expected denial"),
         };
-        assert_eq!(err.status(), StatusCode::FORBIDDEN);
-        assert_eq!(err.code(), "AccessDeniedException");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), "RepositoryPolicyNotFoundException");
+    }
+
+    #[test]
+    fn put_image_cross_account_blocked_when_no_policy_returns_policy_not_found() {
+        // PutImage with no repository policy at all on the cross-account
+        // path: same RepositoryPolicyNotFoundException semantics as the
+        // pull-side ops, since AWS ECR uses the same gate code path.
+        let (svc, _state) = fixture(None);
+        let manifest = "{\"mediaType\":\"x\"}";
+        let req = make_request(
+            "PutImage",
+            OTHER,
+            json!({
+                "registryId": OWNER,
+                "repositoryName": "app",
+                "imageManifest": manifest,
+                "imageTag": "v2",
+            }),
+        );
+        let err = match svc.put_image(&req) {
+            Err(e) => e,
+            Ok(_) => panic!("expected denial"),
+        };
+        assert_eq!(err.code(), "RepositoryPolicyNotFoundException");
+    }
+
+    #[test]
+    fn batch_delete_image_cross_account_gated_by_policy() {
+        // BatchDeleteImage is the most destructive cross-account op and
+        // gets the same policy gate as the pull/push ops. With no policy:
+        // RepositoryPolicyNotFoundException; with explicit Allow on the
+        // matching action: success.
+        let (svc, _state) = fixture(None);
+        let req_no_policy = make_request(
+            "BatchDeleteImage",
+            OTHER,
+            json!({
+                "registryId": OWNER,
+                "repositoryName": "app",
+                "imageIds": [{"imageTag": "v1"}],
+            }),
+        );
+        let err = match svc.batch_delete_image(&req_no_policy) {
+            Err(e) => e,
+            Ok(_) => panic!("expected RepositoryPolicyNotFoundException"),
+        };
+        assert_eq!(err.code(), "RepositoryPolicyNotFoundException");
+
+        let policy = cross_account_allow_policy("ecr:BatchDeleteImage");
+        let (svc, _state) = fixture(Some(&policy));
+        let req_allowed = make_request(
+            "BatchDeleteImage",
+            OTHER,
+            json!({
+                "registryId": OWNER,
+                "repositoryName": "app",
+                "imageIds": [{"imageTag": "v1"}],
+            }),
+        );
+        if let Err(e) = svc.batch_delete_image(&req_allowed) {
+            panic!(
+                "BatchDeleteImage with allow policy should succeed, got: {}",
+                e.code()
+            );
+        }
     }
 }
 

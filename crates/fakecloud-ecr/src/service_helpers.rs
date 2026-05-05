@@ -800,8 +800,17 @@ pub(crate) fn repository_filters_match(
 /// Enforce the cross-account repo-policy gate at a handler. Returns
 /// Ok(()) when the caller belongs to the same account as the repo
 /// (in which case ECR falls back to the caller's IAM perms — out of
-/// scope for this batch), or when an explicit Allow on `action` exists.
-/// Otherwise returns the canonical AccessDeniedException.
+/// scope for this batch), or when the repository policy explicitly
+/// Allows the requested action for the caller. Otherwise returns the
+/// canonical AWS error:
+///
+/// * `RepositoryPolicyNotFoundException` — the repository has no
+///   policy at all (real AWS distinguishes "no policy" from "policy
+///   denies" so callers can tell whether they need to ask the
+///   repository owner to create a policy or fix an existing one).
+/// * `AccessDeniedException` — a policy exists but doesn't grant the
+///   requested action to the caller (either implicit or explicit
+///   deny).
 pub(crate) fn check_repo_policy(
     repo_owner_account: &str,
     caller_account: &str,
@@ -813,28 +822,45 @@ pub(crate) fn check_repo_policy(
     if caller_account == repo_owner_account {
         return Ok(());
     }
-    if repository_policy_allows(policy_doc, caller_account, repo_arn, action) {
-        return Ok(());
+    match repository_policy_decision(policy_doc, caller_account, repo_arn, action) {
+        RepoPolicyDecision::Allow => Ok(()),
+        RepoPolicyDecision::NoPolicy => Err(repository_policy_not_found(repo_name)),
+        RepoPolicyDecision::Deny => Err(repository_policy_denied(repo_name, action)),
     }
-    Err(repository_policy_denied(repo_name, action))
 }
 
-/// Cross-account ECR repository policy gate. When the caller's account
-/// differs from the repository's owning account, the repo must have a
-/// resource policy that explicitly Allows the requested action — empty
-/// policies implicitly deny, mirroring real AWS.
-pub(crate) fn repository_policy_allows(
+/// Outcome of evaluating a cross-account ECR request against a
+/// repository's resource policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepoPolicyDecision {
+    /// Policy exists and explicitly allows the requested action for
+    /// the caller. Maps to `Decision::Allow` from the IAM evaluator.
+    Allow,
+    /// No repository policy exists at all (or it's an empty string).
+    /// AWS surfaces this as `RepositoryPolicyNotFoundException` so
+    /// callers can distinguish "owner hasn't shared this repo" from
+    /// "owner shared it but not with you".
+    NoPolicy,
+    /// A policy exists but its evaluation produced `ImplicitDeny` or
+    /// `ExplicitDeny`. AWS surfaces this as `AccessDeniedException`.
+    Deny,
+}
+
+/// Cross-account ECR repository policy decision. When the caller's
+/// account differs from the repository's owning account, the repo
+/// must have a resource policy that explicitly Allows the requested
+/// action — empty / missing policies map to [`RepoPolicyDecision::NoPolicy`]
+/// so the handler can return the more specific AWS error code.
+pub(crate) fn repository_policy_decision(
     policy_doc: Option<&str>,
     caller_account: &str,
     repo_arn: &str,
     action: &str,
-) -> bool {
-    let Some(doc) = policy_doc else {
-        return false;
+) -> RepoPolicyDecision {
+    let doc = match policy_doc {
+        Some(d) if !d.is_empty() => d,
+        _ => return RepoPolicyDecision::NoPolicy,
     };
-    if doc.is_empty() {
-        return false;
-    }
     use fakecloud_core::auth::{Principal, PrincipalType};
     use fakecloud_iam::evaluator::{evaluate, Decision, EvalRequest, PolicyDocument};
     let parsed = PolicyDocument::parse(doc);
@@ -853,5 +879,24 @@ pub(crate) fn repository_policy_allows(
         resource: repo_arn.to_string(),
         context: Default::default(),
     };
-    matches!(evaluate(&[parsed], &req), Decision::Allow)
+    match evaluate(&[parsed], &req) {
+        Decision::Allow => RepoPolicyDecision::Allow,
+        Decision::ImplicitDeny | Decision::ExplicitDeny => RepoPolicyDecision::Deny,
+    }
+}
+
+/// Boolean shim retained for the existing unit tests (and any callers
+/// that only need a yes/no answer). Returns `true` only when the
+/// repository policy explicitly allows the action.
+#[cfg(test)]
+pub(crate) fn repository_policy_allows(
+    policy_doc: Option<&str>,
+    caller_account: &str,
+    repo_arn: &str,
+    action: &str,
+) -> bool {
+    matches!(
+        repository_policy_decision(policy_doc, caller_account, repo_arn, action),
+        RepoPolicyDecision::Allow
+    )
 }
