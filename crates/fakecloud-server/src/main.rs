@@ -1120,6 +1120,7 @@ async fn main() {
         };
     let ssm_state_for_admin = ssm_state.clone();
     let ssm_state_for_fail = ssm_state.clone();
+    let ssm_state_for_policy_events = ssm_state.clone();
     let mut ssm_service = SsmService::new(ssm_state)
         .with_secretsmanager(secretsmanager_state.clone())
         .with_kms_hook(kms_hook_for_services.clone());
@@ -3321,6 +3322,52 @@ async fn main() {
                     axum::Json(types::FailSsmCommandResponse {
                         updated_invocations: updated,
                     })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ssm/parameter-policy-events",
+            axum::routing::get({
+                let ss = ssm_state_for_policy_events.clone();
+                move |query: axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| async move {
+                    let default_account = ss.read().default_account_id().to_string();
+                    let account = query
+                        .get("accountId")
+                        .cloned()
+                        .unwrap_or(default_account);
+                    let svc = fakecloud_ssm::SsmService::new(ss.clone());
+                    let events = svc
+                        .parameter_policy_events(&account)
+                        .into_iter()
+                        .map(|e| types::SsmParameterPolicyEvent {
+                            parameter_name: e.parameter_name,
+                            parameter_arn: e.parameter_arn,
+                            event_type: e.event_type,
+                            message: e.message,
+                            created_at: e.created_at.to_rfc3339(),
+                        })
+                        .collect();
+                    axum::Json(types::SsmParameterPolicyEventsResponse { events })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ssm/parameter-policy-events",
+            axum::routing::delete({
+                let ss = ssm_state_for_policy_events;
+                move |query: axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| async move {
+                    let default_account = ss.read().default_account_id().to_string();
+                    let account = query
+                        .get("accountId")
+                        .cloned()
+                        .unwrap_or(default_account);
+                    let svc = fakecloud_ssm::SsmService::new(ss.clone());
+                    svc.clear_parameter_policy_events(&account);
+                    axum::http::StatusCode::NO_CONTENT
                 }
             }),
         )

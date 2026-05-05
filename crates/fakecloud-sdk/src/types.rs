@@ -303,6 +303,27 @@ pub struct FailSsmCommandResponse {
     pub updated_invocations: usize,
 }
 
+/// One emitted parameter-policy event, as recorded by the
+/// `/_fakecloud/ssm/parameter-policy-events` admin endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SsmParameterPolicyEvent {
+    pub parameter_name: String,
+    pub parameter_arn: String,
+    /// One of `ExpirationRegistered`, `ExpirationNotificationRegistered`,
+    /// `NoChangeNotificationRegistered`, `Expiration`,
+    /// `ExpirationNotification`, `NoChangeNotification`.
+    pub event_type: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SsmParameterPolicyEventsResponse {
+    pub events: Vec<SsmParameterPolicyEvent>,
+}
+
 // ── EventBridge ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

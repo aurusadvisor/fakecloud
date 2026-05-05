@@ -1267,6 +1267,8 @@ impl ResourceProvisioner {
             data_type: "text".to_string(),
             tier: "Standard".to_string(),
             policies: None,
+            expiration_notified: false,
+            no_change_notified: false,
         };
 
         state.parameters.insert(name.to_string(), parameter);
