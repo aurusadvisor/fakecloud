@@ -6788,7 +6788,12 @@ fn jwks_endpoint_unknown_pool_returns_404() {
 fn openid_configuration_returns_standard_doc() {
     let (svc, _state) = make_svc();
     let pool_id = create_pool(&svc);
-    let doc = oidc_discovery_document(&pool_id, "us-east-1", "http://localhost:4569");
+    let doc = oidc_discovery_document(
+        &pool_id,
+        "us-east-1",
+        "http://localhost:4569",
+        Some("myapp"),
+    );
 
     assert_eq!(
         doc["issuer"],
@@ -6829,12 +6834,40 @@ fn openid_configuration_returns_standard_doc() {
 fn openid_configuration_jwks_uri_matches_jwks_endpoint() {
     let (svc, _state) = make_svc();
     let pool_id = create_pool(&svc);
-    let doc = oidc_discovery_document(&pool_id, "us-east-1", "http://localhost:4569");
+    let doc = oidc_discovery_document(&pool_id, "us-east-1", "http://localhost:4569", None);
     assert_eq!(
         doc["jwks_uri"],
         format!("http://localhost:4569/{pool_id}/.well-known/jwks.json"),
         "discovery doc's jwks_uri must point at the same pool's JWKS endpoint"
     );
+}
+
+#[test]
+fn openid_configuration_omits_oauth_endpoints_without_domain() {
+    let (svc, _state) = make_svc();
+    let pool_id = create_pool(&svc);
+    // Real Cognito only advertises OAuth endpoints once the pool has a
+    // hosted-UI domain — until then the URLs literally don't resolve.
+    let doc = oidc_discovery_document(&pool_id, "us-east-1", "http://localhost:4569", None);
+    assert!(
+        doc.get("authorization_endpoint").is_none(),
+        "authorization_endpoint must be omitted without a domain: {doc}"
+    );
+    assert!(
+        doc.get("token_endpoint").is_none(),
+        "token_endpoint must be omitted without a domain"
+    );
+    assert!(
+        doc.get("userinfo_endpoint").is_none(),
+        "userinfo_endpoint must be omitted without a domain"
+    );
+    assert!(
+        doc.get("revocation_endpoint").is_none(),
+        "revocation_endpoint must be omitted without a domain"
+    );
+    // jwks_uri and issuer are still required and unconditional.
+    assert!(doc["jwks_uri"].is_string());
+    assert!(doc["issuer"].is_string());
 }
 
 #[test]

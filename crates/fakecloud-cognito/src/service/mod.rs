@@ -1667,20 +1667,54 @@ pub async fn pool_jwks_document(state: &SharedCognitoState, pool_id: &str) -> Op
     Some(crate::jwt::jwks_document(&pem, &kid))
 }
 
+/// Whether a pool with `pool_id` exists in any account, plus the first
+/// `UserPoolDomain` (if any) attached to it. Used by the OIDC discovery
+/// route so it can emit OAuth endpoints only when a domain is configured
+/// — matching real Cognito, which omits those endpoints from discovery
+/// until the pool has a hosted-UI domain.
+pub fn pool_existence_and_domain(
+    state: &SharedCognitoState,
+    pool_id: &str,
+) -> (bool, Option<String>) {
+    let mas = state.read();
+    let mut exists = false;
+    let mut domain = None;
+    for (_, account) in mas.iter() {
+        if account.user_pools.contains_key(pool_id) {
+            exists = true;
+            // First domain wins; pools rarely have more than one.
+            for (name, d) in account.domains.iter() {
+                if d.user_pool_id == pool_id {
+                    domain = Some(name.clone());
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    (exists, domain)
+}
+
 /// Cognito-shaped OpenID-Connect discovery document for a pool. Mirrors
 /// the document AWS publishes at
 /// `https://cognito-idp.<region>.amazonaws.com/<pool>/.well-known/openid-configuration`.
 /// `base_url` is the externally-reachable origin (scheme+host+port) that
 /// clients use to reach fakecloud, so the URLs we hand back resolve.
-pub fn oidc_discovery_document(pool_id: &str, region: &str, base_url: &str) -> Value {
+///
+/// `pool_domain` is the hosted-UI domain prefix attached to the pool (if
+/// any). Real Cognito omits the OAuth2 endpoints from this document until
+/// a domain has been attached — those URLs literally don't resolve before
+/// then — so we mirror the same behaviour.
+pub fn oidc_discovery_document(
+    pool_id: &str,
+    region: &str,
+    base_url: &str,
+    pool_domain: Option<&str>,
+) -> Value {
     let issuer = format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}");
     let trimmed = base_url.trim_end_matches('/');
-    serde_json::json!({
+    let mut doc = serde_json::json!({
         "issuer": issuer,
-        "authorization_endpoint": format!("{trimmed}/oauth2/authorize"),
-        "token_endpoint": format!("{trimmed}/oauth2/token"),
-        "userinfo_endpoint": format!("{trimmed}/oauth2/userInfo"),
-        "revocation_endpoint": format!("{trimmed}/oauth2/revoke"),
         "jwks_uri": format!("{trimmed}/{pool_id}/.well-known/jwks.json"),
         "response_types_supported": ["code", "token"],
         "subject_types_supported": ["public"],
@@ -1710,7 +1744,34 @@ pub fn oidc_discovery_document(pool_id: &str, region: &str, base_url: &str) -> V
         ],
         "code_challenge_methods_supported": ["S256", "plain"],
         "grant_types_supported": ["authorization_code", "implicit", "refresh_token", "client_credentials"],
-    })
+    });
+    if pool_domain.is_some() {
+        // OAuth2 endpoints are served by fakecloud at the same base URL
+        // as everything else. AWS Cognito routes them through
+        // `https://<domain>.auth.<region>.amazoncognito.com/...`, but
+        // those hosts don't resolve in a fakecloud test environment, so
+        // pointing clients at our local `<base_url>/oauth2/...` keeps
+        // discovery -> redeem -> userinfo flows actually working.
+        if let Some(map) = doc.as_object_mut() {
+            map.insert(
+                "authorization_endpoint".into(),
+                serde_json::Value::String(format!("{trimmed}/oauth2/authorize")),
+            );
+            map.insert(
+                "token_endpoint".into(),
+                serde_json::Value::String(format!("{trimmed}/oauth2/token")),
+            );
+            map.insert(
+                "userinfo_endpoint".into(),
+                serde_json::Value::String(format!("{trimmed}/oauth2/userInfo")),
+            );
+            map.insert(
+                "revocation_endpoint".into(),
+                serde_json::Value::String(format!("{trimmed}/oauth2/revoke")),
+            );
+        }
+    }
+    doc
 }
 
 /// Result of `/oauth2/token` handling. The HTTP wrapper translates
