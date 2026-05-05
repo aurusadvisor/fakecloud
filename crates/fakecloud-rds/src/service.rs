@@ -1601,8 +1601,7 @@ impl RdsService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
-        let mut target = resolve_tag_target_mut(state, &resource_name)
-            .ok_or_else(|| tag_resource_not_found(&resource_name))?;
+        let mut target = resolve_tag_target_mut(state, &resource_name)?;
         target.merge(&tags);
 
         Ok(AwsResponse::xml(
@@ -1624,8 +1623,7 @@ impl RdsService {
         let accounts = self.state.read();
         let empty = RdsState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
-        let target = resolve_tag_target(state, &resource_name)
-            .ok_or_else(|| tag_resource_not_found(&resource_name))?;
+        let target = resolve_tag_target(state, &resource_name)?;
         let tag_xml = target.to_xml();
 
         Ok(AwsResponse::xml(
@@ -1656,8 +1654,7 @@ impl RdsService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
-        let mut target = resolve_tag_target_mut(state, &resource_name)
-            .ok_or_else(|| tag_resource_not_found(&resource_name))?;
+        let mut target = resolve_tag_target_mut(state, &resource_name)?;
         target.remove_keys(&tag_keys);
 
         Ok(AwsResponse::xml(

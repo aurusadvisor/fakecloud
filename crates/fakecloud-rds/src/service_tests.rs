@@ -732,11 +732,34 @@ fn list_tags_rejects_filters_param() {
 }
 
 #[test]
-fn list_tags_unknown_arn_errors() {
+fn list_tags_missing_db_instance_returns_typed_not_found() {
     let svc = make_service();
     let req = request(
         "ListTagsForResource",
         &[("ResourceName", "arn:aws:rds:us-east-1:123456789012:db:nope")],
+    );
+    assert_code(svc.list_tags_for_resource(&req), "DBInstanceNotFound");
+}
+
+#[test]
+fn list_tags_unknown_arn_resource_type_errors() {
+    let svc = make_service();
+    let req = request(
+        "ListTagsForResource",
+        &[(
+            "ResourceName",
+            "arn:aws:rds:us-east-1:123456789012:bogus:nope",
+        )],
+    );
+    assert_code(svc.list_tags_for_resource(&req), "InvalidParameterValue");
+}
+
+#[test]
+fn list_tags_malformed_arn_errors() {
+    let svc = make_service();
+    let req = request(
+        "ListTagsForResource",
+        &[("ResourceName", "not-even-an-arn")],
     );
     assert_code(svc.list_tags_for_resource(&req), "InvalidParameterValue");
 }
@@ -913,6 +936,128 @@ fn add_tags_to_extras_resource_arn_stores_on_json() {
     let tags = entry.get("Tags").and_then(|t| t.as_array()).unwrap();
     assert_eq!(tags.len(), 1);
     assert_eq!(tags[0].get("Key").and_then(|k| k.as_str()), Some("team"));
+}
+
+/// Seed an extras-backed RDS resource with a minimal JSON entry so the
+/// tagging dispatcher can locate it. The kind/bucket pairs mirror the
+/// ones used by the create-time handlers in `extras.rs`; keeping this
+/// helper local to the test module avoids leaking test-only surface
+/// into the prod crate API.
+fn seed_extras_entry(svc: &RdsService, bucket: &str, name: &str) {
+    let mut accounts = svc.state.write();
+    let state = accounts.default_mut();
+    state
+        .extras
+        .entry(bucket.to_string())
+        .or_default()
+        .insert(name.to_string(), serde_json::json!({"Name": name}));
+}
+
+#[test]
+fn tags_dispatch_covers_every_supported_resource_type() {
+    // One tag round-trip (add -> list -> remove) per ARN segment, so the
+    // dispatcher and tag_resource_not_found mapping stay in lockstep
+    // with the resource buckets the rest of the crate writes to.
+    let svc = make_service();
+    let region = "us-east-1";
+    let acct = "123456789012";
+
+    // State-backed: db / snapshot / pg / subgrp.
+    let _db_arn = seed_instance(&svc, "db1");
+    seed_snapshot(&svc, "snap-1", "db1");
+    create_param_group(&svc, "pg1");
+    create_subnet_group(&svc, "sub1");
+
+    // Extras-backed: cluster / cluster-snapshot / cluster-pg / og /
+    // secgrp / es / db-proxy.
+    seed_extras_entry(&svc, "clusters", "cluster-1");
+    seed_extras_entry(&svc, "cluster_snapshots", "csnap-1");
+    seed_extras_entry(&svc, "cluster_param_groups", "cpg-1");
+    seed_extras_entry(&svc, "option_groups", "og-1");
+    seed_extras_entry(&svc, "security_groups", "secgrp-1");
+    seed_extras_entry(&svc, "event_subscriptions", "es-1");
+    seed_extras_entry(&svc, "proxies", "proxy-1");
+
+    let cases: &[(&str, &str)] = &[
+        ("db", "db1"),
+        ("snapshot", "snap-1"),
+        ("pg", "pg1"),
+        ("subgrp", "sub1"),
+        ("cluster", "cluster-1"),
+        ("cluster-snapshot", "csnap-1"),
+        ("cluster-pg", "cpg-1"),
+        ("og", "og-1"),
+        ("secgrp", "secgrp-1"),
+        ("es", "es-1"),
+        ("db-proxy", "proxy-1"),
+    ];
+
+    for (kind, name) in cases {
+        let arn = format!("arn:aws:rds:{region}:{acct}:{kind}:{name}");
+
+        let add = request(
+            "AddTagsToResource",
+            &[
+                ("ResourceName", arn.as_str()),
+                ("Tags.Tag.1.Key", "env"),
+                ("Tags.Tag.1.Value", "prod"),
+            ],
+        );
+        svc.add_tags_to_resource(&add)
+            .unwrap_or_else(|e| panic!("AddTags failed for kind={kind}: {e:?}"));
+
+        let list = request("ListTagsForResource", &[("ResourceName", arn.as_str())]);
+        let body = body_of(
+            svc.list_tags_for_resource(&list)
+                .unwrap_or_else(|e| panic!("ListTags failed for kind={kind}: {e:?}")),
+        );
+        assert!(
+            body.contains("<Key>env</Key>") && body.contains("<Value>prod</Value>"),
+            "ListTags for kind={kind} should echo the tag, body was: {body}"
+        );
+
+        let rm = request(
+            "RemoveTagsFromResource",
+            &[("ResourceName", arn.as_str()), ("TagKeys.member.1", "env")],
+        );
+        svc.remove_tags_from_resource(&rm)
+            .unwrap_or_else(|e| panic!("RemoveTags failed for kind={kind}: {e:?}"));
+
+        let body = body_of(svc.list_tags_for_resource(&list).unwrap());
+        assert!(
+            !body.contains("<Key>env</Key>"),
+            "RemoveTags for kind={kind} should strip the tag, body was: {body}"
+        );
+    }
+}
+
+#[test]
+fn tags_dispatch_typed_not_found_per_resource_type() {
+    // Each known resource-type must surface its own NotFound code rather
+    // than the generic InvalidParameterValue we use for malformed ARNs.
+    let svc = make_service();
+    let region = "us-east-1";
+    let acct = "123456789012";
+
+    let cases: &[(&str, &str)] = &[
+        ("db", "DBInstanceNotFound"),
+        ("snapshot", "DBSnapshotNotFound"),
+        ("cluster", "DBClusterNotFoundFault"),
+        ("cluster-snapshot", "DBClusterSnapshotNotFoundFault"),
+        ("pg", "DBParameterGroupNotFound"),
+        ("cluster-pg", "DBParameterGroupNotFound"),
+        ("og", "OptionGroupNotFoundFault"),
+        ("subgrp", "DBSubnetGroupNotFoundFault"),
+        ("secgrp", "DBSecurityGroupNotFound"),
+        ("db-proxy", "DBProxyNotFoundFault"),
+        ("es", "SubscriptionNotFound"),
+    ];
+
+    for (kind, expected_code) in cases {
+        let arn = format!("arn:aws:rds:{region}:{acct}:{kind}:ghost");
+        let req = request("ListTagsForResource", &[("ResourceName", arn.as_str())]);
+        assert_code(svc.list_tags_for_resource(&req), expected_code);
+    }
 }
 
 #[test]
@@ -1886,7 +2031,7 @@ fn list_tags_resource_not_found() {
         "ListTagsForResource",
         &[("ResourceName", "arn:aws:rds:us-east-1:123:db:ghost")],
     );
-    assert_code(svc.list_tags_for_resource(&req), "InvalidParameterValue");
+    assert_code(svc.list_tags_for_resource(&req), "DBInstanceNotFound");
 }
 
 // ── snapshot operations ──
