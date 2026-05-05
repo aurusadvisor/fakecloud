@@ -2100,4 +2100,21 @@ async fn iam_misc_account_ops() {
     )
     .await;
     assert!(r.status().is_success());
+    // F4 follow-up: GetSecurityTokenServicePreferences is a fakecloud
+    // extension (not in the AWS Smithy iam.json) so it has no
+    // `#[test_action(...)]` annotation. The Set/Get round-trip is
+    // covered by the e2e test
+    // `iam_set_and_get_sts_preferences_round_trip` and the audit
+    // ignores it because it's not listed in SUPPORTED_ACTIONS.
+    let r = iam_post_raw(
+        &server,
+        &[("Action", "GetSecurityTokenServicePreferences")],
+    )
+    .await;
+    assert!(r.status().is_success());
+    assert!(r
+        .text()
+        .await
+        .unwrap()
+        .contains("<GlobalEndpointTokenVersion>v2Token</GlobalEndpointTokenVersion>"));
 }
