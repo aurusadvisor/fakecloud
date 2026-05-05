@@ -6,16 +6,44 @@
 //! matches and that has a non-`Count` action terminates evaluation; `Count`
 //! rules continue past. When no rule matches, the WebACL's `DefaultAction`
 //! decides Allow vs Block.
+//!
+//! # Public surface
+//!
+//! - [`evaluate`] / [`evaluate_detailed`]: stateless evaluators that ignore
+//!   `RateBasedStatement` (treated as a non-match). Useful when no rate
+//!   limiter is available.
+//! - [`evaluate_web_acl`]: the full evaluator. Returns a [`WafVerdict`] with
+//!   the terminating rule id, accumulated labels, and `blocked` boolean.
+//!   Caller-side dataplanes (ALB, API Gateway, CloudFront) consume this.
+//!
+//! # Rate-based rules
+//!
+//! [`RateLimiter`] is an in-process token-bucket-style counter keyed on the
+//! tuple `(rule_id, aggregate_key_value)`. It is not serialized — counters
+//! are best-effort and reset across process restarts, matching how AWS
+//! describes its own behaviour ("can pause the rule's rate limiting
+//! activities for up to a minute").
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use base64::Engine;
+use parking_lot::Mutex;
 use percent_encoding::percent_decode_str;
 use regex::Regex;
 use serde_json::Value;
 
 use crate::state::{IpSet, RegexPatternSet, WebAcl};
+
+/// HTTP header name (lowercased) the test admin endpoint uses to inject a
+/// synthetic geo country code into the request. Real GeoIP lookup is out of
+/// scope for the W1 evaluator; callers in the dataplane resolve country
+/// codes themselves before constructing [`WafRequest`].
+pub const FAKECLOUD_GEO_COUNTRY_HEADER: &str = "x-fakecloud-geo-country";
+
+/// Default rate-based evaluation window (seconds). AWS allows
+/// `EvaluationWindowSec` of 60, 120, 300, or 600 with 300 as the default.
+pub const DEFAULT_RATE_WINDOW_SECS: u64 = 300;
 
 /// Request fields evaluated against WAF statements. Borrowing keeps the
 /// evaluator allocation-free for the common request paths.
@@ -28,6 +56,33 @@ pub struct WafRequest<'a> {
     pub query: &'a str,
     pub source_ip: IpAddr,
     pub country: Option<&'a str>,
+    /// Total request body byte count. May exceed `body.len()` when the
+    /// caller truncates the body for inspection but knows the wire size.
+    /// Used by [`SizeConstraintStatement`].
+    pub body_size_bytes: u64,
+}
+
+impl<'a> WafRequest<'a> {
+    /// Construct a request with `body_size_bytes` defaulted to `body.len()`.
+    pub fn from_parts(
+        method: &'a str,
+        uri: &'a str,
+        headers: &'a [(String, String)],
+        body: &'a [u8],
+        query: &'a str,
+        source_ip: IpAddr,
+    ) -> Self {
+        Self {
+            method,
+            uri,
+            headers,
+            body,
+            query,
+            source_ip,
+            country: None,
+            body_size_bytes: body.len() as u64,
+        }
+    }
 }
 
 /// Resolved action returned by [`evaluate`].
@@ -38,6 +93,20 @@ pub enum WafAction {
     Count,
     Captcha,
     Challenge,
+}
+
+impl WafAction {
+    /// Human-readable name matching the AWS action enum keys
+    /// (`Allow` / `Block` / `Count` / `Captcha` / `Challenge`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WafAction::Allow => "Allow",
+            WafAction::Block => "Block",
+            WafAction::Count => "Count",
+            WafAction::Captcha => "Captcha",
+            WafAction::Challenge => "Challenge",
+        }
+    }
 }
 
 /// Detailed evaluation outcome. `action` is the final resolved
@@ -51,10 +120,69 @@ pub struct WafEvaluation {
     pub count_rules: Vec<String>,
 }
 
+/// Full evaluator output consumed by upstream dataplanes (ALB, API Gateway,
+/// CloudFront). Includes the rule that terminated evaluation (if any), the
+/// labels accumulated by all matching rules, and a convenience `blocked`
+/// flag. `Captcha` and `Challenge` map to `blocked=true` since the request
+/// is short-circuited with a non-2xx response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WafVerdict {
+    pub action: WafAction,
+    pub terminating_rule_id: Option<String>,
+    pub labels: Vec<String>,
+    pub blocked: bool,
+    /// Names of rules whose matching `Count` action fired.
+    pub count_rules: Vec<String>,
+    /// Optional response body keyword from a matching `Block` rule's
+    /// `CustomResponse`. Callers look this up in `WebAcl.custom_response_bodies`.
+    pub custom_response_body_key: Option<String>,
+    /// Optional HTTP status code from a matching `Block` rule's `CustomResponse`.
+    /// `None` means the caller should use its default (403 for Block, 405 for
+    /// Captcha/Challenge per AWS docs).
+    pub custom_response_status: Option<u16>,
+}
+
+/// In-memory rate-based-rule counter. Tracks request timestamps per
+/// `(rule_id, aggregate_key)` and reports the count within the configured
+/// evaluation window on each `record` call. Counters are not serialized; a
+/// process restart clears all rate-limit state.
+#[derive(Debug, Default)]
+pub struct RateLimiter {
+    inner: Mutex<HashMap<(String, String), Vec<i64>>>,
+}
+
+impl RateLimiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record an event for `key` at `now` (unix epoch seconds), prune events
+    /// older than `window_secs`, and return the resulting in-window count.
+    pub fn record(&self, rule_id: &str, agg_key: &str, window_secs: u64, now: i64) -> u64 {
+        let mut guard = self.inner.lock();
+        let bucket = guard
+            .entry((rule_id.to_string(), agg_key.to_string()))
+            .or_default();
+        let cutoff = now - window_secs as i64;
+        bucket.retain(|t| *t > cutoff);
+        bucket.push(now);
+        bucket.len() as u64
+    }
+
+    /// Drop all counters. Mostly used by tests.
+    pub fn clear(&self) {
+        self.inner.lock().clear();
+    }
+}
+
 /// Evaluate `req` against `web_acl`. Rules are processed in ascending
 /// `Priority`; matching `Count` rules are recorded but do not terminate
 /// evaluation. The first matching non-`Count` rule's action is returned;
 /// otherwise the WebACL's `DefaultAction` is used.
+///
+/// `RateBasedStatement` rules always evaluate as non-matching here because
+/// no [`RateLimiter`] is provided. Use [`evaluate_web_acl`] if you need
+/// rate-based enforcement.
 pub fn evaluate(
     req: &WafRequest,
     web_acl: &WebAcl,
@@ -73,49 +201,35 @@ pub fn evaluate_detailed(
     ipsets: &HashMap<String, IpSet>,
     regex_sets: &HashMap<String, RegexPatternSet>,
 ) -> WafEvaluation {
-    let mut rules: Vec<&Value> = web_acl.rules.iter().collect();
-    rules.sort_by_key(|r| r.get("Priority").and_then(Value::as_i64).unwrap_or(0));
-
-    let mut labels: HashSet<String> = HashSet::new();
-    let mut count_rules: Vec<String> = Vec::new();
-
-    for rule in rules {
-        let Some(stmt) = rule.get("Statement") else {
-            continue;
-        };
-        if !eval_statement(stmt, req, ipsets, regex_sets, &labels) {
-            continue;
-        }
-        // Add labels produced by this rule so subsequent rules can match.
-        if let Some(arr) = rule.get("RuleLabels").and_then(Value::as_array) {
-            for label in arr {
-                if let Some(name) = label.get("Name").and_then(Value::as_str) {
-                    labels.insert(name.to_owned());
-                }
-            }
-        }
-        if let Some(action) = rule.get("Action").and_then(rule_action) {
-            // Count is non-terminal: keep evaluating subsequent rules but
-            // record the rule for metrics.
-            if action == WafAction::Count {
-                if let Some(name) = rule.get("Name").and_then(Value::as_str) {
-                    count_rules.push(name.to_owned());
-                }
-                continue;
-            }
-            return WafEvaluation {
-                action,
-                count_rules,
-            };
-        }
-        // Rule with OverrideAction (rule group reference) doesn't terminate
-        // here either since we don't expand rule groups in this batch.
-    }
-
+    let verdict = evaluate_inner(req, web_acl, ipsets, regex_sets, None, current_epoch_secs());
     WafEvaluation {
-        action: default_action(web_acl),
-        count_rules,
+        action: verdict.action,
+        count_rules: verdict.count_rules,
     }
+}
+
+/// Full evaluator. Returns a [`WafVerdict`] capturing the terminating rule
+/// id, accumulated labels, and `blocked` flag. Callers consume this to
+/// shape the HTTP response (e.g. ALB returns 403 on Block, 405 on Captcha).
+///
+/// `now_epoch_secs` is taken as a parameter so tests can drive the
+/// rate-based clock deterministically.
+pub fn evaluate_web_acl(
+    web_acl: &WebAcl,
+    request: &WafRequest,
+    ipsets: &HashMap<String, IpSet>,
+    regex_sets: &HashMap<String, RegexPatternSet>,
+    rate_limiter: &RateLimiter,
+    now_epoch_secs: i64,
+) -> WafVerdict {
+    evaluate_inner(
+        request,
+        web_acl,
+        ipsets,
+        regex_sets,
+        Some(rate_limiter),
+        now_epoch_secs,
+    )
 }
 
 impl WebAcl {
@@ -139,6 +253,121 @@ impl WebAcl {
     ) -> WafEvaluation {
         evaluate_detailed(req, self, ipsets, regex_sets)
     }
+}
+
+fn current_epoch_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn evaluate_inner(
+    req: &WafRequest,
+    web_acl: &WebAcl,
+    ipsets: &HashMap<String, IpSet>,
+    regex_sets: &HashMap<String, RegexPatternSet>,
+    rate_limiter: Option<&RateLimiter>,
+    now_epoch_secs: i64,
+) -> WafVerdict {
+    let mut rules: Vec<&Value> = web_acl.rules.iter().collect();
+    rules.sort_by_key(|r| r.get("Priority").and_then(Value::as_i64).unwrap_or(0));
+
+    let mut labels: HashSet<String> = HashSet::new();
+    let mut emitted_labels: Vec<String> = Vec::new();
+    let mut count_rules: Vec<String> = Vec::new();
+
+    for rule in rules {
+        let Some(stmt) = rule.get("Statement") else {
+            continue;
+        };
+        let ctx = StmtCtx {
+            req,
+            ipsets,
+            regex_sets,
+            labels: &labels,
+            rule_id: rule
+                .get("Name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            rate_limiter,
+            now_epoch_secs,
+        };
+        if !eval_statement(stmt, &ctx) {
+            continue;
+        }
+        // Add labels produced by this rule so subsequent rules can match.
+        if let Some(arr) = rule.get("RuleLabels").and_then(Value::as_array) {
+            for label in arr {
+                if let Some(name) = label.get("Name").and_then(Value::as_str) {
+                    if labels.insert(name.to_owned()) {
+                        emitted_labels.push(name.to_owned());
+                    }
+                }
+            }
+        }
+        if let Some(action) = rule.get("Action").and_then(rule_action) {
+            // Count is non-terminal: keep evaluating subsequent rules but
+            // record the rule for metrics.
+            if action == WafAction::Count {
+                if let Some(name) = rule.get("Name").and_then(Value::as_str) {
+                    count_rules.push(name.to_owned());
+                }
+                continue;
+            }
+            let (body_key, status) = block_custom_response(rule);
+            let blocked = matches!(
+                action,
+                WafAction::Block | WafAction::Captcha | WafAction::Challenge
+            );
+            return WafVerdict {
+                action,
+                terminating_rule_id: rule.get("Name").and_then(Value::as_str).map(str::to_owned),
+                labels: emitted_labels,
+                blocked,
+                count_rules,
+                custom_response_body_key: body_key,
+                custom_response_status: status,
+            };
+        }
+        // Rule with OverrideAction (rule group reference) doesn't terminate
+        // here either since we don't expand rule groups in this batch.
+    }
+
+    let default = default_action(web_acl);
+    WafVerdict {
+        action: default,
+        terminating_rule_id: None,
+        labels: emitted_labels,
+        blocked: default == WafAction::Block,
+        count_rules,
+        custom_response_body_key: None,
+        custom_response_status: None,
+    }
+}
+
+fn block_custom_response(rule: &Value) -> (Option<String>, Option<u16>) {
+    let action = rule.get("Action").and_then(Value::as_object);
+    let Some(action) = action else {
+        return (None, None);
+    };
+    // CustomResponse may live under Block or any other terminal action.
+    for key in ["Block", "Captcha", "Challenge"] {
+        if let Some(spec) = action.get(key).and_then(|v| v.get("CustomResponse")) {
+            let body_key = spec
+                .get("CustomResponseBodyKey")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let status = spec
+                .get("ResponseCode")
+                .and_then(Value::as_u64)
+                .and_then(|v| u16::try_from(v).ok());
+            return (body_key, status);
+        }
+    }
+    (None, None)
 }
 
 fn default_action(web_acl: &WebAcl) -> WafAction {
@@ -165,106 +394,97 @@ fn rule_action(action: &Value) -> Option<WafAction> {
     }
 }
 
-// ─── Statement dispatch ──────────────────────────────────────────────────
+// --- Statement dispatch -----------------------------------------------------
 
-fn eval_statement(
-    stmt: &Value,
-    req: &WafRequest,
-    ipsets: &HashMap<String, IpSet>,
-    regex_sets: &HashMap<String, RegexPatternSet>,
-    labels: &HashSet<String>,
-) -> bool {
+/// Bag of references threaded through every recursive `eval_*` call. Cheaper
+/// to build once at rule entry than to pass eight separate parameters.
+struct StmtCtx<'a> {
+    req: &'a WafRequest<'a>,
+    ipsets: &'a HashMap<String, IpSet>,
+    regex_sets: &'a HashMap<String, RegexPatternSet>,
+    labels: &'a HashSet<String>,
+    rule_id: String,
+    rate_limiter: Option<&'a RateLimiter>,
+    now_epoch_secs: i64,
+}
+
+fn eval_statement(stmt: &Value, ctx: &StmtCtx) -> bool {
     let Some(obj) = stmt.as_object() else {
         return false;
     };
 
     if let Some(s) = obj.get("ByteMatchStatement") {
-        return eval_byte_match(s, req);
+        return eval_byte_match(s, ctx.req);
     }
     if let Some(s) = obj.get("SqliMatchStatement") {
-        return eval_sqli_match(s, req);
+        return eval_sqli_match(s, ctx.req);
     }
     if let Some(s) = obj.get("XssMatchStatement") {
-        return eval_xss_match(s, req);
+        return eval_xss_match(s, ctx.req);
     }
     if let Some(s) = obj.get("GeoMatchStatement") {
-        return eval_geo_match(s, req);
+        return eval_geo_match(s, ctx.req);
     }
     if let Some(s) = obj.get("IPSetReferenceStatement") {
-        return eval_ipset_ref(s, req, ipsets);
+        return eval_ipset_ref(s, ctx.req, ctx.ipsets);
     }
     if let Some(s) = obj.get("RegexPatternSetReferenceStatement") {
-        return eval_regex_set_ref(s, req, regex_sets);
+        return eval_regex_set_ref(s, ctx.req, ctx.regex_sets);
     }
     if let Some(s) = obj.get("RegexMatchStatement") {
-        return eval_regex_match(s, req);
+        return eval_regex_match(s, ctx.req);
     }
     if let Some(s) = obj.get("AndStatement") {
-        return eval_and(s, req, ipsets, regex_sets, labels);
+        return eval_and(s, ctx);
     }
     if let Some(s) = obj.get("OrStatement") {
-        return eval_or(s, req, ipsets, regex_sets, labels);
+        return eval_or(s, ctx);
     }
     if let Some(s) = obj.get("NotStatement") {
-        return eval_not(s, req, ipsets, regex_sets, labels);
+        return eval_not(s, ctx);
     }
     if let Some(s) = obj.get("LabelMatchStatement") {
-        return eval_label_match(s, labels);
+        return eval_label_match(s, ctx.labels);
+    }
+    if let Some(s) = obj.get("SizeConstraintStatement") {
+        return eval_size_constraint(s, ctx.req);
+    }
+    if let Some(s) = obj.get("RateBasedStatement") {
+        return eval_rate_based(s, ctx);
+    }
+    if let Some(s) = obj.get("ManagedRuleGroupStatement") {
+        return eval_managed_rule_group(s, ctx.req);
     }
 
-    // TODO: SizeConstraintStatement
-    // TODO: RateBasedStatement
-    // TODO: ManagedRuleGroupStatement
-    // TODO: RuleGroupReferenceStatement
+    // RuleGroupReferenceStatement is intentionally unimplemented in W1 —
+    // the customer-defined rule group expansion is a follow-up.
     false
 }
 
-// ─── Logical combinators ─────────────────────────────────────────────────
+// --- Logical combinators ----------------------------------------------------
 
-fn eval_and(
-    stmt: &Value,
-    req: &WafRequest,
-    ipsets: &HashMap<String, IpSet>,
-    regex_sets: &HashMap<String, RegexPatternSet>,
-    labels: &HashSet<String>,
-) -> bool {
+fn eval_and(stmt: &Value, ctx: &StmtCtx) -> bool {
     let Some(arr) = stmt.get("Statements").and_then(Value::as_array) else {
         return false;
     };
-    !arr.is_empty()
-        && arr
-            .iter()
-            .all(|s| eval_statement(s, req, ipsets, regex_sets, labels))
+    !arr.is_empty() && arr.iter().all(|s| eval_statement(s, ctx))
 }
 
-fn eval_or(
-    stmt: &Value,
-    req: &WafRequest,
-    ipsets: &HashMap<String, IpSet>,
-    regex_sets: &HashMap<String, RegexPatternSet>,
-    labels: &HashSet<String>,
-) -> bool {
+fn eval_or(stmt: &Value, ctx: &StmtCtx) -> bool {
     let Some(arr) = stmt.get("Statements").and_then(Value::as_array) else {
         return false;
     };
-    arr.iter()
-        .any(|s| eval_statement(s, req, ipsets, regex_sets, labels))
+    arr.iter().any(|s| eval_statement(s, ctx))
 }
 
-fn eval_not(
-    stmt: &Value,
-    req: &WafRequest,
-    ipsets: &HashMap<String, IpSet>,
-    regex_sets: &HashMap<String, RegexPatternSet>,
-    labels: &HashSet<String>,
-) -> bool {
+fn eval_not(stmt: &Value, ctx: &StmtCtx) -> bool {
     let Some(inner) = stmt.get("Statement") else {
         return false;
     };
-    !eval_statement(inner, req, ipsets, regex_sets, labels)
+    !eval_statement(inner, ctx)
 }
 
-// ─── Leaf statements ─────────────────────────────────────────────────────
+// --- Leaf statements --------------------------------------------------------
 
 fn eval_byte_match(stmt: &Value, req: &WafRequest) -> bool {
     let Some(needle_b64) = stmt.get("SearchString").and_then(Value::as_str) else {
@@ -448,7 +668,237 @@ fn eval_label_match(stmt: &Value, labels: &HashSet<String>) -> bool {
     })
 }
 
-// ─── FieldToMatch + TextTransformations ──────────────────────────────────
+fn eval_size_constraint(stmt: &Value, req: &WafRequest) -> bool {
+    let Some(op) = stmt.get("ComparisonOperator").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(size) = stmt.get("Size").and_then(Value::as_i64) else {
+        return false;
+    };
+    if size < 0 {
+        return false;
+    }
+    let target_size = field_size(
+        stmt.get("FieldToMatch"),
+        req,
+        stmt.get("TextTransformations"),
+    );
+    let lhs = target_size as i64;
+    match op {
+        "EQ" => lhs == size,
+        "NE" => lhs != size,
+        "LE" => lhs <= size,
+        "LT" => lhs < size,
+        "GE" => lhs >= size,
+        "GT" => lhs > size,
+        _ => false,
+    }
+}
+
+fn field_size(field: Option<&Value>, req: &WafRequest, xforms: Option<&Value>) -> u64 {
+    let Some(field) = field else {
+        return 0;
+    };
+    let Some(obj) = field.as_object() else {
+        return 0;
+    };
+    if obj.contains_key("Body") || obj.contains_key("JsonBody") {
+        // Use the wire-level body byte count, not the (possibly truncated)
+        // inspected body — AWS evaluates the full body length here.
+        return req.body_size_bytes;
+    }
+    // For other fields, evaluate on the transformed bytes returned by
+    // `collect_fields` so size comparisons honor `TextTransformations`.
+    collect_fields(Some(field), req)
+        .iter()
+        .map(|raw| apply_transformations(raw, xforms).len() as u64)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Result of resolving the aggregation key for a rate-based rule.
+/// `Key` carries the actual aggregate key value; `Fallback(b)` means the
+/// configured input (typically a `FORWARDED_IP` header) was missing or
+/// malformed and the caller should honor the rule's `FallbackBehavior`.
+enum AggregateKey {
+    Key(String),
+    Fallback(bool),
+}
+
+fn eval_rate_based(stmt: &Value, ctx: &StmtCtx) -> bool {
+    // No limiter -> we cannot count, treat as non-match. Callers that need
+    // rate limiting use `evaluate_web_acl`.
+    let Some(limiter) = ctx.rate_limiter else {
+        return false;
+    };
+    let Some(limit) = stmt.get("Limit").and_then(Value::as_u64) else {
+        return false;
+    };
+    if limit == 0 {
+        return false;
+    }
+    let window = stmt
+        .get("EvaluationWindowSec")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_RATE_WINDOW_SECS);
+    // Optional scope-down statement: only count requests that match it.
+    if let Some(scope_down) = stmt.get("ScopeDownStatement") {
+        if !eval_statement(scope_down, ctx) {
+            return false;
+        }
+    }
+    let agg = stmt
+        .get("AggregateKeyType")
+        .and_then(Value::as_str)
+        .unwrap_or("IP");
+    let agg_key = match rate_aggregate_key(agg, ctx.req, stmt) {
+        AggregateKey::Key(k) => k,
+        // Per AWS docs: when the configured source (FORWARDED_IP header)
+        // is missing or contains a malformed IP, `FallbackBehavior=MATCH`
+        // counts the request as a match and `NO_MATCH` skips the rule.
+        // The aggregation key resolution short-circuits to the boolean.
+        AggregateKey::Fallback(b) => return b,
+    };
+    let count = limiter.record(&ctx.rule_id, &agg_key, window, ctx.now_epoch_secs);
+    count > limit
+}
+
+fn rate_aggregate_key(agg: &str, req: &WafRequest, stmt: &Value) -> AggregateKey {
+    match agg {
+        "IP" => AggregateKey::Key(req.source_ip.to_string()),
+        "FORWARDED_IP" => {
+            let cfg = stmt.get("ForwardedIPConfig");
+            let header_name = cfg
+                .and_then(|c| c.get("HeaderName"))
+                .and_then(Value::as_str)
+                .unwrap_or("X-Forwarded-For");
+            let fallback_match = cfg
+                .and_then(|c| c.get("FallbackBehavior"))
+                .and_then(Value::as_str)
+                .map(|b| b.eq_ignore_ascii_case("MATCH"))
+                .unwrap_or(false);
+            let raw = req
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(header_name))
+                .map(|(_, v)| {
+                    // X-Forwarded-For is a comma-separated chain; the
+                    // client-asserted client IP is the leftmost entry.
+                    v.split(',').next().unwrap_or(v).trim().to_string()
+                });
+            match raw {
+                None => AggregateKey::Fallback(fallback_match),
+                Some(v) if v.parse::<std::net::IpAddr>().is_err() => {
+                    AggregateKey::Fallback(fallback_match)
+                }
+                Some(v) => AggregateKey::Key(v),
+            }
+        }
+        "CONSTANT" => AggregateKey::Key("__constant__".to_string()),
+        // CUSTOM_KEYS aggregates on user-defined fields. We join all
+        // resolvable key values into a single bucket id; if none of the
+        // configured keys can be resolved, fall through to non-match
+        // (CustomKeys has no `FallbackBehavior` knob — AWS just skips).
+        "CUSTOM_KEYS" => {
+            let Some(arr) = stmt.get("CustomKeys").and_then(Value::as_array) else {
+                return AggregateKey::Fallback(false);
+            };
+            let parts: Vec<String> = arr
+                .iter()
+                .filter_map(|k| custom_key_value(k, req))
+                .collect();
+            if parts.is_empty() {
+                AggregateKey::Fallback(false)
+            } else {
+                AggregateKey::Key(parts.join("|"))
+            }
+        }
+        _ => AggregateKey::Fallback(false),
+    }
+}
+
+fn custom_key_value(key: &Value, req: &WafRequest) -> Option<String> {
+    if let Some(h) = key.get("Header") {
+        let name = h.get("Name").and_then(Value::as_str)?;
+        return req
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone());
+    }
+    if let Some(q) = key.get("QueryArgument") {
+        let name = q.get("Name").and_then(Value::as_str)?;
+        let vals = query_arg_values(req.query, name);
+        if vals.is_empty() {
+            return None;
+        }
+        return String::from_utf8(vals[0].clone()).ok();
+    }
+    if key.get("HTTPMethod").is_some() {
+        return Some(req.method.to_string());
+    }
+    if key.get("UriPath").is_some() {
+        return Some(req.uri.to_string());
+    }
+    if key.get("IP").is_some() {
+        return Some(req.source_ip.to_string());
+    }
+    None
+}
+
+/// Canned managed rule groups. AWSManagedRulesCommonRuleSet is a stub that
+/// flags the well-known noisy admin paths so tests can exercise the
+/// `ManagedRuleGroupStatement` code path without us redistributing the real
+/// AWS rule set.
+fn eval_managed_rule_group(stmt: &Value, req: &WafRequest) -> bool {
+    let vendor = stmt.get("VendorName").and_then(Value::as_str).unwrap_or("");
+    let name = stmt.get("Name").and_then(Value::as_str).unwrap_or("");
+    if !vendor.eq_ignore_ascii_case("AWS") {
+        return false;
+    }
+    match name {
+        "AWSManagedRulesCommonRuleSet" => {
+            // Match a small allowlist of admin-y paths plus an obvious
+            // CRS canary header.
+            common_ruleset_match(req)
+        }
+        "AWSManagedRulesSQLiRuleSet" => {
+            let fields = collect_fields(Some(&serde_json::json!({"QueryString": {}})), req);
+            let tokens: &[&[u8]] = &[b"union select", b"or 1=1", b"' or '1'='1", b"--"];
+            fields.iter().any(|raw| {
+                let lower = lowercase_bytes(raw);
+                tokens.iter().any(|t| bytes_contains(&lower, t))
+            })
+        }
+        "AWSManagedRulesKnownBadInputsRuleSet" => req
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("user-agent") && v.is_empty()),
+        _ => false,
+    }
+}
+
+fn common_ruleset_match(req: &WafRequest) -> bool {
+    // Conservative subset; mirrors what the public CRS docs flag as
+    // "noisy admin paths" plus a CRS canary header.
+    const ADMIN_PREFIXES: &[&str] = &[
+        "/admin",
+        "/wp-admin",
+        "/phpmyadmin",
+        "/.env",
+        "/.git",
+        "/cgi-bin/",
+    ];
+    let uri = req.uri;
+    if ADMIN_PREFIXES.iter().any(|p| uri.starts_with(p)) {
+        return true;
+    }
+    req.headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-crs-test") && !v.is_empty())
+}
+
+// --- FieldToMatch + TextTransformations -------------------------------------
 
 fn collect_fields(field: Option<&Value>, req: &WafRequest) -> Vec<Vec<u8>> {
     let Some(field) = field else {
@@ -492,7 +942,8 @@ fn collect_fields(field: Option<&Value>, req: &WafRequest) -> Vec<Vec<u8>> {
             return query_arg_values(req.query, name);
         }
     }
-    // TODO: Cookies, JsonBody match-pattern, HeaderOrder, JA3Fingerprint, etc.
+    // Cookies, JsonBody match-pattern, HeaderOrder, JA3Fingerprint, etc.
+    // are intentionally not modelled in W1 — add as later phases need them.
     Vec::new()
 }
 
@@ -527,7 +978,9 @@ fn apply_transformations(raw: &[u8], xforms: Option<&Value>) -> Vec<u8> {
             "NONE" => current,
             "LOWERCASE" => lowercase_bytes(&current),
             "URL_DECODE" => url_decode_bytes(&current),
-            // TODO: HTML_ENTITY_DECODE, COMPRESS_WHITE_SPACE, CMD_LINE, etc.
+            "COMPRESS_WHITE_SPACE" => compress_whitespace(&current),
+            // HTML_ENTITY_DECODE, CMD_LINE etc. fall through to NONE; add
+            // when a real customer config actually exercises them.
             _ => current,
         };
     }
@@ -545,7 +998,25 @@ fn url_decode_bytes(input: &[u8]) -> Vec<u8> {
     percent_decode_str(s).collect()
 }
 
-// ─── CIDR matching (no extra deps) ───────────────────────────────────────
+fn compress_whitespace(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut last_was_ws = false;
+    for &b in input {
+        let is_ws = matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x0b);
+        if is_ws {
+            if !last_was_ws {
+                out.push(b' ');
+            }
+            last_was_ws = true;
+        } else {
+            out.push(b);
+            last_was_ws = false;
+        }
+    }
+    out
+}
+
+// --- CIDR matching (no extra deps) -----------------------------------------
 
 fn cidr_contains(cidr: &str, ip: &IpAddr) -> bool {
     let Some((net_str, prefix_str)) = cidr.split_once('/') else {
@@ -586,7 +1057,7 @@ fn mask_match(net: &[u8], addr: &[u8], prefix: u8) -> bool {
     (net[full_bytes] & mask) == (addr[full_bytes] & mask)
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────
+// --- Tests -----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -634,6 +1105,7 @@ mod tests {
             query: "",
             source_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             country: None,
+            body_size_bytes: 0,
         }
     }
 
@@ -675,6 +1147,40 @@ mod tests {
     }
 
     #[test]
+    fn byte_match_exactly_post_admin() {
+        // POST /admin matches EXACTLY against the literal string "POST /admin"
+        // when the FieldToMatch is SingleHeader synthesised; for this test
+        // we synthesise the haystack via a method+uri combo header.
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "exactly",
+                "Priority": 0,
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"ByteMatchStatement": {
+                    "SearchString": "/admin",
+                    "FieldToMatch": {"UriPath": {}},
+                    "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+                    "PositionalConstraint": "EXACTLY",
+                }},
+            })],
+        );
+        let mut r = req("/admin");
+        r.method = "POST";
+        assert_eq!(
+            evaluate(&r, &acl, &HashMap::new(), &HashMap::new()),
+            WafAction::Block,
+            "POST /admin EXACTLY should block"
+        );
+        assert_eq!(
+            evaluate(&req("/admin/users"), &acl, &HashMap::new(), &HashMap::new()),
+            WafAction::Allow,
+            "/admin/users is not EXACTLY /admin"
+        );
+    }
+
+    #[test]
     fn ip_set_match_blocks_listed_ip() {
         let arn = "arn:aws:wafv2:us-east-1:000000000000:regional/ipset/blocked/abc".to_string();
         let mut sets = HashMap::new();
@@ -687,7 +1193,7 @@ mod tests {
                 scope: "REGIONAL".into(),
                 description: None,
                 ip_address_version: "IPV4".into(),
-                addresses: vec!["10.0.0.0/24".into()],
+                addresses: vec!["10.0.0.0/8".into()],
                 lock_token: "lt".into(),
                 created_time: Utc::now(),
             },
@@ -703,7 +1209,7 @@ mod tests {
             })],
         );
         let mut r = req("/");
-        r.source_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        r.source_ip = IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3));
         assert_eq!(evaluate(&r, &acl, &sets, &HashMap::new()), WafAction::Block);
     }
 
@@ -716,14 +1222,28 @@ mod tests {
                 "Priority": 0,
                 "Action": {"Block": {}},
                 "VisibilityConfig": {},
-                "Statement": {"GeoMatchStatement": {"CountryCodes": ["US"]}},
+                "Statement": {"GeoMatchStatement": {"CountryCodes": ["DE"]}},
             })],
         );
         let mut r = req("/");
-        r.country = Some("US");
+        r.country = Some("DE");
         assert_eq!(
             evaluate(&r, &acl, &HashMap::new(), &HashMap::new()),
-            WafAction::Block
+            WafAction::Block,
+            "country=DE matches"
+        );
+        let mut r2 = req("/");
+        r2.country = Some("US");
+        assert_eq!(
+            evaluate(&r2, &acl, &HashMap::new(), &HashMap::new()),
+            WafAction::Allow,
+            "country=US does not match"
+        );
+        // No country -> no match
+        assert_eq!(
+            evaluate(&req("/"), &acl, &HashMap::new(), &HashMap::new()),
+            WafAction::Allow,
+            "missing country header -> no match"
         );
     }
 
@@ -943,5 +1463,492 @@ mod tests {
             evaluate(&req("/admin/x"), &acl, &HashMap::new(), &HashMap::new()),
             WafAction::Block
         );
+    }
+
+    // --- New W1 tests -----------------------------------------------------
+
+    #[test]
+    fn size_constraint_body_too_large_blocks() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "size",
+                "Priority": 0,
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"SizeConstraintStatement": {
+                    "FieldToMatch": {"Body": {}},
+                    "ComparisonOperator": "GT",
+                    "Size": 1024,
+                    "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+                }},
+            })],
+        );
+        let mut r = req("/upload");
+        r.body_size_bytes = 2048;
+        assert_eq!(
+            evaluate(&r, &acl, &HashMap::new(), &HashMap::new()),
+            WafAction::Block
+        );
+        let mut r_small = req("/upload");
+        r_small.body_size_bytes = 512;
+        assert_eq!(
+            evaluate(&r_small, &acl, &HashMap::new(), &HashMap::new()),
+            WafAction::Allow
+        );
+    }
+
+    #[test]
+    fn size_constraint_uri_path_le() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "small-uri",
+                "Priority": 0,
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"SizeConstraintStatement": {
+                    "FieldToMatch": {"UriPath": {}},
+                    "ComparisonOperator": "LT",
+                    "Size": 5,
+                    "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+                }},
+            })],
+        );
+        // /api is 4 bytes -> blocks
+        assert_eq!(
+            evaluate(&req("/api"), &acl, &HashMap::new(), &HashMap::new()),
+            WafAction::Block
+        );
+        assert_eq!(
+            evaluate(&req("/admin"), &acl, &HashMap::new(), &HashMap::new()),
+            WafAction::Allow
+        );
+    }
+
+    #[test]
+    fn rate_based_blocks_after_limit() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "rate",
+                "Priority": 0,
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"RateBasedStatement": {
+                    "Limit": 1000,
+                    "AggregateKeyType": "IP",
+                    "EvaluationWindowSec": 300,
+                }},
+            })],
+        );
+        let limiter = RateLimiter::new();
+        let now = 1_700_000_000;
+        let mut r = req("/api");
+        r.source_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        // First 1000 requests should be allowed.
+        for _ in 0..1000 {
+            let v = evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, now);
+            assert_eq!(v.action, WafAction::Allow);
+            assert!(!v.blocked);
+        }
+        // 1001st must trigger the block.
+        let v = evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, now);
+        assert_eq!(v.action, WafAction::Block);
+        assert_eq!(v.terminating_rule_id.as_deref(), Some("rate"));
+        assert!(v.blocked);
+    }
+
+    #[test]
+    fn rate_based_window_rolls_over() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "rate",
+                "Priority": 0,
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"RateBasedStatement": {
+                    "Limit": 2,
+                    "AggregateKeyType": "IP",
+                    "EvaluationWindowSec": 300,
+                }},
+            })],
+        );
+        let limiter = RateLimiter::new();
+        let r = req("/api");
+        let t0 = 1_700_000_000;
+        evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, t0);
+        evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, t0);
+        let v3 = evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, t0);
+        assert_eq!(v3.action, WafAction::Block, "3rd in window blocks");
+        // Roll the clock past the window — counters expire, request is allowed again.
+        let later = t0 + 301;
+        let v4 = evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, later);
+        assert_eq!(v4.action, WafAction::Allow, "after window rolls, allowed");
+    }
+
+    #[test]
+    fn rate_based_per_ip_independent_buckets() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "rate",
+                "Priority": 0,
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"RateBasedStatement": {
+                    "Limit": 1,
+                    "AggregateKeyType": "IP",
+                    "EvaluationWindowSec": 60,
+                }},
+            })],
+        );
+        let limiter = RateLimiter::new();
+        let now = 1_700_000_000;
+        let mut a = req("/api");
+        a.source_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut b = req("/api");
+        b.source_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        // 1st request from each IP allowed.
+        assert_eq!(
+            evaluate_web_acl(&acl, &a, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            WafAction::Allow
+        );
+        assert_eq!(
+            evaluate_web_acl(&acl, &b, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            WafAction::Allow
+        );
+        // 2nd from a blocks, but b's counter is independent.
+        assert_eq!(
+            evaluate_web_acl(&acl, &a, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            WafAction::Block
+        );
+        // b's second still goes over its own limit too (Limit=1, so 2nd
+        // blocks). The check is that it isn't *prematurely* blocked by a's
+        // bucket — we already proved the first b succeeded above.
+        assert_eq!(
+            evaluate_web_acl(&acl, &b, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            WafAction::Block
+        );
+    }
+
+    #[test]
+    fn rate_based_forwarded_ip_missing_header_no_match_default() {
+        // No FallbackBehavior configured -> defaults to NO_MATCH so the
+        // rule does not fire when the header is missing.
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "rate",
+                "Priority": 0,
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"RateBasedStatement": {
+                    "Limit": 1,
+                    "AggregateKeyType": "FORWARDED_IP",
+                    "EvaluationWindowSec": 60,
+                    "ForwardedIPConfig": {"HeaderName": "X-Forwarded-For"},
+                }},
+            })],
+        );
+        let limiter = RateLimiter::new();
+        // No XFF header on the request.
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            0,
+        );
+        assert_eq!(
+            v.action,
+            WafAction::Allow,
+            "missing XFF defaults to NO_MATCH"
+        );
+    }
+
+    #[test]
+    fn rate_based_forwarded_ip_missing_header_with_match_fallback_blocks() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "rate",
+                "Priority": 0,
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"RateBasedStatement": {
+                    "Limit": 1,
+                    "AggregateKeyType": "FORWARDED_IP",
+                    "EvaluationWindowSec": 60,
+                    "ForwardedIPConfig": {
+                        "HeaderName": "X-Forwarded-For",
+                        "FallbackBehavior": "MATCH"
+                    },
+                }},
+            })],
+        );
+        let limiter = RateLimiter::new();
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            0,
+        );
+        assert_eq!(
+            v.action,
+            WafAction::Block,
+            "missing XFF with FallbackBehavior=MATCH blocks regardless of count"
+        );
+    }
+
+    #[test]
+    fn rate_based_forwarded_ip_malformed_value_uses_fallback_not_counter() {
+        // Without the malformed-IP fallback fix, a request whose XFF header
+        // is garbage would still rate-limit on the garbage string. With the
+        // fix, FallbackBehavior=NO_MATCH skips and FallbackBehavior=MATCH
+        // blocks unconditionally.
+        let mk_acl = |fb: &str| {
+            make_acl(
+                json!({"Allow": {}}),
+                vec![json!({
+                    "Name": "rate",
+                    "Priority": 0,
+                    "Action": {"Block": {}},
+                    "VisibilityConfig": {},
+                    "Statement": {"RateBasedStatement": {
+                        "Limit": 1000,
+                        "AggregateKeyType": "FORWARDED_IP",
+                        "EvaluationWindowSec": 60,
+                        "ForwardedIPConfig": {
+                            "HeaderName": "X-Forwarded-For",
+                            "FallbackBehavior": fb,
+                        },
+                    }},
+                })],
+            )
+        };
+        let limiter = RateLimiter::new();
+        let headers = vec![("X-Forwarded-For".to_string(), "not-an-ip".to_string())];
+        let r = WafRequest {
+            method: "GET",
+            uri: "/",
+            headers: &headers,
+            body: b"",
+            query: "",
+            source_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            country: None,
+            body_size_bytes: 0,
+        };
+        let acl_no = mk_acl("NO_MATCH");
+        assert_eq!(
+            evaluate_web_acl(&acl_no, &r, &HashMap::new(), &HashMap::new(), &limiter, 0).action,
+            WafAction::Allow,
+            "malformed XFF + NO_MATCH falls through"
+        );
+        let acl_match = mk_acl("MATCH");
+        assert_eq!(
+            evaluate_web_acl(
+                &acl_match,
+                &r,
+                &HashMap::new(),
+                &HashMap::new(),
+                &limiter,
+                0
+            )
+            .action,
+            WafAction::Block,
+            "malformed XFF + MATCH blocks even though limit is 1000"
+        );
+    }
+
+    #[test]
+    fn rate_based_forwarded_ip_aggregate() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "rate",
+                "Priority": 0,
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"RateBasedStatement": {
+                    "Limit": 1,
+                    "AggregateKeyType": "FORWARDED_IP",
+                    "EvaluationWindowSec": 60,
+                    "ForwardedIPConfig": {"HeaderName": "X-Forwarded-For", "FallbackBehavior": "MATCH"},
+                }},
+            })],
+        );
+        let limiter = RateLimiter::new();
+        let now = 1_700_000_000;
+        let headers = vec![("X-Forwarded-For".to_string(), "203.0.113.5".to_string())];
+        let r = WafRequest {
+            method: "GET",
+            uri: "/",
+            headers: &headers,
+            body: b"",
+            query: "",
+            source_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            country: None,
+            body_size_bytes: 0,
+        };
+        assert_eq!(
+            evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            WafAction::Allow
+        );
+        assert_eq!(
+            evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            WafAction::Block
+        );
+    }
+
+    #[test]
+    fn managed_rule_group_common_set_blocks_admin() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "crs",
+                "Priority": 0,
+                "OverrideAction": {"None": {}},
+                "Action": {"Block": {}},
+                "VisibilityConfig": {},
+                "Statement": {"ManagedRuleGroupStatement": {
+                    "VendorName": "AWS",
+                    "Name": "AWSManagedRulesCommonRuleSet",
+                }},
+            })],
+        );
+        assert_eq!(
+            evaluate(&req("/admin/users"), &acl, &HashMap::new(), &HashMap::new()),
+            WafAction::Block
+        );
+        assert_eq!(
+            evaluate(&req("/wp-admin"), &acl, &HashMap::new(), &HashMap::new()),
+            WafAction::Block
+        );
+        assert_eq!(
+            evaluate(&req("/index.html"), &acl, &HashMap::new(), &HashMap::new()),
+            WafAction::Allow
+        );
+    }
+
+    #[test]
+    fn captcha_action_marks_blocked() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![byte_match_uri_contains("/admin", json!({"Captcha": {}}))],
+        );
+        let limiter = RateLimiter::new();
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/admin/x"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            0,
+        );
+        assert_eq!(v.action, WafAction::Captcha);
+        assert!(v.blocked, "Captcha is non-2xx — counts as blocked");
+    }
+
+    #[test]
+    fn challenge_action_marks_blocked() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![byte_match_uri_contains("/admin", json!({"Challenge": {}}))],
+        );
+        let limiter = RateLimiter::new();
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/admin/x"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            0,
+        );
+        assert_eq!(v.action, WafAction::Challenge);
+        assert!(v.blocked);
+    }
+
+    #[test]
+    fn verdict_carries_terminating_rule_id_and_labels() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![
+                json!({
+                    "Name": "tag",
+                    "Priority": 0,
+                    "Action": {"Count": {}},
+                    "VisibilityConfig": {},
+                    "RuleLabels": [{"Name": "awswaf:custom:admin"}],
+                    "Statement": {"ByteMatchStatement": {
+                        "SearchString": "/admin",
+                        "FieldToMatch": {"UriPath": {}},
+                        "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+                        "PositionalConstraint": "CONTAINS",
+                    }},
+                }),
+                json!({
+                    "Name": "block-by-label",
+                    "Priority": 1,
+                    "Action": {"Block": {}},
+                    "VisibilityConfig": {},
+                    "Statement": {"LabelMatchStatement": {
+                        "Scope": "LABEL",
+                        "Key": "awswaf:custom:admin",
+                    }},
+                }),
+            ],
+        );
+        let limiter = RateLimiter::new();
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/admin/x"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            0,
+        );
+        assert_eq!(v.action, WafAction::Block);
+        assert_eq!(v.terminating_rule_id.as_deref(), Some("block-by-label"));
+        assert_eq!(v.labels, vec!["awswaf:custom:admin"]);
+        assert_eq!(v.count_rules, vec!["tag"]);
+    }
+
+    #[test]
+    fn block_with_custom_response_propagates_to_verdict() {
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![json!({
+                "Name": "block",
+                "Priority": 0,
+                "Action": {"Block": {"CustomResponse": {
+                    "ResponseCode": 429,
+                    "CustomResponseBodyKey": "rate-limited",
+                }}},
+                "VisibilityConfig": {},
+                "Statement": {"ByteMatchStatement": {
+                    "SearchString": "/admin",
+                    "FieldToMatch": {"UriPath": {}},
+                    "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+                    "PositionalConstraint": "CONTAINS",
+                }},
+            })],
+        );
+        let limiter = RateLimiter::new();
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/admin"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            0,
+        );
+        assert_eq!(v.action, WafAction::Block);
+        assert_eq!(v.custom_response_status, Some(429));
+        assert_eq!(v.custom_response_body_key.as_deref(), Some("rate-limited"));
     }
 }

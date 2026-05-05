@@ -619,6 +619,294 @@ async fn get_mobile_sdk_release_url_uses_provided_platform() {
     assert!(url.contains("1.0.0"));
 }
 
+/// Phase W1: the WAFv2 evaluator runs entirely in-process. Until the W2
+/// dataplane integrations land (ALB / API Gateway / CloudFront), tests
+/// drive evaluation through the `/_fakecloud/wafv2/evaluate` admin
+/// endpoint. The endpoint accepts a synthetic `WafRequest` plus a WebACL
+/// ARN and returns the resolved verdict.
+#[tokio::test]
+async fn evaluator_blocks_request_from_listed_ip_via_admin_endpoint() {
+    use aws_sdk_wafv2::types::{IpSetReferenceStatement, Statement as SdkStatement};
+
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let http = reqwest::Client::new();
+
+    // 1) Create an IPSet with the loopback CIDR.
+    let ip_set_arn = waf
+        .create_ip_set()
+        .name("eval-blocked")
+        .scope(Scope::Regional)
+        .ip_address_version(IpAddressVersion::Ipv4)
+        .addresses("203.0.113.0/24")
+        .send()
+        .await
+        .expect("create ipset")
+        .summary
+        .expect("summary")
+        .arn
+        .expect("ipset arn");
+
+    // 2) Create a WebACL with a Block-on-IP rule referencing that IPSet.
+    let block_rule = Rule::builder()
+        .name("block-bad-ips")
+        .priority(0)
+        .action(
+            RuleAction::builder()
+                .block(aws_sdk_wafv2::types::BlockAction::builder().build())
+                .build(),
+        )
+        .visibility_config(vis("block-bad-ips"))
+        .statement(
+            SdkStatement::builder()
+                .ip_set_reference_statement(
+                    IpSetReferenceStatement::builder()
+                        .arn(&ip_set_arn)
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .build()
+        .expect("rule");
+    let acl_arn = waf
+        .create_web_acl()
+        .name("eval-acl")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("eval-acl"))
+        .rules(block_rule)
+        .send()
+        .await
+        .expect("create acl")
+        .summary
+        .expect("summary")
+        .arn
+        .expect("acl arn");
+
+    // 3) GetWebACL still returns the rule as configured.
+    let scoped_arn_lookup = waf
+        .list_web_acls()
+        .scope(Scope::Regional)
+        .send()
+        .await
+        .expect("list");
+    assert!(scoped_arn_lookup
+        .web_acls()
+        .iter()
+        .any(|s| s.arn() == Some(acl_arn.as_str())));
+
+    // 4) Hit the admin evaluator with a request from a blocked IP.
+    let body = serde_json::json!({
+        "webAclArn": acl_arn,
+        "request": {
+            "method": "GET",
+            "uri": "/health",
+            "sourceIp": "203.0.113.42",
+        },
+    });
+    let resp: serde_json::Value = http
+        .post(format!("{}/_fakecloud/wafv2/evaluate", server.endpoint()))
+        .json(&body)
+        .send()
+        .await
+        .expect("admin call")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(resp["action"], "Block");
+    assert_eq!(resp["blocked"], true);
+    assert_eq!(resp["terminatingRuleId"], "block-bad-ips");
+
+    // 5) A request from an unlisted IP falls through to default Allow.
+    let body_allow = serde_json::json!({
+        "webAclArn": acl_arn,
+        "request": {
+            "method": "GET",
+            "uri": "/health",
+            "sourceIp": "10.0.0.5",
+        },
+    });
+    let resp_allow: serde_json::Value = http
+        .post(format!("{}/_fakecloud/wafv2/evaluate", server.endpoint()))
+        .json(&body_allow)
+        .send()
+        .await
+        .expect("admin call 2")
+        .json()
+        .await
+        .expect("json 2");
+    assert_eq!(resp_allow["action"], "Allow");
+    assert_eq!(resp_allow["blocked"], false);
+}
+
+#[tokio::test]
+async fn evaluator_geo_match_uses_country_header_override() {
+    use aws_sdk_wafv2::types::{GeoMatchStatement, Statement as SdkStatement};
+
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let http = reqwest::Client::new();
+
+    let block_de = Rule::builder()
+        .name("block-de")
+        .priority(0)
+        .action(
+            RuleAction::builder()
+                .block(aws_sdk_wafv2::types::BlockAction::builder().build())
+                .build(),
+        )
+        .visibility_config(vis("block-de"))
+        .statement(
+            SdkStatement::builder()
+                .geo_match_statement(
+                    GeoMatchStatement::builder()
+                        .country_codes(aws_sdk_wafv2::types::CountryCode::De)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+        .expect("rule");
+    let acl_arn = waf
+        .create_web_acl()
+        .name("geo-acl")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("geo-acl"))
+        .rules(block_de)
+        .send()
+        .await
+        .expect("create acl")
+        .summary
+        .expect("summary")
+        .arn
+        .expect("arn");
+
+    // Header override: x-fakecloud-geo-country=DE -> Block.
+    let body = serde_json::json!({
+        "webAclArn": acl_arn,
+        "request": {
+            "uri": "/",
+            "headers": [["x-fakecloud-geo-country", "DE"]],
+        },
+    });
+    let resp: serde_json::Value = http
+        .post(format!("{}/_fakecloud/wafv2/evaluate", server.endpoint()))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["action"], "Block", "DE country header should block");
+
+    // No header -> default Allow.
+    let body2 = serde_json::json!({
+        "webAclArn": acl_arn,
+        "request": {"uri": "/"},
+    });
+    let resp2: serde_json::Value = http
+        .post(format!("{}/_fakecloud/wafv2/evaluate", server.endpoint()))
+        .json(&body2)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp2["action"], "Allow");
+}
+
+#[tokio::test]
+async fn evaluator_rate_based_blocks_after_limit() {
+    use aws_sdk_wafv2::types::{
+        RateBasedStatement, RateBasedStatementAggregateKeyType, Statement as SdkStatement,
+    };
+
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+    let http = reqwest::Client::new();
+
+    let rate_rule = Rule::builder()
+        .name("rate")
+        .priority(0)
+        .action(
+            RuleAction::builder()
+                .block(aws_sdk_wafv2::types::BlockAction::builder().build())
+                .build(),
+        )
+        .visibility_config(vis("rate"))
+        .statement(
+            SdkStatement::builder()
+                .rate_based_statement(
+                    RateBasedStatement::builder()
+                        .limit(3)
+                        .aggregate_key_type(RateBasedStatementAggregateKeyType::Ip)
+                        .evaluation_window_sec(300)
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .build()
+        .expect("rule");
+    let acl_arn = waf
+        .create_web_acl()
+        .name("rate-acl")
+        .scope(Scope::Regional)
+        .default_action(allow_default())
+        .visibility_config(vis("rate-acl"))
+        .rules(rate_rule)
+        .send()
+        .await
+        .expect("create acl")
+        .summary
+        .expect("summary")
+        .arn
+        .expect("arn");
+
+    // Pin the evaluation clock so the test is deterministic.
+    let now: i64 = 1_700_000_000;
+    let mk_body = || {
+        serde_json::json!({
+            "webAclArn": acl_arn,
+            "request": {
+                "uri": "/api",
+                "sourceIp": "198.51.100.7",
+                "nowEpochSecs": now,
+            },
+        })
+    };
+    // First three requests pass.
+    for i in 0..3 {
+        let resp: serde_json::Value = http
+            .post(format!("{}/_fakecloud/wafv2/evaluate", server.endpoint()))
+            .json(&mk_body())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resp["action"], "Allow", "request {i} should be allowed");
+    }
+    // The 4th exceeds Limit=3 within the window.
+    let blocked: serde_json::Value = http
+        .post(format!("{}/_fakecloud/wafv2/evaluate", server.endpoint()))
+        .json(&mk_body())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(blocked["action"], "Block");
+    assert_eq!(blocked["blocked"], true);
+    assert_eq!(blocked["terminatingRuleId"], "rate");
+}
+
 #[tokio::test]
 async fn paginate_with_stale_marker_does_not_panic() {
     let server = TestServer::start().await;
