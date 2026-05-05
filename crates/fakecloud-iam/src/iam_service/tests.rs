@@ -3807,6 +3807,49 @@ fn simulate_principal_policy_unions_attached_group_managed_policy() {
 }
 
 #[test]
+fn simulate_principal_policy_reports_missing_context_from_resolved_policies() {
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "ed")]))
+        .unwrap();
+    // Attach a managed policy whose Condition references a key the
+    // request never supplies. The simulator must walk the *resolved*
+    // policy set, not just PolicyInputList, when reporting missing
+    // context values.
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*","Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-1"}}}]}"#;
+    svc.create_policy(&make_request(
+        "CreatePolicy",
+        vec![("PolicyName", "RegionGate"), ("PolicyDocument", policy_doc)],
+    ))
+    .unwrap();
+    svc.attach_user_policy(&make_request(
+        "AttachUserPolicy",
+        vec![
+            ("UserName", "ed"),
+            ("PolicyArn", "arn:aws:iam::123456789012:policy/RegionGate"),
+        ],
+    ))
+    .unwrap();
+
+    let resp = svc
+        .simulate_principal_policy(&make_request(
+            "SimulatePrincipalPolicy",
+            vec![
+                ("PolicySourceArn", "arn:aws:iam::123456789012:user/ed"),
+                ("ActionNames.member.1", "s3:PutObject"),
+                ("ResourceArns.member.1", "arn:aws:s3:::b/k"),
+            ],
+        ))
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains(
+            "<MissingContextValues><member>aws:RequestedRegion</member></MissingContextValues>"
+        ),
+        "expected resolved-policy condition key reported, body: {body}"
+    );
+}
+
+#[test]
 fn simulate_custom_policy_reports_missing_context_values() {
     let svc = make_service();
     let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","Condition":{"StringEquals":{"aws:RequestTag/team":"red"}}}]}"#;
