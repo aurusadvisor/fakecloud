@@ -1601,28 +1601,73 @@ async fn ssm_automation_execution_lifecycle() {
 // ── Sessions ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn ssm_session_lifecycle() {
+async fn ssm_start_session_returns_not_implemented() {
+    // Real fakecloud behavior: no websocket data plane, so StartSession
+    // and ResumeSession refuse loud rather than handing back a fake
+    // stream URL. The test is the user-facing contract: callers see a
+    // typed error pointing at the documented escape hatches.
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
 
-    // Start
-    let start = client
+    let err = client
         .start_session()
         .target("i-00000000000000001")
         .send()
         .await
-        .unwrap();
-    let session_id = start.session_id().unwrap().to_string();
-    assert!(start.token_value().is_some());
+        .unwrap_err();
+    let svc_err = err.into_service_error();
+    let code = svc_err.meta().code().unwrap_or_default();
+    assert_eq!(code, "OperationNotSupportedException");
+    let msg = svc_err.meta().message().unwrap_or_default();
+    assert!(
+        msg.contains("FAKECLOUD_SSM_SESSION_ECHO"),
+        "error must point at echo-mode escape hatch, got: {msg}"
+    );
+    assert!(
+        msg.contains("/_fakecloud/ssm/sessions/inject"),
+        "error must point at admin inject endpoint, got: {msg}"
+    );
 
-    // Resume
-    let resume = client
+    let err = client
         .resume_session()
-        .session_id(&session_id)
+        .session_id("session-000000000001")
+        .send()
+        .await
+        .unwrap_err();
+    let svc_err = err.into_service_error();
+    assert_eq!(
+        svc_err.meta().code().unwrap_or_default(),
+        "OperationNotSupportedException"
+    );
+}
+
+#[tokio::test]
+async fn ssm_session_lifecycle_via_admin_inject() {
+    // Default flow for tests that need DescribeSessions / TerminateSession
+    // to round-trip without a real websocket: drop a session in via the
+    // admin endpoint.
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/_fakecloud/ssm/sessions/inject",
+            server.endpoint()
+        ))
+        .json(&serde_json::json!({
+            "target": "i-00000000000000001",
+            "reason": "e2e-injected"
+        }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resume.session_id().unwrap(), session_id);
+    assert!(resp.status().is_success(), "inject endpoint failed");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let session_id = body
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .expect("response missing sessionId");
 
     // Describe active
     let desc = client
@@ -1632,6 +1677,7 @@ async fn ssm_session_lifecycle() {
         .await
         .unwrap();
     assert_eq!(desc.sessions().len(), 1);
+    assert_eq!(desc.sessions()[0].reason(), Some("e2e-injected"));
 
     // Terminate
     client
