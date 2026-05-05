@@ -778,13 +778,27 @@ impl OrganizationsService {
         // account; CancelHandshake belongs to the *source* (management)
         // account. Enforce party-correctness so test harnesses catch
         // misuse before AWS would.
+        //
+        // ENABLE_ALL_FEATURES / APPROVE_ALL_FEATURES handshakes are
+        // org-wide and any member account can accept/decline their copy;
+        // they don't have a single target_account_id, so we skip the
+        // party gate for them.
         let handshake = org.handshakes.get(&id).ok_or_else(|| {
             org_error_to_aws(crate::state::OrgError::HandshakeNotFound(id.clone()))
         })?;
-        let allowed = match new_state {
-            "ACCEPTED" | "DECLINED" => req.account_id == handshake.target_account_id,
-            "CANCELED" => req.account_id == handshake.source_account_id,
-            _ => false,
+        let org_wide_action = matches!(
+            handshake.action.as_str(),
+            "ENABLE_ALL_FEATURES" | "APPROVE_ALL_FEATURES"
+        );
+        let allowed = if org_wide_action {
+            // For org-wide handshakes only require membership.
+            true
+        } else {
+            match new_state {
+                "ACCEPTED" | "DECLINED" => req.account_id == handshake.target_account_id,
+                "CANCELED" => req.account_id == handshake.source_account_id,
+                _ => false,
+            }
         };
         if !allowed {
             return Err(org_error_to_aws(
@@ -816,29 +830,49 @@ impl OrganizationsService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let filter = parse_handshake_filter(&body)?;
+        let (max_results, next_token) = parse_handshake_pagination(&body)?;
+
         let guard = self.state.read();
         let org = guard.as_ref().ok_or_else(organizations_not_in_use)?;
-        let entries: Vec<Value> = org
+        let filtered: Vec<Value> = org
             .list_handshakes(Some(&req.account_id))
-            .iter()
-            .map(handshake_payload)
+            .into_iter()
+            .filter(|h| handshake_matches_filter(h, &filter))
+            .map(|h| handshake_payload(&h))
             .collect();
-        Ok(AwsResponse::ok_json(json!({ "Handshakes": entries })))
+        let (page, token) = paginate(&filtered, next_token.as_deref(), max_results);
+        let mut body = json!({ "Handshakes": page });
+        if let Some(t) = token {
+            body["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(body))
     }
 
     fn list_handshakes_for_organization(
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let filter = parse_handshake_filter(&body)?;
+        let (max_results, next_token) = parse_handshake_pagination(&body)?;
+
         let guard = self.state.write();
         self.require_member_management(&guard, &req.account_id)?;
         let org = guard.as_ref().expect("management gate proved Some");
-        let entries: Vec<Value> = org
+        let filtered: Vec<Value> = org
             .list_handshakes(None)
-            .iter()
-            .map(handshake_payload)
+            .into_iter()
+            .filter(|h| handshake_matches_filter(h, &filter))
+            .map(|h| handshake_payload(&h))
             .collect();
-        Ok(AwsResponse::ok_json(json!({ "Handshakes": entries })))
+        let (page, token) = paginate(&filtered, next_token.as_deref(), max_results);
+        let mut body = json!({ "Handshakes": page });
+        if let Some(t) = token {
+            body["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(body))
     }
 
     fn enable_aws_service_access(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1543,10 +1577,141 @@ fn org_error_to_aws(err: OrgError) -> AwsServiceError {
     }
 }
 
+/// Parsed `Filter` block from a `ListHandshakes*` request. Keeps each
+/// AWS-supported filter field as an `Option`; `None` means "don't
+/// constrain on this dimension".
+#[derive(Default, Debug, Clone)]
+struct HandshakeFilter {
+    action_type: Option<String>,
+    parent_handshake_id: Option<String>,
+}
+
+/// Parse `Filter` (HandshakeFilter shape) from a `ListHandshakes*`
+/// request body. Unknown keys are ignored to match AWS's forward-compat
+/// behavior. Returns an empty filter if the field is absent.
+fn parse_handshake_filter(body: &Value) -> Result<HandshakeFilter, AwsServiceError> {
+    let Some(filter_val) = body.get("Filter") else {
+        return Ok(HandshakeFilter::default());
+    };
+    if filter_val.is_null() {
+        return Ok(HandshakeFilter::default());
+    }
+    let filter_obj = filter_val.as_object().ok_or_else(|| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidInputException",
+            "Filter must be an object.",
+        )
+    })?;
+    let action_type = filter_obj
+        .get("ActionType")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    if let Some(action) = &action_type {
+        // Reject unknown action types up front so callers see the same
+        // error AWS returns for typos, instead of silently getting an
+        // empty page.
+        const ALLOWED: &[&str] = &[
+            "INVITE",
+            "ENABLE_ALL_FEATURES",
+            "APPROVE_ALL_FEATURES",
+            "ADD_ORGANIZATIONS_SERVICE_LINKED_ROLE",
+        ];
+        if !ALLOWED.contains(&action.as_str()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInputException",
+                format!("Filter.ActionType {action} is not a recognized handshake action."),
+            ));
+        }
+    }
+    let parent_handshake_id = filter_obj
+        .get("ParentHandshakeId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Ok(HandshakeFilter {
+        action_type,
+        parent_handshake_id,
+    })
+}
+
+/// Match a stored handshake against the parsed filter. We don't track
+/// parent/child handshakes today, so any `ParentHandshakeId` filter
+/// excludes every handshake — which matches AWS's behavior for
+/// stand-alone INVITE handshakes that have no parent link.
+fn handshake_matches_filter(h: &crate::state::Handshake, filter: &HandshakeFilter) -> bool {
+    if let Some(ref action) = filter.action_type {
+        if &h.action != action {
+            return false;
+        }
+    }
+    if filter.parent_handshake_id.is_some() {
+        // No handshake we mint has a parent; the filter therefore
+        // matches nothing rather than everything.
+        return false;
+    }
+    true
+}
+
+/// Parse `MaxResults` (1..=20, default 20) and `NextToken` (string
+/// matching what `paginate` mints) from a `ListHandshakes*` request.
+fn parse_handshake_pagination(body: &Value) -> Result<(usize, Option<String>), AwsServiceError> {
+    let max_results = match body.get("MaxResults") {
+        None | Some(Value::Null) => 20usize,
+        Some(v) => {
+            let n = v.as_u64().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidInputException",
+                    "MaxResults must be a positive integer between 1 and 20.",
+                )
+            })?;
+            if !(1..=20).contains(&n) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidInputException",
+                    "MaxResults must be between 1 and 20.",
+                ));
+            }
+            n as usize
+        }
+    };
+    let next_token = match body.get("NextToken") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let s = v.as_str().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidInputException",
+                    "NextToken must be a string.",
+                )
+            })?;
+            if s.parse::<usize>().is_err() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidInputException",
+                    "NextToken is not a valid pagination token.",
+                ));
+            }
+            Some(s.to_string())
+        }
+    };
+    Ok((max_results, next_token))
+}
+
 fn handshake_payload(h: &crate::state::Handshake) -> Value {
+    // Real AWS Organizations encodes the inviter as the org itself
+    // (`Type: ORGANIZATION`, `Id` = the org id) and the invitee as the
+    // member account (`Type: ACCOUNT`, `Id` = account id) or its email
+    // (`Type: EMAIL`, `Id` = email address). The source account id is
+    // also exposed as a separate ACCOUNT party so callers can correlate.
     let parties = json!([
+        {"Id": h.organization_id, "Type": "ORGANIZATION"},
         {"Id": h.source_account_id, "Type": "ACCOUNT"},
-        {"Id": h.target_account_id, "Type": h.target_kind},
+        {
+            "Id": h.target_email.clone().unwrap_or_else(|| h.target_account_id.clone()),
+            "Type": h.target_kind,
+        },
     ]);
     let resources = json!([
         {"Type": "ORGANIZATION", "Value": h.organization_id},
