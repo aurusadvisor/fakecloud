@@ -11782,6 +11782,7 @@ impl ResourceProvisioner {
             auto_deploy,
             created_date: Utc::now(),
             last_updated_date: None,
+            web_acl_arn: None,
         };
 
         let mut accounts = self.apigatewayv2_state.write();

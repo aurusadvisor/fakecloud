@@ -302,6 +302,13 @@ pub struct Stage {
     pub created_date: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_updated_date: Option<DateTime<Utc>>,
+    /// WebACL ARN attached to this stage. Set via `AssociateWebACL`
+    /// (the WAFv2 service tracks the association keyed by the stage
+    /// ARN); the v2 dataplane consults this on every request before
+    /// invoking the authorizer or integration. `None` when no WebACL
+    /// is attached, which is the common case.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub web_acl_arn: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

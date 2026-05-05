@@ -86,8 +86,12 @@ struct DataPlane {
     upstream: reqwest::Client,
 }
 
-pub fn spawn_dataplane(state: SharedElbv2State, waf_state: Option<SharedWafv2State>) {
-    spawn_dataplane_with_delivery(state, waf_state, None);
+pub fn spawn_dataplane(
+    state: SharedElbv2State,
+    waf_state: Option<SharedWafv2State>,
+    waf_count_metrics: Option<Arc<Mutex<BTreeMap<String, u64>>>>,
+) {
+    spawn_dataplane_with_delivery(state, waf_state, None, waf_count_metrics);
 }
 
 /// Spawn the supervisor and (when a `delivery_bus` is wired) the
@@ -97,6 +101,7 @@ pub fn spawn_dataplane_with_delivery(
     state: SharedElbv2State,
     waf_state: Option<SharedWafv2State>,
     delivery_bus: Option<Arc<DeliveryBus>>,
+    waf_count_metrics: Option<Arc<Mutex<BTreeMap<String, u64>>>>,
 ) -> Option<Arc<AccessLogger>> {
     if !dataplane_enabled() {
         debug!("ELBv2 data plane disabled via {ENV_DISABLE}");
@@ -126,7 +131,8 @@ pub fn spawn_dataplane_with_delivery(
         state,
         waf_state,
         access_logger,
-        waf_count_metrics: Arc::new(Mutex::new(BTreeMap::new())),
+        waf_count_metrics: waf_count_metrics
+            .unwrap_or_else(|| Arc::new(Mutex::new(BTreeMap::new()))),
         rr_counters: Arc::new(Mutex::new(BTreeMap::new())),
         sticky_targets: Arc::new(Mutex::new(BTreeMap::new())),
         upstream,

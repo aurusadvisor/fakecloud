@@ -44,6 +44,11 @@ struct DataPlaneMatch {
     /// the data plane enforces the `x-api-key` header + the associated
     /// usage plan's throttle/quota before invoking the integration.
     api_key_required: bool,
+    /// WebACL ARN attached to the matched stage (`Stage.web_acl_arn`).
+    /// Optional both because most stages don't have a WebACL and
+    /// because the stage may not exist (data plane handles miss
+    /// elsewhere).
+    stage_web_acl_arn: Option<String>,
 }
 
 /// Outcome of authorizer evaluation. `claims`/`context` are merged into
@@ -77,6 +82,7 @@ pub async fn handle(
         authorization_type,
         authorizer,
         api_key_required,
+        stage_web_acl_arn,
     } = {
         let accounts = service.state_handle().read();
         let state = match accounts.get(&req.account_id) {
@@ -145,6 +151,9 @@ pub async fn handle(
                             .as_ref()
                             .map(|m| m.api_key_required)
                             .unwrap_or(false);
+                        let stage_web_acl_arn = api_stages
+                            .get(&stage_name)
+                            .and_then(|s| s.web_acl_arn.clone());
                         found = Some(DataPlaneMatch {
                             api_id: api_id.clone(),
                             integration,
@@ -154,6 +163,7 @@ pub async fn handle(
                             authorization_type,
                             authorizer,
                             api_key_required,
+                            stage_web_acl_arn,
                         });
                         break;
                     }
@@ -173,6 +183,21 @@ pub async fn handle(
             }
         }
     };
+
+    // WAFv2 inspection: when the matched stage's ARN is associated
+    // with a WebACL and the service was wired with WAF state,
+    // evaluate the request before the authorizer. Block / Captcha /
+    // Challenge short-circuit; Count is recorded but lets the request
+    // fall through. The `stage_web_acl_arn` field on the stage is a
+    // hint cached from AssociateWebACL — we still hit the WAFv2
+    // association table for the actual lookup, since that's the
+    // source of truth.
+    let _ = &stage_web_acl_arn;
+    let stage_arn = stage_resource_arn(&req.region, &api_id, &stage_name);
+    if let Some(resp) = evaluate_waf(service, req, &stage_arn) {
+        service.record_request(&req.account_id, &api_id, &stage_name, req, resp.status);
+        return Ok(resp);
+    }
 
     // Run the authorizer (when configured) before touching the
     // integration. AWS rejects with 401/403 here without ever invoking
@@ -1183,6 +1208,97 @@ fn current_quota_window(
         }
         QuotaPeriod::Month => format!("M:{}-{:02}", date.year(), date.month()),
     }
+}
+
+// ─── WAFv2 inspection ──────────────────────────────────────────────
+
+/// Build the resource ARN that callers use when associating a WebACL
+/// with an API Gateway v1 stage:
+/// `arn:aws:apigateway:<region>::/restapis/<api>/stages/<stage>`.
+fn stage_resource_arn(region: &str, api_id: &str, stage_name: &str) -> String {
+    format!("arn:aws:apigateway:{region}::/restapis/{api_id}/stages/{stage_name}",)
+}
+
+/// Run the WAFv2 evaluator for one API Gateway v1 request. Returns
+/// `Some(response)` for a terminal action (`Block` / `Captcha` /
+/// `Challenge`); returns `None` for `Allow` / `Count` / `NoAcl`.
+fn evaluate_waf(
+    service: &ApiGatewayService,
+    req: &AwsRequest,
+    resource_arn: &str,
+) -> Option<AwsResponse> {
+    let waf_state = service.waf_state.as_ref()?;
+    let limiter = service.waf_rate_limiter.as_ref()?;
+    let ctx = build_waf_context(req);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let decision = fakecloud_wafv2::evaluate_request(waf_state, resource_arn, &ctx, limiter, now);
+    record_count_rules(service, &decision);
+    decision_to_response(decision)
+}
+
+fn build_waf_context(req: &AwsRequest) -> fakecloud_wafv2::RequestContext {
+    let headers: Vec<(String, String)> = req
+        .headers
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_lowercase(), s.to_string()))
+        })
+        .collect();
+    let source_ip = headers
+        .iter()
+        .find(|(k, _)| k == "x-forwarded-for")
+        .and_then(|(_, v)| v.split(',').next().map(str::trim))
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok());
+    let mut ctx =
+        fakecloud_wafv2::RequestContext::new(req.method.as_str(), &req.raw_path, &req.raw_query)
+            .with_headers(headers)
+            .with_body(req.body.as_ref());
+    if let Some(ip) = source_ip {
+        ctx = ctx.with_source_ip(ip);
+    }
+    ctx
+}
+
+fn record_count_rules(service: &ApiGatewayService, decision: &fakecloud_wafv2::Decision) {
+    let rules = decision.count_rules();
+    if rules.is_empty() {
+        return;
+    }
+    let Some(arn) = decision.web_acl_arn() else {
+        return;
+    };
+    let mut metrics = service.waf_count_metrics.lock();
+    for rule in rules {
+        let key = format!("{arn}|{rule}");
+        *metrics.entry(key).or_insert(0) += 1;
+    }
+}
+
+fn decision_to_response(decision: fakecloud_wafv2::Decision) -> Option<AwsResponse> {
+    use fakecloud_wafv2::Decision;
+    let (status, message) = match decision {
+        Decision::NoAcl | Decision::Allow { .. } => return None,
+        Decision::Block { status, .. } => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN),
+            "Forbidden".to_string(),
+        ),
+        // CAPTCHA / Challenge interstitials are out of scope for this
+        // batch; surface a 403 with a discoverable description so
+        // tests can distinguish from a plain Block.
+        Decision::Captcha { .. } => (StatusCode::FORBIDDEN, "WAF requires CAPTCHA".to_string()),
+        Decision::Challenge { .. } => (StatusCode::FORBIDDEN, "WAF requires challenge".to_string()),
+    };
+    let body = json!({"message": message});
+    let mut resp = AwsResponse::json_value(status, body);
+    // Match the ALB shape: real AWS returns plain JSON, not the
+    // amz-json-1.1 content-type the JSON-protocol services use.
+    resp.content_type = "application/json".to_string();
+    Some(resp)
 }
 
 #[cfg(test)]
