@@ -89,6 +89,7 @@ impl CloudFrontService {
             runtime: parsed.connection_function_config.runtime,
             comment: parsed.connection_function_config.comment,
             code,
+            live_code: None,
             etag: etag.clone(),
             created_time: now,
             last_modified_time: now,
@@ -250,6 +251,11 @@ impl CloudFrontService {
         f.status = "DEPLOYED".to_string();
         f.stage = "LIVE".to_string();
         f.last_modified_time = Utc::now();
+        // Freeze the current development bytes as the LIVE snapshot so
+        // TestConnectionFunction(Stage=LIVE) keeps the published
+        // behaviour stable across subsequent UpdateConnectionFunction
+        // calls.
+        f.live_code = Some(f.code.clone());
         let snap = f.clone();
         drop(state);
         let body = render_connection_function_summary(&snap, true);
@@ -286,9 +292,20 @@ impl CloudFrontService {
         if f.etag != if_match {
             return Err(precondition_failed());
         }
-        let code = String::from_utf8(f.code.clone())
+        // Pick the stored bytes that match the requested stage.
+        // DEVELOPMENT (the default) is the latest body; LIVE reads the
+        // snapshot taken at PublishConnectionFunction. We fall back to
+        // `f.code` when no LIVE snapshot exists so unpublished
+        // functions are still testable against Stage=LIVE.
+        let stage = parsed.stage.as_deref().unwrap_or("DEVELOPMENT");
+        let source: &[u8] = if stage.eq_ignore_ascii_case("LIVE") {
+            f.live_code.as_deref().unwrap_or(&f.code)
+        } else {
+            &f.code
+        };
+        let code = std::str::from_utf8(source)
             .map_err(|e| invalid_argument(format!("function code is not valid UTF-8: {e}")))?;
-        let exec = crate::js_runtime::run_handler(&code, &event_bytes);
+        let exec = crate::js_runtime::run_handler(code, &event_bytes);
 
         let mut body = String::with_capacity(1024);
         body.push_str(XML_DECL);
@@ -322,7 +339,6 @@ struct TestConnectionFunctionRequest {
     #[serde(default)]
     connection_object: String,
     #[serde(default)]
-    #[allow(dead_code)]
     stage: Option<String>,
 }
 
@@ -444,14 +460,67 @@ mod tests {
     }
 
     fn test_cfn_request_xml(event_json: &str) -> String {
+        test_cfn_request_xml_with_stage(event_json, "DEVELOPMENT")
+    }
+
+    fn test_cfn_request_xml_with_stage(event_json: &str, stage: &str) -> String {
         let event_b64 = base64::engine::general_purpose::STANDARD.encode(event_json.as_bytes());
         format!(
             r#"<?xml version="1.0"?>
 <TestConnectionFunctionRequest xmlns="{NS}">
-  <Stage>DEVELOPMENT</Stage>
+  <Stage>{stage}</Stage>
   <ConnectionObject>{event_b64}</ConnectionObject>
 </TestConnectionFunctionRequest>"#
         )
+    }
+
+    async fn update_cfn(svc: &CloudFrontService, name: &str, code: &str, if_match: &str) -> String {
+        let code_b64 = base64::engine::general_purpose::STANDARD.encode(code.as_bytes());
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<UpdateConnectionFunctionRequest xmlns="{NS}">
+  <ConnectionFunctionConfig>
+    <Comment>t</Comment>
+    <Runtime>cloudfront-js-2.0</Runtime>
+  </ConnectionFunctionConfig>
+  <ConnectionFunctionCode>{code_b64}</ConnectionFunctionCode>
+</UpdateConnectionFunctionRequest>"#
+        );
+        let resp = svc
+            .handle(req(
+                http::Method::PUT,
+                &format!("/2020-05-31/connection-function/{name}"),
+                &body,
+                Some(if_match),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        resp.headers
+            .get(ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn publish_cfn(svc: &CloudFrontService, name: &str, if_match: &str) -> String {
+        let resp = svc
+            .handle(req(
+                http::Method::POST,
+                &format!("/2020-05-31/connection-function/{name}/publish"),
+                "",
+                Some(if_match),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        resp.headers
+            .get(ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
     }
 
     #[tokio::test]
@@ -560,6 +629,56 @@ mod tests {
         let cu_close = xml.find("</ComputeUtilization>").unwrap();
         let pct: u32 = xml[cu_open..cu_close].parse().unwrap();
         assert!(pct > 100, "expected pct > 100 on error, got {pct}");
+    }
+
+    #[tokio::test]
+    async fn test_connection_function_stage_selects_published_or_development_code() {
+        // ConnectionFunctions mirror Functions: PublishConnectionFunction
+        // freezes a LIVE snapshot, UpdateConnectionFunction mutates only
+        // DEVELOPMENT, and TestConnectionFunction picks the matching
+        // version per Stage.
+        let svc = svc();
+        let etag = create_cfn(&svc, "cfn-stage", r#"function handler() { return "v1"; }"#).await;
+        let pub_etag = publish_cfn(&svc, "cfn-stage", &etag).await;
+        let new_etag = update_cfn(
+            &svc,
+            "cfn-stage",
+            r#"function handler() { return "v2"; }"#,
+            &pub_etag,
+        )
+        .await;
+
+        let dev_body = test_cfn_request_xml_with_stage("{}", "DEVELOPMENT");
+        let dev_resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/connection-function/cfn-stage/test",
+                &dev_body,
+                Some(&new_etag),
+            ))
+            .await
+            .unwrap();
+        let dev_xml = std::str::from_utf8(dev_resp.body.expect_bytes()).unwrap();
+        assert!(
+            dev_xml.contains("&quot;v2&quot;"),
+            "DEVELOPMENT should run latest update (v2), got {dev_xml}"
+        );
+
+        let live_body = test_cfn_request_xml_with_stage("{}", "LIVE");
+        let live_resp = svc
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/connection-function/cfn-stage/test",
+                &live_body,
+                Some(&new_etag),
+            ))
+            .await
+            .unwrap();
+        let live_xml = std::str::from_utf8(live_resp.body.expect_bytes()).unwrap();
+        assert!(
+            live_xml.contains("&quot;v1&quot;"),
+            "LIVE should run published snapshot (v1), got {live_xml}"
+        );
     }
 
     #[tokio::test]
