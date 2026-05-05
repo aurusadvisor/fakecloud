@@ -156,6 +156,16 @@ pub struct ApiGatewayService {
     /// these to control-plane reads, and quotas reset on a wall-clock
     /// boundary. Restart resetting the buckets is acceptable.
     pub(crate) meters: Arc<parking_lot::Mutex<crate::data_plane::UsageMeters>>,
+    /// WAFv2 inspection wiring. When set together with
+    /// `waf_rate_limiter`, the data plane evaluates each request
+    /// against the WebACL associated with the matched stage's ARN
+    /// before invoking the authorizer or integration.
+    pub(crate) waf_state: Option<fakecloud_wafv2::SharedWafv2State>,
+    pub(crate) waf_rate_limiter: Option<Arc<fakecloud_wafv2::RateLimiter>>,
+    /// Per-(WebACL ARN, rule name) Count-action match counter. Keyed
+    /// by `"<acl-arn>|<rule-name>"`; exposed via the admin endpoint
+    /// for tests and future metrics scraping.
+    pub(crate) waf_count_metrics: Arc<parking_lot::Mutex<BTreeMap<String, u64>>>,
 }
 
 impl ApiGatewayService {
@@ -168,6 +178,9 @@ impl ApiGatewayService {
             meters: Arc::new(parking_lot::Mutex::new(
                 crate::data_plane::UsageMeters::default(),
             )),
+            waf_state: None,
+            waf_rate_limiter: None,
+            waf_count_metrics: Arc::new(parking_lot::Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -179,6 +192,28 @@ impl ApiGatewayService {
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
+    }
+
+    /// Wire the shared WAFv2 state + rate limiter so the data plane
+    /// can evaluate the WebACL associated with the matched stage's
+    /// ARN on every execute-API request. Pass the same
+    /// `Wafv2Service::rate_limiter()` instance every dataplane uses
+    /// so `RateBasedStatement` counters stay consistent.
+    pub fn with_waf(
+        mut self,
+        state: fakecloud_wafv2::SharedWafv2State,
+        rate_limiter: Arc<fakecloud_wafv2::RateLimiter>,
+    ) -> Self {
+        self.waf_state = Some(state);
+        self.waf_rate_limiter = Some(rate_limiter);
+        self
+    }
+
+    /// Snapshot of the WAF Count-action metrics. Keyed by
+    /// `"<webacl-arn>|<rule-name>"`. Returns an empty map when WAF
+    /// inspection is disabled or no Count rules have fired.
+    pub fn waf_count_metrics_snapshot(&self) -> BTreeMap<String, u64> {
+        self.waf_count_metrics.lock().clone()
     }
 
     pub(crate) fn delivery(&self) -> Option<&Arc<DeliveryBus>> {

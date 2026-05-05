@@ -126,6 +126,15 @@ pub struct ApiGatewayV2Service {
     delivery: Option<Arc<DeliveryBus>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// WAFv2 inspection wiring. When set together with
+    /// `waf_rate_limiter`, the data plane evaluates each request
+    /// against the WebACL associated with the matched stage's ARN
+    /// before authorizer / integration dispatch.
+    pub(crate) waf_state: Option<fakecloud_wafv2::SharedWafv2State>,
+    pub(crate) waf_rate_limiter: Option<Arc<fakecloud_wafv2::RateLimiter>>,
+    /// Per-(WebACL ARN, rule name) Count-action match counter. Keyed
+    /// by `"<acl-arn>|<rule-name>"`.
+    pub(crate) waf_count_metrics: Arc<parking_lot::Mutex<std::collections::BTreeMap<String, u64>>>,
 }
 
 impl ApiGatewayV2Service {
@@ -135,6 +144,9 @@ impl ApiGatewayV2Service {
             delivery: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            waf_state: None,
+            waf_rate_limiter: None,
+            waf_count_metrics: Arc::new(parking_lot::Mutex::new(std::collections::BTreeMap::new())),
         }
     }
 
@@ -146,6 +158,28 @@ impl ApiGatewayV2Service {
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
+    }
+
+    /// Wire the shared WAFv2 state + rate limiter so the execute-API
+    /// data plane can evaluate the WebACL associated with the matched
+    /// stage's ARN. Pass the same `Wafv2Service::rate_limiter()`
+    /// instance every dataplane uses so `RateBasedStatement` counters
+    /// stay consistent.
+    pub fn with_waf(
+        mut self,
+        state: fakecloud_wafv2::SharedWafv2State,
+        rate_limiter: Arc<fakecloud_wafv2::RateLimiter>,
+    ) -> Self {
+        self.waf_state = Some(state);
+        self.waf_rate_limiter = Some(rate_limiter);
+        self
+    }
+
+    /// Snapshot of the WAF Count-action metrics. Keyed by
+    /// `"<webacl-arn>|<rule-name>"`. Returns an empty map when WAF
+    /// inspection is disabled.
+    pub fn waf_count_metrics_snapshot(&self) -> std::collections::BTreeMap<String, u64> {
+        self.waf_count_metrics.lock().clone()
     }
 
     async fn save_snapshot(&self) {
@@ -1240,6 +1274,7 @@ impl ApiGatewayV2Service {
             auto_deploy,
             created_date,
             last_updated_date: None,
+            web_acl_arn: None,
         };
 
         let mut accounts = self.state.write();
@@ -1972,6 +2007,22 @@ impl ApiGatewayV2Service {
             }
         }
 
+        // WAFv2 inspection: when the matched stage's ARN is associated
+        // with a WebACL and the service was wired with WAF state,
+        // evaluate the request before route match / authorizer /
+        // integration. Block / Captcha / Challenge short-circuit;
+        // Count is recorded but lets the request continue.
+        if let Some(resp) = self.evaluate_waf(&req, &api_id, stage_name) {
+            self.record_request(
+                &req,
+                &api_id,
+                stage_name,
+                &resource_path,
+                resp.status.as_u16(),
+            );
+            return Ok(resp);
+        }
+
         // Match the request against routes
         let router = Router::new(routes);
         let route_match = router
@@ -2090,6 +2141,51 @@ impl ApiGatewayV2Service {
         Ok(response)
     }
 
+    /// Build the resource ARN that callers use when associating a
+    /// WebACL with an API Gateway v2 stage:
+    /// `arn:aws:apigateway:<region>::/apis/<api>/stages/<stage>`.
+    fn stage_resource_arn(&self, region: &str, api_id: &str, stage: &str) -> String {
+        format!("arn:aws:apigateway:{region}::/apis/{api_id}/stages/{stage}")
+    }
+
+    /// Run WAFv2 inspection for one execute-API request. Returns
+    /// `Some(response)` for a terminal action; returns `None` for
+    /// `Allow` / `Count` / `NoAcl`.
+    fn evaluate_waf(
+        &self,
+        req: &AwsRequest,
+        api_id: &str,
+        stage_name: &str,
+    ) -> Option<AwsResponse> {
+        let waf_state = self.waf_state.as_ref()?;
+        let limiter = self.waf_rate_limiter.as_ref()?;
+        let resource_arn = self.stage_resource_arn(&req.region, api_id, stage_name);
+        let ctx = build_waf_context(req);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let decision =
+            fakecloud_wafv2::evaluate_request(waf_state, &resource_arn, &ctx, limiter, now);
+        self.record_count_rules(&decision);
+        decision_to_response(decision)
+    }
+
+    fn record_count_rules(&self, decision: &fakecloud_wafv2::Decision) {
+        let rules = decision.count_rules();
+        if rules.is_empty() {
+            return;
+        }
+        let Some(arn) = decision.web_acl_arn() else {
+            return;
+        };
+        let mut metrics = self.waf_count_metrics.lock();
+        for rule in rules {
+            let key = format!("{arn}|{rule}");
+            *metrics.entry(key).or_insert(0) += 1;
+        }
+    }
+
     fn record_request(
         &self,
         req: &AwsRequest,
@@ -2131,6 +2227,53 @@ impl ApiGatewayV2Service {
         let state = accounts.get_or_create(&req.account_id);
         state.request_history.push(request_record);
     }
+}
+
+// ─── WAFv2 inspection helpers ─────────────────────────────────────
+
+fn build_waf_context(req: &AwsRequest) -> fakecloud_wafv2::RequestContext {
+    let headers: Vec<(String, String)> = req
+        .headers
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_lowercase(), s.to_string()))
+        })
+        .collect();
+    let source_ip = headers
+        .iter()
+        .find(|(k, _)| k == "x-forwarded-for")
+        .and_then(|(_, v)| v.split(',').next().map(str::trim))
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok());
+    let mut ctx =
+        fakecloud_wafv2::RequestContext::new(req.method.as_str(), &req.raw_path, &req.raw_query)
+            .with_headers(headers)
+            .with_body(req.body.as_ref());
+    if let Some(ip) = source_ip {
+        ctx = ctx.with_source_ip(ip);
+    }
+    ctx
+}
+
+fn decision_to_response(decision: fakecloud_wafv2::Decision) -> Option<AwsResponse> {
+    use fakecloud_wafv2::Decision;
+    let (status, message) = match decision {
+        Decision::NoAcl | Decision::Allow { .. } => return None,
+        Decision::Block { status, .. } => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN),
+            "Forbidden".to_string(),
+        ),
+        // CAPTCHA / Challenge interstitials are out of scope for this
+        // batch; surface a 403 with a discoverable description so
+        // tests can distinguish from a plain Block.
+        Decision::Captcha { .. } => (StatusCode::FORBIDDEN, "WAF requires CAPTCHA".to_string()),
+        Decision::Challenge { .. } => (StatusCode::FORBIDDEN, "WAF requires challenge".to_string()),
+    };
+    let body = json!({"message": message});
+    let mut resp = AwsResponse::json_value(status, body);
+    resp.content_type = "application/json".to_string();
+    Some(resp)
 }
 
 #[path = "service_helpers.rs"]

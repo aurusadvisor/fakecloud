@@ -2300,7 +2300,8 @@ async fn main() {
         } else {
             None
         };
-    let mut apigw_service = ApiGatewayV2Service::new(apigatewayv2_state.clone());
+    let mut apigw_service = ApiGatewayV2Service::new(apigatewayv2_state.clone())
+        .with_waf(wafv2_state.clone(), wafv2_rate_limiter.clone());
     if let Some(ref ld) = lambda_delivery {
         let delivery_for_apigw = Arc::new(DeliveryBus::new().with_lambda(ld.clone()));
         apigw_service = apigw_service.with_delivery(delivery_for_apigw);
@@ -2361,7 +2362,8 @@ async fn main() {
         } else {
             None
         };
-    let mut apigw_v1_service = ApiGatewayService::new(apigatewayv1_state.clone());
+    let mut apigw_v1_service = ApiGatewayService::new(apigatewayv1_state.clone())
+        .with_waf(wafv2_state.clone(), wafv2_rate_limiter.clone());
     {
         let cognito_jwt_verifier: Arc<dyn fakecloud_core::delivery::CognitoJwtVerifier> = Arc::new(
             fakecloud_cognito::StateBackedJwtVerifier::new(cognito_state.clone()),
@@ -4713,6 +4715,19 @@ async fn main() {
                     async move {
                         let flushed = svc.flush_access_logs();
                         axum::Json(serde_json::json!({ "flushed": flushed }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/elbv2/waf-counts",
+            axum::routing::get({
+                let svc = elbv2_service_for_admin.clone();
+                move || {
+                    let svc = svc.clone();
+                    async move {
+                        let counts = svc.waf_count_metrics_snapshot();
+                        axum::Json(serde_json::json!({ "counts": counts }))
                     }
                 }
             }),

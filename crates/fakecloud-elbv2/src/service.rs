@@ -89,6 +89,10 @@ pub struct Elbv2Service {
     /// started — exposed so the introspection layer can flush
     /// synchronously inside tests.
     access_logger: parking_lot::Mutex<Option<Arc<crate::accesslogs::AccessLogger>>>,
+    /// Shared per-(WebACL ARN, rule name) Count-action match counter.
+    /// Threaded into the dataplane on `start_dataplane` so the
+    /// `/_fakecloud/elbv2/waf-counts` admin endpoint can read it.
+    waf_count_metrics: Arc<parking_lot::Mutex<std::collections::BTreeMap<String, u64>>>,
     pub region: String,
 }
 
@@ -99,12 +103,19 @@ impl Elbv2Service {
     /// before the dataplane spawns.
     pub fn new(state: SharedElbv2State) -> Self {
         crate::prober::spawn_prober(Arc::clone(&state));
-        crate::dataplane::spawn_dataplane(Arc::clone(&state), None);
+        let waf_count_metrics =
+            Arc::new(parking_lot::Mutex::new(std::collections::BTreeMap::new()));
+        crate::dataplane::spawn_dataplane(
+            Arc::clone(&state),
+            None,
+            Some(Arc::clone(&waf_count_metrics)),
+        );
         Self {
             state,
             waf_state: None,
             delivery_bus: None,
             access_logger: parking_lot::Mutex::new(None),
+            waf_count_metrics,
             region: "us-east-1".to_string(),
         }
     }
@@ -119,6 +130,7 @@ impl Elbv2Service {
             waf_state: None,
             delivery_bus: None,
             access_logger: parking_lot::Mutex::new(None),
+            waf_count_metrics: Arc::new(parking_lot::Mutex::new(std::collections::BTreeMap::new())),
             region: "us-east-1".to_string(),
         }
     }
@@ -145,8 +157,16 @@ impl Elbv2Service {
             Arc::clone(&self.state),
             self.waf_state.as_ref().map(Arc::clone),
             self.delivery_bus.as_ref().map(Arc::clone),
+            Some(Arc::clone(&self.waf_count_metrics)),
         );
         *self.access_logger.lock() = logger;
+    }
+
+    /// Snapshot of the WAF Count-action metrics. Keyed by
+    /// `"<webacl-arn>|<rule-name>"`. Returns an empty map when no
+    /// Count rules have fired (or when WAF inspection is disabled).
+    pub fn waf_count_metrics_snapshot(&self) -> std::collections::BTreeMap<String, u64> {
+        self.waf_count_metrics.lock().clone()
     }
 
     /// Force every buffered access / connection log line to flush to
