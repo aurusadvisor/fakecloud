@@ -167,7 +167,7 @@ Top-level client. Defaults to `http://localhost:4566`.
 
 | Method                                          | Description                                                                                                                                   |
 | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `setHealthCheckStatus(id, { status, reason? })` | Flip a health check between `Success` / `Failure` to drive failover routing in tests; reason is appended to the `<Status>` element on failure |
+| `setHealthCheckStatus(id, { status, reason? })` | Flip a health check between `Success` / `Failure` / `Timeout` / `DnsError` / `InsufficientDataPoints` / `Unknown` to drive failover routing in tests; reason is appended to the `<Status>` element for failure-flavoured statuses |
 
 #### Full test loop — asserting on Bedrock calls
 

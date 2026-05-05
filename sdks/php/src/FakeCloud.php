@@ -594,9 +594,11 @@ final class Route53Client
     public function __construct(private readonly HttpTransport $http) {}
 
     /**
-     * Flip a Route 53 health check's reported status. $status is
-     * "Success" or "Failure"; $reason is appended to the <Status>
-     * element when status is "Failure" (pass null to omit).
+     * Flip a Route 53 health check's reported status. $status is one of
+     * "Success", "Failure", "Timeout", "DnsError",
+     * "InsufficientDataPoints", "Unknown". $reason is appended to the
+     * <Status> element for failure-flavoured statuses (Failure, Timeout,
+     * DnsError); ignored otherwise. Pass null to omit reason.
      */
     public function setHealthCheckStatus(string $healthCheckId, string $status, ?string $reason = null): void
     {

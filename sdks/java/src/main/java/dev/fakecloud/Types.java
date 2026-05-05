@@ -578,7 +578,9 @@ public final class Types {
     /**
      * Body for the Route 53 admin endpoint
      * {@code POST /_fakecloud/route53/health-checks/{id}/status}.
-     * {@code status} is {@code "Success"} or {@code "Failure"};
+     * {@code status} is one of {@code "Success"}, {@code "Failure"},
+     * {@code "Timeout"}, {@code "DnsError"},
+     * {@code "InsufficientDataPoints"}, {@code "Unknown"};
      * {@code reason} is omitted from the JSON when null.
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)

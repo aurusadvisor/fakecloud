@@ -106,6 +106,20 @@ pub enum HealthCheckStatus {
     #[default]
     Success,
     Failure,
+    /// The endpoint did not respond within the request timeout. Surfaced
+    /// in `<Status>` as `"Failure: Connection timed out"` unless an
+    /// explicit `last_failure_reason` is supplied.
+    Timeout,
+    /// Route 53 could not resolve the FQDN. Surfaced as
+    /// `"Failure: DNS resolution failed"`.
+    DnsError,
+    /// Not enough recent observations to compute a definitive verdict.
+    /// Surfaced as `"InsufficientDataPoints"` (no `Success`/`Failure`
+    /// prefix, mirroring real AWS status strings).
+    InsufficientDataPoints,
+    /// Status could not be determined for any other reason. Surfaced as
+    /// `"Unknown"`.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -374,9 +374,11 @@ class Route53Client:
     ) -> None:
         """Flip a health check's reported status.
 
-        ``status`` is ``"Success"`` or ``"Failure"``. ``reason`` is appended to
-        the ``<Status>`` element returned by ``GetHealthCheckStatus`` when the
-        new status is ``Failure``; ignored when ``Success``.
+        ``status`` is one of ``"Success"``, ``"Failure"``, ``"Timeout"``,
+        ``"DnsError"``, ``"InsufficientDataPoints"``, ``"Unknown"``.
+        ``reason`` is appended to the ``<Status>`` element returned by
+        ``GetHealthCheckStatus`` for failure-flavoured statuses
+        (``Failure``, ``Timeout``, ``DnsError``); ignored otherwise.
         """
         body: Dict[str, str] = {"status": status}
         if reason is not None:

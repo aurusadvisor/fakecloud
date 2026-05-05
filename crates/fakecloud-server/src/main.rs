@@ -5297,6 +5297,18 @@ async fn main() {
                             types::Route53HealthCheckStatusValue::Failure => {
                                 fakecloud_route53::HealthCheckStatus::Failure
                             }
+                            types::Route53HealthCheckStatusValue::Timeout => {
+                                fakecloud_route53::HealthCheckStatus::Timeout
+                            }
+                            types::Route53HealthCheckStatusValue::DnsError => {
+                                fakecloud_route53::HealthCheckStatus::DnsError
+                            }
+                            types::Route53HealthCheckStatusValue::InsufficientDataPoints => {
+                                fakecloud_route53::HealthCheckStatus::InsufficientDataPoints
+                            }
+                            types::Route53HealthCheckStatusValue::Unknown => {
+                                fakecloud_route53::HealthCheckStatus::Unknown
+                            }
                         };
                         if svc.set_health_check_status(&id, status, body.reason) {
                             axum::http::StatusCode::NO_CONTENT

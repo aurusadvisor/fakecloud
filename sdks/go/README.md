@@ -176,7 +176,7 @@ func main() {
 
 | Method | Description |
 |--------|-------------|
-| `SetHealthCheckStatus(ctx, id, req)` | Flip a health check between `Success` / `Failure` to drive failover routing in tests; reason is appended to the `<Status>` element on failure |
+| `SetHealthCheckStatus(ctx, id, req)` | Flip a health check between `Success` / `Failure` / `Timeout` / `DnsError` / `InsufficientDataPoints` / `Unknown` to drive failover routing in tests; reason is appended to the `<Status>` element for failure-flavoured statuses |
 
 #### Testing Bedrock-calling code end-to-end
 

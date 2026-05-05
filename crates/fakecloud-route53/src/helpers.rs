@@ -404,16 +404,34 @@ pub(crate) fn rfc3339(t: &chrono::DateTime<chrono::Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// Format the `<Status>` element returned by `GetHealthCheckStatus`.
+///
+/// Mirrors the strings real Route 53 surfaces: a `Success`/`Failure`
+/// prefix with a free-form descriptor after a colon. When the caller
+/// records an explicit `last_failure_reason` for a failing check, that
+/// reason is concatenated; otherwise we fall back to a per-status
+/// canned descriptor that matches what AWS produces for that flavour.
 pub(crate) fn render_status_line(
     status: crate::state::HealthCheckStatus,
     last_failure_reason: Option<&str>,
 ) -> String {
+    use crate::state::HealthCheckStatus;
     match status {
-        crate::state::HealthCheckStatus::Success => "Success".to_string(),
-        crate::state::HealthCheckStatus::Failure => match last_failure_reason {
+        HealthCheckStatus::Success => "Success: HTTP Status Code 200".to_string(),
+        HealthCheckStatus::Failure => match last_failure_reason {
             Some(reason) if !reason.is_empty() => format!("Failure: {reason}"),
-            _ => "Failure".to_string(),
+            _ => "Failure: Endpoint unreachable".to_string(),
         },
+        HealthCheckStatus::Timeout => match last_failure_reason {
+            Some(reason) if !reason.is_empty() => format!("Failure: {reason}"),
+            _ => "Failure: Connection timed out".to_string(),
+        },
+        HealthCheckStatus::DnsError => match last_failure_reason {
+            Some(reason) if !reason.is_empty() => format!("Failure: {reason}"),
+            _ => "Failure: DNS resolution failed".to_string(),
+        },
+        HealthCheckStatus::InsufficientDataPoints => "InsufficientDataPoints".to_string(),
+        HealthCheckStatus::Unknown => "Unknown".to_string(),
     }
 }
 

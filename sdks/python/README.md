@@ -91,7 +91,7 @@ Access via properties on the main client:
 | `stepfunctions` | Step Functions | `get_executions()` |
 | `apigatewayv2` | API Gateway v2 | `get_requests()` |
 | `bedrock` | Bedrock Runtime | `get_invocations()`, `set_model_response(model_id, text)`, `set_response_rules(model_id, rules)`, `clear_response_rules(model_id)`, `queue_fault(rule)`, `get_faults()`, `clear_faults()` |
-| `route53` | Route 53 | `set_health_check_status(id, status, reason=None)` — flip a health check between `Success` / `Failure` to drive failover routing in tests |
+| `route53` | Route 53 | `set_health_check_status(id, status, reason=None)` — flip a health check between `Success` / `Failure` / `Timeout` / `DnsError` / `InsufficientDataPoints` / `Unknown` to drive failover routing in tests |
 
 ### Testing Bedrock-calling code end-to-end
 
