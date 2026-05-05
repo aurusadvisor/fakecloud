@@ -51,14 +51,18 @@ fn collect_member_list(req: &AwsRequest, prefix: &str) -> Vec<String> {
 }
 
 /// Resolve an IAM principal ARN (user or role) to its full identity
-/// policy set: managed policies (default version) plus inline
-/// policies. Returns an empty vec if the ARN doesn't resolve.
-fn collect_principal_policies(
-    state: &IamState,
-    source_arn: &str,
-) -> Vec<crate::evaluator::PolicyDocument> {
-    use crate::evaluator::PolicyDocument;
-    let mut out: Vec<PolicyDocument> = Vec::new();
+/// policy set as raw JSON strings: managed policies (default version)
+/// plus inline policies. For users this also unions every policy
+/// attached to the groups they belong to, matching AWS's
+/// `SimulatePrincipalPolicy` semantics. Returns an empty vec if the
+/// ARN doesn't resolve.
+///
+/// Returning raw JSON (instead of `PolicyDocument`) lets callers feed
+/// the same docs into both the evaluator (via `PolicyDocument::parse`)
+/// and the condition-key scanner used to populate
+/// `MissingContextValues`.
+fn collect_principal_policy_jsons(state: &IamState, source_arn: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
     let (kind, name) = match parse_principal_arn(source_arn) {
         Some(p) => p,
         None => return out,
@@ -84,12 +88,32 @@ fn collect_principal_policies(
     for arn in &managed {
         if let Some(policy) = state.policies.get(arn) {
             if let Some(v) = policy.versions.iter().find(|v| v.is_default) {
-                out.push(PolicyDocument::parse(&v.document));
+                out.push(v.document.clone());
             }
         }
     }
     for doc in inline.values() {
-        out.push(PolicyDocument::parse(doc));
+        out.push(doc.clone());
+    }
+    // Users inherit every policy attached to a group they belong to —
+    // both managed and inline. Roles can't be group members so this
+    // step is user-only.
+    if matches!(kind, PrincipalKind::User) {
+        for group in state.groups.values() {
+            if !group.members.iter().any(|m| m == name) {
+                continue;
+            }
+            for arn in &group.attached_policies {
+                if let Some(policy) = state.policies.get(arn) {
+                    if let Some(v) = policy.versions.iter().find(|v| v.is_default) {
+                        out.push(v.document.clone());
+                    }
+                }
+            }
+            for doc in group.inline_policies.values() {
+                out.push(doc.clone());
+            }
+        }
     }
     out
 }
@@ -767,7 +791,11 @@ impl IamService {
         // Identity-side policies. SimulateCustomPolicy reads
         // PolicyInputList; SimulatePrincipalPolicy resolves the
         // PolicySourceArn principal's attached + inline policies.
+        // We collect the raw JSON alongside the parsed `PolicyDocument`
+        // so MissingContextValues can scan the *resolved* doc set
+        // (principal + group + boundary), not just the request inputs.
         let mut identity_docs: Vec<PolicyDocument> = Vec::new();
+        let mut raw_policy_jsons: Vec<String> = Vec::new();
         let mut caller_arn: Option<String> = req.query_params.get("CallerArn").cloned();
         let mut boundary_docs: Option<Vec<PolicyDocument>> = None;
 
@@ -775,6 +803,7 @@ impl IamService {
             "SimulateCustomPolicy" => {
                 for body in collect_member_list(req, "PolicyInputList.member.") {
                     identity_docs.push(PolicyDocument::parse(&body));
+                    raw_policy_jsons.push(body);
                 }
                 if identity_docs.is_empty() {
                     return Err(AwsServiceError::aws_error(
@@ -788,10 +817,11 @@ impl IamService {
                 if !boundaries.is_empty() {
                     boundary_docs = Some(
                         boundaries
-                            .into_iter()
-                            .map(|s| PolicyDocument::parse(&s))
+                            .iter()
+                            .map(|s| PolicyDocument::parse(s))
                             .collect(),
                     );
+                    raw_policy_jsons.extend(boundaries);
                 }
             }
             "SimulatePrincipalPolicy" => {
@@ -806,17 +836,23 @@ impl IamService {
                 let accounts = self.state.read();
                 let empty = IamState::new(&req.account_id);
                 let state = accounts.get(&req.account_id).unwrap_or(&empty);
-                identity_docs = collect_principal_policies(state, source_arn);
+                let resolved = collect_principal_policy_jsons(state, source_arn);
+                for body in &resolved {
+                    identity_docs.push(PolicyDocument::parse(body));
+                }
+                raw_policy_jsons.extend(resolved);
                 if let Some(boundary_arn) = principal_boundary(state, source_arn) {
                     if let Some(p) = state.policies.get(&boundary_arn) {
                         if let Some(v) = p.versions.iter().find(|v| v.is_default) {
                             boundary_docs = Some(vec![PolicyDocument::parse(&v.document)]);
+                            raw_policy_jsons.push(v.document.clone());
                         }
                     }
                 }
                 // Add policies attached via PolicyInputList overlay.
                 for body in collect_member_list(req, "PolicyInputList.member.") {
                     identity_docs.push(PolicyDocument::parse(&body));
+                    raw_policy_jsons.push(body);
                 }
             }
             _ => {}
@@ -846,6 +882,14 @@ impl IamService {
         // to for any key it doesn't recognize.
         apply_context_entries(req, &mut ctx);
 
+        // Pre-compute the set of condition keys referenced by every
+        // resolved policy doc (PolicyInputList + boundary inputs for
+        // SimulateCustomPolicy; principal/group/boundary policies +
+        // optional overlay for SimulatePrincipalPolicy). Any key the
+        // caller didn't supply is reported under MissingContextValues
+        // so simulators can warn about gaps before the real call.
+        let missing_keys = collect_missing_context_values(&raw_policy_jsons, &ctx);
+
         let mut members = String::new();
         for action_name in &actions {
             for resource in &resources {
@@ -862,11 +906,16 @@ impl IamService {
                     Decision::ImplicitDeny => "implicitDeny",
                     Decision::ExplicitDeny => "explicitDeny",
                 };
+                let missing_xml: String = missing_keys
+                    .iter()
+                    .map(|k| format!("<member>{}</member>", xml_escape(k)))
+                    .collect();
                 members.push_str(&format!(
-                    "<member><EvalActionName>{}</EvalActionName><EvalResourceName>{}</EvalResourceName><EvalDecision>{}</EvalDecision><MatchedStatements/><MissingContextValues/></member>",
+                    "<member><EvalActionName>{}</EvalActionName><EvalResourceName>{}</EvalResourceName><EvalDecision>{}</EvalDecision><MatchedStatements/><MissingContextValues>{}</MissingContextValues></member>",
                     xml_escape(action_name),
                     xml_escape(resource),
-                    decision_str
+                    decision_str,
+                    missing_xml,
                 ));
             }
         }
@@ -1102,6 +1151,31 @@ impl IamService {
             empty_response("UpdateServerCertificate", &req.request_id),
         ))
     }
+}
+
+/// Walk every resolved policy doc (request inputs + principal/group/
+/// boundary policies for SimulatePrincipalPolicy) and return the
+/// condition keys that the request's [`ConditionContext`] can't
+/// resolve. Order is stable + deduped so callers get a deterministic
+/// XML response.
+///
+/// AWS uses this list to surface "you're missing aws:RequestedRegion"
+/// style hints in the simulator UI even when the decision is `allowed`.
+fn collect_missing_context_values(
+    policy_jsons: &[String],
+    ctx: &fakecloud_core::auth::ConditionContext,
+) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for body in policy_jsons {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
+            extract_condition_keys(&parsed, &mut keys);
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys.into_iter()
+        .filter(|k| ctx.lookup(k).is_none())
+        .collect()
 }
 
 fn extract_condition_keys(v: &serde_json::Value, out: &mut Vec<String>) {
