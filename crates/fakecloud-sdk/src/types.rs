@@ -136,6 +136,19 @@ pub struct SesMailFromStatusRequest {
     pub status: String,
 }
 
+/// Admin payload to flip the SES account-level `production_access_enabled`
+/// flag. fakecloud defaults to `production_access_enabled=true` so users
+/// don't have to verify recipients to send mail; flip this to `false` to
+/// exercise sandbox-mode semantics (verified-recipient gate, send quotas,
+/// etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SesSandboxRequest {
+    /// `true` puts the account back into sandbox mode (production access
+    /// disabled); `false` re-enables production access.
+    pub sandbox: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundEmailRequest {
