@@ -168,6 +168,8 @@ func TestE2ERDS(t *testing.T) {
 	// until the container is up so the introspection endpoint sees the
 	// populated container_id and host_port.
 	deadline := time.Now().Add(240 * time.Second)
+	ready := false
+	var lastErr error
 	for time.Now().Before(deadline) {
 		desc, derr := rdsClient.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{
 			DBInstanceIdentifier: aws.String("sdk-go-rds-db"),
@@ -175,9 +177,14 @@ func TestE2ERDS(t *testing.T) {
 		if derr == nil && len(desc.DBInstances) > 0 &&
 			desc.DBInstances[0].DBInstanceStatus != nil &&
 			*desc.DBInstances[0].DBInstanceStatus == "available" {
+			ready = true
 			break
 		}
+		lastErr = derr
 		time.Sleep(1 * time.Second)
+	}
+	if !ready {
+		t.Fatalf("timed out waiting for DB instance to become available; last describe error: %v", lastErr)
 	}
 
 	fc := fakecloud.New(fakecloudURL)
