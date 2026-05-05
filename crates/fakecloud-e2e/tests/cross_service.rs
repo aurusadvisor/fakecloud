@@ -1352,3 +1352,127 @@ async fn secretsmanager_rotation_invokes_lambda() {
         "rotation Lambda ARN should be recorded on the secret"
     );
 }
+
+/// EventBridge -> SNS -> SQS with FilterPolicyScope=MessageBody. The
+/// cross-service publish path must apply the subscription's filter
+/// policy the same way the direct `Publish` op does, so a non-matching
+/// EB event must not deliver to the SQS subscriber.
+#[tokio::test]
+async fn eventbridge_sns_filter_policy_drops_non_matching() {
+    let server = TestServer::start().await;
+    let eb = server.eventbridge_client().await;
+    let sns = server.sns_client().await;
+    let sqs = server.sqs_client().await;
+
+    let topic = sns
+        .create_topic()
+        .name("eb-filtered-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    let queue = sqs
+        .create_queue()
+        .queue_name("eb-filtered-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+    let queue_arn = get_queue_arn(&sqs, &queue_url).await;
+
+    let sub = sns
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sqs")
+        .endpoint(&queue_arn)
+        .send()
+        .await
+        .unwrap();
+    let sub_arn = sub.subscription_arn().unwrap().to_string();
+
+    // FilterPolicyScope=MessageBody so the policy matches against the
+    // EventBridge event JSON delivered as the SNS Message body.
+    sns.set_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .attribute_name("FilterPolicyScope")
+        .attribute_value("MessageBody")
+        .send()
+        .await
+        .unwrap();
+    sns.set_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .attribute_name("FilterPolicy")
+        .attribute_value(r#"{"source":["payments"]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // Rule routes everything from sources "payments" and "auth" to the SNS topic
+    eb.put_rule()
+        .name("filter-rule")
+        .event_pattern(r#"{"source": ["payments", "auth"]}"#)
+        .send()
+        .await
+        .unwrap();
+    eb.put_targets()
+        .rule("filter-rule")
+        .targets(
+            Target::builder()
+                .id("sns-1")
+                .arn(&topic_arn)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    eb.put_events()
+        .entries(
+            PutEventsRequestEntry::builder()
+                .source("payments")
+                .detail_type("PaymentProcessed")
+                .detail(r#"{"amount": 100}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    eb.put_events()
+        .entries(
+            PutEventsRequestEntry::builder()
+                .source("auth")
+                .detail_type("LoginAttempt")
+                .detail(r#"{"user": "alice"}"#)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Wait briefly for async fan-out
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+    let received = msgs.messages();
+    assert_eq!(
+        received.len(),
+        1,
+        "filter policy should drop the auth event; got {} msgs",
+        received.len()
+    );
+    // The delivered message is wrapped in an SNS notification envelope
+    // around the original EventBridge event JSON.
+    let envelope: serde_json::Value = serde_json::from_str(received[0].body().unwrap()).unwrap();
+    assert_eq!(envelope["Type"], "Notification");
+    let inner: serde_json::Value =
+        serde_json::from_str(envelope["Message"].as_str().unwrap()).unwrap();
+    assert_eq!(inner["source"], "payments");
+}

@@ -1642,17 +1642,20 @@ pub(crate) struct HttpSubscriber {
 
 /// Read-only state passed down the fan-out helpers so each helper has
 /// the same data the monolithic publish() used to reference inline.
-struct TopicFanoutContext<'a> {
-    msg_id: &'a str,
-    topic_arn: &'a str,
-    subject: Option<&'a str>,
-    endpoint: &'a str,
-    sqs_message: &'a str,
-    default_message: &'a str,
-    envelope_attrs: &'a serde_json::Map<String, Value>,
-    message_attributes: &'a BTreeMap<String, MessageAttribute>,
-    message_group_id: Option<&'a str>,
-    message_dedup_id: Option<&'a str>,
+/// Visible to `delivery.rs` so the cross-service `SnsDelivery`
+/// implementation can build the same context the direct `Publish` op
+/// uses.
+pub(crate) struct TopicFanoutContext<'a> {
+    pub(crate) msg_id: &'a str,
+    pub(crate) topic_arn: &'a str,
+    pub(crate) subject: Option<&'a str>,
+    pub(crate) endpoint: &'a str,
+    pub(crate) sqs_message: &'a str,
+    pub(crate) default_message: &'a str,
+    pub(crate) envelope_attrs: &'a serde_json::Map<String, Value>,
+    pub(crate) message_attributes: &'a BTreeMap<String, MessageAttribute>,
+    pub(crate) message_group_id: Option<&'a str>,
+    pub(crate) message_dedup_id: Option<&'a str>,
 }
 
 /// Known match type keys for filter policy objects.
@@ -1673,9 +1676,7 @@ const UPPER_OPS: &[&str] = &["<", "<="];
 mod service_platform;
 #[path = "service_publish.rs"]
 mod service_publish;
-pub(crate) use service_publish::{
-    build_dlq_envelope, parse_http_delivery_policy, parse_redrive_dlq, retry_delay_ms,
-};
+pub(crate) use service_publish::fan_out_to_subscribers;
 #[path = "service_sms.rs"]
 mod service_sms;
 
