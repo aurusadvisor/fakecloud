@@ -261,6 +261,151 @@ async fn rds_modify_db_instance() {
 }
 
 #[tokio::test]
+async fn rds_modify_db_instance_accepts_all_mutable_fields() {
+    // M1: ModifyDBInstance must accept every mutable field. Exercises a
+    // broad subset round-trip with ApplyImmediately=true (immediate apply
+    // path) and ApplyImmediately=false (PendingModifiedValues staging).
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "orders-modify-all").await;
+
+    // 1. BackupRetentionPeriod with ApplyImmediately=true should reflect
+    // immediately and clear PendingModifiedValues.
+    let response = client
+        .modify_db_instance()
+        .db_instance_identifier("orders-modify-all")
+        .backup_retention_period(14)
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response
+            .db_instance()
+            .and_then(|i| i.backup_retention_period()),
+        Some(14)
+    );
+
+    let described = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-modify-all")
+        .send()
+        .await
+        .unwrap();
+    let inst = &described.db_instances()[0];
+    assert_eq!(inst.backup_retention_period(), Some(14));
+    // No deferred fields supplied above, so the immediate apply path
+    // should not produce any pending modified values.
+    if let Some(pmv) = inst.pending_modified_values() {
+        assert!(pmv.backup_retention_period().is_none());
+        assert!(pmv.storage_type().is_none());
+    }
+
+    // 2. StorageType with ApplyImmediately=false stages to
+    // PendingModifiedValues; live StorageType remains gp2.
+    client
+        .modify_db_instance()
+        .db_instance_identifier("orders-modify-all")
+        .storage_type("gp3")
+        .apply_immediately(false)
+        .send()
+        .await
+        .unwrap();
+
+    let described = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-modify-all")
+        .send()
+        .await
+        .unwrap();
+    let inst = &described.db_instances()[0];
+    assert_eq!(inst.storage_type(), Some("gp2"));
+    let pmv = inst
+        .pending_modified_values()
+        .expect("PendingModifiedValues should be populated");
+    assert_eq!(pmv.storage_type(), Some("gp3"));
+
+    // 3. MasterUserPassword with ApplyImmediately=true must be accepted
+    // (no plaintext echo, just no error).
+    client
+        .modify_db_instance()
+        .db_instance_identifier("orders-modify-all")
+        .master_user_password("rotated-pwd-123!")
+        .apply_immediately(true)
+        .send()
+        .await
+        .expect("MasterUserPassword change should succeed");
+
+    // 4. CloudwatchLogsExportConfiguration round-trip — enable then
+    // disable. Disable with empty enable list still works and the
+    // resulting set drops the disabled type.
+    client
+        .modify_db_instance()
+        .db_instance_identifier("orders-modify-all")
+        .cloudwatch_logs_export_configuration(
+            aws_sdk_rds::types::CloudwatchLogsExportConfiguration::builder()
+                .enable_log_types("postgresql")
+                .enable_log_types("upgrade")
+                .build(),
+        )
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+
+    let described = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-modify-all")
+        .send()
+        .await
+        .unwrap();
+    let exports = described.db_instances()[0].enabled_cloudwatch_logs_exports();
+    assert!(exports.contains(&"postgresql".to_string()));
+    assert!(exports.contains(&"upgrade".to_string()));
+
+    client
+        .modify_db_instance()
+        .db_instance_identifier("orders-modify-all")
+        .cloudwatch_logs_export_configuration(
+            aws_sdk_rds::types::CloudwatchLogsExportConfiguration::builder()
+                .disable_log_types("upgrade")
+                .build(),
+        )
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+
+    let described = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-modify-all")
+        .send()
+        .await
+        .unwrap();
+    let exports = described.db_instances()[0].enabled_cloudwatch_logs_exports();
+    assert!(exports.contains(&"postgresql".to_string()));
+    assert!(!exports.contains(&"upgrade".to_string()));
+
+    // 5. New mutable surface: extended Modify fields all accepted in a
+    // single call without any allowlist gate firing.
+    client
+        .modify_db_instance()
+        .db_instance_identifier("orders-modify-all")
+        .max_allocated_storage(200)
+        .copy_tags_to_snapshot(true)
+        .auto_minor_version_upgrade(false)
+        .enable_iam_database_authentication(true)
+        .network_type("DUAL")
+        .multi_tenant(false)
+        .license_model("postgresql-license")
+        .apply_immediately(true)
+        .send()
+        .await
+        .expect("extended Modify fields should be accepted");
+}
+
+#[tokio::test]
 async fn rds_reboot_db_instance() {
     let server = TestServer::start().await;
     let client = server.rds_client().await;

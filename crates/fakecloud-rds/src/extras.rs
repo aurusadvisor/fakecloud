@@ -1147,7 +1147,9 @@ impl RdsService {
                 match kind {
                     Some("db") => {
                         if let Some(inst) = state.instances.get_mut(&id) {
-                            inst.pending_modified_values = None;
+                            if let Some(pending) = inst.pending_modified_values.take() {
+                                crate::service::apply_pending_to_instance(inst, pending);
+                            }
                         }
                     }
                     Some("cluster") => {
@@ -2406,6 +2408,19 @@ mod tests {
                 copy_tags_to_snapshot: None,
                 master_user_secret_arn: None,
                 master_user_secret_kms_key_id: None,
+                license_model: None,
+                max_allocated_storage: None,
+                multi_tenant: None,
+                storage_throughput: None,
+                tde_credential_arn: None,
+                delete_automated_backups: None,
+                db_security_groups: Vec::new(),
+                domain: None,
+                domain_fqdn: None,
+                domain_ou: None,
+                domain_iam_role_name: None,
+                domain_auth_secret_arn: None,
+                domain_dns_ips: Vec::new(),
             },
         );
         // Replica points at source.
@@ -2461,6 +2476,19 @@ mod tests {
                 copy_tags_to_snapshot: None,
                 master_user_secret_arn: None,
                 master_user_secret_kms_key_id: None,
+                license_model: None,
+                max_allocated_storage: None,
+                multi_tenant: None,
+                storage_throughput: None,
+                tde_credential_arn: None,
+                delete_automated_backups: None,
+                db_security_groups: Vec::new(),
+                domain: None,
+                domain_fqdn: None,
+                domain_ou: None,
+                domain_iam_role_name: None,
+                domain_auth_secret_arn: None,
+                domain_dns_ips: Vec::new(),
             },
         );
     }
@@ -2852,6 +2880,19 @@ mod tests {
                 copy_tags_to_snapshot: None,
                 master_user_secret_arn: None,
                 master_user_secret_kms_key_id: None,
+                license_model: None,
+                max_allocated_storage: None,
+                multi_tenant: None,
+                storage_throughput: None,
+                tde_credential_arn: None,
+                delete_automated_backups: None,
+                db_security_groups: Vec::new(),
+                domain: None,
+                domain_fqdn: None,
+                domain_ou: None,
+                domain_iam_role_name: None,
+                domain_auth_secret_arn: None,
+                domain_dns_ips: Vec::new(),
             },
         );
     }
@@ -3287,7 +3328,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_pending_maintenance_action_clears_pending() {
+    fn apply_pending_maintenance_action_drains_into_live_instance() {
         let svc = svc();
         seed_replica(&svc, "replica-1", "source-1");
         {
@@ -3296,6 +3337,7 @@ mod tests {
             let inst = state.instances.get_mut("source-1").unwrap();
             inst.pending_modified_values = Some(crate::state::PendingModifiedValues {
                 engine_version: Some("16.4".to_string()),
+                storage_type: Some("gp3".to_string()),
                 ..Default::default()
             });
         }
@@ -3321,6 +3363,8 @@ mod tests {
             .get("source-1")
             .unwrap();
         assert!(inst.pending_modified_values.is_none());
+        assert_eq!(inst.engine_version, "16.4");
+        assert_eq!(inst.storage_type.as_deref(), Some("gp3"));
     }
 
     #[test]

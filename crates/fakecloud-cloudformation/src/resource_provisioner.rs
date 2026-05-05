@@ -7000,6 +7000,48 @@ impl ResourceProvisioner {
                 .and_then(|v| v.get("KmsKeyId"))
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            license_model: props
+                .get("LicenseModel")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            max_allocated_storage: props
+                .get("MaxAllocatedStorage")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
+            multi_tenant: props.get("MultiTenant").and_then(|v| v.as_bool()),
+            storage_throughput: props
+                .get("StorageThroughput")
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32),
+            tde_credential_arn: props
+                .get("TdeCredentialArn")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            delete_automated_backups: props
+                .get("DeleteAutomatedBackups")
+                .and_then(|v| v.as_bool()),
+            db_security_groups: Vec::new(),
+            domain: props
+                .get("Domain")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            domain_fqdn: props
+                .get("DomainFqdn")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            domain_ou: props
+                .get("DomainOu")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            domain_iam_role_name: props
+                .get("DomainIAMRoleName")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            domain_auth_secret_arn: props
+                .get("DomainAuthSecretArn")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            domain_dns_ips: Vec::new(),
         };
         let endpoint = inst.endpoint_address.clone();
         let endpoint_port = inst.port;

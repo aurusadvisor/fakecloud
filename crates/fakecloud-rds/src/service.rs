@@ -572,6 +572,19 @@ impl RdsService {
                 copy_tags_to_snapshot,
                 master_user_secret_arn: None,
                 master_user_secret_kms_key_id: None,
+                license_model: None,
+                max_allocated_storage: None,
+                multi_tenant: None,
+                storage_throughput: None,
+                tde_credential_arn: None,
+                delete_automated_backups: None,
+                db_security_groups: Vec::new(),
+                domain: None,
+                domain_fqdn: None,
+                domain_ou: None,
+                domain_iam_role_name: None,
+                domain_auth_secret_arn: None,
+                domain_dns_ips: Vec::new(),
             };
             state.finish_instance_creation(placeholder.clone());
             placeholder
@@ -903,32 +916,82 @@ impl RdsService {
 
     fn modify_db_instance(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let db_instance_identifier = required_query_param(request, "DBInstanceIdentifier")?;
-        let db_instance_class = optional_query_param(request, "DBInstanceClass");
-        let deletion_protection =
-            parse_optional_bool(optional_query_param(request, "DeletionProtection").as_deref())?;
         let apply_immediately =
             parse_optional_bool(optional_query_param(request, "ApplyImmediately").as_deref())?;
-        let master_user_password = optional_query_param(request, "MasterUserPassword");
+
+        // Fields AWS always applies immediately (i.e. ApplyImmediately is
+        // ignored). Mirrors the RDS API guide; per AWS docs none of these
+        // require a downtime window so they land on the live struct.
+        let deletion_protection =
+            parse_optional_bool(optional_query_param(request, "DeletionProtection").as_deref())?;
         let backup_retention_period =
             parse_optional_i32(optional_query_param(request, "BackupRetentionPeriod").as_deref())?;
         let preferred_backup_window = optional_query_param(request, "PreferredBackupWindow");
         let preferred_maintenance_window =
             optional_query_param(request, "PreferredMaintenanceWindow");
-        let engine_version = optional_query_param(request, "EngineVersion");
-        let allocated_storage =
-            parse_optional_i32(optional_query_param(request, "AllocatedStorage").as_deref())?;
         let db_parameter_group_name = optional_query_param(request, "DBParameterGroupName");
-        let multi_az = parse_optional_bool(optional_query_param(request, "MultiAZ").as_deref())?;
-        let iops = parse_optional_i32(optional_query_param(request, "Iops").as_deref())?;
-        let storage_type = optional_query_param(request, "StorageType");
         let master_user_secret_kms_key_id =
             optional_query_param(request, "MasterUserSecretKmsKeyId");
         let ca_certificate_identifier = optional_query_param(request, "CACertificateIdentifier");
         let monitoring_interval =
             parse_optional_i32(optional_query_param(request, "MonitoringInterval").as_deref())?;
+        let option_group_name = optional_query_param(request, "OptionGroupName");
+        let auto_minor_version_upgrade = parse_optional_bool(
+            optional_query_param(request, "AutoMinorVersionUpgrade").as_deref(),
+        )?;
+        let copy_tags_to_snapshot =
+            parse_optional_bool(optional_query_param(request, "CopyTagsToSnapshot").as_deref())?;
+        let delete_automated_backups = parse_optional_bool(
+            optional_query_param(request, "DeleteAutomatedBackups").as_deref(),
+        )?;
+        let enable_iam_db_auth = parse_optional_bool(
+            optional_query_param(request, "EnableIAMDatabaseAuthentication").as_deref(),
+        )?;
+        let max_allocated_storage =
+            parse_optional_i32(optional_query_param(request, "MaxAllocatedStorage").as_deref())?;
+        let network_type = optional_query_param(request, "NetworkType");
+        let domain = optional_query_param(request, "Domain");
+        let domain_fqdn = optional_query_param(request, "DomainFqdn");
+        let domain_ou = optional_query_param(request, "DomainOu");
+        let domain_iam_role_name = optional_query_param(request, "DomainIAMRoleName");
+        let domain_auth_secret_arn = optional_query_param(request, "DomainAuthSecretArn");
+        let domain_dns_ips = {
+            let v = parse_string_member_list(request, "DomainDnsIps");
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        };
+        let disable_domain =
+            parse_optional_bool(optional_query_param(request, "DisableDomain").as_deref())?;
+        let rotate_master_user_password = parse_optional_bool(
+            optional_query_param(request, "RotateMasterUserPassword").as_deref(),
+        )?;
+
+        // Fields gated on ApplyImmediately. None or true = immediate;
+        // false stages to pending_modified_values.
+        let db_instance_class = optional_query_param(request, "DBInstanceClass");
+        let master_user_password = optional_query_param(request, "MasterUserPassword");
+        let engine_version = optional_query_param(request, "EngineVersion");
+        let allocated_storage =
+            parse_optional_i32(optional_query_param(request, "AllocatedStorage").as_deref())?;
+        let multi_az = parse_optional_bool(optional_query_param(request, "MultiAZ").as_deref())?;
+        let iops = parse_optional_i32(optional_query_param(request, "Iops").as_deref())?;
+        let storage_type = optional_query_param(request, "StorageType");
+        let storage_throughput =
+            parse_optional_i32(optional_query_param(request, "StorageThroughput").as_deref())?;
         let performance_insights_enabled = parse_optional_bool(
             optional_query_param(request, "EnablePerformanceInsights").as_deref(),
         )?;
+        let license_model = optional_query_param(request, "LicenseModel");
+        let multi_tenant =
+            parse_optional_bool(optional_query_param(request, "MultiTenant").as_deref())?;
+        let publicly_accessible =
+            parse_optional_bool(optional_query_param(request, "PubliclyAccessible").as_deref())?;
+        let tde_credential_arn = optional_query_param(request, "TdeCredentialArn");
+        let db_port_number =
+            parse_optional_i32(optional_query_param(request, "DBPortNumber").as_deref())?;
 
         // CloudWatch logs exports — AWS lets callers both opt-in to and
         // opt-out of specific log types in the same call. We compute the
@@ -955,34 +1018,77 @@ impl RdsService {
             }
         };
 
-        // At-least-one-field validation: every supported mutable input.
-        if db_instance_class.is_none()
-            && deletion_protection.is_none()
-            && vpc_security_group_ids.is_none()
-            && master_user_password.is_none()
-            && backup_retention_period.is_none()
-            && preferred_backup_window.is_none()
-            && preferred_maintenance_window.is_none()
-            && engine_version.is_none()
-            && allocated_storage.is_none()
-            && db_parameter_group_name.is_none()
-            && multi_az.is_none()
-            && iops.is_none()
-            && storage_type.is_none()
-            && master_user_secret_kms_key_id.is_none()
-            && ca_certificate_identifier.is_none()
-            && monitoring_interval.is_none()
-            && performance_insights_enabled.is_none()
-            && !cloudwatch_changed
-        {
+        // Legacy classic-only DBSecurityGroups list. AWS still accepts the
+        // parameter even on VPC instances; we record it verbatim.
+        let db_security_groups = {
+            let mut ids = Vec::new();
+            for index in 1.. {
+                let key = format!("DBSecurityGroups.DBSecurityGroupName.{index}");
+                match optional_query_param(request, &key) {
+                    Some(name) => ids.push(name),
+                    None => break,
+                }
+            }
+            if ids.is_empty() {
+                None
+            } else {
+                Some(ids)
+            }
+        };
+
+        if let Some(ref class) = db_instance_class {
+            validate_db_instance_class(class)?;
+        }
+
+        // At-least-one mutable field must be present. We accept every
+        // mutable RDS Modify input, so we only reject the trivial case
+        // where the caller supplied just `DBInstanceIdentifier`.
+        let any_mutable_field = db_instance_class.is_some()
+            || deletion_protection.is_some()
+            || vpc_security_group_ids.is_some()
+            || db_security_groups.is_some()
+            || master_user_password.is_some()
+            || backup_retention_period.is_some()
+            || preferred_backup_window.is_some()
+            || preferred_maintenance_window.is_some()
+            || engine_version.is_some()
+            || allocated_storage.is_some()
+            || db_parameter_group_name.is_some()
+            || multi_az.is_some()
+            || iops.is_some()
+            || storage_type.is_some()
+            || storage_throughput.is_some()
+            || master_user_secret_kms_key_id.is_some()
+            || ca_certificate_identifier.is_some()
+            || monitoring_interval.is_some()
+            || performance_insights_enabled.is_some()
+            || cloudwatch_changed
+            || option_group_name.is_some()
+            || auto_minor_version_upgrade.is_some()
+            || copy_tags_to_snapshot.is_some()
+            || delete_automated_backups.is_some()
+            || enable_iam_db_auth.is_some()
+            || max_allocated_storage.is_some()
+            || network_type.is_some()
+            || license_model.is_some()
+            || multi_tenant.is_some()
+            || publicly_accessible.is_some()
+            || tde_credential_arn.is_some()
+            || db_port_number.is_some()
+            || domain.is_some()
+            || domain_fqdn.is_some()
+            || domain_ou.is_some()
+            || domain_iam_role_name.is_some()
+            || domain_auth_secret_arn.is_some()
+            || domain_dns_ips.is_some()
+            || disable_domain.is_some()
+            || rotate_master_user_password.is_some();
+        if !any_mutable_field {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterCombination",
-                "At least one supported mutable field must be provided.",
+                "At least one mutable field must be provided.",
             ));
-        }
-        if let Some(ref class) = db_instance_class {
-            validate_db_instance_class(class)?;
         }
 
         let mut accounts = self.state.write();
@@ -992,22 +1098,69 @@ impl RdsService {
             .get_mut(&db_instance_identifier)
             .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
 
-        // Fields AWS always applies immediately (per AWS RDS docs),
-        // regardless of ApplyImmediately:
-        //   deletion_protection, vpc_security_group_ids,
-        //   ca_certificate_identifier, master_user_secret_kms_key_id,
-        //   enabled_cloudwatch_logs_exports.
+        // ── Always-immediate fields (ApplyImmediately ignored) ──
         if let Some(deletion_protection) = deletion_protection {
             instance.deletion_protection = deletion_protection;
         }
         if let Some(security_group_ids) = vpc_security_group_ids {
             instance.vpc_security_group_ids = security_group_ids;
         }
+        if let Some(sg_names) = db_security_groups {
+            instance.db_security_groups = sg_names;
+        }
         if let Some(ca_id) = ca_certificate_identifier {
             instance.ca_certificate_identifier = Some(ca_id);
         }
         if let Some(kms_key) = master_user_secret_kms_key_id {
             instance.master_user_secret_kms_key_id = Some(kms_key);
+        }
+        if let Some(name) = option_group_name {
+            instance.option_group_name = Some(name);
+        }
+        if let Some(b) = auto_minor_version_upgrade {
+            instance.auto_minor_version_upgrade = Some(b);
+        }
+        if let Some(b) = copy_tags_to_snapshot {
+            instance.copy_tags_to_snapshot = Some(b);
+        }
+        if let Some(b) = delete_automated_backups {
+            instance.delete_automated_backups = Some(b);
+        }
+        if let Some(b) = enable_iam_db_auth {
+            instance.iam_database_authentication_enabled = b;
+        }
+        if let Some(n) = max_allocated_storage {
+            instance.max_allocated_storage = Some(n);
+        }
+        if let Some(nt) = network_type {
+            instance.network_type = Some(nt);
+        }
+        if disable_domain == Some(true) {
+            instance.domain = None;
+            instance.domain_fqdn = None;
+            instance.domain_ou = None;
+            instance.domain_iam_role_name = None;
+            instance.domain_auth_secret_arn = None;
+            instance.domain_dns_ips.clear();
+        } else {
+            if let Some(v) = domain {
+                instance.domain = Some(v);
+            }
+            if let Some(v) = domain_fqdn {
+                instance.domain_fqdn = Some(v);
+            }
+            if let Some(v) = domain_ou {
+                instance.domain_ou = Some(v);
+            }
+            if let Some(v) = domain_iam_role_name {
+                instance.domain_iam_role_name = Some(v);
+            }
+            if let Some(v) = domain_auth_secret_arn {
+                instance.domain_auth_secret_arn = Some(v);
+            }
+            if let Some(v) = domain_dns_ips {
+                instance.domain_dns_ips = v;
+            }
         }
         if cloudwatch_changed {
             let mut current: Vec<String> = instance.enabled_cloudwatch_logs_exports.clone();
@@ -1019,9 +1172,14 @@ impl RdsService {
             }
             instance.enabled_cloudwatch_logs_exports = current;
         }
+        // RotateMasterUserPassword: AWS rotates the secret in place. We
+        // record a marker by bumping a synthetic password — callers don't
+        // see plaintext, only that the secret status remains active.
+        if rotate_master_user_password == Some(true) {
+            instance.master_user_password = format!("rotated-{}", uuid::Uuid::new_v4().simple());
+        }
 
-        // Fields gated on ApplyImmediately. Default (None or true) is
-        // immediate; false stages to pending_modified_values.
+        // ── ApplyImmediately-gated fields ────────────────────────
         let immediate = apply_immediately != Some(false);
         if immediate {
             if let Some(class) = db_instance_class {
@@ -1029,15 +1187,6 @@ impl RdsService {
             }
             if let Some(pwd) = master_user_password {
                 instance.master_user_password = pwd;
-            }
-            if let Some(retention) = backup_retention_period {
-                instance.backup_retention_period = retention;
-            }
-            if let Some(window) = preferred_backup_window {
-                instance.preferred_backup_window = window;
-            }
-            if let Some(window) = preferred_maintenance_window {
-                instance.preferred_maintenance_window = Some(window);
             }
             if let Some(version) = engine_version {
                 instance.engine_version = version;
@@ -1057,27 +1206,59 @@ impl RdsService {
             if let Some(stype) = storage_type {
                 instance.storage_type = Some(stype);
             }
-            if let Some(interval) = monitoring_interval {
-                instance.monitoring_interval = Some(interval);
+            if let Some(t) = storage_throughput {
+                instance.storage_throughput = Some(t);
             }
             if let Some(pi) = performance_insights_enabled {
                 instance.performance_insights_enabled = pi;
             }
+            if let Some(lm) = license_model {
+                instance.license_model = Some(lm);
+            }
+            if let Some(b) = multi_tenant {
+                instance.multi_tenant = Some(b);
+            }
+            if let Some(b) = publicly_accessible {
+                instance.publicly_accessible = b;
+            }
+            if let Some(arn) = tde_credential_arn {
+                instance.tde_credential_arn = Some(arn);
+            }
+            if let Some(p) = db_port_number {
+                instance.port = p;
+            }
+            if let Some(retention) = backup_retention_period {
+                instance.backup_retention_period = retention;
+            }
+            if let Some(window) = preferred_backup_window {
+                instance.preferred_backup_window = window;
+            }
+            if let Some(window) = preferred_maintenance_window {
+                instance.preferred_maintenance_window = Some(window);
+            }
+            if let Some(interval) = monitoring_interval {
+                instance.monitoring_interval = Some(interval);
+            }
         } else {
-            // Stage only if at least one deferrable field was supplied.
             let any_deferred = db_instance_class.is_some()
                 || master_user_password.is_some()
-                || backup_retention_period.is_some()
-                || preferred_backup_window.is_some()
-                || preferred_maintenance_window.is_some()
                 || engine_version.is_some()
                 || allocated_storage.is_some()
                 || db_parameter_group_name.is_some()
                 || multi_az.is_some()
                 || iops.is_some()
                 || storage_type.is_some()
-                || monitoring_interval.is_some()
-                || performance_insights_enabled.is_some();
+                || storage_throughput.is_some()
+                || performance_insights_enabled.is_some()
+                || license_model.is_some()
+                || multi_tenant.is_some()
+                || publicly_accessible.is_some()
+                || tde_credential_arn.is_some()
+                || db_port_number.is_some()
+                || backup_retention_period.is_some()
+                || preferred_backup_window.is_some()
+                || preferred_maintenance_window.is_some()
+                || monitoring_interval.is_some();
             if any_deferred {
                 let pending = instance
                     .pending_modified_values
@@ -1087,15 +1268,6 @@ impl RdsService {
                 }
                 if let Some(pwd) = master_user_password {
                     pending.master_user_password = Some(pwd);
-                }
-                if let Some(retention) = backup_retention_period {
-                    pending.backup_retention_period = Some(retention);
-                }
-                if let Some(window) = preferred_backup_window {
-                    pending.preferred_backup_window = Some(window);
-                }
-                if let Some(window) = preferred_maintenance_window {
-                    pending.preferred_maintenance_window = Some(window);
                 }
                 if let Some(version) = engine_version {
                     pending.engine_version = Some(version);
@@ -1115,11 +1287,38 @@ impl RdsService {
                 if let Some(stype) = storage_type {
                     pending.storage_type = Some(stype);
                 }
-                if let Some(interval) = monitoring_interval {
-                    pending.monitoring_interval = Some(interval);
+                if let Some(t) = storage_throughput {
+                    pending.storage_throughput = Some(t);
                 }
                 if let Some(pi) = performance_insights_enabled {
                     pending.performance_insights_enabled = Some(pi);
+                }
+                if let Some(lm) = license_model {
+                    pending.license_model = Some(lm);
+                }
+                if let Some(b) = multi_tenant {
+                    pending.multi_tenant = Some(b);
+                }
+                if let Some(b) = publicly_accessible {
+                    pending.publicly_accessible = Some(b);
+                }
+                if let Some(arn) = tde_credential_arn {
+                    pending.tde_credential_arn = Some(arn);
+                }
+                if let Some(p) = db_port_number {
+                    pending.port = Some(p);
+                }
+                if let Some(retention) = backup_retention_period {
+                    pending.backup_retention_period = Some(retention);
+                }
+                if let Some(window) = preferred_backup_window {
+                    pending.preferred_backup_window = Some(window);
+                }
+                if let Some(window) = preferred_maintenance_window {
+                    pending.preferred_maintenance_window = Some(window);
+                }
+                if let Some(interval) = monitoring_interval {
+                    pending.monitoring_interval = Some(interval);
                 }
             }
         }
@@ -1201,24 +1400,7 @@ impl RdsService {
 
             // Apply any pending modifications
             if let Some(pending) = instance.pending_modified_values.take() {
-                if let Some(class) = pending.db_instance_class {
-                    instance.db_instance_class = class;
-                }
-                if let Some(allocated_storage) = pending.allocated_storage {
-                    instance.allocated_storage = allocated_storage;
-                }
-                if let Some(backup_retention_period) = pending.backup_retention_period {
-                    instance.backup_retention_period = backup_retention_period;
-                }
-                if let Some(multi_az) = pending.multi_az {
-                    instance.multi_az = multi_az;
-                }
-                if let Some(engine_version) = pending.engine_version {
-                    instance.engine_version = engine_version;
-                }
-                if let Some(master_user_password) = pending.master_user_password {
-                    instance.master_user_password = master_user_password;
-                }
+                apply_pending_to_instance(instance, pending);
             }
 
             instance.clone()

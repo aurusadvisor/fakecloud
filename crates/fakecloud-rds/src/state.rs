@@ -99,6 +99,37 @@ pub struct DbInstance {
     pub master_user_secret_arn: Option<String>,
     #[serde(default)]
     pub master_user_secret_kms_key_id: Option<String>,
+    /// Settable via Modify; AWS reports the engine-derived default until
+    /// the caller overrides. We honor explicit overrides but fall back to
+    /// `license_model_for_engine` in XML when this is `None`.
+    #[serde(default)]
+    pub license_model: Option<String>,
+    #[serde(default)]
+    pub max_allocated_storage: Option<i32>,
+    #[serde(default)]
+    pub multi_tenant: Option<bool>,
+    #[serde(default)]
+    pub storage_throughput: Option<i32>,
+    #[serde(default)]
+    pub tde_credential_arn: Option<String>,
+    #[serde(default)]
+    pub delete_automated_backups: Option<bool>,
+    #[serde(default)]
+    pub db_security_groups: Vec<String>,
+    /// Active Directory domain membership. AWS exposes these via
+    /// `<DomainMemberships><DomainMembership>...` in describe responses.
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub domain_fqdn: Option<String>,
+    #[serde(default)]
+    pub domain_ou: Option<String>,
+    #[serde(default)]
+    pub domain_iam_role_name: Option<String>,
+    #[serde(default)]
+    pub domain_auth_secret_arn: Option<String>,
+    #[serde(default)]
+    pub domain_dns_ips: Vec<String>,
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -125,6 +156,20 @@ pub struct PendingModifiedValues {
     pub performance_insights_enabled: Option<bool>,
     #[serde(default)]
     pub enabled_cloudwatch_logs_exports: Option<Vec<String>>,
+    #[serde(default)]
+    pub storage_throughput: Option<i32>,
+    #[serde(default)]
+    pub license_model: Option<String>,
+    #[serde(default)]
+    pub multi_tenant: Option<bool>,
+    #[serde(default)]
+    pub publicly_accessible: Option<bool>,
+    #[serde(default)]
+    pub tde_credential_arn: Option<String>,
+    #[serde(default)]
+    pub port: Option<i32>,
+    #[serde(default)]
+    pub ca_certificate_identifier: Option<String>,
 }
 
 impl fmt::Debug for PendingModifiedValues {
@@ -156,6 +201,13 @@ impl fmt::Debug for PendingModifiedValues {
                 "enabled_cloudwatch_logs_exports",
                 &self.enabled_cloudwatch_logs_exports,
             )
+            .field("storage_throughput", &self.storage_throughput)
+            .field("license_model", &self.license_model)
+            .field("multi_tenant", &self.multi_tenant)
+            .field("publicly_accessible", &self.publicly_accessible)
+            .field("tde_credential_arn", &self.tde_credential_arn)
+            .field("port", &self.port)
+            .field("ca_certificate_identifier", &self.ca_certificate_identifier)
             .finish()
     }
 }
@@ -763,6 +815,19 @@ mod tests {
                 copy_tags_to_snapshot: None,
                 master_user_secret_arn: None,
                 master_user_secret_kms_key_id: None,
+                license_model: None,
+                max_allocated_storage: None,
+                multi_tenant: None,
+                storage_throughput: None,
+                tde_credential_arn: None,
+                delete_automated_backups: None,
+                db_security_groups: Vec::new(),
+                domain: None,
+                domain_fqdn: None,
+                domain_ou: None,
+                domain_iam_role_name: None,
+                domain_auth_secret_arn: None,
+                domain_dns_ips: Vec::new(),
             },
         );
 
@@ -895,6 +960,19 @@ mod tests {
             copy_tags_to_snapshot: None,
             master_user_secret_arn: None,
             master_user_secret_kms_key_id: None,
+            license_model: None,
+            max_allocated_storage: None,
+            multi_tenant: None,
+            storage_throughput: None,
+            tde_credential_arn: None,
+            delete_automated_backups: None,
+            db_security_groups: Vec::new(),
+            domain: None,
+            domain_fqdn: None,
+            domain_ou: None,
+            domain_iam_role_name: None,
+            domain_auth_secret_arn: None,
+            domain_dns_ips: Vec::new(),
         }
     }
 

@@ -521,6 +521,19 @@ pub(crate) fn build_restored_instance(
         copy_tags_to_snapshot: None,
         master_user_secret_arn: None,
         master_user_secret_kms_key_id: None,
+        license_model: None,
+        max_allocated_storage: None,
+        multi_tenant: None,
+        storage_throughput: None,
+        tde_credential_arn: None,
+        delete_automated_backups: None,
+        db_security_groups: Vec::new(),
+        domain: None,
+        domain_fqdn: None,
+        domain_ou: None,
+        domain_iam_role_name: None,
+        domain_auth_secret_arn: None,
+        domain_dns_ips: Vec::new(),
     }
 }
 
@@ -591,6 +604,19 @@ pub(crate) fn build_s3_restored_instance(
         copy_tags_to_snapshot: None,
         master_user_secret_arn: None,
         master_user_secret_kms_key_id: None,
+        license_model: None,
+        max_allocated_storage: None,
+        multi_tenant: None,
+        storage_throughput: None,
+        tde_credential_arn: None,
+        delete_automated_backups: None,
+        db_security_groups: Vec::new(),
+        domain: None,
+        domain_fqdn: None,
+        domain_ou: None,
+        domain_iam_role_name: None,
+        domain_auth_secret_arn: None,
+        domain_dns_ips: Vec::new(),
     }
 }
 
@@ -655,6 +681,19 @@ pub(crate) fn build_pit_restored_instance(
         copy_tags_to_snapshot: source.copy_tags_to_snapshot,
         master_user_secret_arn: source.master_user_secret_arn.clone(),
         master_user_secret_kms_key_id: source.master_user_secret_kms_key_id.clone(),
+        license_model: source.license_model.clone(),
+        max_allocated_storage: source.max_allocated_storage,
+        multi_tenant: source.multi_tenant,
+        storage_throughput: source.storage_throughput,
+        tde_credential_arn: source.tde_credential_arn.clone(),
+        delete_automated_backups: source.delete_automated_backups,
+        db_security_groups: source.db_security_groups.clone(),
+        domain: source.domain.clone(),
+        domain_fqdn: source.domain_fqdn.clone(),
+        domain_ou: source.domain_ou.clone(),
+        domain_iam_role_name: source.domain_iam_role_name.clone(),
+        domain_auth_secret_arn: source.domain_auth_secret_arn.clone(),
+        domain_dns_ips: source.domain_dns_ips.clone(),
     }
 }
 
@@ -721,6 +760,19 @@ pub(crate) fn build_read_replica_instance(
         copy_tags_to_snapshot: source.copy_tags_to_snapshot,
         master_user_secret_arn: None,
         master_user_secret_kms_key_id: None,
+        license_model: source.license_model.clone(),
+        max_allocated_storage: source.max_allocated_storage,
+        multi_tenant: source.multi_tenant,
+        storage_throughput: source.storage_throughput,
+        tde_credential_arn: source.tde_credential_arn.clone(),
+        delete_automated_backups: source.delete_automated_backups,
+        db_security_groups: source.db_security_groups.clone(),
+        domain: source.domain.clone(),
+        domain_fqdn: source.domain_fqdn.clone(),
+        domain_ou: source.domain_ou.clone(),
+        domain_iam_role_name: source.domain_iam_role_name.clone(),
+        domain_auth_secret_arn: source.domain_auth_secret_arn.clone(),
+        domain_dns_ips: source.domain_dns_ips.clone(),
     }
 }
 
@@ -969,6 +1021,85 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
         if pending.master_user_password.is_some() {
             fields.push("<MasterUserPassword>****</MasterUserPassword>".to_string());
         }
+        if let Some(ref window) = pending.preferred_backup_window {
+            fields.push(format!(
+                "<PreferredBackupWindow>{}</PreferredBackupWindow>",
+                xml_escape(window)
+            ));
+        }
+        if let Some(ref window) = pending.preferred_maintenance_window {
+            fields.push(format!(
+                "<PreferredMaintenanceWindow>{}</PreferredMaintenanceWindow>",
+                xml_escape(window)
+            ));
+        }
+        if let Some(ref name) = pending.db_parameter_group_name {
+            fields.push(format!(
+                "<DBParameterGroupName>{}</DBParameterGroupName>",
+                xml_escape(name)
+            ));
+        }
+        if let Some(iops) = pending.iops {
+            fields.push(format!("<Iops>{iops}</Iops>"));
+        }
+        if let Some(ref stype) = pending.storage_type {
+            fields.push(format!("<StorageType>{}</StorageType>", xml_escape(stype)));
+        }
+        if let Some(throughput) = pending.storage_throughput {
+            fields.push(format!(
+                "<StorageThroughput>{throughput}</StorageThroughput>"
+            ));
+        }
+        if let Some(interval) = pending.monitoring_interval {
+            fields.push(format!(
+                "<MonitoringInterval>{interval}</MonitoringInterval>"
+            ));
+        }
+        if let Some(b) = pending.performance_insights_enabled {
+            fields.push(format!(
+                "<PerformanceInsightsEnabled>{}</PerformanceInsightsEnabled>",
+                if b { "true" } else { "false" }
+            ));
+        }
+        if let Some(ref types) = pending.enabled_cloudwatch_logs_exports {
+            let inner = types
+                .iter()
+                .map(|t| format!("<member>{}</member>", xml_escape(t)))
+                .collect::<String>();
+            fields.push(format!(
+                "<PendingCloudwatchLogsExports><LogTypesToEnable>{inner}</LogTypesToEnable><LogTypesToDisable/></PendingCloudwatchLogsExports>"
+            ));
+        }
+        if let Some(ref lm) = pending.license_model {
+            fields.push(format!("<LicenseModel>{}</LicenseModel>", xml_escape(lm)));
+        }
+        if let Some(b) = pending.multi_tenant {
+            fields.push(format!(
+                "<MultiTenant>{}</MultiTenant>",
+                if b { "true" } else { "false" }
+            ));
+        }
+        if let Some(b) = pending.publicly_accessible {
+            fields.push(format!(
+                "<PubliclyAccessible>{}</PubliclyAccessible>",
+                if b { "true" } else { "false" }
+            ));
+        }
+        if let Some(ref arn) = pending.tde_credential_arn {
+            fields.push(format!(
+                "<TdeCredentialArn>{}</TdeCredentialArn>",
+                xml_escape(arn)
+            ));
+        }
+        if let Some(p) = pending.port {
+            fields.push(format!("<DBPortNumber>{p}</DBPortNumber>"));
+        }
+        if let Some(ref ca) = pending.ca_certificate_identifier {
+            fields.push(format!(
+                "<CACertificateIdentifier>{}</CACertificateIdentifier>",
+                xml_escape(ca)
+            ));
+        }
         if !fields.is_empty() {
             format!(
                 "<PendingModifiedValues>{}</PendingModifiedValues>",
@@ -1116,6 +1247,88 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
             )
         })
         .unwrap_or_default();
+    let preferred_maintenance_window_xml = format!(
+        "<PreferredMaintenanceWindow>{}</PreferredMaintenanceWindow>",
+        xml_escape(
+            instance
+                .preferred_maintenance_window
+                .as_deref()
+                .unwrap_or("sun:00:00-sun:00:30")
+        )
+    );
+    let db_security_groups_xml = if instance.db_security_groups.is_empty() {
+        "<DBSecurityGroups/>".to_string()
+    } else {
+        format!(
+            "<DBSecurityGroups>{}</DBSecurityGroups>",
+            instance
+                .db_security_groups
+                .iter()
+                .map(|name| format!(
+                    "<DBSecurityGroup><DBSecurityGroupName>{}</DBSecurityGroupName><Status>active</Status></DBSecurityGroup>",
+                    xml_escape(name)
+                ))
+                .collect::<String>()
+        )
+    };
+    let max_allocated_storage_xml = instance
+        .max_allocated_storage
+        .map(|n| format!("<MaxAllocatedStorage>{n}</MaxAllocatedStorage>"))
+        .unwrap_or_default();
+    let storage_throughput_xml = instance
+        .storage_throughput
+        .map(|n| format!("<StorageThroughput>{n}</StorageThroughput>"))
+        .unwrap_or_default();
+    let multi_tenant_xml = instance
+        .multi_tenant
+        .map(|b| {
+            format!(
+                "<MultiTenant>{}</MultiTenant>",
+                if b { "true" } else { "false" }
+            )
+        })
+        .unwrap_or_default();
+    let tde_credential_arn_xml = instance
+        .tde_credential_arn
+        .as_ref()
+        .map(|a| format!("<TdeCredentialArn>{}</TdeCredentialArn>", xml_escape(a)))
+        .unwrap_or_default();
+    let domain_memberships_xml = if instance.domain.is_some()
+        || instance.domain_fqdn.is_some()
+        || instance.domain_iam_role_name.is_some()
+    {
+        let domain_inner = format!(
+            "<Domain>{domain}</Domain><Status>joined</Status><FQDN>{fqdn}</FQDN><IAMRoleName>{iam_role}</IAMRoleName>{ou}{auth_secret}{dns_ips}",
+            domain = xml_escape(instance.domain.as_deref().unwrap_or("")),
+            fqdn = xml_escape(instance.domain_fqdn.as_deref().unwrap_or("")),
+            iam_role = xml_escape(instance.domain_iam_role_name.as_deref().unwrap_or("")),
+            ou = instance
+                .domain_ou
+                .as_ref()
+                .map(|v| format!("<OU>{}</OU>", xml_escape(v)))
+                .unwrap_or_default(),
+            auth_secret = instance
+                .domain_auth_secret_arn
+                .as_ref()
+                .map(|v| format!("<AuthSecretArn>{}</AuthSecretArn>", xml_escape(v)))
+                .unwrap_or_default(),
+            dns_ips = if instance.domain_dns_ips.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<DnsIps>{}</DnsIps>",
+                    instance
+                        .domain_dns_ips
+                        .iter()
+                        .map(|ip| format!("<member>{}</member>", xml_escape(ip)))
+                        .collect::<String>()
+                )
+            },
+        );
+        format!("<DomainMemberships><DomainMembership>{domain_inner}</DomainMembership></DomainMemberships>")
+    } else {
+        "<DomainMemberships/>".to_string()
+    };
 
     format!(
         "<DBInstanceIdentifier>{identifier}</DBInstanceIdentifier>\
@@ -1129,12 +1342,12 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
          <InstanceCreateTime>{create_time}</InstanceCreateTime>\
          <PreferredBackupWindow>{preferred_backup_window}</PreferredBackupWindow>\
          <BackupRetentionPeriod>{backup_retention_period}</BackupRetentionPeriod>\
-         <DBSecurityGroups/>\
+         {db_security_groups_xml}\
          {vpc_security_groups_xml}\
          {db_parameter_groups_xml}\
          <AvailabilityZone>{availability_zone}</AvailabilityZone>\
          {latest_restorable_time_xml}\
-         <PreferredMaintenanceWindow>sun:00:00-sun:00:30</PreferredMaintenanceWindow>\
+         {preferred_maintenance_window_xml}\
          <MultiAZ>{multi_az}</MultiAZ>\
          <EngineVersion>{engine_version}</EngineVersion>\
          {auto_minor_xml}\
@@ -1144,6 +1357,11 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
          {option_group_memberships_xml}\
          <PubliclyAccessible>{publicly_accessible}</PubliclyAccessible>\
          <StorageType>{storage_type}</StorageType>\
+         {storage_throughput_xml}\
+         {max_allocated_storage_xml}\
+         {multi_tenant_xml}\
+         {tde_credential_arn_xml}\
+         {domain_memberships_xml}\
          <DbInstancePort>{port}</DbInstancePort>\
          <StorageEncrypted>{storage_encrypted}</StorageEncrypted>\
          {kms_key_id_xml}\
@@ -1178,7 +1396,12 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
         backup_retention_period = instance.backup_retention_period,
         multi_az = if instance.multi_az { "true" } else { "false" },
         engine_version = xml_escape(&instance.engine_version),
-        license_model = license_model_for_engine(&instance.engine),
+        license_model = xml_escape(
+            instance
+                .license_model
+                .as_deref()
+                .unwrap_or_else(|| license_model_for_engine(&instance.engine))
+        ),
         publicly_accessible = if instance.publicly_accessible {
             "true"
         } else {
@@ -1560,6 +1783,78 @@ pub(crate) fn resolve_tag_target<'a>(
             .and_then(|bucket| state.extras.get(bucket))
             .and_then(|map| map.get(&name))
             .map(TagTargetRef::Json),
+    }
+}
+
+/// Drain a `PendingModifiedValues` into its owning `DbInstance`. Used by
+/// reboot and `ApplyPendingMaintenanceAction` so deferred Modify changes
+/// land on the live struct on the next maintenance window.
+pub(crate) fn apply_pending_to_instance(
+    instance: &mut DbInstance,
+    pending: crate::state::PendingModifiedValues,
+) {
+    if let Some(class) = pending.db_instance_class {
+        instance.db_instance_class = class;
+    }
+    if let Some(allocated_storage) = pending.allocated_storage {
+        instance.allocated_storage = allocated_storage;
+    }
+    if let Some(backup_retention_period) = pending.backup_retention_period {
+        instance.backup_retention_period = backup_retention_period;
+    }
+    if let Some(multi_az) = pending.multi_az {
+        instance.multi_az = multi_az;
+    }
+    if let Some(engine_version) = pending.engine_version {
+        instance.engine_version = engine_version;
+    }
+    if let Some(master_user_password) = pending.master_user_password {
+        instance.master_user_password = master_user_password;
+    }
+    if let Some(window) = pending.preferred_backup_window {
+        instance.preferred_backup_window = window;
+    }
+    if let Some(window) = pending.preferred_maintenance_window {
+        instance.preferred_maintenance_window = Some(window);
+    }
+    if let Some(name) = pending.db_parameter_group_name {
+        instance.db_parameter_group_name = Some(name);
+    }
+    if let Some(iops) = pending.iops {
+        instance.iops = Some(iops);
+    }
+    if let Some(stype) = pending.storage_type {
+        instance.storage_type = Some(stype);
+    }
+    if let Some(throughput) = pending.storage_throughput {
+        instance.storage_throughput = Some(throughput);
+    }
+    if let Some(interval) = pending.monitoring_interval {
+        instance.monitoring_interval = Some(interval);
+    }
+    if let Some(b) = pending.performance_insights_enabled {
+        instance.performance_insights_enabled = b;
+    }
+    if let Some(types) = pending.enabled_cloudwatch_logs_exports {
+        instance.enabled_cloudwatch_logs_exports = types;
+    }
+    if let Some(lm) = pending.license_model {
+        instance.license_model = Some(lm);
+    }
+    if let Some(b) = pending.multi_tenant {
+        instance.multi_tenant = Some(b);
+    }
+    if let Some(b) = pending.publicly_accessible {
+        instance.publicly_accessible = b;
+    }
+    if let Some(arn) = pending.tde_credential_arn {
+        instance.tde_credential_arn = Some(arn);
+    }
+    if let Some(p) = pending.port {
+        instance.port = p;
+    }
+    if let Some(ca) = pending.ca_certificate_identifier {
+        instance.ca_certificate_identifier = Some(ca);
     }
 }
 
