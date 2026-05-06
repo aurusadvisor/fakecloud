@@ -1439,6 +1439,232 @@ async fn logs_export_task_writes_to_storage() {
     assert!(data.contains("export event B"));
 }
 
+/// Z2: CreateExportTask must write a real, gzipped object into the
+/// destination S3 bucket so callers can `GetObject` + decompress + read
+/// the events the same way they would against AWS.
+#[tokio::test]
+async fn logs_export_task_writes_gzipped_object_to_real_s3() {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let server = TestServer::start().await;
+    let logs = server.logs_client().await;
+    let s3 = server.s3_client().await;
+
+    // Bucket must exist upfront — S3 put_object refuses unknown buckets.
+    s3.create_bucket()
+        .bucket("logs-export-real-s3")
+        .send()
+        .await
+        .unwrap();
+
+    logs.create_log_group()
+        .log_group_name("/export-real-s3/e2e")
+        .send()
+        .await
+        .unwrap();
+    logs.create_log_stream()
+        .log_group_name("/export-real-s3/e2e")
+        .log_stream_name("s1")
+        .send()
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    logs.put_log_events()
+        .log_group_name("/export-real-s3/e2e")
+        .log_stream_name("s1")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now)
+                .message("real-s3-evt-1")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 1)
+                .message("real-s3-evt-2")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = logs
+        .create_export_task()
+        .log_group_name("/export-real-s3/e2e")
+        .from(now - 1000)
+        .to(now + 10000)
+        .destination("logs-export-real-s3")
+        .destination_prefix("exports")
+        .send()
+        .await
+        .unwrap();
+    let task_id = resp.task_id().unwrap().to_string();
+
+    // ListObjectsV2 should surface a single gzipped key under the prefix.
+    let listed = s3
+        .list_objects_v2()
+        .bucket("logs-export-real-s3")
+        .prefix(format!("exports/{task_id}/"))
+        .send()
+        .await
+        .unwrap();
+    let objects = listed.contents();
+    assert_eq!(objects.len(), 1, "expected one exported object");
+    let key = objects[0].key().unwrap().to_string();
+    assert!(
+        key.ends_with("/000000.gz"),
+        "expected key to end with /000000.gz, got {key}",
+    );
+
+    // GetObject + gunzip + verify both events round-trip.
+    let obj = s3
+        .get_object()
+        .bucket("logs-export-real-s3")
+        .key(&key)
+        .send()
+        .await
+        .unwrap();
+    let body = obj.body.collect().await.unwrap().into_bytes();
+    let mut decoded = String::new();
+    GzDecoder::new(&body[..])
+        .read_to_string(&mut decoded)
+        .unwrap();
+    assert!(decoded.contains("real-s3-evt-1"));
+    assert!(decoded.contains("real-s3-evt-2"));
+    // JSONL shape: each line is a JSON object with timestamp + message.
+    let line_count = decoded.lines().filter(|l| !l.is_empty()).count();
+    assert_eq!(line_count, 2);
+}
+
+/// Z2: CreateDelivery wires log group -> S3 bucket; subsequent
+/// PutLogEvents calls deliver gzipped objects we can fetch via the
+/// real S3 GetObject API.
+#[tokio::test]
+async fn logs_delivery_pipeline_writes_gzipped_object_to_real_s3() {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let server = TestServer::start().await;
+    let logs = server.logs_client().await;
+    let s3 = server.s3_client().await;
+
+    s3.create_bucket()
+        .bucket("logs-delivery-real-s3")
+        .send()
+        .await
+        .unwrap();
+
+    logs.create_log_group()
+        .log_group_name("/delivery-real-s3/e2e")
+        .send()
+        .await
+        .unwrap();
+    logs.create_log_stream()
+        .log_group_name("/delivery-real-s3/e2e")
+        .log_stream_name("s1")
+        .send()
+        .await
+        .unwrap();
+
+    let groups = logs
+        .describe_log_groups()
+        .log_group_name_prefix("/delivery-real-s3/e2e")
+        .send()
+        .await
+        .unwrap();
+    let group_arn = groups.log_groups()[0].arn().unwrap().to_string();
+
+    logs.put_delivery_source()
+        .name("real-src")
+        .resource_arn(&group_arn)
+        .log_type("APPLICATION_LOGS")
+        .send()
+        .await
+        .unwrap();
+
+    let dest_resp = logs
+        .put_delivery_destination()
+        .name("real-dest")
+        .delivery_destination_configuration(
+            aws_sdk_cloudwatchlogs::types::DeliveryDestinationConfiguration::builder()
+                .destination_resource_arn("arn:aws:s3:::logs-delivery-real-s3")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let dest_arn = dest_resp
+        .delivery_destination()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
+
+    logs.create_delivery()
+        .delivery_source_name("real-src")
+        .delivery_destination_arn(&dest_arn)
+        .send()
+        .await
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp_millis();
+    logs.put_log_events()
+        .log_group_name("/delivery-real-s3/e2e")
+        .log_stream_name("s1")
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now)
+                .message("delivered-real-1")
+                .build()
+                .unwrap(),
+        )
+        .log_events(
+            InputLogEvent::builder()
+                .timestamp(now + 1)
+                .message("delivered-real-2")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let listed = s3
+        .list_objects_v2()
+        .bucket("logs-delivery-real-s3")
+        .prefix("aws-logs-write/")
+        .send()
+        .await
+        .unwrap();
+    let objects = listed.contents();
+    assert!(
+        !objects.is_empty(),
+        "expected delivery object under aws-logs-write/",
+    );
+    let key = objects[0].key().unwrap().to_string();
+    assert!(key.ends_with(".gz"), "delivery key should be .gz: {key}");
+
+    let obj = s3
+        .get_object()
+        .bucket("logs-delivery-real-s3")
+        .key(&key)
+        .send()
+        .await
+        .unwrap();
+    let body = obj.body.collect().await.unwrap().into_bytes();
+    let mut decoded = String::new();
+    GzDecoder::new(&body[..])
+        .read_to_string(&mut decoded)
+        .unwrap();
+    assert!(decoded.contains("delivered-real-1"));
+    assert!(decoded.contains("delivered-real-2"));
+}
+
 #[tokio::test]
 async fn logs_delivery_pipeline_forwards_events() {
     let server = TestServer::start().await;
@@ -1541,13 +1767,15 @@ async fn logs_delivery_pipeline_forwards_events() {
             "Authorization",
             "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20240101/us-east-1/logs/aws4_request, SignedHeaders=host, Signature=dummy",
         )
-        .body(r#"{"keyPrefix": "e2e-delivery-bucket/delivery"}"#)
+        .body(r#"{"keyPrefix": "e2e-delivery-bucket/aws-logs-write"}"#)
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
     let entries = body["entries"].as_array().unwrap();
     assert!(!entries.is_empty(), "Should have delivery data");
+    // The internal GetExportedData endpoint transparently decompresses
+    // gzip payloads back to the JSONL text we wrote.
     let data = entries[0]["data"].as_str().unwrap();
     assert!(data.contains("delivered msg 1"));
     assert!(data.contains("delivered msg 2"));

@@ -4,8 +4,42 @@ use serde_json::{json, Value};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use std::io::Write;
+
 use super::LogsService;
 use crate::state::ExportTask;
+
+/// Gzip-encode a JSONL payload. CloudWatch Logs writes export task and
+/// delivery output as gzip-compressed objects (`.gz`); downstream
+/// consumers (Athena, S3 SELECT, custom readers) expect that wire shape.
+fn gzip_jsonl(data: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data).expect("gzip write");
+    encoder.finish().expect("gzip finish")
+}
+
+/// Build the S3 key real CloudWatch uses for export task output:
+/// `<destinationPrefix>/<exportTaskId>/<32-hex-hash>/000000.gz`. The
+/// hash segment is unique per file so reruns of the same task don't
+/// collide; we derive it from the stream name + completion timestamp.
+fn export_object_key(prefix: &str, task_id: &str, stream_name: &str, ts: i64) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    stream_name.hash(&mut h1);
+    ts.hash(&mut h1);
+    task_id.hash(&mut h2);
+    stream_name.hash(&mut h2);
+    let hash = format!("{:016x}{:016x}", h1.finish(), h2.finish());
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        format!("{task_id}/{hash}/000000.gz")
+    } else {
+        format!("{prefix}/{task_id}/{hash}/000000.gz")
+    }
+}
 
 impl LogsService {
     // ---- Export Tasks ----
@@ -125,8 +159,12 @@ impl LogsService {
                     data.push_str(&line);
                     data.push('\n');
                 }
-                let s3_key = format!("{destination_prefix}/{task_id}/{stream_name}-{now}");
-                let body = data.into_bytes();
+                // CloudWatch Logs export tasks deliver gzip-compressed
+                // JSONL under `<prefix>/<taskId>/<hash>/000000.gz`. We
+                // mirror that shape so downstream readers (Athena, S3
+                // SELECT, custom decompressors) work without changes.
+                let s3_key = export_object_key(&destination_prefix, &task_id, stream_name, now);
+                let body = gzip_jsonl(data.as_bytes());
                 if self
                     .delivery_bus
                     .put_object_to_s3(
@@ -134,7 +172,7 @@ impl LogsService {
                         &destination,
                         &s3_key,
                         body.clone(),
-                        Some("application/x-ndjson"),
+                        Some("application/x-gzip"),
                     )
                     .is_err()
                 {
@@ -299,9 +337,24 @@ impl LogsService {
             .iter()
             .filter(|(k, _)| k.starts_with(key_prefix))
             .map(|(k, v)| {
+                // Stored payloads are gzipped JSONL on the AWS path; for
+                // this introspection endpoint we transparently decompress
+                // when we recognize the gzip magic so callers keep getting
+                // raw text back.
+                let data = if v.len() >= 2 && v[0] == 0x1f && v[1] == 0x8b {
+                    use flate2::read::GzDecoder;
+                    use std::io::Read;
+                    let mut out = String::new();
+                    GzDecoder::new(&v[..])
+                        .read_to_string(&mut out)
+                        .unwrap_or_default();
+                    out
+                } else {
+                    String::from_utf8_lossy(v).to_string()
+                };
                 json!({
                     "key": k,
-                    "data": String::from_utf8_lossy(v).to_string(),
+                    "data": data,
                 })
             })
             .collect();
@@ -527,15 +580,29 @@ mod tests {
         assert_eq!(objects.len(), 1, "expected one S3 object");
         let (_, bucket, key, body, content_type) = &objects[0];
         assert_eq!(bucket, "exp-bucket");
-        assert!(key.starts_with("p/"));
-        assert!(key.contains("/s1-"));
-        assert_eq!(content_type.as_deref(), Some("application/x-ndjson"));
-        let text = String::from_utf8_lossy(body);
+        // AWS-format key: <prefix>/<taskId>/<hash>/000000.gz
+        assert!(key.starts_with("p/"), "key should start with prefix: {key}");
+        assert!(
+            key.ends_with("/000000.gz"),
+            "key should end with .gz: {key}"
+        );
+        let segments: Vec<&str> = key.split('/').collect();
+        assert_eq!(segments.len(), 4, "expected 4 segments in {key}");
+        assert_eq!(content_type.as_deref(), Some("application/x-gzip"));
+        let text = decompress_gzip(body);
         let lines: Vec<&str> = text.trim().lines().collect();
         assert_eq!(lines.len(), 3);
         let first: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(first["timestamp"].as_i64().unwrap(), now);
         assert_eq!(first["message"].as_str().unwrap(), "evt-a");
+    }
+
+    fn decompress_gzip(body: &[u8]) -> String {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+        let mut out = String::new();
+        GzDecoder::new(body).read_to_string(&mut out).unwrap();
+        out
     }
 
     #[test]
@@ -579,7 +646,7 @@ mod tests {
 
         let objects = recorder.objects.lock();
         assert_eq!(objects.len(), 1);
-        let body = String::from_utf8_lossy(&objects[0].3);
+        let body = decompress_gzip(&objects[0].3);
         assert!(body.contains("\"mid\""));
         assert!(!body.contains("\"low\""));
         assert!(!body.contains("\"high\""));
@@ -751,9 +818,11 @@ mod tests {
 
         let objects = recorder.objects.lock();
         assert!(!objects.is_empty(), "expected delivery to write S3 objects");
-        let (_, bucket, _, body, _) = &objects[0];
+        let (_, bucket, key, body, content_type) = &objects[0];
         assert_eq!(bucket, "live-bucket");
-        let text = String::from_utf8_lossy(body);
+        assert!(key.ends_with(".gz"), "delivery key should be .gz: {key}");
+        assert_eq!(content_type.as_deref(), Some("application/x-gzip"));
+        let text = decompress_gzip(body);
         assert!(text.contains("live-a"));
         assert!(text.contains("live-b"));
     }
