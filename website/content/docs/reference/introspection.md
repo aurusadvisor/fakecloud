@@ -84,7 +84,8 @@ curl http://localhost:4566/_fakecloud/health
 
 | Endpoint                                     | Method | Description |
 | -------------------------------------------- | ------ | ----------- |
-| `/_fakecloud/application-autoscaling/tick`   | POST   | Force the watcher to evaluate every scaling policy now. Returns `{ "applied": <int> }` — the count of policies that applied a capacity change this tick. |
+| `/_fakecloud/application-autoscaling/tick`           | POST   | Force the watcher to evaluate every scaling policy now. Returns `{ "applied": <int> }` — the count of policies that applied a capacity change this tick. |
+| `/_fakecloud/application-autoscaling/scheduled-tick` | POST   | Force the scheduled-action executor to evaluate every scheduled action now. Returns `{ "fired": <int> }` — the count of actions that fired this tick. |
 
 ## Secrets Manager
 

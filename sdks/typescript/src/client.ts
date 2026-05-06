@@ -30,6 +30,7 @@ import type {
   SqsMessagesResponse,
   ExpirationTickResponse,
   ForceDlqResponse,
+  AppAsScheduledTickResponse,
   AppAsTickResponse,
   EventHistoryResponse,
   FireRuleRequest,
@@ -245,6 +246,14 @@ export class ApplicationAutoScalingClient {
   async tick(): Promise<AppAsTickResponse> {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/application-autoscaling/tick`,
+      { method: "POST" },
+    );
+    return parse(resp);
+  }
+
+  async scheduledTick(): Promise<AppAsScheduledTickResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/application-autoscaling/scheduled-tick`,
       { method: "POST" },
     );
     return parse(resp);

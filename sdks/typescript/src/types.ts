@@ -236,6 +236,15 @@ export interface AppAsTickResponse {
   applied: number;
 }
 
+/**
+ * Result of forcing one Application Auto Scaling scheduled-action
+ * tick. The `fired` field is the number of scheduled actions that
+ * successfully fired on this tick.
+ */
+export interface AppAsScheduledTickResponse {
+  fired: number;
+}
+
 // ── EventBridge ────────────────────────────────────────────────────
 
 export interface EventBridgeEvent {

@@ -2639,11 +2639,35 @@ async fn main() {
         let watcher = fakecloud_application_autoscaling::ScalingWatcher::new(
             app_autoscaling_state.clone(),
             appas_metric_reader,
-            appas_ddb_hook,
+            appas_ddb_hook.clone(),
             cli.region.clone(),
         )
         .with_interval(std::time::Duration::from_secs(15));
         tokio::spawn(watcher.run());
+    }
+
+    // Application Auto Scaling scheduled action executor: ticks every
+    // 30s, walks all ScheduledActions, fires the ones whose Schedule
+    // expression is due and applies the configured ScalableTargetAction
+    // bounds across linked resources (DDB capacity today). Tests can
+    // skip the wall-clock wait via the
+    // `/_fakecloud/application-autoscaling/scheduled-tick` admin route.
+    let appas_scheduled_executor_for_admin = Arc::new(
+        fakecloud_application_autoscaling::ScheduledActionExecutor::new(
+            app_autoscaling_state.clone(),
+            appas_ddb_hook.clone(),
+            cli.region.clone(),
+        )
+        .with_interval(std::time::Duration::from_secs(30)),
+    );
+    {
+        let executor = fakecloud_application_autoscaling::ScheduledActionExecutor::new(
+            app_autoscaling_state.clone(),
+            appas_ddb_hook,
+            cli.region.clone(),
+        )
+        .with_interval(std::time::Duration::from_secs(30));
+        tokio::spawn(executor.run());
     }
 
     let services: Vec<&str> = registry.service_names();
@@ -3391,6 +3415,16 @@ async fn main() {
                 move || async move {
                     let applied = watcher.tick_once();
                     axum::Json(types::AppAsTickResponse { applied })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/application-autoscaling/scheduled-tick",
+            axum::routing::post({
+                let executor = appas_scheduled_executor_for_admin.clone();
+                move || async move {
+                    let fired = executor.tick_once();
+                    axum::Json(types::AppAsScheduledTickResponse { fired })
                 }
             }),
         )

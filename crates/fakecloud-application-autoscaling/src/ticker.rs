@@ -520,6 +520,12 @@ fn ddb_table_from_resource(resource_id: &str) -> Option<&str> {
     Some(rest.split('/').next().unwrap_or(rest))
 }
 
+/// Same as `ddb_table_from_resource`, but visible to sibling modules
+/// (`scheduled_executor`) so we don't duplicate the parsing rule.
+pub(crate) fn ddb_table_from_resource_public(resource_id: &str) -> Option<&str> {
+    ddb_table_from_resource(resource_id)
+}
+
 fn suspended_for(target: &ScalableTarget, policy: &ScalingPolicy) -> bool {
     let Some(s) = target.suspended_state.as_ref() else {
         return false;

@@ -75,14 +75,45 @@ useful in tests — POST `/_fakecloud/application-autoscaling/tick`. The
 response shape is `{ "applied": <int> }`. The introspection SDKs
 expose this as `fakecloud.applicationAutoscaling.tick()`.
 
+## Scheduled actions
+
+`PutScheduledAction` registers a one-shot or recurring capacity change.
+fakecloud's executor evaluates every scheduled action every 30 seconds
+and fires the ones whose `Schedule` expression is currently due:
+
+- `at(yyyy-mm-ddThh:mm:ss)` — fires once when wall-clock catches up.
+- `cron(min hour dom month dow year)` — recurring, evaluated against
+  the action's `Timezone` (IANA name; falls back to UTC when missing
+  or unrecognized). The supported grammar matches EventBridge
+  Scheduler — wildcards (`*` / `?`) and single numeric values per
+  field. Ranges, lists, and step values silently never fire so a
+  malformed expression doesn't blow up the executor.
+
+When an action fires the executor mutates the linked `ScalableTarget`
+to the action's `ScalableTargetAction.{MinCapacity, MaxCapacity}` and,
+for DynamoDB targets, calls the same capacity hook used by
+target-tracking / step scaling so the table's provisioned throughput
+moves into the new bounds. Each fire appends a `ScalingActivity` row
+whose `Cause` references the scheduled action by name and schedule.
+Per-minute dedupe (via `last_fired_at`) prevents a `cron(* * * * ? *)`
+schedule from re-firing inside the same wall-clock minute.
+
+To deterministically fire scheduled actions in tests — without waiting
+on the 30s interval — POST
+`/_fakecloud/application-autoscaling/scheduled-tick`. Response shape
+is `{ "fired": <int> }`. The introspection SDKs expose this as
+`fakecloud.applicationAutoscaling.scheduledTick()`.
+
 ## Caveats
 
-The watcher only scales DynamoDB tables today. ECS service
-`DesiredCount`, Lambda provisioned concurrency, RDS Aurora capacity,
-ElastiCache replicas, and the rest of Application Auto Scaling's
-service namespaces still store policy configurations verbatim without
-applying them. Predictive forecasts are deterministic synthetic
-curves, not actual ML predictions. CloudWatch alarms reported under
-`ScalingPolicy.Alarms` remain empty — the watcher resolves alarms by
-walking CloudWatch state directly rather than mirroring AWS's
-auto-attach behaviour.
+The watcher and scheduled-action executor only mutate DynamoDB table
+capacity today. ECS service `DesiredCount`, Lambda provisioned
+concurrency, RDS Aurora capacity, ElastiCache replicas, and the rest
+of Application Auto Scaling's service namespaces still store policy
+and scheduled-action configurations verbatim — the bound updates land
+on the `ScalableTarget` but no per-namespace apply hook is wired yet,
+so the underlying resource isn't resized. Predictive forecasts are
+deterministic synthetic curves, not actual ML predictions. CloudWatch
+alarms reported under `ScalingPolicy.Alarms` remain empty — the
+watcher resolves alarms by walking CloudWatch state directly rather
+than mirroring AWS's auto-attach behaviour.

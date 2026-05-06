@@ -3,6 +3,7 @@ package dev.fakecloud;
 import static dev.fakecloud.HttpTransport.encodePath;
 
 import dev.fakecloud.Types.ApiGatewayV2RequestsResponse;
+import dev.fakecloud.Types.AppAsScheduledTickResponse;
 import dev.fakecloud.Types.AppAsTickResponse;
 import dev.fakecloud.Types.AuthEventsResponse;
 import dev.fakecloud.Types.MintAuthorizationCodeRequest;
@@ -328,6 +329,12 @@ public final class FakeCloud {
             return http.postEmpty(
                     "/_fakecloud/application-autoscaling/tick",
                     AppAsTickResponse.class);
+        }
+
+        public AppAsScheduledTickResponse scheduledTick() {
+            return http.postEmpty(
+                    "/_fakecloud/application-autoscaling/scheduled-tick",
+                    AppAsScheduledTickResponse.class);
         }
     }
 
