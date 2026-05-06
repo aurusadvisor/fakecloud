@@ -232,7 +232,7 @@ async fn websocket_connect_and_default_route_dispatches_to_lambda() {
         "$default lambda should have fired for message"
     );
     let body: serde_json::Value = serde_json::from_str(msgs[0].body().unwrap()).unwrap();
-    assert_eq!(body["route_key"], "sendmessage");
+    assert_eq!(body["route_key"], "$default");
     assert_eq!(body["event_type"], "MESSAGE");
     assert_eq!(body["body"], r#"{"action":"sendmessage"}"#);
     assert_eq!(body["connection_id"].as_str().unwrap(), connection_id);

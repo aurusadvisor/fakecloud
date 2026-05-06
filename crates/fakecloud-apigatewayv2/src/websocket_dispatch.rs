@@ -147,7 +147,7 @@ pub async fn dispatch_websocket_event(
     headers: Option<&std::collections::HashMap<String, String>>,
     query_params: Option<&std::collections::HashMap<String, String>>,
 ) {
-    let (integration_id, function_arn) = {
+    let (integration_id, function_arn, matched_route_key) = {
         let accounts = state.read();
         let empty = ApiGatewayV2State::new(account_id, region);
         let state = accounts.get(account_id).unwrap_or(&empty);
@@ -160,11 +160,17 @@ pub async fn dispatch_websocket_event(
         // if the resolved route doesn't exist and there's no `$default`,
         // AWS silently drops the message.
         let routes = state.routes.get(api_id);
-        let route = routes
-            .and_then(|rs| rs.values().find(|r| r.route_key == route_key))
-            .or_else(|| routes.and_then(|rs| rs.values().find(|r| r.route_key == "$default")));
-
-        let Some(route) = route else {
+        let matched = routes.and_then(|rs| {
+            rs.values()
+                .find(|r| r.route_key == route_key)
+                .map(|r| (r, route_key.to_string()))
+        });
+        let matched = matched.or_else(|| {
+            routes
+                .and_then(|rs| rs.values().find(|r| r.route_key == "$default"))
+                .map(|r| (r, "$default".to_string()))
+        });
+        let Some((route, matched_route_key)) = matched else {
             return;
         };
 
@@ -192,7 +198,7 @@ pub async fn dispatch_websocket_event(
             return;
         };
 
-        (integration_id.to_string(), function_arn)
+        (integration_id.to_string(), function_arn, matched_route_key)
     };
 
     let lambda_delivery = match lambda_delivery {
@@ -204,7 +210,7 @@ pub async fn dispatch_websocket_event(
         api_id,
         stage,
         connection_id,
-        route_key,
+        &matched_route_key,
         event_type,
         body,
         source_ip,
