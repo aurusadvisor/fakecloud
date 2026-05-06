@@ -261,6 +261,7 @@ async fn ses_send_email_template() {
         .template_content(
             EmailTemplateContent::builder()
                 .subject("Hello {{name}}")
+                .html("<p>Hi {{name}}</p>")
                 .text("Hi {{name}}")
                 .build(),
         )
@@ -292,6 +293,61 @@ async fn ses_send_email_template() {
         .unwrap();
 
     assert!(!resp.message_id().unwrap().is_empty());
+
+    // Introspection should reveal the rendered subject/html/text, not
+    // the raw `{{name}}` source. This is the contract real SES
+    // recipients actually see downstream.
+    let url = format!("{}/_fakecloud/ses/emails", server.endpoint());
+    let resp: serde_json::Value = reqwest::get(&url).await.unwrap().json().await.unwrap();
+    let emails = resp["emails"].as_array().unwrap();
+    assert_eq!(emails.len(), 1);
+    assert_eq!(emails[0]["templateName"], "greet");
+    assert_eq!(emails[0]["subject"], "Hello World");
+    assert_eq!(emails[0]["htmlBody"], "<p>Hi World</p>");
+    assert_eq!(emails[0]["textBody"], "Hi World");
+}
+
+#[tokio::test]
+async fn ses_send_email_template_missing() {
+    let server = TestServer::start().await;
+    let client = server.sesv2_client().await;
+
+    client
+        .create_email_identity()
+        .email_identity("sender@example.com")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_email_identity()
+        .email_identity("recipient@example.com")
+        .send()
+        .await
+        .unwrap();
+
+    // SendEmail with a Content.Template referencing an undefined
+    // template must fail with TemplateDoesNotExistException.
+    let err = client
+        .send_email()
+        .from_email_address("sender@example.com")
+        .destination(
+            Destination::builder()
+                .to_addresses("recipient@example.com")
+                .build(),
+        )
+        .content(
+            EmailContent::builder()
+                .template(
+                    Template::builder()
+                        .template_name("nope")
+                        .template_data("{}")
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await;
+    assert!(err.is_err(), "expected error for missing template");
 }
 
 #[tokio::test]

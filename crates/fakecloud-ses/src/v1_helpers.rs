@@ -1329,19 +1329,24 @@ pub(crate) fn send_templated_email(
     let cc = parse_member_list(&req.query_params, "Destination.CcAddresses");
     let bcc = parse_member_list(&req.query_params, "Destination.BccAddresses");
 
-    // Verify template exists
-    {
+    // Verify template exists and capture a clone so we can render it
+    // outside the read lock. Real SES surfaces missing templates as
+    // `TemplateDoesNotExistException` (HTTP 400).
+    let template_clone = {
         let accounts = state.read();
         let empty = SesState::new(&req.account_id, &req.region);
         let st = accounts.get(&req.account_id).unwrap_or(&empty);
-        if !st.templates.contains_key(template_name) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "TemplateDoesNotExistException",
-                format!("Template '{template_name}' does not exist"),
-            ));
+        match st.templates.get(template_name) {
+            Some(t) => t.clone(),
+            None => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "TemplateDoesNotExistException",
+                    format!("Template '{template_name}' does not exist"),
+                ));
+            }
         }
-    }
+    };
 
     let recipients: Vec<String> = to
         .iter()
@@ -1365,15 +1370,20 @@ pub(crate) fn send_templated_email(
         rand_u16(),
     );
 
+    // Render subject/html/text via the same engine TestRenderTemplate /
+    // TestRenderEmailTemplate uses so introspection callers see the
+    // materialized message, not the raw `{{placeholder}}` source.
+    let rendered = crate::service::templates::render_template(&template_clone, template_data);
+
     let sent = SentEmail {
         message_id: message_id.clone(),
         from: from.to_string(),
         to,
         cc,
         bcc,
-        subject: None,
-        html_body: None,
-        text_body: None,
+        subject: rendered.subject,
+        html_body: rendered.html,
+        text_body: rendered.text,
         raw_data: None,
         template_name: Some(template_name.to_string()),
         template_data: Some(template_data.to_string()),
@@ -1515,15 +1525,27 @@ pub(crate) fn send_bulk_destination(
         rand_u16(),
     );
 
+    // Look up the template once to render the destination's substitutions.
+    // The caller has already checked that the template exists.
+    let template_clone = {
+        let accounts = state.read();
+        accounts
+            .get(account_id)
+            .and_then(|st| st.templates.get(template_name).cloned())
+    };
+    let rendered = template_clone
+        .as_ref()
+        .map(|t| crate::service::templates::render_template(t, &replacement_data));
+
     let sent = SentEmail {
         message_id: message_id.clone(),
         from: from.to_string(),
         to,
         cc: Vec::new(),
         bcc: Vec::new(),
-        subject: None,
-        html_body: None,
-        text_body: None,
+        subject: rendered.as_ref().and_then(|r| r.subject.clone()),
+        html_body: rendered.as_ref().and_then(|r| r.html.clone()),
+        text_body: rendered.as_ref().and_then(|r| r.text.clone()),
         raw_data: None,
         template_name: Some(template_name.to_string()),
         template_data: Some(replacement_data),

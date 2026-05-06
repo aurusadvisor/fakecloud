@@ -303,6 +303,24 @@ impl SesV2Service {
                 let tmpl = &body["Content"]["Template"];
                 let tmpl_name = tmpl["TemplateName"].as_str().map(|s| s.to_string());
                 let tmpl_data = tmpl["TemplateData"].as_str().map(|s| s.to_string());
+                // Real SES rejects sends that reference a missing template
+                // with `TemplateDoesNotExistException` (HTTP 400). Without
+                // this gate, we'd silently produce an empty rendered body.
+                if let Some(name) = tmpl_name.as_deref() {
+                    let accounts = self.state.read();
+                    let exists = accounts
+                        .get(&req.account_id)
+                        .map(|st| st.templates.contains_key(name))
+                        .unwrap_or(false);
+                    drop(accounts);
+                    if !exists {
+                        return Ok(Self::json_error(
+                            StatusCode::BAD_REQUEST,
+                            "TemplateDoesNotExistException",
+                            &format!("Template {name} does not exist"),
+                        ));
+                    }
+                }
                 // Render via the same engine RenderEmailTemplate uses so
                 // SentEmail captures the materialized subject/html/text.
                 let rendered = self.render_template_for_send(
@@ -386,6 +404,25 @@ impl SesV2Service {
                 ));
             }
         };
+
+        // Reject the whole batch up-front if the referenced template
+        // doesn't exist. Real SES surfaces this as
+        // `TemplateDoesNotExistException` (HTTP 400).
+        if let Some(name) = body["DefaultContent"]["Template"]["TemplateName"].as_str() {
+            let accounts = self.state.read();
+            let exists = accounts
+                .get(&req.account_id)
+                .map(|st| st.templates.contains_key(name))
+                .unwrap_or(false);
+            drop(accounts);
+            if !exists {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "TemplateDoesNotExistException",
+                    &format!("Template {name} does not exist"),
+                ));
+            }
+        }
 
         let mut results = Vec::new();
 

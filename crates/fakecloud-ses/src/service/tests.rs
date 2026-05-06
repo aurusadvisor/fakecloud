@@ -410,6 +410,21 @@ async fn test_send_email_template_content() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");
     enable_production_access(&state);
+    {
+        use crate::state::EmailTemplate;
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.templates.insert(
+            "welcome".to_string(),
+            EmailTemplate {
+                template_name: "welcome".to_string(),
+                subject: Some("Hi {{name}}".to_string()),
+                html_body: None,
+                text_body: None,
+                created_at: chrono::Utc::now(),
+            },
+        );
+    }
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -542,6 +557,21 @@ async fn test_send_bulk_email() {
     let state = make_state();
     seed_identity(&state, "sender@example.com");
     enable_production_access(&state);
+    {
+        use crate::state::EmailTemplate;
+        let mut accounts = state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.templates.insert(
+            "bulk-template".to_string(),
+            EmailTemplate {
+                template_name: "bulk-template".to_string(),
+                subject: Some("hi".to_string()),
+                html_body: None,
+                text_body: None,
+                created_at: chrono::Utc::now(),
+            },
+        );
+    }
     let svc = SesV2Service::new(state.clone());
 
     let req = make_request(
@@ -4226,7 +4256,7 @@ async fn send_email_v2_rejects_when_config_set_sending_paused() {
 
 #[tokio::test]
 async fn send_email_v2_skips_suppressed_recipient() {
-    use crate::state::SuppressedDestination;
+    use crate::state::{EmailTemplate, SuppressedDestination};
     let state = make_state();
     seed_identity(&state, "sender@example.com");
     enable_production_access(&state);
@@ -4239,6 +4269,16 @@ async fn send_email_v2_skips_suppressed_recipient() {
                 email_address: "blocked@example.com".to_string(),
                 reason: "BOUNCE".to_string(),
                 last_update_time: chrono::Utc::now(),
+            },
+        );
+        st.templates.insert(
+            "t".to_string(),
+            EmailTemplate {
+                template_name: "t".to_string(),
+                subject: Some("hi".to_string()),
+                html_body: None,
+                text_body: None,
+                created_at: chrono::Utc::now(),
             },
         );
     }
