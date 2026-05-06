@@ -4578,13 +4578,21 @@ impl ResourceProvisioner {
         let now = Utc::now();
         let mut versions = BTreeMap::new();
         let mut current_version_id: Option<String> = None;
-        if let Some(secret_string) = props.get("SecretString").and_then(|v| v.as_str()) {
+        let initial_string: Option<String> =
+            if let Some(secret_string) = props.get("SecretString").and_then(|v| v.as_str()) {
+                Some(secret_string.to_string())
+            } else if let Some(gen) = props.get("GenerateSecretString") {
+                Some(generate_secret_string_payload(gen)?)
+            } else {
+                None
+            };
+        if let Some(secret_string) = initial_string {
             let version_id = Uuid::new_v4().to_string();
             versions.insert(
                 version_id.clone(),
                 SecretVersion {
                     version_id: version_id.clone(),
-                    secret_string: Some(secret_string.to_string()),
+                    secret_string: Some(secret_string),
                     secret_binary: None,
                     stages: vec!["AWSCURRENT".to_string()],
                     created_at: now,
@@ -15744,9 +15752,26 @@ impl ResourceProvisioner {
             .secrets
             .get_mut(&secret_arn)
             .ok_or_else(|| format!("Secret {secret_arn} not found"))?;
-        // Update SecretString JSON in current version with engine/host/port
-        // /username/password placeholders so it shows as "attached" via the
-        // RDS-style schema CFN expects.
+        // Patch the AWSCURRENT version with engine/host/dbInstanceIdentifier
+        // so it shows as "attached" via the RDS-style schema CFN expects.
+        // If the secret has no version yet (created without SecretString or
+        // GenerateSecretString), seed one — this matches CFN's behaviour of
+        // making the attachment usable on its own.
+        let now = Utc::now();
+        if secret.current_version_id.is_none() {
+            let version_id = Uuid::new_v4().to_string();
+            secret.versions.insert(
+                version_id.clone(),
+                SecretVersion {
+                    version_id: version_id.clone(),
+                    secret_string: Some("{}".to_string()),
+                    secret_binary: None,
+                    stages: vec!["AWSCURRENT".to_string()],
+                    created_at: now,
+                },
+            );
+            secret.current_version_id = Some(version_id);
+        }
         if let Some(version_id) = secret.current_version_id.clone() {
             if let Some(version) = secret.versions.get_mut(&version_id) {
                 let mut existing: serde_json::Value = version
@@ -15768,8 +15793,107 @@ impl ResourceProvisioner {
                 version.secret_string = Some(existing.to_string());
             }
         }
-        secret.last_changed_at = Utc::now();
+        secret.last_changed_at = now;
         Ok(ProvisionResult::new(secret_arn.clone()).with("SecretArn", secret_arn))
+    }
+}
+
+/// Implements the CloudFormation `GenerateSecretString` shape on
+/// `AWS::SecretsManager::Secret`. Produces the plaintext payload that
+/// will become the AWSCURRENT version of the secret.
+///
+/// When `SecretStringTemplate` is set together with `GenerateStringKey`,
+/// the generated password is inserted under `GenerateStringKey` in the
+/// JSON template (this is the standard "DB credential" pattern).
+/// Without those two, the bare generated password is returned.
+fn generate_secret_string_payload(gen: &serde_json::Value) -> Result<String, String> {
+    let length = gen
+        .get("PasswordLength")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(32) as usize;
+    let exclude_lowercase = gen
+        .get("ExcludeLowercase")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let exclude_uppercase = gen
+        .get("ExcludeUppercase")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let exclude_numbers = gen
+        .get("ExcludeNumbers")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let exclude_punctuation = gen
+        .get("ExcludePunctuation")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let include_space = gen
+        .get("IncludeSpace")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let exclude_chars = gen
+        .get("ExcludeCharacters")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let lowercase = "abcdefghijklmnopqrstuvwxyz";
+    let uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let digits = "0123456789";
+    let punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+
+    let mut pool = String::new();
+    if !exclude_lowercase {
+        pool.extend(lowercase.chars().filter(|c| !exclude_chars.contains(*c)));
+    }
+    if !exclude_uppercase {
+        pool.extend(uppercase.chars().filter(|c| !exclude_chars.contains(*c)));
+    }
+    if !exclude_numbers {
+        pool.extend(digits.chars().filter(|c| !exclude_chars.contains(*c)));
+    }
+    if !exclude_punctuation {
+        pool.extend(punctuation.chars().filter(|c| !exclude_chars.contains(*c)));
+    }
+    if include_space && !exclude_chars.contains(' ') {
+        pool.push(' ');
+    }
+    if pool.is_empty() {
+        return Err("GenerateSecretString character pool is empty".to_string());
+    }
+
+    let pool_chars: Vec<char> = pool.chars().collect();
+    let mut password = String::with_capacity(length);
+    let mut counter: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    while password.len() < length {
+        // Splitmix64 — deterministic, no_std-friendly, good enough for
+        // fake-cloud password generation. Real entropy isn't a goal here.
+        counter = counter.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = counter;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^= z >> 31;
+        let idx = (z as usize) % pool_chars.len();
+        password.push(pool_chars[idx]);
+    }
+
+    let template = gen.get("SecretStringTemplate").and_then(|v| v.as_str());
+    let key = gen.get("GenerateStringKey").and_then(|v| v.as_str());
+    match (template, key) {
+        (Some(tmpl), Some(k)) => {
+            let mut value: serde_json::Value = serde_json::from_str(tmpl)
+                .map_err(|e| format!("SecretStringTemplate is not valid JSON: {e}"))?;
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(k.to_string(), serde_json::Value::String(password));
+                Ok(value.to_string())
+            } else {
+                Err("SecretStringTemplate must be a JSON object".to_string())
+            }
+        }
+        _ => Ok(password),
     }
 }
 
