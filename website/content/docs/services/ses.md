@@ -10,8 +10,8 @@ fakecloud implements **110 of 110** SES v2 operations at 100% Smithy conformance
 
 ### Sending (SES v2)
 
-- **SendEmail, SendBulkEmail** — recorded at `/_fakecloud/ses/emails`
-- **Identities** — email identity and domain identity CRUD, DKIM, mail-from, feedback attributes, signing attributes
+- **SendEmail, SendBulkEmail** — recorded at `/_fakecloud/ses/emails`, including the stamped `DKIM-Signature` header when signing is enabled
+- **Identities** — email identity and domain identity CRUD, DKIM (real RSA-SHA256 signing with relaxed/relaxed canonicalization), mail-from, feedback attributes, signing attributes
 - **Configuration sets** — CRUD, event destinations, reputation options, sending options, tracking, suppression, VDM, archiving
 - **Templates** — email templates, custom verification templates, test rendering
 - **Contact lists** — CRUD, contacts, subscription topics
@@ -42,7 +42,8 @@ SES v2 uses REST. SES v1 inbound uses Query protocol.
 
 ## Introspection
 
-- `GET /_fakecloud/ses/emails` — list all sent emails with full body, headers, attachments
+- `GET /_fakecloud/ses/emails` — list all sent emails with full body, synthesized headers (DKIM-Signature first when signing was active), attachments
+- `GET /_fakecloud/ses/identities/{name}/dkim-public-key` — pull the published Easy DKIM public key (SPKI DER, base64) so tests can verify signatures end-to-end
 - `POST /_fakecloud/ses/inbound` — simulate receiving an inbound email, trigger receipt rule evaluation
 
 ## Cross-service delivery

@@ -136,6 +136,10 @@ export interface SentEmail {
   rawData: string | null;
   templateName: string | null;
   templateData: string | null;
+  /** DKIM-Signature header value when signing was active for this send. */
+  dkimSignature?: string | null;
+  /** Synthesized RFC 5322 headers (DKIM-Signature first when signing). */
+  headers?: [string, string][];
   timestamp: string;
 }
 

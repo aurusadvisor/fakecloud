@@ -426,6 +426,21 @@ impl SesV2Service {
         if let Some(enabled) = body["SigningEnabled"].as_bool() {
             identity.dkim_signing_enabled = enabled;
         }
+        // Lazily provision an Easy DKIM keypair the moment signing is
+        // enabled if no caller-supplied key is on file. Mirrors how real
+        // SES auto-generates the per-identity keypair on enable so the
+        // next SendEmail can stamp a real DKIM-Signature.
+        if identity.dkim_signing_enabled && identity.dkim_domain_signing_private_key.is_none() {
+            let (priv_pem, pub_b64) = crate::dkim::generate_easy_dkim_keypair();
+            identity.dkim_domain_signing_private_key = Some(priv_pem);
+            identity.dkim_public_key_b64 = Some(pub_b64);
+            if identity.dkim_domain_signing_selector.is_none() {
+                identity.dkim_domain_signing_selector = Some("fakecloudses".to_string());
+            }
+            if identity.dkim_next_signing_key_length.is_none() {
+                identity.dkim_next_signing_key_length = Some("RSA_2048_BIT".to_string());
+            }
+        }
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }

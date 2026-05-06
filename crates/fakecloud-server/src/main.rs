@@ -2752,6 +2752,7 @@ async fn main() {
                             template_name: email.template_name.clone(),
                             template_data: email.template_data.clone(),
                             dkim_signature: email.dkim_signature.clone(),
+                            headers: email.headers.clone(),
                             timestamp: email.timestamp.to_rfc3339(),
                         })
                         .collect();
@@ -2801,6 +2802,31 @@ async fn main() {
                         axum::Json(serde_json::json!({
                             "identity": name,
                             "mailFromDomainStatus": body.status,
+                        })),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ses/identities/{name}/dkim-public-key",
+            axum::routing::get({
+                let ss = ses_emails_state.clone();
+                move |axum::extract::Path(name): axum::extract::Path<String>| async move {
+                    let mas = ss.read();
+                    let state = mas.default_ref();
+                    let Some(identity) = state.identities.get(&name) else {
+                        return (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "identity not found"})),
+                        );
+                    };
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "identity": name,
+                            "selector": identity.dkim_domain_signing_selector,
+                            "publicKeyBase64": identity.dkim_public_key_b64,
+                            "signingEnabled": identity.dkim_signing_enabled,
                         })),
                     )
                 }
@@ -3065,6 +3091,7 @@ async fn main() {
                                     template_name: None,
                                     template_data: None,
                                     dkim_signature: None,
+                                    headers: Vec::new(),
                                     timestamp: chrono::Utc::now(),
                                 };
                                 {
@@ -6004,6 +6031,7 @@ impl fakecloud_core::delivery::EmailDispatcher for SesEmailDispatcher {
             template_name: None,
             template_data: None,
             dkim_signature: None,
+            headers: Vec::new(),
             timestamp: chrono::Utc::now(),
         });
     }
@@ -6050,6 +6078,7 @@ impl fakecloud_core::delivery::SesSendEmailDispatcher for SesSendEmailDispatcher
             template_name: None,
             template_data: None,
             dkim_signature: None,
+            headers: Vec::new(),
             timestamp: chrono::Utc::now(),
         });
         Ok(())

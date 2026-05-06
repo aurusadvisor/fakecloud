@@ -2,10 +2,11 @@
 //!
 //! When an `EmailIdentity` has DKIM enabled and a private key configured,
 //! every email sent through that identity gets a `DKIM-Signature` header
-//! computed over the message headers + body using simple/simple
-//! canonicalization with RSA-SHA256. Real receivers can verify against
-//! the matching public key (Easy DKIM publishes generated public keys via
-//! the per-identity `DkimTokens`; BYODKIM uses the caller-supplied key).
+//! computed over the message headers + body using relaxed/relaxed
+//! canonicalization (RFC 6376 §3.4.2/§3.4.4) with RSA-SHA256. Real
+//! verifiers can validate against the matching public key (Easy DKIM
+//! publishes generated public keys via the per-identity `DkimTokens`;
+//! BYODKIM uses the caller-supplied key).
 
 use base64::Engine;
 use rsa::pkcs1::DecodeRsaPrivateKey;
@@ -42,7 +43,8 @@ pub fn generate_easy_dkim_keypair() -> (String, String) {
 
 /// Sign the given message and return a fully-formed `DKIM-Signature`
 /// header value (without the leading `DKIM-Signature: ` prefix). Returns
-/// `None` when the private key cannot be parsed.
+/// `None` when the private key cannot be parsed. Uses relaxed/relaxed
+/// canonicalization per RFC 6376 §3.4.2 / §3.4.4.
 pub fn sign_message(
     private_key_pem: &str,
     domain: &str,
@@ -53,7 +55,7 @@ pub fn sign_message(
     let priv_key = parse_private_key(private_key_pem)?;
     let signing_key = SigningKey::<Sha256>::new(priv_key);
 
-    let canonical_body = canonicalize_body_simple(body);
+    let canonical_body = canonicalize_body_relaxed(body);
     let mut body_hasher = Sha256::new();
     body_hasher.update(canonical_body.as_bytes());
     let bh = base64::engine::general_purpose::STANDARD.encode(body_hasher.finalize());
@@ -70,13 +72,15 @@ pub fn sign_message(
 
     let mut header_block = String::new();
     for (h, v) in &signed_headers {
-        header_block.push_str(&format!("{}: {}\r\n", h, v.trim()));
+        header_block.push_str(&canonicalize_header_relaxed(h, v));
     }
     let dkim_unsigned = format!(
-        "v=1; a=rsa-sha256; c=simple/simple; d={}; s={}; h={}; bh={}; b=",
+        "v=1; a=rsa-sha256; c=relaxed/relaxed; d={}; s={}; h={}; bh={}; b=",
         domain, selector, header_list, bh
     );
-    header_block.push_str(&format!("DKIM-Signature: {}", dkim_unsigned));
+    // The signing input includes the canonicalized DKIM-Signature header
+    // itself with an empty `b=` tag and NO trailing CRLF (RFC 6376 §3.7).
+    header_block.push_str(&canonicalize_dkim_signature_for_signing(&dkim_unsigned));
 
     let signature = signing_key.sign(header_block.as_bytes());
     let b = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
@@ -88,6 +92,18 @@ pub fn sign_message(
 /// is enabled and a key is on file. Returns `None` if no matching identity
 /// has DKIM signing wired.
 pub fn signature_for_sent_email(state: &SesState, sent: &SentEmail) -> Option<String> {
+    signed_headers_for_sent_email(state, sent).map(|(sig, _)| sig)
+}
+
+/// Variant of [`signature_for_sent_email`] that also returns the full
+/// header block we stamped onto the message: the `DKIM-Signature`
+/// header followed by the synthesized `From`/`To`/`Subject`/`Date`/
+/// `Message-ID` lines that were covered by the signature. Returns
+/// `None` when DKIM signing is disabled or no key is on file.
+pub fn signed_headers_for_sent_email(
+    state: &SesState,
+    sent: &SentEmail,
+) -> Option<(String, Vec<(String, String)>)> {
     let address = address_part(&sent.from);
     let domain = address.split('@').nth(1)?;
     let identity = state
@@ -113,7 +129,7 @@ pub fn signature_for_sent_email(state: &SesState, sent: &SentEmail) -> Option<St
         .timestamp
         .format("%a, %d %b %Y %H:%M:%S +0000")
         .to_string();
-    let headers = vec![
+    let signed_headers = vec![
         ("From".to_string(), sent.from.clone()),
         ("To".to_string(), to_header),
         (
@@ -126,7 +142,11 @@ pub fn signature_for_sent_email(state: &SesState, sent: &SentEmail) -> Option<St
             format!("<{}@fakecloud.local>", sent.message_id),
         ),
     ];
-    sign_message(private_key, domain, selector, &headers, &body_text)
+    let signature = sign_message(private_key, domain, selector, &signed_headers, &body_text)?;
+    let mut all_headers = Vec::with_capacity(signed_headers.len() + 1);
+    all_headers.push(("DKIM-Signature".to_string(), signature.clone()));
+    all_headers.extend(signed_headers);
+    Some((signature, all_headers))
 }
 
 fn address_part(from: &str) -> String {
@@ -144,14 +164,80 @@ fn parse_private_key(pem: &str) -> Option<RsaPrivateKey> {
         .or_else(|| RsaPrivateKey::from_pkcs1_pem(pem).ok())
 }
 
-fn canonicalize_body_simple(body: &str) -> String {
+/// Relaxed body canonicalization per RFC 6376 §3.4.4:
+/// - normalize line endings to CRLF
+/// - reduce all WSP sequences within a line to a single SP
+/// - strip trailing WSP from each line
+/// - strip trailing empty lines
+/// - if the body is non-empty, terminate with a single CRLF
+fn canonicalize_body_relaxed(body: &str) -> String {
     let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
-    let trimmed = normalized.trim_end_matches('\n');
-    if trimmed.is_empty() {
-        "\r\n".to_string()
-    } else {
-        format!("{}\r\n", trimmed.replace('\n', "\r\n"))
+    let mut lines: Vec<String> = normalized
+        .split('\n')
+        .map(|line| {
+            let mut out = String::with_capacity(line.len());
+            let mut prev_ws = false;
+            for c in line.chars() {
+                if c == ' ' || c == '\t' {
+                    if !prev_ws {
+                        out.push(' ');
+                    }
+                    prev_ws = true;
+                } else {
+                    out.push(c);
+                    prev_ws = false;
+                }
+            }
+            out.trim_end().to_string()
+        })
+        .collect();
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
     }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        let mut out = lines.join("\r\n");
+        out.push_str("\r\n");
+        out
+    }
+}
+
+/// Relaxed header canonicalization per RFC 6376 §3.4.2 for a single
+/// header, returning the line terminated by CRLF. Header name is
+/// lowercased; whitespace within the value is collapsed to a single
+/// SP and trailing WSP is stripped.
+fn canonicalize_header_relaxed(name: &str, value: &str) -> String {
+    let canonical_value = canonicalize_header_value_relaxed(value);
+    format!("{}:{}\r\n", name.to_lowercase(), canonical_value)
+}
+
+fn canonicalize_header_value_relaxed(value: &str) -> String {
+    // Unfold first (CRLF + WSP -> single SP per the spec).
+    let unfolded = value.replace("\r\n", "\n");
+    let mut out = String::with_capacity(unfolded.len());
+    let mut prev_ws = false;
+    for c in unfolded.chars() {
+        if c == ' ' || c == '\t' || c == '\n' {
+            if !prev_ws {
+                out.push(' ');
+            }
+            prev_ws = true;
+        } else {
+            out.push(c);
+            prev_ws = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Canonicalize the DKIM-Signature header for inclusion in the signing
+/// input: uses the relaxed header rules, but the value is supplied
+/// already-formatted with an empty `b=` tag and no trailing CRLF
+/// (RFC 6376 §3.7).
+fn canonicalize_dkim_signature_for_signing(unsigned_value: &str) -> String {
+    let canonical_value = canonicalize_header_value_relaxed(unsigned_value);
+    format!("dkim-signature:{}", canonical_value)
 }
 
 #[cfg(test)]
@@ -185,6 +271,7 @@ mod tests {
         let sig = sign_message(&pem, "example.com", "sel1", &headers, "hello world").unwrap();
         assert!(sig.contains("v=1"));
         assert!(sig.contains("a=rsa-sha256"));
+        assert!(sig.contains("c=relaxed/relaxed"));
         assert!(sig.contains("d=example.com"));
         assert!(sig.contains("s=sel1"));
         assert!(sig.contains("h=from:to:subject:date:message-id"));
@@ -199,9 +286,73 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_body_simple_normalizes_line_endings() {
-        assert_eq!(canonicalize_body_simple(""), "\r\n");
-        assert_eq!(canonicalize_body_simple("a"), "a\r\n");
-        assert_eq!(canonicalize_body_simple("a\nb\n\n\n"), "a\r\nb\r\n");
+    fn canonicalize_body_relaxed_normalizes_whitespace_and_endings() {
+        assert_eq!(canonicalize_body_relaxed(""), "");
+        assert_eq!(canonicalize_body_relaxed("a"), "a\r\n");
+        assert_eq!(canonicalize_body_relaxed("a\nb\n\n\n"), "a\r\nb\r\n");
+        // collapses internal WSP runs
+        assert_eq!(canonicalize_body_relaxed("a   b\tc"), "a b c\r\n");
+        // strips trailing WSP per line
+        assert_eq!(canonicalize_body_relaxed("a   \nb"), "a\r\nb\r\n");
+    }
+
+    #[test]
+    fn canonicalize_header_relaxed_lowercases_and_collapses() {
+        assert_eq!(
+            canonicalize_header_relaxed("From", "  Alice  <a@b.com>  "),
+            "from:Alice <a@b.com>\r\n"
+        );
+        assert_eq!(
+            canonicalize_header_relaxed("Subject", "  hello   world  "),
+            "subject:hello world\r\n"
+        );
+    }
+
+    #[test]
+    fn signed_signature_verifies_against_generated_public_key() {
+        use rsa::pkcs1v15::{Signature, VerifyingKey};
+        use rsa::pkcs8::DecodePublicKey;
+        use rsa::signature::Verifier;
+
+        let (pem, pub_b64) = generate_easy_dkim_keypair();
+        let headers = vec![
+            ("From".to_string(), "alice@example.com".to_string()),
+            ("To".to_string(), "bob@example.com".to_string()),
+            ("Subject".to_string(), "hello".to_string()),
+            (
+                "Date".to_string(),
+                "Mon, 01 Jan 2024 00:00:00 +0000".to_string(),
+            ),
+            ("Message-ID".to_string(), "<x@example.com>".to_string()),
+        ];
+        let body = "hello world\r\n";
+        let sig_value = sign_message(&pem, "example.com", "sel1", &headers, body).unwrap();
+
+        // Reconstruct the signing input the same way sign_message does.
+        let mut block = String::new();
+        for (h, v) in &headers {
+            block.push_str(&canonicalize_header_relaxed(h, v));
+        }
+        // Strip the b=<sig> tail off the DKIM-Signature value to recover
+        // the unsigned form.
+        let b_idx = sig_value.rfind("b=").unwrap();
+        let unsigned = &sig_value[..b_idx + 2];
+        block.push_str(&canonicalize_dkim_signature_for_signing(unsigned));
+
+        // Decode the b= tag to get the raw signature bytes.
+        let raw_b = sig_value[b_idx + 2..].to_string();
+        let sig_bytes = base64::engine::general_purpose::STANDARD
+            .decode(raw_b.as_bytes())
+            .unwrap();
+        let signature = Signature::try_from(sig_bytes.as_slice()).unwrap();
+
+        // Decode the public key from the SPKI DER we exposed.
+        let pub_der = base64::engine::general_purpose::STANDARD
+            .decode(pub_b64.as_bytes())
+            .unwrap();
+        let pub_key = RsaPublicKey::from_public_key_der(&pub_der).unwrap();
+        let verifying_key: VerifyingKey<Sha256> = VerifyingKey::new(pub_key);
+
+        verifying_key.verify(block.as_bytes(), &signature).unwrap();
     }
 }

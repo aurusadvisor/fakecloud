@@ -779,7 +779,8 @@ pub(crate) fn verify_domain_dkim(
     // Ensure identity exists
     let mut accounts = state.write();
     let st = accounts.get_or_create(&req.account_id);
-    st.identities
+    let id = st
+        .identities
         .entry(domain.to_string())
         .or_insert_with(|| EmailIdentity {
             identity_name: domain.to_string(),
@@ -798,6 +799,12 @@ pub(crate) fn verify_domain_dkim(
             mail_from_domain_status: "NotStarted".to_string(),
             configuration_set_name: None,
         });
+    // VerifyDomainDkim is the moment SES tells you "ok, I generated DKIM
+    // keys, here are the CNAMEs you must publish". Lazily create the
+    // keypair the first time the action runs so SendRawEmail can stamp
+    // a signature without a follow-up SetIdentityDkimEnabled call.
+    id.dkim_signing_enabled = true;
+    ensure_easy_dkim_keypair(id);
     // Return 3 DKIM tokens
     let mut inner = String::from("<DkimTokens>");
     for _ in 0..3 {
@@ -968,8 +975,32 @@ pub(crate) fn set_identity_dkim_enabled(
     let st = accounts.get_or_create(&req.account_id);
     if let Some(id) = st.identities.get_mut(identity) {
         id.dkim_signing_enabled = enabled;
+        ensure_easy_dkim_keypair(id);
     }
     Ok(xml_metadata_only("SetIdentityDkimEnabled", &req.request_id))
+}
+
+/// Lazily provision the Easy DKIM keypair for `id` when signing is
+/// enabled but no caller-supplied key is on file. Mirrors how real SES
+/// auto-generates the per-identity keypair the moment DKIM signing is
+/// switched on. No-op when the identity already has a key (Easy or
+/// BYODKIM) or when signing is disabled.
+fn ensure_easy_dkim_keypair(id: &mut EmailIdentity) {
+    if !id.dkim_signing_enabled {
+        return;
+    }
+    if id.dkim_domain_signing_private_key.is_some() {
+        return;
+    }
+    let (priv_pem, pub_b64) = crate::dkim::generate_easy_dkim_keypair();
+    id.dkim_domain_signing_private_key = Some(priv_pem);
+    id.dkim_public_key_b64 = Some(pub_b64);
+    if id.dkim_domain_signing_selector.is_none() {
+        id.dkim_domain_signing_selector = Some("fakecloudses".to_string());
+    }
+    if id.dkim_next_signing_key_length.is_none() {
+        id.dkim_next_signing_key_length = Some("RSA_2048_BIT".to_string());
+    }
 }
 
 pub(crate) fn set_identity_notification_topic(
@@ -1225,6 +1256,7 @@ pub(crate) fn send_email(
         template_name: None,
         template_data: None,
         dkim_signature: None,
+        headers: Vec::new(),
         timestamp: Utc::now(),
     };
     let sent = sign_sent_email(state, &req.account_id, &req.region, sent);
@@ -1250,15 +1282,19 @@ fn sign_sent_email(
     _region: &str,
     sent: SentEmail,
 ) -> SentEmail {
-    let dkim_signature = {
+    let signed = {
         let accounts = state.read();
         accounts
             .get(account_id)
-            .and_then(|st| crate::dkim::signature_for_sent_email(st, &sent))
+            .and_then(|st| crate::dkim::signed_headers_for_sent_email(st, &sent))
     };
-    SentEmail {
-        dkim_signature,
-        ..sent
+    match signed {
+        Some((sig, hdrs)) => SentEmail {
+            dkim_signature: Some(sig),
+            headers: hdrs,
+            ..sent
+        },
+        None => sent,
     }
 }
 
@@ -1298,6 +1334,7 @@ pub(crate) fn send_raw_email(
         template_name: None,
         template_data: None,
         dkim_signature: None,
+        headers: Vec::new(),
         timestamp: Utc::now(),
     };
     let sent = sign_sent_email(state, &req.account_id, &req.region, sent);
@@ -1388,6 +1425,7 @@ pub(crate) fn send_templated_email(
         template_name: Some(template_name.to_string()),
         template_data: Some(template_data.to_string()),
         dkim_signature: None,
+        headers: Vec::new(),
         timestamp: Utc::now(),
     };
     let sent = sign_sent_email(state, &req.account_id, &req.region, sent);
@@ -1550,6 +1588,7 @@ pub(crate) fn send_bulk_destination(
         template_name: Some(template_name.to_string()),
         template_data: Some(replacement_data),
         dkim_signature: None,
+        headers: Vec::new(),
         timestamp: Utc::now(),
     };
     let sent = sign_sent_email(state, account_id, "", sent);

@@ -339,6 +339,9 @@ final class SentEmail
         public readonly ?string $rawData,
         public readonly ?string $templateName,
         public readonly ?string $templateData,
+        public readonly ?string $dkimSignature,
+        /** @var array<int, array{0: string, 1: string}> */
+        public readonly array $headers,
         public readonly string $timestamp,
     ) {}
 
@@ -356,6 +359,8 @@ final class SentEmail
             $data['rawData'] ?? null,
             $data['templateName'] ?? null,
             $data['templateData'] ?? null,
+            $data['dkimSignature'] ?? null,
+            $data['headers'] ?? [],
             $data['timestamp'],
         );
     }
