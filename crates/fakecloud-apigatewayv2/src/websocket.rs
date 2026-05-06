@@ -99,7 +99,61 @@ pub async fn run_lifecycle_tracked<F, Fut>(
     .await;
 }
 
+/// Same as [`run_lifecycle_tracked`] but also invokes `on_disconnect` when
+/// the WebSocket closes for any reason (client close, error, or outbound
+/// Close frame). This is used to dispatch the `$disconnect` Lambda route.
+pub async fn run_lifecycle_tracked_with_disconnect<F, Fut, D, Dfut>(
+    socket: WebSocket,
+    outbound: UnboundedReceiver<Message>,
+    on_message: F,
+    registry: SharedWebSocketRegistry,
+    connection_id: String,
+    on_disconnect: D,
+) where
+    F: Fn(Vec<u8>, bool) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+    D: FnOnce() -> Dfut,
+    Dfut: std::future::Future<Output = ()>,
+{
+    run_lifecycle_inner_with_disconnect(
+        socket,
+        outbound,
+        on_message,
+        Some((registry, connection_id)),
+        on_disconnect,
+    )
+    .await;
+}
+
 async fn run_lifecycle_inner<F, Fut>(
+    socket: WebSocket,
+    outbound: UnboundedReceiver<Message>,
+    on_message: F,
+    activity: Option<(SharedWebSocketRegistry, String)>,
+) where
+    F: Fn(Vec<u8>, bool) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    run_lifecycle_body(socket, outbound, on_message, activity).await;
+}
+
+async fn run_lifecycle_inner_with_disconnect<F, Fut, D, Dfut>(
+    socket: WebSocket,
+    outbound: UnboundedReceiver<Message>,
+    on_message: F,
+    activity: Option<(SharedWebSocketRegistry, String)>,
+    on_disconnect: D,
+) where
+    F: Fn(Vec<u8>, bool) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+    D: FnOnce() -> Dfut,
+    Dfut: std::future::Future<Output = ()>,
+{
+    run_lifecycle_body(socket, outbound, on_message, activity).await;
+    on_disconnect().await;
+}
+
+async fn run_lifecycle_body<F, Fut>(
     mut socket: WebSocket,
     mut outbound: UnboundedReceiver<Message>,
     on_message: F,

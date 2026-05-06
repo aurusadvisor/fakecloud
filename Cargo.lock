@@ -3247,6 +3247,7 @@ dependencies = [
  "fakecloud-sdk",
  "fakecloud-testkit",
  "flate2",
+ "futures-util",
  "mail-parser",
  "md-5 0.10.6",
  "mysql_async",
@@ -3260,6 +3261,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-postgres",
+ "tokio-tungstenite",
  "x509-cert",
  "zip",
 ]
