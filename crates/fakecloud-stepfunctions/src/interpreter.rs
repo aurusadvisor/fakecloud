@@ -823,16 +823,11 @@ fn map_sdk_service_id(service_id: &str) -> &str {
     match service_id {
         "sfn" => "states",
         "cloudwatchlogs" => "logs",
-        "elasticloadbalancingv2" => "elasticloadbalancingv2",
         // Default: pass through unchanged.
         other => other,
     }
 }
 
-/// Dispatch a Step Functions `aws-sdk:<service>:<action>` Task to the
-/// registered service via the central [`fakecloud_core::registry::ServiceRegistry`].
-/// `tail` is the trailing portion of the resource ARN after the
-/// `aws-sdk:` prefix (e.g. `dynamodb:getItem` or `sqs:sendMessage.waitForTaskToken`).
 /// Extract the AWS account id from a Step Functions execution ARN
 /// (`arn:aws:states:<region>:<account>:execution:...`). Falls back to
 /// the AWS-conventional fixture id if the ARN is malformed.
@@ -845,6 +840,10 @@ fn account_from_execution_arn(execution_arn: &str) -> String {
         .to_string()
 }
 
+/// Dispatch a Step Functions `aws-sdk:<service>:<action>` Task to the
+/// registered service via the central [`fakecloud_core::registry::ServiceRegistry`].
+/// `tail` is the trailing portion of the resource ARN after the
+/// `aws-sdk:` prefix (e.g. `dynamodb:getItem` or `sqs:sendMessage.waitForTaskToken`).
 async fn invoke_aws_sdk_integration(
     tail: &str,
     input: &Value,
