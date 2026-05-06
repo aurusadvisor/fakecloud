@@ -5,6 +5,8 @@ mod helpers;
 use aws_sdk_athena::types::{
     DataCatalogType, QueryExecutionContext, ResultConfiguration, Tag, WorkGroupConfiguration,
 };
+use aws_sdk_glue::types as glue_types;
+use aws_sdk_s3::primitives::ByteStream;
 use helpers::TestServer;
 
 #[tokio::test]
@@ -375,5 +377,222 @@ async fn list_engine_versions_returns_known_versions() {
     assert!(
         names.iter().any(|n| n.contains("Athena engine")),
         "expected at least one Athena engine version, got {names:?}"
+    );
+}
+
+/// End-to-end: pre-seed a Glue table that points at CSV objects in S3,
+/// `StartQueryExecution` with a `SELECT col FROM db.t WHERE col='x'`, and
+/// confirm `GetQueryResults` returns the matched rows from the underlying
+/// CSV — exercising the SQL parser + Glue catalog read + S3 read + result
+/// CSV write path.
+#[tokio::test]
+async fn select_with_filter_reads_csv_via_glue_catalog() {
+    let server = TestServer::start().await;
+    let athena = server.athena_client().await;
+    let glue = server.glue_client().await;
+    let s3 = server.s3_client().await;
+
+    // 1. Seed S3 with a CSV file under the table's storage prefix.
+    s3.create_bucket()
+        .bucket("dl-bucket")
+        .send()
+        .await
+        .expect("create bucket");
+    let csv = "1,alice,active\n2,bob,inactive\n3,carol,active\n";
+    s3.put_object()
+        .bucket("dl-bucket")
+        .key("users/data.csv")
+        .body(ByteStream::from_static(csv.as_bytes()))
+        .send()
+        .await
+        .expect("put csv");
+
+    // 2. Register a Glue database + CSV-backed table over that prefix.
+    glue.create_database()
+        .database_input(
+            glue_types::DatabaseInput::builder()
+                .name("warehouse")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create db");
+    let table_input = glue_types::TableInput::builder()
+        .name("users")
+        .table_type("EXTERNAL_TABLE")
+        .storage_descriptor(
+            glue_types::StorageDescriptor::builder()
+                .columns(
+                    glue_types::Column::builder()
+                        .name("id")
+                        .r#type("bigint")
+                        .build()
+                        .unwrap(),
+                )
+                .columns(
+                    glue_types::Column::builder()
+                        .name("name")
+                        .r#type("string")
+                        .build()
+                        .unwrap(),
+                )
+                .columns(
+                    glue_types::Column::builder()
+                        .name("status")
+                        .r#type("string")
+                        .build()
+                        .unwrap(),
+                )
+                .location("s3://dl-bucket/users/")
+                .input_format("org.apache.hadoop.mapred.TextInputFormat")
+                .output_format("org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat")
+                .serde_info(
+                    glue_types::SerDeInfo::builder()
+                        .serialization_library("org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe")
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+        .expect("table input");
+    glue.create_table()
+        .database_name("warehouse")
+        .table_input(table_input)
+        .send()
+        .await
+        .expect("create table");
+
+    // 3. Result location bucket so Athena can write the CSV result back.
+    s3.create_bucket()
+        .bucket("athena-results")
+        .send()
+        .await
+        .expect("create results bucket");
+
+    // 4. Run the query.
+    let started = athena
+        .start_query_execution()
+        .query_string("SELECT id, name FROM warehouse.users WHERE status = 'active' LIMIT 10")
+        .work_group("primary")
+        .query_execution_context(
+            QueryExecutionContext::builder()
+                .database("warehouse")
+                .build(),
+        )
+        .result_configuration(
+            ResultConfiguration::builder()
+                .output_location("s3://athena-results/queries/")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("start");
+    let qid = started.query_execution_id().expect("qid").to_owned();
+
+    // 5. Verify the execution completed successfully.
+    let exec = athena
+        .get_query_execution()
+        .query_execution_id(&qid)
+        .send()
+        .await
+        .expect("get exec");
+    let qe = exec.query_execution().expect("qe");
+    let state = qe
+        .status()
+        .and_then(|s| s.state())
+        .expect("status state")
+        .as_str()
+        .to_string();
+    assert_eq!(state, "SUCCEEDED", "qe failed: {qe:?}");
+    let resolved_output = qe
+        .result_configuration()
+        .and_then(|rc| rc.output_location())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        resolved_output.starts_with("s3://athena-results/queries/")
+            && resolved_output.ends_with(".csv"),
+        "expected resolved CSV output_location, got `{resolved_output}`"
+    );
+
+    // 6. GetQueryResults: header row + matched rows, projected to (id, name).
+    let results = athena
+        .get_query_results()
+        .query_execution_id(&qid)
+        .send()
+        .await
+        .expect("results");
+    let rs = results.result_set().expect("rs");
+    let rows: Vec<Vec<String>> = rs
+        .rows()
+        .iter()
+        .map(|row| {
+            row.data()
+                .iter()
+                .map(|d| d.var_char_value().unwrap_or("").to_string())
+                .collect()
+        })
+        .collect();
+    assert_eq!(rows.len(), 3, "header + 2 matches; got {rows:?}");
+    assert_eq!(rows[0], vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(rows[1], vec!["1".to_string(), "alice".to_string()]);
+    assert_eq!(rows[2], vec!["3".to_string(), "carol".to_string()]);
+
+    // 7. The result CSV was written back to S3 — fetch and verify.
+    let result_key = resolved_output
+        .strip_prefix("s3://athena-results/")
+        .expect("strip");
+    let got = s3
+        .get_object()
+        .bucket("athena-results")
+        .key(result_key)
+        .send()
+        .await
+        .expect("get result csv");
+    let body = got.body.collect().await.expect("body").into_bytes();
+    let body_str = String::from_utf8(body.to_vec()).expect("utf8");
+    assert!(
+        body_str.contains("id,name\n1,alice\n3,carol"),
+        "result CSV missing expected payload: {body_str:?}"
+    );
+}
+
+/// SELECT against a non-existent table: Athena marks the execution `FAILED`
+/// with a structured reason rather than synthesizing a fake row.
+#[tokio::test]
+async fn select_failing_against_unknown_table_marks_query_failed() {
+    let server = TestServer::start().await;
+    let athena = server.athena_client().await;
+    let started = athena
+        .start_query_execution()
+        .query_string("SELECT * FROM nodb.notable")
+        .work_group("primary")
+        .send()
+        .await
+        .expect("start");
+    let qid = started.query_execution_id().expect("qid").to_owned();
+    let exec = athena
+        .get_query_execution()
+        .query_execution_id(&qid)
+        .send()
+        .await
+        .expect("get exec");
+    let qe = exec.query_execution().expect("qe");
+    let state = qe
+        .status()
+        .and_then(|s| s.state())
+        .expect("state")
+        .as_str()
+        .to_string();
+    assert_eq!(state, "FAILED");
+    let reason = qe
+        .status()
+        .and_then(|s| s.state_change_reason())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        reason.to_lowercase().contains("not found"),
+        "expected `not found` in reason, got `{reason}`"
     );
 }

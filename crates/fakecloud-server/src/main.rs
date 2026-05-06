@@ -2158,7 +2158,9 @@ async fn main() {
     );
     registry.register(Arc::new(wafv2_service));
 
-    let athena_service = fakecloud_athena::AthenaService::new(athena_state.clone());
+    let athena_service = fakecloud_athena::AthenaService::new(athena_state.clone())
+        .with_glue(glue_state.clone())
+        .with_s3(s3_state.clone());
     registry.register(Arc::new(athena_service));
 
     let mut sfn_service = StepFunctionsService::new(stepfunctions_state.clone());

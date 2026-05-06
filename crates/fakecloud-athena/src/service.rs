@@ -12,7 +12,10 @@ use uuid::Uuid;
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::pagination::paginate;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
+use fakecloud_glue::SharedGlueState;
+use fakecloud_s3::SharedS3State;
 
+use crate::sql::{self, ExecutedQuery};
 use crate::state::{
     AccountState, AthenaAccounts, Calculation, CapacityAssignmentConfiguration,
     CapacityReservation, DataCatalog, NamedQuery, Notebook, PreparedStatement, QueryExecution,
@@ -94,11 +97,27 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 
 pub struct AthenaService {
     state: SharedAthenaState,
+    glue: Option<SharedGlueState>,
+    s3: Option<SharedS3State>,
 }
 
 impl AthenaService {
     pub fn new(state: SharedAthenaState) -> Self {
-        Self { state }
+        Self {
+            state,
+            glue: None,
+            s3: None,
+        }
+    }
+
+    pub fn with_glue(mut self, glue: SharedGlueState) -> Self {
+        self.glue = Some(glue);
+        self
+    }
+
+    pub fn with_s3(mut self, s3: SharedS3State) -> Self {
+        self.s3 = Some(s3);
+        self
     }
 
     pub fn shared_state(&self) -> SharedAthenaState {
@@ -879,36 +898,107 @@ impl AthenaService {
             .to_string();
         let context = body.get("QueryExecutionContext").cloned();
         let result_configuration = body.get("ResultConfiguration").cloned();
-        let mut state = self.state.write();
-        let account = account_mut(&mut state, &req.account_id);
-        if !account.work_groups.contains_key(&work_group) {
-            return Err(invalid_request(format!("Workgroup {work_group} not found")));
+        let default_database = context
+            .as_ref()
+            .and_then(|c| c.get("Database"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let output_location = result_configuration
+            .as_ref()
+            .and_then(|c| c.get("OutputLocation"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+
+        // Workgroup existence check before kicking off SQL execution so we
+        // surface the same error users hit on real Athena.
+        {
+            let mut state = self.state.write();
+            let account = account_mut(&mut state, &req.account_id);
+            if !account.work_groups.contains_key(&work_group) {
+                return Err(invalid_request(format!("Workgroup {work_group} not found")));
+            }
         }
+
         let id = synth_uuid();
         let now = Utc::now();
-        // Synthesize a successful query result instantly so callers can
-        // immediately fetch it via GetQueryResults.
+
+        // Try real SQL execution. Only SELECT is implemented today; anything
+        // else lands in QueryExecution with a structured failure reason
+        // (state=FAILED, state_change_reason=<error>) so callers see the real
+        // outcome instead of a fabricated SUCCEEDED.
+        let executed = sql::execute(
+            &query,
+            default_database.as_deref(),
+            output_location.as_deref(),
+            &req.account_id,
+            &req.region,
+            self.glue.as_ref(),
+            self.s3.as_ref(),
+        );
+
+        let (state_str, state_reason, columns, rows, scanned, output) = match executed {
+            Ok(ExecutedQuery {
+                columns,
+                rows,
+                data_scanned_bytes,
+                output_location,
+            }) => (
+                "SUCCEEDED".to_string(),
+                None,
+                columns,
+                rows,
+                data_scanned_bytes,
+                output_location,
+            ),
+            Err(err) => {
+                tracing::debug!(query = %query, error = %err, "athena: query failed");
+                (
+                    "FAILED".to_string(),
+                    Some(err.to_string()),
+                    Vec::new(),
+                    Vec::new(),
+                    0i64,
+                    None,
+                )
+            }
+        };
+
+        // Re-merge the executed output_location back into ResultConfiguration
+        // so GetQueryExecution echoes the resolved s3:// key back to the
+        // caller (real Athena does this).
+        let mut effective_result_config = result_configuration.clone();
+        if let Some(ref out) = output {
+            let cfg = effective_result_config
+                .get_or_insert_with(|| json!({}))
+                .as_object_mut();
+            if let Some(obj) = cfg {
+                obj.insert("OutputLocation".to_string(), Value::String(out.clone()));
+            }
+        }
+
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
         let qe = QueryExecution {
             query_execution_id: id.clone(),
             query: query.clone(),
             statement_type: classify_statement(&query),
             work_group,
-            state: "SUCCEEDED".to_string(),
-            state_change_reason: None,
+            state: state_str,
+            state_change_reason: state_reason,
             submission_time: now,
             completion_time: Some(now),
             query_execution_context: context,
-            result_configuration,
+            result_configuration: effective_result_config,
             engine_version: Some(json!({
                 "SelectedEngineVersion": "AUTO",
                 "EffectiveEngineVersion": "Athena engine version 3",
             })),
-            data_scanned_bytes: 0,
+            data_scanned_bytes: scanned,
             engine_execution_time_ms: 1,
             query_planning_time_ms: 1,
             total_execution_time_ms: 2,
-            result_rows: vec![vec!["1".to_string()]],
-            result_columns: vec![("_col0".to_string(), "integer".to_string())],
+            result_rows: rows,
+            result_columns: columns,
         };
         account.query_executions.insert(id.clone(), qe);
         Ok(AwsResponse::ok_json(json!({ "QueryExecutionId": id })))
