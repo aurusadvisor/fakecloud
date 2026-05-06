@@ -7,7 +7,7 @@ pub mod signing;
 pub mod state;
 
 pub use lifecycle_ticker::LifecycleTicker;
-pub use service::EcrService;
+pub use service::{evaluate_lifecycle_policy, EcrService};
 pub use state::{
     EcrSnapshot, EcrState, Image, PullThroughCacheRule, ReplicationConfiguration,
     ReplicationDestination, ReplicationRule, Repository, RepositoryFilter, SharedEcrState,

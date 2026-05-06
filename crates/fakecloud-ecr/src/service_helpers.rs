@@ -470,10 +470,7 @@ pub(crate) fn registry_policy_not_found() -> AwsServiceError {
 /// (`imageCountMoreThan` or `sinceImagePushed` with `countUnit=days`).
 /// Rules run in ascending `rulePriority` order; later rules can't
 /// re-prune images earlier rules already marked.
-pub(crate) fn evaluate_lifecycle_policy(
-    repo: &crate::state::Repository,
-    policy: &str,
-) -> Vec<String> {
+pub fn evaluate_lifecycle_policy(repo: &crate::state::Repository, policy: &str) -> Vec<String> {
     let Ok(doc) = serde_json::from_str::<Value>(policy) else {
         return Vec::new();
     };

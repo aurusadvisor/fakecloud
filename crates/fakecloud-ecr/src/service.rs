@@ -3185,6 +3185,7 @@ impl EcrService {
 
 #[path = "service_helpers.rs"]
 mod service_helpers;
+pub use service_helpers::evaluate_lifecycle_policy;
 pub(crate) use service_helpers::*;
 
 #[cfg(test)]
