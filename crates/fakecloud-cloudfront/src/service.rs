@@ -197,18 +197,43 @@ pub struct CloudFrontService {
     pub(crate) state: SharedCloudFrontState,
     /// How long the propagation tick sleeps before flipping a freshly
     /// created or updated Distribution / DistributionTenant /
-    /// ConnectionGroup from `InProgress` to `Deployed`. Real CloudFront
-    /// takes ~15 minutes; the default of 1s keeps SDK-driven integration
-    /// tests fast while still simulating the async transition. Tests can
-    /// shrink it via [`CloudFrontService::with_propagation_delay`].
+    /// ConnectionGroup / StreamingDistribution from `InProgress` to
+    /// `Deployed`. Real CloudFront takes ~15 minutes; the default of 1s
+    /// keeps SDK-driven integration tests fast while still simulating the
+    /// async transition. Tests can shrink it via
+    /// [`CloudFrontService::with_propagation_delay`], and operators can
+    /// override the default via the
+    /// `FAKECLOUD_CLOUDFRONT_STATUS_DELAY_SEC` env var.
     pub(crate) propagation_delay: std::time::Duration,
+}
+
+/// Resolve the default `InProgress` -> `Deployed` delay from the
+/// `FAKECLOUD_CLOUDFRONT_STATUS_DELAY_SEC` env var, falling back to 1
+/// second. The value parses as either a non-negative integer (seconds) or
+/// a floating-point number; `0` keeps the transition synchronous, which is
+/// useful for fast unit tests. Invalid input falls back to 1 second so a
+/// typo in the env var can't accidentally hang the process.
+fn default_propagation_delay() -> std::time::Duration {
+    let Ok(raw) = std::env::var("FAKECLOUD_CLOUDFRONT_STATUS_DELAY_SEC") else {
+        return std::time::Duration::from_secs(1);
+    };
+    let trimmed = raw.trim();
+    if let Ok(secs) = trimmed.parse::<u64>() {
+        return std::time::Duration::from_secs(secs);
+    }
+    if let Ok(secs) = trimmed.parse::<f64>() {
+        if secs.is_finite() && secs >= 0.0 {
+            return std::time::Duration::from_secs_f64(secs);
+        }
+    }
+    std::time::Duration::from_secs(1)
 }
 
 impl CloudFrontService {
     pub fn new(state: SharedCloudFrontState) -> Self {
         Self {
             state,
-            propagation_delay: std::time::Duration::from_secs(1),
+            propagation_delay: default_propagation_delay(),
         }
     }
 
@@ -627,6 +652,27 @@ impl CloudFrontService {
         });
     }
 
+    /// Same as [`schedule_distribution_deploy`] but for StreamingDistributions.
+    /// Real CloudFront mirrors the `InProgress` -> `Deployed` lifecycle for
+    /// RTMP streaming distributions, even though the resource is largely
+    /// deprecated.
+    pub(crate) fn schedule_streaming_distribution_deploy(&self, id: String) {
+        let state = Arc::clone(&self.state);
+        let delay = self.propagation_delay;
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let mut s = state.write();
+            for account in s.accounts.values_mut() {
+                if let Some(d) = account.streaming_distributions.get_mut(&id) {
+                    if d.status == "InProgress" {
+                        d.status = "Deployed".to_string();
+                    }
+                    return;
+                }
+            }
+        });
+    }
+
     fn get_distribution(&self, route: &Route) -> Result<AwsResponse, AwsServiceError> {
         let id = route
             .id
@@ -714,16 +760,26 @@ impl CloudFrontService {
                 "If-Match header does not match the current ETag",
             ));
         }
-        dist.config = new_config;
-        dist.etag = generate_etag();
-        dist.last_modified_time = Utc::now();
-        // UpdateDistribution kicks off a fresh edge propagation; AWS flips
-        // the status back to InProgress until the new config lands.
-        dist.status = "InProgress".to_string();
+        // ETag stability: only bump the ETag and flip status back to
+        // InProgress when the new config actually differs from what we
+        // have on disk. A no-op UpdateDistribution (PUT the same config
+        // back) leaves the ETag intact, matching AWS behavior.
+        let config_changed = !configs_equal(&dist.config, &new_config);
+        if config_changed {
+            dist.config = new_config;
+            dist.etag = generate_etag();
+            dist.last_modified_time = Utc::now();
+            // UpdateDistribution kicks off a fresh edge propagation; AWS
+            // flips the status back to InProgress until the new config
+            // lands.
+            dist.status = "InProgress".to_string();
+        }
         let snapshot = dist.clone();
         drop(state);
 
-        self.schedule_distribution_deploy(id.to_string());
+        if config_changed {
+            self.schedule_distribution_deploy(id.to_string());
+        }
 
         let body = build_distribution_xml(&snapshot);
         let mut headers = HeaderMap::new();
@@ -1443,6 +1499,21 @@ fn validate_origins(config: &DistributionConfig) -> Result<(), AwsServiceError> 
         ));
     }
     Ok(())
+}
+
+/// Compare two `DistributionConfig`s by serializing them to canonical XML
+/// and comparing bytes. Used by `UpdateDistribution` to detect no-op writes
+/// so the ETag stays stable when the caller PUTs the same config back.
+/// Falls back to "not equal" if either serialization fails so we still
+/// honor the request rather than silently swallow a write.
+fn configs_equal(lhs: &DistributionConfig, rhs: &DistributionConfig) -> bool {
+    let Ok(a) = xml_io::to_xml_root("DistributionConfig", lhs) else {
+        return false;
+    };
+    let Ok(b) = xml_io::to_xml_root("DistributionConfig", rhs) else {
+        return false;
+    };
+    a == b
 }
 
 fn account_id(_req: &AwsRequest) -> &'static str {
