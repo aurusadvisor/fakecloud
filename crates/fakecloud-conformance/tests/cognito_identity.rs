@@ -670,38 +670,3 @@ async fn cognito_identity_unlink_identity() {
         .unwrap();
 }
 
-#[test_action("cognito-identity", "LinkIdentity", checksum = "17e06289")]
-#[tokio::test]
-async fn cognito_identity_link_identity() {
-    let server = TestServer::start().await;
-    let client = server.cognito_identity_client().await;
-
-    let create = client
-        .create_identity_pool()
-        .identity_pool_name("link-id-pool")
-        .allow_unauthenticated_identities(true)
-        .send()
-        .await
-        .unwrap();
-    let pool_id = create.identity_pool_id().to_string();
-
-    let get_id = client
-        .get_id()
-        .identity_pool_id(&pool_id)
-        .send()
-        .await
-        .unwrap();
-    let identity_id = get_id.identity_id().unwrap().to_string();
-
-    let mut logins = HashMap::new();
-    logins.insert("login.provider".to_string(), "user123".to_string());
-
-    client
-        .link_identity()
-        .identity_id(&identity_id)
-        .identity_pool_id(&pool_id)
-        .set_logins(Some(logins))
-        .send()
-        .await
-        .unwrap();
-}

@@ -100,9 +100,6 @@
                     "target": "com.amazonaws.cognitoidentity#TagResource"
                 },
                 {
-                    "target": "com.amazonaws.cognitoidentity#LinkIdentity"
-                },
-                {
                     "target": "com.amazonaws.cognitoidentity#UnlinkDeveloperIdentity"
                 },
                 {
@@ -3422,73 +3419,6 @@
             },
             "traits": {
                 "smithy.api#documentation": "<p>Input to the <code>UnlinkDeveloperIdentity</code> action.</p>",
-                "smithy.api#input": {}
-            }
-        },
-        "com.amazonaws.cognitoidentity#LinkIdentity": {
-            "type": "operation",
-            "input": {
-                "target": "com.amazonaws.cognitoidentity#LinkIdentityInput"
-            },
-            "output": {
-                "target": "smithy.api#Unit"
-            },
-            "errors": [
-                {
-                    "target": "com.amazonaws.cognitoidentity#ExternalServiceException"
-                },
-                {
-                    "target": "com.amazonaws.cognitoidentity#InternalErrorException"
-                },
-                {
-                    "target": "com.amazonaws.cognitoidentity#InvalidParameterException"
-                },
-                {
-                    "target": "com.amazonaws.cognitoidentity#NotAuthorizedException"
-                },
-                {
-                    "target": "com.amazonaws.cognitoidentity#ResourceConflictException"
-                },
-                {
-                    "target": "com.amazonaws.cognitoidentity#ResourceNotFoundException"
-                },
-                {
-                    "target": "com.amazonaws.cognitoidentity#TooManyRequestsException"
-                }
-            ],
-            "traits": {
-                "smithy.api#auth": [],
-                "smithy.api#documentation": "<p>Links a federated identity to an existing account. If the identity doesn't exist, it creates a new one.</p>",
-                "smithy.api#optionalAuth": {}
-            }
-        },
-        "com.amazonaws.cognitoidentity#LinkIdentityInput": {
-            "type": "structure",
-            "members": {
-                "IdentityId": {
-                    "target": "com.amazonaws.cognitoidentity#IdentityId",
-                    "traits": {
-                        "smithy.api#documentation": "<p>A unique identifier in the format REGION:GUID.</p>",
-                        "smithy.api#required": {}
-                    }
-                },
-                "IdentityPoolId": {
-                    "target": "com.amazonaws.cognitoidentity#IdentityPoolId",
-                    "traits": {
-                        "smithy.api#documentation": "<p>An identity pool ID in the format REGION:GUID.</p>",
-                        "smithy.api#required": {}
-                    }
-                },
-                "Logins": {
-                    "target": "com.amazonaws.cognitoidentity#LoginsMap",
-                    "traits": {
-                        "smithy.api#documentation": "<p>A set of optional name-value pairs that map provider names to provider tokens.</p>",
-                        "smithy.api#required": {}
-                    }
-                }
-            },
-            "traits": {
-                "smithy.api#documentation": "<p>Input to the LinkIdentity action.</p>",
                 "smithy.api#input": {}
             }
         },
