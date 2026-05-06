@@ -1511,7 +1511,14 @@ impl AwsService for BedrockService {
                 }
                 let response_text =
                     crate::streaming::get_response_text(&self.state, &req, &model_id, &req.body);
-                let body = crate::streaming::build_converse_stream_response(&response_text);
+                let prompt = crate::prompt::extract_prompt_text(&model_id, &req.body);
+                let input_tokens = crate::prompt::count_tokens(&prompt);
+                let output_tokens = crate::prompt::count_tokens(&response_text);
+                let body = crate::streaming::build_converse_stream_response(
+                    &response_text,
+                    input_tokens,
+                    output_tokens,
+                );
 
                 // Record invocation
                 {

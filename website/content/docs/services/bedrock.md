@@ -65,6 +65,12 @@ REST. Path-based routing for runtime operations, JSON bodies per provider.
 - `GET /_fakecloud/bedrock/faults` — list queued faults
 - `DELETE /_fakecloud/bedrock/faults` — clear all faults
 
+## Echo mode
+
+Set `FAKECLOUD_BEDROCK_ECHO=1` on the fakecloud process to make every InvokeModel / Converse / streaming call reflect the user's prompt back as the assistant text in the provider-correct shape. Useful for tests that just need the prompt to round-trip through application code without configuring an explicit response per call. Explicit overrides still win.
+
+Token counts in headers and `usage` fields scale with the actual input length in all modes.
+
 ## The full test loop
 
 Configure a response, run code, assert on what was called — see [Testing Bedrock](/docs/guides/testing-bedrock/) for complete examples including fault injection for retry testing.

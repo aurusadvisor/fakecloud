@@ -35,7 +35,21 @@ pub(crate) fn converse(
                 custom
             }
         }
-        None => "This is a test response from the emulated model.".to_string(),
+        None => {
+            // Echo mode short-circuits the canned phrase: reflect the
+            // caller's prompt back as the assistant text so tests can
+            // assert against their own input.
+            if crate::prompt::echo_enabled() {
+                let echoed = crate::prompt::extract_prompt_text(model_id, body);
+                if echoed.is_empty() {
+                    "(empty prompt)".to_string()
+                } else {
+                    echoed
+                }
+            } else {
+                "This is a test response from the emulated model.".to_string()
+            }
+        }
     };
 
     // Respect maxTokens by truncating (rough approximation: 1 token ~= 4 chars)
@@ -84,7 +98,7 @@ pub(crate) fn converse(
     };
 
     let input_tokens = estimate_tokens(&input);
-    let output_tokens = truncated_text.split_whitespace().count().max(1) as u64;
+    let output_tokens = crate::prompt::count_tokens(&truncated_text).max(1);
 
     let response = json!({
         "output": {
@@ -158,9 +172,17 @@ mod tests {
     use bytes::Bytes;
     use fakecloud_core::multi_account::MultiAccountState;
     use http::{HeaderMap, Method};
-    use parking_lot::RwLock;
+    use parking_lot::{Mutex, RwLock};
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::OnceLock;
+
+    /// Serialize tests in this module that observe the process-global
+    /// `FAKECLOUD_BEDROCK_ECHO` flag.
+    fn echo_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn shared() -> SharedBedrockState {
         let multi: MultiAccountState<BedrockState> =
@@ -288,6 +310,52 @@ mod tests {
         let v: Value =
             serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
         assert_eq!(v["output"]["message"]["content"][0]["text"], "nested-hello");
+    }
+
+    #[test]
+    fn converse_echo_mode_reflects_prompt() {
+        let _g = echo_lock().lock();
+        let prev = std::env::var("FAKECLOUD_BEDROCK_ECHO").ok();
+        // SAFETY: the lock above pins us to a single mutation window.
+        unsafe { std::env::set_var("FAKECLOUD_BEDROCK_ECHO", "1") };
+
+        let s = shared();
+        let body = br#"{"messages":[{"role":"user","content":[{"text":"hello echo"}]}]}"#;
+        let resp = converse(&s, &req(), "anthropic.claude-v2", body).unwrap();
+        let v: Value =
+            serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
+        let text = v["output"]["message"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("hello echo"), "echo missing prompt: {text}");
+
+        // SAFETY: see above.
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("FAKECLOUD_BEDROCK_ECHO", p),
+                None => std::env::remove_var("FAKECLOUD_BEDROCK_ECHO"),
+            }
+        }
+    }
+
+    #[test]
+    fn converse_token_counts_scale_with_input_length() {
+        let _g = echo_lock().lock();
+        let s = shared();
+        let short = br#"{"messages":[{"content":[{"text":"hi"}]}]}"#;
+        let long = br#"{"messages":[{"content":[{"text":"please count many words across this longer message body"}]}]}"#;
+        let r1 = converse(&s, &req(), "m", short).unwrap();
+        let r2 = converse(&s, &req(), "m", long).unwrap();
+        let v1: Value =
+            serde_json::from_str(std::str::from_utf8(r1.body.expect_bytes()).unwrap()).unwrap();
+        let v2: Value =
+            serde_json::from_str(std::str::from_utf8(r2.body.expect_bytes()).unwrap()).unwrap();
+        let in1 = v1["usage"]["inputTokens"].as_u64().unwrap();
+        let in2 = v2["usage"]["inputTokens"].as_u64().unwrap();
+        assert!(
+            in2 > in1,
+            "longer prompt should produce more input tokens (got {in1} vs {in2})"
+        );
     }
 
     #[test]

@@ -152,6 +152,18 @@ Provider defaults are shipped for:
 
 All follow the same shape as real model responses. They're not useful if your code inspects the output, but they're fine for tests that just verify "did my code call Bedrock at all."
 
+### Echo mode
+
+If you want every model call to reflect the caller's prompt back as the assistant text, set `FAKECLOUD_BEDROCK_ECHO=1` on the fakecloud process. This skips the canned phrase and instead pins the response on whatever the test sent in, which is convenient for assertions that don't care about model behavior — only that the prompt round-tripped through your code.
+
+```bash
+FAKECLOUD_BEDROCK_ECHO=1 fakecloud
+```
+
+Echo mode applies to InvokeModel, Converse, InvokeModelWithResponseStream, and ConverseStream, and covers all five provider shapes (Anthropic, Amazon, Meta, Cohere, Mistral). It is bypassed by any prompt-conditional rule or single-model override you configure, so explicit responses always win.
+
+Token counts in headers and `usage` fields are derived from the actual prompt and generated text in all modes — they scale with input length rather than returning a fixed placeholder.
+
 ## Fault injection
 
 Real Bedrock throws a specific set of errors. Production code has retry, fallback, and circuit-breaker logic for them — and that logic is normally untestable because you can't make real Bedrock fail on command.

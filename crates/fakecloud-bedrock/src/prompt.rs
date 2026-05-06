@@ -4,6 +4,29 @@ use fakecloud_core::service::AwsRequest;
 
 use crate::state::{ResponseRule, SharedBedrockState};
 
+/// Approximate token count for an arbitrary text using a whitespace
+/// heuristic. Real Bedrock invokes the model's tokenizer; we don't ship
+/// one, but SDKs only treat usage as opaque metering, so a stable
+/// length-proportional scalar (minimum 1 for any non-empty input) is
+/// sufficient. Used everywhere we need to populate `usage.input_tokens`
+/// / `usage.output_tokens` from the actual prompt and generated text.
+pub(crate) fn count_tokens(text: &str) -> u64 {
+    let n = text.split_whitespace().count() as u64;
+    if n == 0 && !text.is_empty() {
+        1
+    } else {
+        n
+    }
+}
+
+/// Read the echo-mode flag from the environment. Accepts either
+/// `FAKECLOUD_BEDROCK_ECHO=1` (preferred, matches the project's
+/// `FAKECLOUD_*` env-var convention) or the legacy `BEDROCK_ECHO=1`.
+pub(crate) fn echo_enabled() -> bool {
+    std::env::var("FAKECLOUD_BEDROCK_ECHO").as_deref() == Ok("1")
+        || std::env::var("BEDROCK_ECHO").as_deref() == Ok("1")
+}
+
 /// Extract the user-visible prompt text from a runtime request body.
 ///
 /// Handles both InvokeModel (provider-specific shapes) and Converse bodies.
@@ -272,5 +295,55 @@ mod tests {
     fn resolve_override_none_when_nothing_configured() {
         let state = shared();
         assert!(resolve_override(&state, &req(), "m", b"{}").is_none());
+    }
+
+    #[test]
+    fn count_tokens_basic_whitespace_split() {
+        assert_eq!(count_tokens(""), 0);
+        assert_eq!(count_tokens("hi"), 1);
+        assert_eq!(count_tokens("hello world"), 2);
+        assert_eq!(count_tokens("a b c d e"), 5);
+    }
+
+    #[test]
+    fn count_tokens_proportional_to_input_length() {
+        // FF1 acceptance: token counts should grow with input size.
+        let short = count_tokens("one two");
+        let long = count_tokens("one two three four five six seven eight");
+        assert!(long > short);
+    }
+
+    #[test]
+    fn count_tokens_no_whitespace_input_returns_at_least_one() {
+        // Pathological input (e.g. one giant word) shouldn't report
+        // zero tokens — SDKs treat 0 as "this didn't run".
+        assert_eq!(count_tokens("supercalifragilistic"), 1);
+    }
+
+    #[test]
+    fn echo_enabled_reads_canonical_var() {
+        let prev_canonical = std::env::var("FAKECLOUD_BEDROCK_ECHO").ok();
+        let prev_legacy = std::env::var("BEDROCK_ECHO").ok();
+        // SAFETY: env is process-global; we restore both vars below.
+        unsafe {
+            std::env::remove_var("FAKECLOUD_BEDROCK_ECHO");
+            std::env::remove_var("BEDROCK_ECHO");
+        }
+        assert!(!echo_enabled());
+        // SAFETY: see above.
+        unsafe { std::env::set_var("FAKECLOUD_BEDROCK_ECHO", "1") };
+        assert!(echo_enabled());
+
+        // SAFETY: see above.
+        unsafe {
+            match prev_canonical {
+                Some(v) => std::env::set_var("FAKECLOUD_BEDROCK_ECHO", v),
+                None => std::env::remove_var("FAKECLOUD_BEDROCK_ECHO"),
+            }
+            match prev_legacy {
+                Some(v) => std::env::set_var("BEDROCK_ECHO", v),
+                None => std::env::remove_var("BEDROCK_ECHO"),
+            }
+        }
     }
 }

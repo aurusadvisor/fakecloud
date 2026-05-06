@@ -117,7 +117,15 @@ pub(crate) fn build_invoke_stream_response(model_id: &str, response_text: &str) 
 }
 
 /// Build the complete event stream body for ConverseStream.
-pub(crate) fn build_converse_stream_response(response_text: &str) -> Vec<u8> {
+///
+/// `input_tokens` and `output_tokens` are surfaced verbatim in the
+/// terminating `metadata` event so callers see real, prompt-derived
+/// usage figures instead of the historical 10/20 placeholder.
+pub(crate) fn build_converse_stream_response(
+    response_text: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Vec<u8> {
     let mut body = Vec::new();
 
     // messageStart event
@@ -172,9 +180,9 @@ pub(crate) fn build_converse_stream_response(response_text: &str) -> Vec<u8> {
     // metadata event
     let metadata = json!({
         "usage": {
-            "inputTokens": 10,
-            "outputTokens": 20,
-            "totalTokens": 30
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": input_tokens + output_tokens
         },
         "metrics": {
             "latencyMs": 100
@@ -198,7 +206,9 @@ pub(crate) fn default_stream_text() -> &'static str {
 }
 
 /// Generate the canned response text, checking for prompt-conditional and
-/// legacy custom overrides for the given call.
+/// legacy custom overrides for the given call. When neither is set and
+/// `FAKECLOUD_BEDROCK_ECHO=1` is exported, the caller's prompt is
+/// reflected back so streaming tests can assert against their own input.
 pub(crate) fn get_response_text(
     state: &crate::state::SharedBedrockState,
     req: &fakecloud_core::service::AwsRequest,
@@ -206,6 +216,14 @@ pub(crate) fn get_response_text(
     body: &[u8],
 ) -> String {
     let Some(custom) = crate::prompt::resolve_override(state, req, model_id, body) else {
+        if crate::prompt::echo_enabled() {
+            let echoed = crate::prompt::extract_prompt_text(model_id, body);
+            return if echoed.is_empty() {
+                "(empty prompt)".to_string()
+            } else {
+                echoed
+            };
+        }
         return default_stream_text().to_string();
     };
     // Try to extract text from a JSON response body.
@@ -325,7 +343,7 @@ mod tests {
 
     #[test]
     fn build_converse_stream_emits_all_events() {
-        let out = build_converse_stream_response("hello world");
+        let out = build_converse_stream_response("hello world", 5, 7);
         let s = String::from_utf8_lossy(&out);
         for marker in [
             "messageStart",
@@ -338,6 +356,10 @@ mod tests {
         ] {
             assert!(s.contains(marker), "missing marker {marker}");
         }
+        // Token counts surface via metadata, not a hardcoded 10/20.
+        assert!(s.contains("\"inputTokens\":5"));
+        assert!(s.contains("\"outputTokens\":7"));
+        assert!(s.contains("\"totalTokens\":12"));
     }
 
     #[test]
@@ -397,5 +419,38 @@ mod tests {
         install_rule(&s, "anthropic.claude", "plain raw");
         let out = get_response_text(&s, &req(), "anthropic.claude", b"{}");
         assert_eq!(out, "plain raw");
+    }
+
+    /// Echo mode test mutates the process-global env var; we don't
+    /// share a lock with sibling test files (the `cargo test` binary
+    /// is per-crate and these are different modules), so we restore
+    /// the previous value as a defensive cleanup.
+    #[test]
+    fn get_response_text_echo_mode_reflects_prompt() {
+        let prev = std::env::var("FAKECLOUD_BEDROCK_ECHO").ok();
+        // SAFETY: scoped mutation below restores the previous value.
+        unsafe { std::env::set_var("FAKECLOUD_BEDROCK_ECHO", "1") };
+
+        let s = shared();
+        let body = br#"{"messages":[{"role":"user","content":"hello stream"}]}"#;
+        let out = get_response_text(&s, &req(), "anthropic.claude-3", body);
+        assert!(out.contains("hello stream"), "echo missing prompt: {out}");
+
+        // SAFETY: see above.
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("FAKECLOUD_BEDROCK_ECHO", p),
+                None => std::env::remove_var("FAKECLOUD_BEDROCK_ECHO"),
+            }
+        }
+    }
+
+    #[test]
+    fn build_converse_stream_response_emits_dynamic_token_counts() {
+        let out = build_converse_stream_response("text", 42, 7);
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains("\"inputTokens\":42"));
+        assert!(s.contains("\"outputTokens\":7"));
+        assert!(s.contains("\"totalTokens\":49"));
     }
 }
