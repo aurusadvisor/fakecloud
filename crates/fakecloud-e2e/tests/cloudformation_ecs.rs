@@ -2,7 +2,7 @@
 
 mod helpers;
 
-use aws_sdk_cloudformation::types::{Capability, OnFailure};
+use aws_sdk_cloudformation::types::{Capability, OnFailure, Parameter};
 use helpers::TestServer;
 
 const TEMPLATE: &str = r#"{
@@ -12,13 +12,89 @@ const TEMPLATE: &str = r#"{
       "Type": "AWS::ECS::Cluster",
       "Properties": {
         "ClusterName": "cfn-ecs-cluster",
-        "ClusterSettings": [{"Name": "containerInsights", "Value": "enhanced"}]
+        "ClusterSettings": [{"Name": "containerInsights", "Value": "enhanced"}],
+        "ServiceConnectDefaults": {"Namespace": "cfn-ns"},
+        "Tags": [{"Key": "env", "Value": "test"}]
       }
     },
     "CP": {
       "Type": "AWS::ECS::CapacityProvider",
       "Properties": {
         "Name": "cfn-cp"
+      }
+    },
+    "TaskDef": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties": {
+        "Family": "cfn-task",
+        "NetworkMode": "awsvpc",
+        "RequiresCompatibilities": ["FARGATE"],
+        "Cpu": "256",
+        "Memory": "512",
+        "EphemeralStorage": {"SizeInGiB": 30},
+        "RuntimePlatform": {"OperatingSystemFamily": "LINUX", "CpuArchitecture": "X86_64"},
+        "ContainerDefinitions": [
+          {
+            "Name": "web",
+            "Image": "nginx:alpine",
+            "Essential": true,
+            "PortMappings": [{"ContainerPort": 80, "Protocol": "tcp"}]
+          }
+        ]
+      }
+    },
+    "Svc": {
+      "Type": "AWS::ECS::Service",
+      "Properties": {
+        "ServiceName": "cfn-svc",
+        "Cluster": {"Ref": "Cluster"},
+        "TaskDefinition": {"Ref": "TaskDef"},
+        "DesiredCount": 1,
+        "LaunchType": "FARGATE",
+        "PlatformVersion": "1.4.0",
+        "HealthCheckGracePeriodSeconds": 60,
+        "EnableECSManagedTags": true,
+        "EnableExecuteCommand": true,
+        "PropagateTags": "SERVICE",
+        "AvailabilityZoneRebalancing": "ENABLED",
+        "DeploymentConfiguration": {
+          "MinimumHealthyPercent": 50,
+          "MaximumPercent": 200
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "ClusterName": {"Value": {"Ref": "Cluster"}},
+    "ClusterArn": {"Value": {"Fn::GetAtt": ["Cluster", "Arn"]}},
+    "CpName": {"Value": {"Ref": "CP"}},
+    "CpArn": {"Value": {"Fn::GetAtt": ["CP", "Arn"]}},
+    "TaskDefArn": {"Value": {"Ref": "TaskDef"}},
+    "ServiceArn": {"Value": {"Fn::GetAtt": ["Svc", "ServiceArn"]}},
+    "ServiceName": {"Value": {"Fn::GetAtt": ["Svc", "Name"]}}
+  }
+}"#;
+
+const TEMPLATE_UPDATE: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Parameters": {
+    "Desired": {"Type": "Number", "Default": 3}
+  },
+  "Resources": {
+    "Cluster": {
+      "Type": "AWS::ECS::Cluster",
+      "Properties": {
+        "ClusterName": "cfn-ecs-cluster",
+        "ClusterSettings": [{"Name": "containerInsights", "Value": "disabled"}],
+        "ServiceConnectDefaults": {"Namespace": "cfn-ns-2"},
+        "Tags": [{"Key": "env", "Value": "prod"}]
+      }
+    },
+    "CP": {
+      "Type": "AWS::ECS::CapacityProvider",
+      "Properties": {
+        "Name": "cfn-cp",
+        "Tags": [{"Key": "tier", "Value": "compute"}]
       }
     },
     "TaskDef": {
@@ -45,21 +121,19 @@ const TEMPLATE: &str = r#"{
         "ServiceName": "cfn-svc",
         "Cluster": {"Ref": "Cluster"},
         "TaskDefinition": {"Ref": "TaskDef"},
-        "DesiredCount": 1,
+        "DesiredCount": {"Ref": "Desired"},
         "LaunchType": "FARGATE",
+        "PlatformVersion": "LATEST",
+        "HealthCheckGracePeriodSeconds": 120,
+        "EnableExecuteCommand": false,
         "DeploymentConfiguration": {
-          "MinimumHealthyPercent": 50,
+          "MinimumHealthyPercent": 100,
           "MaximumPercent": 200
         }
       }
     }
   },
   "Outputs": {
-    "ClusterName": {"Value": {"Ref": "Cluster"}},
-    "ClusterArn": {"Value": {"Fn::GetAtt": ["Cluster", "Arn"]}},
-    "CpName": {"Value": {"Ref": "CP"}},
-    "CpArn": {"Value": {"Fn::GetAtt": ["CP", "Arn"]}},
-    "TaskDefArn": {"Value": {"Ref": "TaskDef"}},
     "ServiceArn": {"Value": {"Fn::GetAtt": ["Svc", "ServiceArn"]}}
   }
 }"#;
@@ -135,11 +209,20 @@ async fn cfn_provisions_ecs_cluster_taskdef_service_capacity_provider() {
         .send()
         .await
         .expect("describe_services");
+    let svc = svcs.services().first().expect("service present");
+    assert_eq!(svc.service_name(), Some("cfn-svc"));
+    assert_eq!(svc.desired_count(), 1);
+    // CFN-only properties round-trip through DescribeServices.
+    assert_eq!(svc.platform_version(), Some("1.4.0"));
+    assert_eq!(svc.health_check_grace_period_seconds(), Some(60));
+    assert!(svc.enable_ecs_managed_tags());
+    assert!(svc.enable_execute_command());
+    assert_eq!(svc.propagate_tags().map(|p| p.as_str()), Some("SERVICE"));
     assert_eq!(
-        svcs.services().first().and_then(|s| s.service_name()),
-        Some("cfn-svc")
+        svc.availability_zone_rebalancing().map(|a| a.as_str()),
+        Some("ENABLED")
     );
-    assert_eq!(svcs.services().first().map(|s| s.desired_count()), Some(1));
+    assert_eq!(outs.get("ServiceName").map(|s| s.as_str()), Some("cfn-svc"));
 
     let td = ecs
         .describe_task_definition()
@@ -147,10 +230,81 @@ async fn cfn_provisions_ecs_cluster_taskdef_service_capacity_provider() {
         .send()
         .await
         .expect("describe_task_definition");
+    let td_inner = td.task_definition().expect("task definition present");
+    assert_eq!(td_inner.family(), Some("cfn-task"));
+    // EphemeralStorage round-trips.
     assert_eq!(
-        td.task_definition().and_then(|t| t.family()),
-        Some("cfn-task")
+        td_inner.ephemeral_storage().map(|e| e.size_in_gib()),
+        Some(30)
     );
+
+    // Cluster ServiceConnectDefaults round-trips.
+    let cluster = clusters.clusters().first().expect("cluster present");
+    let scd_namespace = cluster
+        .service_connect_defaults()
+        .map(|s| s.namespace().unwrap_or(""));
+    assert_eq!(scd_namespace, Some("cfn-ns"));
+
+    // --- UpdateStack: bumps desired count, swaps task definition. ---
+    cfn.update_stack()
+        .stack_name("ecs-stack")
+        .template_body(TEMPLATE_UPDATE)
+        .capabilities(Capability::CapabilityIam)
+        .parameters(
+            Parameter::builder()
+                .parameter_key("Desired")
+                .parameter_value("3")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("update_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("ecs-stack")
+        .send()
+        .await
+        .expect("describe_stacks after update");
+    let stack = described.stacks().first().expect("stack present");
+    assert_eq!(stack.stack_status().unwrap().as_str(), "UPDATE_COMPLETE");
+
+    let svcs = ecs
+        .describe_services()
+        .cluster("cfn-ecs-cluster")
+        .services("cfn-svc")
+        .send()
+        .await
+        .expect("describe_services after update");
+    let svc = svcs
+        .services()
+        .first()
+        .expect("service present after update");
+    assert_eq!(svc.desired_count(), 3);
+    assert_eq!(svc.platform_version(), Some("LATEST"));
+    assert_eq!(svc.health_check_grace_period_seconds(), Some(120));
+    assert!(!svc.enable_execute_command());
+    // TaskDefinition stayed at revision 1 across update.
+    assert!(svc.task_definition().unwrap().contains("cfn-task:1"));
+
+    // Cluster Tag was rewritten by update.
+    let after_clusters = ecs
+        .describe_clusters()
+        .clusters("cfn-ecs-cluster")
+        .include(aws_sdk_ecs::types::ClusterField::Tags)
+        .send()
+        .await
+        .expect("describe_clusters after update");
+    let after_cluster = after_clusters
+        .clusters()
+        .first()
+        .expect("cluster present after update");
+    let env_tag = after_cluster
+        .tags()
+        .iter()
+        .find(|t| t.key() == Some("env"))
+        .and_then(|t| t.value());
+    assert_eq!(env_tag, Some("prod"));
 
     cfn.delete_stack()
         .stack_name("ecs-stack")

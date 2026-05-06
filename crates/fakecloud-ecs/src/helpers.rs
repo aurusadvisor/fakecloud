@@ -847,11 +847,26 @@ pub(crate) fn service_to_json(svc: &Service) -> Value {
     }
     map.insert("createdAt".into(), json!(svc.created_at.timestamp()));
     // Always-present fields AWS returns; SDKs deserialize unconditionally.
-    map.insert("enableExecuteCommand".into(), json!(false));
-    map.insert("enableECSManagedTags".into(), json!(false));
-    map.insert("propagateTags".into(), json!("NONE"));
-    map.insert("healthCheckGracePeriodSeconds".into(), json!(0));
-    map.insert("platformVersion".into(), json!("LATEST"));
+    map.insert(
+        "enableExecuteCommand".into(),
+        json!(svc.enable_execute_command),
+    );
+    map.insert(
+        "enableECSManagedTags".into(),
+        json!(svc.enable_ecs_managed_tags),
+    );
+    map.insert(
+        "propagateTags".into(),
+        json!(svc.propagate_tags.as_deref().unwrap_or("NONE")),
+    );
+    map.insert(
+        "healthCheckGracePeriodSeconds".into(),
+        json!(svc.health_check_grace_period_seconds.unwrap_or(0)),
+    );
+    map.insert(
+        "platformVersion".into(),
+        json!(svc.platform_version.as_deref().unwrap_or("LATEST")),
+    );
     map.insert(
         "platformFamily".into(),
         match svc.launch_type.as_str() {
@@ -859,11 +874,20 @@ pub(crate) fn service_to_json(svc: &Service) -> Value {
             _ => Value::Null,
         },
     );
-    map.insert("availabilityZoneRebalancing".into(), json!("DISABLED"));
+    map.insert(
+        "availabilityZoneRebalancing".into(),
+        json!(svc
+            .availability_zone_rebalancing
+            .as_deref()
+            .unwrap_or("DISABLED")),
+    );
     map.insert("volumeConfigurations".into(), json!([]));
     map.insert("taskSets".into(), json!([]));
     map.insert("events".into(), json!([]));
-    map.insert("capacityProviderStrategy".into(), json!([]));
+    map.insert(
+        "capacityProviderStrategy".into(),
+        json!(svc.capacity_provider_strategy),
+    );
     if !svc.tags.is_empty() {
         map.insert(
             "tags".into(),
