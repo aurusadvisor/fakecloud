@@ -744,6 +744,35 @@ pub struct AuthEventsResponse {
     pub events: Vec<AuthEvent>,
 }
 
+/// Request body for the `/_fakecloud/cognito/authorization-codes` admin
+/// mint endpoint. Lets test harnesses (and any caller that wants to
+/// drive the `authorization_code` grant before the Y4 hosted-UI lands)
+/// pre-allocate the same `(client_id, redirect_uri, scopes, PKCE)`
+/// binding the real `/oauth2/authorize` endpoint will eventually
+/// produce.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MintAuthorizationCodeRequest {
+    pub user_pool_id: String,
+    pub client_id: String,
+    pub username: String,
+    pub redirect_uri: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_challenge: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_challenge_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MintAuthorizationCodeResponse {
+    pub code: String,
+}
+
 // ── API Gateway v2 ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

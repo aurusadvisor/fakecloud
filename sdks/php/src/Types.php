@@ -1008,6 +1008,57 @@ final class AuthEventsResponse
     }
 }
 
+/**
+ * Payload for `POST /_fakecloud/cognito/authorization-codes`. Lets
+ * test harnesses pre-allocate a single-use OAuth2 authorization code
+ * that the `/oauth2/token` `authorization_code` grant later consumes.
+ */
+final class MintAuthorizationCodeRequest
+{
+    public function __construct(
+        public readonly string $userPoolId,
+        public readonly string $clientId,
+        public readonly string $username,
+        public readonly string $redirectUri,
+        /** @var string[] */
+        public readonly array $scopes = [],
+        public readonly ?string $codeChallenge = null,
+        public readonly ?string $codeChallengeMethod = null,
+        public readonly ?string $nonce = null,
+    ) {}
+
+    public function toArray(): array
+    {
+        $out = [
+            'userPoolId' => $this->userPoolId,
+            'clientId' => $this->clientId,
+            'username' => $this->username,
+            'redirectUri' => $this->redirectUri,
+            'scopes' => $this->scopes,
+        ];
+        if ($this->codeChallenge !== null) {
+            $out['codeChallenge'] = $this->codeChallenge;
+        }
+        if ($this->codeChallengeMethod !== null) {
+            $out['codeChallengeMethod'] = $this->codeChallengeMethod;
+        }
+        if ($this->nonce !== null) {
+            $out['nonce'] = $this->nonce;
+        }
+        return $out;
+    }
+}
+
+final class MintAuthorizationCodeResponse
+{
+    public function __construct(public readonly string $code) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['code']);
+    }
+}
+
 // ── Step Functions ─────────────────────────────────────────────
 
 final class StepFunctionsExecution

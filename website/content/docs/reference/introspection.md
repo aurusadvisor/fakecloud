@@ -112,6 +112,7 @@ curl http://localhost:4566/_fakecloud/health
 | `/_fakecloud/cognito/tokens`                                  | GET    | List all active tokens (without exposing strings). |
 | `/_fakecloud/cognito/expire-tokens`                           | POST   | Expire tokens for a pool/user. |
 | `/_fakecloud/cognito/auth-events`                             | GET    | List auth events (signup, signin, failures). |
+| `/_fakecloud/cognito/authorization-codes`                     | POST   | Mint a single-use OAuth2 authorization code for the `authorization_code` grant. Test-only equivalent of `/oauth2/authorize`. |
 
 ## Step Functions
 

@@ -47,6 +47,8 @@ import type {
   ExpireTokensRequest,
   ExpireTokensResponse,
   AuthEventsResponse,
+  MintAuthorizationCodeRequest,
+  MintAuthorizationCodeResponse,
   StepFunctionsExecutionsResponse,
   EcsClustersResponse,
   Elbv2LoadBalancersResponse,
@@ -365,6 +367,20 @@ export class CognitoClient {
 
   async getAuthEvents(): Promise<AuthEventsResponse> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/cognito/auth-events`);
+    return parse(resp);
+  }
+
+  async mintAuthorizationCode(
+    req: MintAuthorizationCodeRequest,
+  ): Promise<MintAuthorizationCodeResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/cognito/authorization-codes`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
     return parse(resp);
   }
 }

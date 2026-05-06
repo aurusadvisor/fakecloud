@@ -51,6 +51,8 @@ from fakecloud.types import (
     InboundEmailResponse,
     LambdaInvocationsResponse,
     LifecycleTickResponse,
+    MintAuthorizationCodeRequest,
+    MintAuthorizationCodeResponse,
     PendingConfirmationsResponse,
     RdsInstancesResponse,
     ResetResponse,
@@ -719,6 +721,16 @@ class CognitoClient:
         _check(resp)
         return AuthEventsResponse.from_dict(resp.json())
 
+    async def mint_authorization_code(
+        self, req: MintAuthorizationCodeRequest
+    ) -> MintAuthorizationCodeResponse:
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/cognito/authorization-codes",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return MintAuthorizationCodeResponse.from_dict(resp.json())
+
 
 class ApiGatewayV2Client:
     """Async API Gateway v2 introspection client."""
@@ -1061,6 +1073,16 @@ class _SyncCognitoClient:
         resp = self._client.get(f"{self._base}/_fakecloud/cognito/auth-events")
         _check(resp)
         return AuthEventsResponse.from_dict(resp.json())
+
+    def mint_authorization_code(
+        self, req: MintAuthorizationCodeRequest
+    ) -> MintAuthorizationCodeResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/cognito/authorization-codes",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return MintAuthorizationCodeResponse.from_dict(resp.json())
 
 
 class _SyncApiGatewayV2Client:

@@ -878,6 +878,51 @@ class AuthEventsResponse:
         )
 
 
+@dataclass
+class MintAuthorizationCodeRequest:
+    """Payload for `POST /_fakecloud/cognito/authorization-codes`.
+
+    Lets test harnesses pre-allocate a single-use OAuth2 authorization
+    code that the `/oauth2/token` `authorization_code` grant will
+    later consume.
+    """
+
+    user_pool_id: str
+    client_id: str
+    username: str
+    redirect_uri: str
+    scopes: Optional[List[str]] = None
+    code_challenge: Optional[str] = None
+    code_challenge_method: Optional[str] = None
+    nonce: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "userPoolId": self.user_pool_id,
+            "clientId": self.client_id,
+            "username": self.username,
+            "redirectUri": self.redirect_uri,
+        }
+        if self.scopes is not None:
+            out["scopes"] = self.scopes
+        if self.code_challenge is not None:
+            out["codeChallenge"] = self.code_challenge
+        if self.code_challenge_method is not None:
+            out["codeChallengeMethod"] = self.code_challenge_method
+        if self.nonce is not None:
+            out["nonce"] = self.nonce
+        return out
+
+
+@dataclass
+class MintAuthorizationCodeResponse:
+    code: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> MintAuthorizationCodeResponse:
+        return cls(code=data["code"])
+
+
 # ── Step Functions ──────────────────────────────────────────────────
 
 

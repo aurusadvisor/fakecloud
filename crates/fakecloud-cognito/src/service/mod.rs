@@ -1537,6 +1537,26 @@ fn generate_tokens(
     region: &str,
     signing: Option<(&str, &str)>,
 ) -> TokenSet {
+    generate_tokens_with_scope(
+        pool_id, client_id, sub, username, region, signing, None, None,
+    )
+}
+
+/// Like [`generate_tokens`] but lets callers stamp custom `scope` and
+/// `nonce` claims into the issued tokens — used by the
+/// `authorization_code` grant which carries the scopes and nonce the
+/// user originally consented to at `/oauth2/authorize`.
+#[allow(clippy::too_many_arguments)]
+fn generate_tokens_with_scope(
+    pool_id: &str,
+    client_id: &str,
+    sub: &str,
+    username: &str,
+    region: &str,
+    signing: Option<(&str, &str)>,
+    scope: Option<&str>,
+    nonce: Option<&str>,
+) -> TokenSet {
     let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
@@ -1552,7 +1572,7 @@ fn generate_tokens(
     let kid = owned_signing.1.as_str();
 
     let id_header = json!({"kid": kid, "alg": "RS256", "typ": "JWT"});
-    let id_payload = json!({
+    let mut id_payload = json!({
         "sub": sub,
         "iss": iss,
         "aud": client_id,
@@ -1563,16 +1583,25 @@ fn generate_tokens(
         "iat": now,
         "jti": jti,
     });
+    if let Some(n) = nonce {
+        id_payload
+            .as_object_mut()
+            .expect("id_payload is always a JSON object")
+            .insert("nonce".to_string(), Value::String(n.to_string()));
+    }
     let id_token = sign_jwt(&id_header, &id_payload, pem);
 
     let access_jti = Uuid::new_v4().to_string();
     let access_header = json!({"kid": kid, "alg": "RS256", "typ": "JWT"});
+    let access_scope = scope
+        .filter(|s| !s.is_empty())
+        .unwrap_or("aws.cognito.signin.user.admin");
     let access_payload = json!({
         "sub": sub,
         "iss": iss,
         "client_id": client_id,
         "token_use": "access",
-        "scope": "aws.cognito.signin.user.admin",
+        "scope": access_scope,
         "jti": access_jti,
         "exp": now + 3600,
         "iat": now,
@@ -1784,6 +1813,12 @@ pub enum OAuthTokenError {
     UnsupportedGrantType,
     InvalidClient,
     InvalidGrant,
+    /// The client is recognised but isn't allowed to use the requested
+    /// grant_type (RFC 6749 §5.2).
+    UnauthorizedClient,
+    /// The requested `scope` is not a subset of what the client is
+    /// allowed (RFC 6749 §5.2).
+    InvalidScope,
 }
 
 impl OAuthTokenError {
@@ -1800,6 +1835,8 @@ impl OAuthTokenError {
             OAuthTokenError::UnsupportedGrantType => "unsupported_grant_type",
             OAuthTokenError::InvalidClient => "invalid_client",
             OAuthTokenError::InvalidGrant => "invalid_grant",
+            OAuthTokenError::UnauthorizedClient => "unauthorized_client",
+            OAuthTokenError::InvalidScope => "invalid_scope",
         }
     }
 
@@ -1837,150 +1874,443 @@ impl OAuthTokenResponse {
     }
 }
 
-/// Handle a Cognito `/oauth2/token` POST. Implements the
-/// `refresh_token` and `client_credentials` grants. The
-/// `authorization_code` grant lands in Y4 alongside the
-/// `/oauth2/authorize` endpoint.
+/// Handle a Cognito `/oauth2/token` POST. Implements all three Cognito
+/// Hosted-UI grants — `authorization_code`, `client_credentials`, and
+/// `refresh_token` — with optional HTTP Basic client authentication
+/// (RFC 6749 §2.3.1) layered on top of form-body credentials.
 ///
 /// `params` is the form-decoded body (Cognito uses
-/// `application/x-www-form-urlencoded`). `region` is the AWS region
-/// for `iss` claim composition.
+/// `application/x-www-form-urlencoded`). `basic_auth` is the optional
+/// `(client_id, client_secret)` parsed from a `Authorization: Basic …`
+/// header — when both that header and a form `client_secret`/`client_id`
+/// are present, AWS treats the Basic header as authoritative and fails
+/// on conflict; we follow the same rule here.
+/// `region` is the AWS region used for the JWT `iss` claim.
 pub async fn handle_oauth2_token(
     state: &SharedCognitoState,
     params: &BTreeMap<String, String>,
+    basic_auth: Option<(&str, &str)>,
     region: &str,
 ) -> Result<OAuthTokenResponse, OAuthTokenError> {
     let grant_type = params
         .get("grant_type")
         .map(String::as_str)
         .ok_or(OAuthTokenError::InvalidRequest("grant_type is required"))?;
-    let client_id = params
-        .get("client_id")
-        .map(String::as_str)
-        .ok_or(OAuthTokenError::InvalidRequest("client_id is required"))?;
 
-    let (pool_id, stored_secret) = {
+    // Per RFC 6749 §2.3.1 a single client MUST NOT use more than one
+    // authentication mechanism in the same request. When a Basic
+    // header is supplied AND a form `client_id`/`client_secret`, both
+    // must point to the same client and same secret — anything else
+    // is an `invalid_client`.
+    let form_client_id = params.get("client_id").map(String::as_str);
+    let form_client_secret = params.get("client_secret").map(String::as_str);
+    let client_id = match (basic_auth, form_client_id) {
+        (Some((b_id, _)), Some(f_id)) if b_id != f_id => {
+            return Err(OAuthTokenError::InvalidClient);
+        }
+        (Some((b_id, _)), _) => b_id,
+        (None, Some(f_id)) => f_id,
+        (None, None) => {
+            return Err(OAuthTokenError::InvalidRequest("client_id is required"));
+        }
+    };
+    let supplied_secret = match (basic_auth, form_client_secret) {
+        (Some((_, b_sec)), Some(f_sec)) if b_sec != f_sec => {
+            return Err(OAuthTokenError::InvalidClient);
+        }
+        (Some((_, b_sec)), _) => Some(b_sec),
+        (None, Some(f_sec)) => Some(f_sec),
+        (None, None) => None,
+    };
+
+    let (pool_id, stored_secret, allowed_flows, allowed_scopes, oauth_flows_enabled) = {
         let mas = state.read();
         let mut found = None;
         for (_, account) in mas.iter() {
             if let Some(client) = account.user_pool_clients.get(client_id) {
-                found = Some((client.user_pool_id.clone(), client.client_secret.clone()));
+                found = Some((
+                    client.user_pool_id.clone(),
+                    client.client_secret.clone(),
+                    client.allowed_o_auth_flows.clone(),
+                    client.allowed_o_auth_scopes.clone(),
+                    client.allowed_o_auth_flows_user_pool_client,
+                ));
                 break;
             }
         }
         found.ok_or(OAuthTokenError::InvalidClient)?
     };
 
+    // SECRET_HASH equivalence: when an app client has a secret the
+    // request MUST present it (Basic header or `client_secret` form
+    // field). RFC 6749 §2.3.1.
     if let Some(secret) = stored_secret.as_ref() {
-        let supplied = params.get("client_secret").map(String::as_str);
-        if supplied != Some(secret.as_str()) {
+        if supplied_secret != Some(secret.as_str()) {
             return Err(OAuthTokenError::InvalidClient);
         }
     }
 
     match grant_type {
+        "authorization_code" => {
+            handle_authorization_code_grant(
+                state,
+                params,
+                client_id,
+                &pool_id,
+                &allowed_flows,
+                oauth_flows_enabled,
+                region,
+            )
+            .await
+        }
         "refresh_token" => {
-            let refresh_token = params
-                .get("refresh_token")
-                .map(String::as_str)
-                .ok_or(OAuthTokenError::InvalidRequest("refresh_token is required"))?;
-            let (username, sub) = {
-                let mas = state.read();
-                let mut found = Err(OAuthTokenError::InvalidGrant);
-                for (_, account) in mas.iter() {
-                    if let Some(rt) = account.refresh_tokens.get(refresh_token) {
-                        if rt.client_id != client_id {
-                            found = Err(OAuthTokenError::InvalidGrant);
-                            break;
-                        }
-                        let sub = account
-                            .users
-                            .get(&rt.user_pool_id)
-                            .and_then(|users| users.get(&rt.username))
-                            .map(|u| u.sub.clone())
-                            .unwrap_or_default();
-                        found = Ok((rt.username.clone(), sub));
-                        break;
+            handle_refresh_token_grant(state, params, client_id, &pool_id, region).await
+        }
+        "client_credentials" => {
+            handle_client_credentials_grant(
+                state,
+                params,
+                client_id,
+                &pool_id,
+                stored_secret.as_deref(),
+                &allowed_flows,
+                &allowed_scopes,
+                oauth_flows_enabled,
+                region,
+            )
+            .await
+        }
+        _ => Err(OAuthTokenError::UnsupportedGrantType),
+    }
+}
+
+async fn handle_authorization_code_grant(
+    state: &SharedCognitoState,
+    params: &BTreeMap<String, String>,
+    client_id: &str,
+    pool_id: &str,
+    allowed_flows: &[String],
+    oauth_flows_enabled: bool,
+    region: &str,
+) -> Result<OAuthTokenResponse, OAuthTokenError> {
+    // Cognito only accepts authorization_code on app clients that have
+    // explicitly opted into Hosted-UI OAuth flows. When the client
+    // declares any flows at all, `code` must be on the list.
+    if oauth_flows_enabled
+        && !allowed_flows.is_empty()
+        && !allowed_flows.iter().any(|f| f.eq_ignore_ascii_case("code"))
+    {
+        return Err(OAuthTokenError::UnauthorizedClient);
+    }
+    let code = params
+        .get("code")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or(OAuthTokenError::InvalidRequest("code is required"))?;
+    let redirect_uri = params
+        .get("redirect_uri")
+        .map(String::as_str)
+        .ok_or(OAuthTokenError::InvalidRequest("redirect_uri is required"))?;
+    let code_verifier = params.get("code_verifier").map(String::as_str);
+
+    let consumed = {
+        let mut mas = state.write();
+        let mut found: Option<crate::state::AuthorizationCodeData> = None;
+        for (_, account) in mas.iter_mut() {
+            if let Some(stored) = account.authorization_codes.get(code).cloned() {
+                if stored.client_id != client_id || stored.user_pool_id != pool_id {
+                    return Err(OAuthTokenError::InvalidGrant);
+                }
+                if stored.redirect_uri != redirect_uri {
+                    return Err(OAuthTokenError::InvalidGrant);
+                }
+                // Codes expire after 5 minutes per Cognito docs.
+                let age = Utc::now()
+                    .signed_duration_since(stored.issued_at)
+                    .num_seconds();
+                if age > 300 {
+                    account.authorization_codes.remove(code);
+                    return Err(OAuthTokenError::InvalidGrant);
+                }
+                if let Some(challenge) = stored.code_challenge.as_deref() {
+                    let verifier = code_verifier.ok_or(OAuthTokenError::InvalidGrant)?;
+                    if !verify_pkce(challenge, stored.code_challenge_method.as_deref(), verifier) {
+                        return Err(OAuthTokenError::InvalidGrant);
                     }
                 }
-                found?
-            };
-            let signing = ensure_pool_signing_key(state, &pool_id).await;
-            let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
-            let tokens = generate_tokens(&pool_id, client_id, &sub, &username, region, signing_ref);
-            let rotated_refresh = {
-                let mut mas = state.write();
-                let mut new_rt = None;
-                for (_, account) in mas.iter_mut() {
-                    if !account.user_pool_clients.contains_key(client_id) {
-                        continue;
-                    }
-                    let rotation_enabled = account
-                        .user_pool_clients
-                        .get(client_id)
-                        .and_then(|c| c.refresh_token_rotation.as_ref())
-                        .map(|r| r.feature.eq_ignore_ascii_case("ENABLED"))
-                        .unwrap_or(false);
-                    if rotation_enabled {
-                        if let Some(old) = account.refresh_tokens.get(refresh_token).cloned() {
-                            let token = format!("rt-{}", Uuid::new_v4());
-                            account.refresh_tokens.insert(
-                                token.clone(),
-                                crate::state::RefreshTokenData {
-                                    user_pool_id: old.user_pool_id,
-                                    username: old.username,
-                                    client_id: old.client_id,
-                                    issued_at: Utc::now(),
-                                },
-                            );
-                            account.refresh_tokens.remove(refresh_token);
-                            new_rt = Some(token);
-                        }
-                    }
-                    account.access_tokens.insert(
-                        tokens.access_token.clone(),
-                        crate::state::AccessTokenData {
-                            user_pool_id: pool_id.clone(),
-                            username: username.clone(),
-                            client_id: client_id.to_string(),
+                // Single-use: remove on consumption.
+                account.authorization_codes.remove(code);
+                found = Some(stored);
+                break;
+            }
+        }
+        found.ok_or(OAuthTokenError::InvalidGrant)?
+    };
+
+    let sub = {
+        let mas = state.read();
+        let mut sub = String::new();
+        for (_, account) in mas.iter() {
+            if let Some(user) = account
+                .users
+                .get(&consumed.user_pool_id)
+                .and_then(|users| users.get(&consumed.username))
+            {
+                sub = user.sub.clone();
+                break;
+            }
+        }
+        sub
+    };
+
+    let signing = ensure_pool_signing_key(state, pool_id).await;
+    let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
+    let scope_str = if consumed.scopes.is_empty() {
+        None
+    } else {
+        Some(consumed.scopes.join(" "))
+    };
+    let tokens = generate_tokens_with_scope(
+        pool_id,
+        client_id,
+        &sub,
+        &consumed.username,
+        region,
+        signing_ref,
+        scope_str.as_deref(),
+        consumed.nonce.as_deref(),
+    );
+
+    {
+        let mut mas = state.write();
+        for (_, account) in mas.iter_mut() {
+            if !account.user_pool_clients.contains_key(client_id) {
+                continue;
+            }
+            account.refresh_tokens.insert(
+                tokens.refresh_token.clone(),
+                crate::state::RefreshTokenData {
+                    user_pool_id: pool_id.to_string(),
+                    username: consumed.username.clone(),
+                    client_id: client_id.to_string(),
+                    issued_at: Utc::now(),
+                },
+            );
+            account.access_tokens.insert(
+                tokens.access_token.clone(),
+                crate::state::AccessTokenData {
+                    user_pool_id: pool_id.to_string(),
+                    username: consumed.username.clone(),
+                    client_id: client_id.to_string(),
+                    issued_at: Utc::now(),
+                },
+            );
+            break;
+        }
+    }
+
+    Ok(OAuthTokenResponse {
+        access_token: tokens.access_token,
+        id_token: Some(tokens.id_token),
+        refresh_token: Some(tokens.refresh_token),
+        expires_in: 3600,
+        token_type: "Bearer".to_string(),
+    })
+}
+
+async fn handle_refresh_token_grant(
+    state: &SharedCognitoState,
+    params: &BTreeMap<String, String>,
+    client_id: &str,
+    pool_id: &str,
+    region: &str,
+) -> Result<OAuthTokenResponse, OAuthTokenError> {
+    let refresh_token = params
+        .get("refresh_token")
+        .map(String::as_str)
+        .ok_or(OAuthTokenError::InvalidRequest("refresh_token is required"))?;
+    let (username, sub) = {
+        let mas = state.read();
+        let mut found = Err(OAuthTokenError::InvalidGrant);
+        for (_, account) in mas.iter() {
+            if let Some(rt) = account.refresh_tokens.get(refresh_token) {
+                if rt.client_id != client_id {
+                    found = Err(OAuthTokenError::InvalidGrant);
+                    break;
+                }
+                let sub = account
+                    .users
+                    .get(&rt.user_pool_id)
+                    .and_then(|users| users.get(&rt.username))
+                    .map(|u| u.sub.clone())
+                    .unwrap_or_default();
+                found = Ok((rt.username.clone(), sub));
+                break;
+            }
+        }
+        found?
+    };
+    let signing = ensure_pool_signing_key(state, pool_id).await;
+    let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
+    let tokens = generate_tokens(pool_id, client_id, &sub, &username, region, signing_ref);
+    let rotated_refresh = {
+        let mut mas = state.write();
+        let mut new_rt = None;
+        for (_, account) in mas.iter_mut() {
+            if !account.user_pool_clients.contains_key(client_id) {
+                continue;
+            }
+            let rotation_enabled = account
+                .user_pool_clients
+                .get(client_id)
+                .and_then(|c| c.refresh_token_rotation.as_ref())
+                .map(|r| r.feature.eq_ignore_ascii_case("ENABLED"))
+                .unwrap_or(false);
+            if rotation_enabled {
+                if let Some(old) = account.refresh_tokens.get(refresh_token).cloned() {
+                    let token = format!("rt-{}", Uuid::new_v4());
+                    account.refresh_tokens.insert(
+                        token.clone(),
+                        crate::state::RefreshTokenData {
+                            user_pool_id: old.user_pool_id,
+                            username: old.username,
+                            client_id: old.client_id,
                             issued_at: Utc::now(),
                         },
                     );
-                    break;
+                    account.refresh_tokens.remove(refresh_token);
+                    new_rt = Some(token);
                 }
-                new_rt
-            };
-            Ok(OAuthTokenResponse {
-                access_token: tokens.access_token,
-                id_token: Some(tokens.id_token),
-                refresh_token: rotated_refresh,
-                expires_in: 3600,
-                token_type: "Bearer".to_string(),
-            })
-        }
-        "client_credentials" => {
-            // Machine-to-machine: just an access token, no id_token,
-            // no refresh_token. `sub` is the client_id per OIDC core.
-            let signing = ensure_pool_signing_key(state, &pool_id).await;
-            let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
-            let scope = params.get("scope").cloned();
-            let access_token = build_client_credentials_access_token(
-                &pool_id,
-                client_id,
-                scope.as_deref(),
-                region,
-                signing_ref,
+            }
+            account.access_tokens.insert(
+                tokens.access_token.clone(),
+                crate::state::AccessTokenData {
+                    user_pool_id: pool_id.to_string(),
+                    username: username.clone(),
+                    client_id: client_id.to_string(),
+                    issued_at: Utc::now(),
+                },
             );
-            Ok(OAuthTokenResponse {
-                access_token,
-                id_token: None,
-                refresh_token: None,
-                expires_in: 3600,
-                token_type: "Bearer".to_string(),
-            })
+            break;
         }
-        "authorization_code" => Err(OAuthTokenError::UnsupportedGrantType),
-        _ => Err(OAuthTokenError::UnsupportedGrantType),
+        new_rt
+    };
+    Ok(OAuthTokenResponse {
+        access_token: tokens.access_token,
+        id_token: Some(tokens.id_token),
+        refresh_token: rotated_refresh,
+        expires_in: 3600,
+        token_type: "Bearer".to_string(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_client_credentials_grant(
+    state: &SharedCognitoState,
+    params: &BTreeMap<String, String>,
+    client_id: &str,
+    pool_id: &str,
+    stored_secret: Option<&str>,
+    allowed_flows: &[String],
+    allowed_scopes: &[String],
+    oauth_flows_enabled: bool,
+    region: &str,
+) -> Result<OAuthTokenResponse, OAuthTokenError> {
+    // client_credentials demands a confidential client (always has a
+    // secret) and an explicit `client_credentials` flow allowance.
+    if stored_secret.is_none() {
+        return Err(OAuthTokenError::InvalidClient);
+    }
+    if oauth_flows_enabled
+        && !allowed_flows.is_empty()
+        && !allowed_flows
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("client_credentials"))
+    {
+        return Err(OAuthTokenError::UnauthorizedClient);
+    }
+
+    // Per RFC 6749 §3.3 the requested scope MUST be a subset of what
+    // the client is allowed to use; AWS Cognito enforces this against
+    // resource-server scopes registered on the pool.
+    let requested = params
+        .get("scope")
+        .map(String::as_str)
+        .unwrap_or("")
+        .split_whitespace()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    if !requested.is_empty() && !allowed_scopes.is_empty() {
+        for scope in &requested {
+            if !allowed_scopes.iter().any(|s| s == scope) {
+                return Err(OAuthTokenError::InvalidScope);
+            }
+        }
+    }
+    let granted = if requested.is_empty() {
+        allowed_scopes.join(" ")
+    } else {
+        requested.join(" ")
+    };
+
+    let signing = ensure_pool_signing_key(state, pool_id).await;
+    let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
+    let access_token = build_client_credentials_access_token(
+        pool_id,
+        client_id,
+        Some(&granted),
+        region,
+        signing_ref,
+    );
+
+    {
+        let mut mas = state.write();
+        for (_, account) in mas.iter_mut() {
+            if !account.user_pool_clients.contains_key(client_id) {
+                continue;
+            }
+            // client_credentials access tokens have no associated
+            // user; record `username = client_id` so revoke/userInfo
+            // can still resolve the token owner.
+            account.access_tokens.insert(
+                access_token.clone(),
+                crate::state::AccessTokenData {
+                    user_pool_id: pool_id.to_string(),
+                    username: client_id.to_string(),
+                    client_id: client_id.to_string(),
+                    issued_at: Utc::now(),
+                },
+            );
+            break;
+        }
+    }
+
+    Ok(OAuthTokenResponse {
+        access_token,
+        id_token: None,
+        refresh_token: None,
+        expires_in: 3600,
+        token_type: "Bearer".to_string(),
+    })
+}
+
+/// Verify a PKCE `code_verifier` against the stored `code_challenge`
+/// and `code_challenge_method`. Implements RFC 7636 §4.6 — only
+/// `S256` and `plain` are recognised; an unknown method is treated
+/// as a verification failure rather than silently downgrading.
+fn verify_pkce(challenge: &str, method: Option<&str>, verifier: &str) -> bool {
+    let method = method.unwrap_or("S256");
+    match method {
+        "plain" => challenge == verifier,
+        "S256" => {
+            use rsa::sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(verifier.as_bytes());
+            let digest = hasher.finalize();
+            let computed = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+            challenge == computed
+        }
+        _ => false,
     }
 }
 
@@ -2125,6 +2455,91 @@ pub fn handle_oauth2_revoke(
         }
     }
     Ok(())
+}
+
+/// Inputs accepted by [`mint_authorization_code`]. Mirrors the
+/// authorization-code request shape from RFC 6749 §4.1.1: the values
+/// the user agent originally sent to `/oauth2/authorize`. Y4 will fill
+/// these in from the consent flow; for now it's used by the admin
+/// `/_fakecloud/cognito/authorization-codes` endpoint and by tests.
+#[derive(Debug, Clone)]
+pub struct MintAuthorizationCodeRequest {
+    pub user_pool_id: String,
+    pub client_id: String,
+    pub username: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+    pub code_challenge: Option<String>,
+    pub code_challenge_method: Option<String>,
+    pub nonce: Option<String>,
+}
+
+/// Validation failures from [`mint_authorization_code`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MintAuthorizationCodeError {
+    /// `client_id` doesn't exist in any pool, or the supplied
+    /// `user_pool_id` doesn't match the client's pool.
+    InvalidClient,
+    /// `redirect_uri` isn't one of the client's registered
+    /// `callback_urls`.
+    InvalidRedirectUri,
+    /// User isn't enrolled in the pool.
+    UserNotFound,
+}
+
+/// Issue a single-use authorization code and store it in pool state so
+/// the next `/oauth2/token` `authorization_code` POST can consume it.
+/// Returns the opaque code string.
+///
+/// Validates the request the same way real Cognito does at
+/// `/oauth2/authorize`: client must exist, `user_pool_id` must match,
+/// `redirect_uri` must be one of the client's registered callback URLs,
+/// and the user must exist in the pool.
+pub fn mint_authorization_code(
+    state: &SharedCognitoState,
+    req: &MintAuthorizationCodeRequest,
+) -> Result<String, MintAuthorizationCodeError> {
+    let mut mas = state.write();
+    for (_, account) in mas.iter_mut() {
+        let Some(client) = account.user_pool_clients.get(&req.client_id) else {
+            continue;
+        };
+        if client.user_pool_id != req.user_pool_id {
+            return Err(MintAuthorizationCodeError::InvalidClient);
+        }
+        // AWS allows callback_urls to be empty during early dev, so we
+        // only enforce the match when at least one URL is registered.
+        if !client.callback_urls.is_empty()
+            && !client.callback_urls.iter().any(|u| u == &req.redirect_uri)
+        {
+            return Err(MintAuthorizationCodeError::InvalidRedirectUri);
+        }
+        let user_exists = account
+            .users
+            .get(&req.user_pool_id)
+            .map(|users| users.contains_key(&req.username))
+            .unwrap_or(false);
+        if !user_exists {
+            return Err(MintAuthorizationCodeError::UserNotFound);
+        }
+        let code = format!("ac-{}", Uuid::new_v4());
+        account.authorization_codes.insert(
+            code.clone(),
+            crate::state::AuthorizationCodeData {
+                user_pool_id: req.user_pool_id.clone(),
+                client_id: req.client_id.clone(),
+                username: req.username.clone(),
+                redirect_uri: req.redirect_uri.clone(),
+                scopes: req.scopes.clone(),
+                code_challenge: req.code_challenge.clone(),
+                code_challenge_method: req.code_challenge_method.clone(),
+                nonce: req.nonce.clone(),
+                issued_at: Utc::now(),
+            },
+        );
+        return Ok(code);
+    }
+    Err(MintAuthorizationCodeError::InvalidClient)
 }
 
 #[cfg(test)]

@@ -105,3 +105,14 @@ func (c *CognitoClient) GetAuthEvents(ctx context.Context) (*AuthEventsResponse,
 	}
 	return &out, nil
 }
+
+// MintAuthorizationCode mints a single-use OAuth2 authorization code
+// that the /oauth2/token authorization_code grant can later redeem.
+// Test-only equivalent of /oauth2/authorize.
+func (c *CognitoClient) MintAuthorizationCode(ctx context.Context, req *MintAuthorizationCodeRequest) (*MintAuthorizationCodeResponse, error) {
+	var out MintAuthorizationCodeResponse
+	if err := c.fc.doPost(ctx, "/_fakecloud/cognito/authorization-codes", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

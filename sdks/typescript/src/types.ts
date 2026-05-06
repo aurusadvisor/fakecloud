@@ -364,6 +364,26 @@ export interface AuthEventsResponse {
   events: AuthEvent[];
 }
 
+/**
+ * Payload for `POST /_fakecloud/cognito/authorization-codes`. Lets
+ * test harnesses pre-allocate a single-use OAuth2 authorization code
+ * that the `/oauth2/token` `authorization_code` grant later consumes.
+ */
+export interface MintAuthorizationCodeRequest {
+  userPoolId: string;
+  clientId: string;
+  username: string;
+  redirectUri: string;
+  scopes?: string[];
+  codeChallenge?: string;
+  codeChallengeMethod?: string;
+  nonce?: string;
+}
+
+export interface MintAuthorizationCodeResponse {
+  code: string;
+}
+
 // ── Step Functions ────────────────────────────────────────────────
 
 export interface StepFunctionsExecution {
