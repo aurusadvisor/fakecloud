@@ -395,6 +395,7 @@ mod tests {
             template_name: None,
             template_data: None,
             dkim_signature: None,
+            headers: Vec::new(),
             timestamp: Utc::now(),
         };
         let event = build_ses_event(SesEventType::Send, &email);
@@ -419,6 +420,7 @@ mod tests {
             template_name: None,
             template_data: None,
             dkim_signature: None,
+            headers: Vec::new(),
             timestamp: Utc::now(),
         };
         let event = build_ses_event(SesEventType::Bounce, &email);
@@ -442,6 +444,7 @@ mod tests {
             template_name: None,
             template_data: None,
             dkim_signature: None,
+            headers: Vec::new(),
             timestamp: Utc::now(),
         };
         let event = build_ses_event(SesEventType::Delivery, &email);
@@ -465,6 +468,7 @@ mod tests {
             template_name: None,
             template_data: None,
             dkim_signature: None,
+            headers: Vec::new(),
             timestamp: Utc::now(),
         };
         let event = build_ses_event(SesEventType::Complaint, &email);

@@ -136,18 +136,20 @@ type EvictContainerResponse struct {
 
 // SentEmail represents an email captured by the SES emulator.
 type SentEmail struct {
-	MessageID    string   `json:"messageId"`
-	From         string   `json:"from"`
-	To           []string `json:"to"`
-	CC           []string `json:"cc"`
-	BCC          []string `json:"bcc"`
-	Subject      *string  `json:"subject,omitempty"`
-	HTMLBody     *string  `json:"htmlBody,omitempty"`
-	TextBody     *string  `json:"textBody,omitempty"`
-	RawData      *string  `json:"rawData,omitempty"`
-	TemplateName *string  `json:"templateName,omitempty"`
-	TemplateData *string  `json:"templateData,omitempty"`
-	Timestamp    string   `json:"timestamp"`
+	MessageID     string      `json:"messageId"`
+	From          string      `json:"from"`
+	To            []string    `json:"to"`
+	CC            []string    `json:"cc"`
+	BCC           []string    `json:"bcc"`
+	Subject       *string     `json:"subject,omitempty"`
+	HTMLBody      *string     `json:"htmlBody,omitempty"`
+	TextBody      *string     `json:"textBody,omitempty"`
+	RawData       *string     `json:"rawData,omitempty"`
+	TemplateName  *string     `json:"templateName,omitempty"`
+	TemplateData  *string     `json:"templateData,omitempty"`
+	DKIMSignature *string     `json:"dkimSignature,omitempty"`
+	Headers       [][2]string `json:"headers,omitempty"`
+	Timestamp     string      `json:"timestamp"`
 }
 
 // SESEmailsResponse contains all sent emails.

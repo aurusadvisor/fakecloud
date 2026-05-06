@@ -90,10 +90,14 @@ impl SesV2Service {
         super::templates::render_template(template, data_str)
     }
 
-    fn compute_dkim_signature(&self, account_id: &str, sent: &SentEmail) -> Option<String> {
+    fn compute_dkim_signature(
+        &self,
+        account_id: &str,
+        sent: &SentEmail,
+    ) -> Option<(String, Vec<(String, String)>)> {
         let accounts = self.state.read();
         let state = accounts.get(account_id)?;
-        crate::dkim::signature_for_sent_email(state, sent)
+        crate::dkim::signed_headers_for_sent_email(state, sent)
     }
 
     /// Reject the send if either account-level sending or the resolved
@@ -355,13 +359,18 @@ impl SesV2Service {
             template_name,
             template_data,
             dkim_signature: None,
+            headers: Vec::new(),
             timestamp: Utc::now(),
         };
 
-        let dkim_signature = self.compute_dkim_signature(&req.account_id, &sent);
-        let sent = SentEmail {
-            dkim_signature,
-            ..sent
+        let signed = self.compute_dkim_signature(&req.account_id, &sent);
+        let sent = match signed {
+            Some((sig, hdrs)) => SentEmail {
+                dkim_signature: Some(sig),
+                headers: hdrs,
+                ..sent
+            },
+            None => sent,
         };
 
         // Event fanout: check suppression list, generate events, deliver to destinations
@@ -497,12 +506,17 @@ impl SesV2Service {
                 template_name,
                 template_data,
                 dkim_signature: None,
+                headers: Vec::new(),
                 timestamp: Utc::now(),
             };
-            let dkim_signature = self.compute_dkim_signature(&req.account_id, &sent);
-            let sent = SentEmail {
-                dkim_signature,
-                ..sent
+            let signed = self.compute_dkim_signature(&req.account_id, &sent);
+            let sent = match signed {
+                Some((sig, hdrs)) => SentEmail {
+                    dkim_signature: Some(sig),
+                    headers: hdrs,
+                    ..sent
+                },
+                None => sent,
             };
 
             // Event fanout for each bulk entry

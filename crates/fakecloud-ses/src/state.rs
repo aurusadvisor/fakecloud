@@ -94,6 +94,13 @@ pub struct SentEmail {
     /// DKIM not configured.
     #[serde(default)]
     pub dkim_signature: Option<String>,
+    /// Synthesized RFC 5322-style headers for the stored message. When
+    /// DKIM signing is active the `DKIM-Signature` header is the first
+    /// entry, ahead of the `From`/`To`/`Subject`/`Date`/`Message-ID`
+    /// headers covered by the signature. Empty for messages stored
+    /// before DKIM was wired up.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
     pub timestamp: DateTime<Utc>,
 }
 

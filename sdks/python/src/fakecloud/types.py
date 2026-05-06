@@ -301,6 +301,7 @@ class SentEmail:
     dkim_signature: Optional[str] = None
     dkim_domain: Optional[str] = None
     dkim_selector: Optional[str] = None
+    headers: List[List[str]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SentEmail:

@@ -120,6 +120,11 @@ pub struct SentEmail {
     pub template_data: Option<String>,
     #[serde(default)]
     pub dkim_signature: Option<String>,
+    /// Synthesized RFC 5322 headers stamped onto the message at send
+    /// time. When DKIM is on, the first entry is `DKIM-Signature`. Each
+    /// pair is `(name, value)`.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
     pub timestamp: String,
 }
 

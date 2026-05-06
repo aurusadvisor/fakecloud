@@ -133,6 +133,8 @@ public final class Types {
             String rawData,
             String templateName,
             String templateData,
+            String dkimSignature,
+            List<List<String>> headers,
             String timestamp) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
