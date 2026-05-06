@@ -332,6 +332,90 @@ pub(crate) fn parse_query_list_param(
     indexed
 }
 
+/// Per-shard replica config supplied via
+/// `ReplicaConfiguration.ConfigureShard.N.{NodeGroupId,NewReplicaCount}`.
+/// Used by IncreaseReplicaCount + DecreaseReplicaCount.
+pub(crate) struct ConfigureShard {
+    /// Captured from the request so future per-shard placement can target a
+    /// specific NodeGroupId; today we apply NewReplicaCount uniformly.
+    #[allow(dead_code)]
+    pub node_group_id: String,
+    pub new_replica_count: i32,
+}
+
+pub(crate) fn parse_replica_configuration(
+    req: &AwsRequest,
+) -> Result<Vec<ConfigureShard>, AwsServiceError> {
+    let prefix = "ReplicaConfiguration.ConfigureShard.";
+    let mut indices: Vec<usize> = req
+        .query_params
+        .keys()
+        .filter_map(|k| {
+            k.strip_prefix(prefix).and_then(|tail| {
+                tail.split_once('.')
+                    .and_then(|(idx, _)| idx.parse::<usize>().ok())
+            })
+        })
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    let mut out = Vec::with_capacity(indices.len());
+    for idx in indices {
+        let id_key = format!("{prefix}{idx}.NodeGroupId");
+        let count_key = format!("{prefix}{idx}.NewReplicaCount");
+        let node_group_id = req.query_params.get(&id_key).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                format!("ReplicaConfiguration entry {idx} is missing NodeGroupId."),
+            )
+        })?;
+        let count_raw = req.query_params.get(&count_key).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MissingParameter",
+                format!("ReplicaConfiguration entry {idx} is missing NewReplicaCount."),
+            )
+        })?;
+        let new_replica_count: i32 = count_raw.parse().map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "ReplicaConfiguration entry {idx} has invalid NewReplicaCount '{count_raw}'."
+                ),
+            )
+        })?;
+        out.push(ConfigureShard {
+            node_group_id: node_group_id.clone(),
+            new_replica_count,
+        });
+    }
+    Ok(out)
+}
+
+/// Returns the current per-shard replica count, derived from
+/// `replicas_per_node_group` when set or back-computed from
+/// `num_cache_clusters / num_node_groups - 1` for legacy state created
+/// before that field was populated.
+pub(crate) fn current_replicas_per_shard(group: &ReplicationGroup) -> i32 {
+    if let Some(r) = group.replicas_per_node_group {
+        return r;
+    }
+    let shards = group.num_node_groups.max(1);
+    (group.num_cache_clusters / shards - 1).max(0)
+}
+
+/// Rebuild the flat `member_clusters` list as `<rg_id>-NNN` for the given
+/// total cluster count. Used by Increase/DecreaseReplicaCount and
+/// ModifyReplicationGroupShardConfiguration so DescribeReplicationGroups
+/// reflects the new shape.
+pub(crate) fn build_member_clusters(replication_group_id: &str, total: i32) -> Vec<String> {
+    (1..=total.max(0))
+        .map(|i| format!("{replication_group_id}-{i:03}"))
+        .collect()
+}
+
 pub(crate) fn optional_usize_param(
     req: &AwsRequest,
     name: &str,

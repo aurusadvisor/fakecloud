@@ -2798,100 +2798,27 @@ impl ElastiCacheService {
     }
 
     fn increase_replica_count(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let replication_group_id = required_query_param(request, "ReplicationGroupId")?;
-        let apply_str = required_query_param(request, "ApplyImmediately")?;
-        let _apply_immediately = parse_optional_bool(Some(&apply_str))?.ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                format!(
-                    "Invalid boolean value for ApplyImmediately: '{}'",
-                    apply_str
-                ),
-            )
-        })?;
-
-        let new_replica_count = optional_query_param(request, "NewReplicaCount")
-            .map(|v| {
-                v.parse::<i32>().map_err(|_| {
-                    AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidParameterValue",
-                        format!("Invalid value for NewReplicaCount: '{v}'"),
-                    )
-                })
-            })
-            .transpose()?
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "MissingParameter",
-                    "The request must contain the parameter NewReplicaCount.".to_string(),
-                )
-            })?;
-
-        if new_replica_count < 1 {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                format!("NewReplicaCount must be a positive integer, got {new_replica_count}"),
-            ));
-        }
-
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
-
-        let group = state
-            .replication_groups
-            .get_mut(&replication_group_id)
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ReplicationGroupNotFoundFault",
-                    format!("ReplicationGroup {replication_group_id} not found."),
-                )
-            })?;
-
-        // new_replica_count is number of replicas (excluding primary), so total clusters = replicas + 1
-        let new_total = new_replica_count.checked_add(1).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                format!("NewReplicaCount value {new_replica_count} is too large"),
-            )
-        })?;
-        if new_total <= group.num_cache_clusters {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                format!(
-                    "NewReplicaCount ({new_replica_count}) must result in more clusters than current count ({}).",
-                    group.num_cache_clusters
-                ),
-            ));
-        }
-
-        group.num_cache_clusters = new_total;
-        group.member_clusters = (1..=new_total)
-            .map(|i| format!("{replication_group_id}-{i:03}"))
-            .collect();
-
-        let group = group.clone();
-        let region = state.region.clone();
-        let xml = replication_group_xml(&group, &region);
-
-        Ok(AwsResponse::xml(
-            StatusCode::OK,
-            query_response_xml(
-                "IncreaseReplicaCount",
-                ELASTICACHE_NS,
-                &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
-                &request.request_id,
-            ),
-        ))
+        self.modify_replica_count(request, true)
     }
 
     fn decrease_replica_count(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.modify_replica_count(request, false)
+    }
+
+    /// Shared core for IncreaseReplicaCount + DecreaseReplicaCount.
+    ///
+    /// Both AWS operations take either a uniform `NewReplicaCount` (applied to
+    /// every shard) or a per-shard `ReplicaConfiguration.ConfigureShard.N`
+    /// list. DecreaseReplicaCount additionally accepts `ReplicasToRemove`,
+    /// which we map onto a uniform `replicas_per_node_group - len(remove)`.
+    /// The struct fields we mutate are `num_cache_clusters`, `member_clusters`
+    /// and `replicas_per_node_group` so DescribeReplicationGroups reflects the
+    /// new shape immediately.
+    fn modify_replica_count(
+        &self,
+        request: &AwsRequest,
+        increase: bool,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let replication_group_id = required_query_param(request, "ReplicationGroupId")?;
         let apply_str = required_query_param(request, "ApplyImmediately")?;
         let _apply_immediately = parse_optional_bool(Some(&apply_str))?.ok_or_else(|| {
@@ -2915,21 +2842,52 @@ impl ElastiCacheService {
                     )
                 })
             })
-            .transpose()?
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "MissingParameter",
-                    "The request must contain the parameter NewReplicaCount.".to_string(),
-                )
-            })?;
+            .transpose()?;
 
-        if new_replica_count < 0 {
+        let replica_configuration = parse_replica_configuration(request)?;
+        let replicas_to_remove =
+            parse_query_list_param(request, "ReplicasToRemove", "ReplicaToRemove");
+
+        let action = if increase {
+            "IncreaseReplicaCount"
+        } else {
+            "DecreaseReplicaCount"
+        };
+
+        // AWS requires exactly one of NewReplicaCount or ReplicaConfiguration.
+        // DecreaseReplicaCount additionally accepts ReplicasToRemove (alone or
+        // with one of the others). We mirror the validation so callers don't
+        // accidentally race two configurations against each other.
+        let inputs_supplied = (new_replica_count.is_some() as u8)
+            + (!replica_configuration.is_empty() as u8)
+            + (!replicas_to_remove.is_empty() as u8);
+        if inputs_supplied == 0 {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                format!("NewReplicaCount must be non-negative, got {new_replica_count}"),
+                "InvalidParameterCombination",
+                if increase {
+                    "IncreaseReplicaCount requires NewReplicaCount or ReplicaConfiguration."
+                        .to_string()
+                } else {
+                    "DecreaseReplicaCount requires NewReplicaCount, ReplicaConfiguration, or ReplicasToRemove.".to_string()
+                },
             ));
+        }
+        if let Some(n) = new_replica_count {
+            if increase && n < 1 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("NewReplicaCount must be a positive integer, got {n}"),
+                ));
+            }
+            if !increase && n < 0 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!("NewReplicaCount must be non-negative, got {n}"),
+                ));
+            }
         }
 
         let mut accounts = self.state.write();
@@ -2946,29 +2904,80 @@ impl ElastiCacheService {
                 )
             })?;
 
-        // new_replica_count is number of replicas (excluding primary), so total clusters = replicas + 1
-        let new_total = new_replica_count.checked_add(1).ok_or_else(|| {
-            AwsServiceError::aws_error(
+        let shard_count = group.num_node_groups.max(1);
+        let current_replicas_per_shard = current_replicas_per_shard(group);
+
+        // Resolve the target per-shard replica count. ReplicaConfiguration takes
+        // precedence and must specify the same NewReplicaCount for every shard
+        // (we don't model per-shard replica counts; the value gets applied
+        // uniformly). Without it we fall back to NewReplicaCount, then to
+        // ReplicasToRemove for the decrease path.
+        let target_replicas = if !replica_configuration.is_empty() {
+            let mut counts: Vec<i32> = replica_configuration
+                .iter()
+                .map(|c| c.new_replica_count)
+                .collect();
+            counts.sort_unstable();
+            counts.dedup();
+            if counts.len() != 1 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    "ReplicaConfiguration entries must specify the same NewReplicaCount across shards.".to_string(),
+                ));
+            }
+            counts[0]
+        } else if let Some(n) = new_replica_count {
+            n
+        } else {
+            // ReplicasToRemove: drop the listed count from the current
+            // per-shard replica count, distributed evenly across shards.
+            let removed_per_shard =
+                (replicas_to_remove.len() as i32).div_euclid(shard_count.max(1));
+            current_replicas_per_shard - removed_per_shard
+        };
+
+        if target_replicas < 0 {
+            return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterValue",
-                format!("NewReplicaCount value {new_replica_count} is too large"),
-            )
-        })?;
-        if new_total >= group.num_cache_clusters {
+                format!("Replica count must be non-negative, got {target_replicas}"),
+            ));
+        }
+
+        if increase && target_replicas <= current_replicas_per_shard {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterValue",
                 format!(
-                    "NewReplicaCount ({new_replica_count}) must result in fewer clusters than current count ({}).",
-                    group.num_cache_clusters
+                    "NewReplicaCount ({target_replicas}) must be greater than the current replica count per shard ({current_replicas_per_shard})."
+                ),
+            ));
+        }
+        if !increase && target_replicas >= current_replicas_per_shard {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "NewReplicaCount ({target_replicas}) must be less than the current replica count per shard ({current_replicas_per_shard})."
                 ),
             ));
         }
 
+        let new_total = shard_count
+            .checked_mul(target_replicas + 1)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "Replica count {target_replicas} across {shard_count} shards overflows."
+                    ),
+                )
+            })?;
         group.num_cache_clusters = new_total;
-        group.member_clusters = (1..=new_total)
-            .map(|i| format!("{replication_group_id}-{i:03}"))
-            .collect();
+        group.replicas_per_node_group = Some(target_replicas);
+        group.member_clusters = build_member_clusters(&replication_group_id, new_total);
 
         let group = group.clone();
         let region = state.region.clone();
@@ -2977,7 +2986,7 @@ impl ElastiCacheService {
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
-                "DecreaseReplicaCount",
+                action,
                 ELASTICACHE_NS,
                 &format!("<ReplicationGroup>{xml}</ReplicationGroup>"),
                 &request.request_id,
@@ -4139,20 +4148,129 @@ impl ElastiCacheService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = required_query_param(request, "ReplicationGroupId")?;
-        let _node_group_count = required_query_param(request, "NodeGroupCount")?;
-        let _apply = required_query_param(request, "ApplyImmediately")?;
-        let accounts = self.state.read();
-        let empty = ElastiCacheState::new(&request.account_id, &request.region);
-        let state = accounts.get(&request.account_id).unwrap_or(&empty);
-        let group = state.replication_groups.get(&id).ok_or_else(|| {
+        let node_group_count_str = required_query_param(request, "NodeGroupCount")?;
+        let node_group_count: i32 = node_group_count_str.parse().map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!("Invalid value for NodeGroupCount: '{node_group_count_str}'"),
+            )
+        })?;
+        if node_group_count < 1 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!("NodeGroupCount must be a positive integer, got {node_group_count}"),
+            ));
+        }
+        let apply_str = required_query_param(request, "ApplyImmediately")?;
+        let _apply = parse_optional_bool(Some(&apply_str))?.ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!("Invalid boolean value for ApplyImmediately: '{apply_str}'"),
+            )
+        })?;
+        // Optional NodeGroupsToRemove / NodeGroupsToRetain — we accept and
+        // validate them but the actual data placement is opaque (single
+        // backing redis container), so they only affect bookkeeping.
+        let node_groups_to_remove =
+            parse_query_list_param(request, "NodeGroupsToRemove", "NodeGroupToRemove");
+        let node_groups_to_retain =
+            parse_query_list_param(request, "NodeGroupsToRetain", "NodeGroupToRetain");
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let group = state.replication_groups.get_mut(&id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ReplicationGroupNotFoundFault",
                 format!("ReplicationGroup {id} not found."),
             )
         })?;
+
+        if !group.cluster_enabled && node_group_count != 1 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterCombination",
+                "NodeGroupCount can only be modified for cluster mode replication groups."
+                    .to_string(),
+            ));
+        }
+
+        let max_shards = max_node_groups_for(&group.engine, &group.engine_version);
+        if node_group_count > max_shards {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!(
+                    "NodeGroupCount must be between 1 and {max_shards} for {} {}, got {node_group_count}",
+                    group.engine, group.engine_version
+                ),
+            ));
+        }
+
+        let current_shards = group.num_node_groups.max(1);
+        if node_group_count < current_shards {
+            // Decrease: AWS requires either NodeGroupsToRemove or
+            // NodeGroupsToRetain whose length matches the delta or the new
+            // shape respectively.
+            let to_drop = (current_shards - node_group_count) as usize;
+            let supplied_remove = node_groups_to_remove.len();
+            let supplied_retain = node_groups_to_retain.len();
+            if supplied_remove == 0 && supplied_retain == 0 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterCombination",
+                    "Decreasing NodeGroupCount requires NodeGroupsToRemove or NodeGroupsToRetain."
+                        .to_string(),
+                ));
+            }
+            if supplied_remove > 0 && supplied_remove != to_drop {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "NodeGroupsToRemove must contain exactly {to_drop} entries, got {supplied_remove}"
+                    ),
+                ));
+            }
+            if supplied_retain > 0 && supplied_retain != node_group_count as usize {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "NodeGroupsToRetain must contain exactly {node_group_count} entries, got {supplied_retain}"
+                    ),
+                ));
+            }
+        }
+
+        let replicas_per_shard = current_replicas_per_shard(group);
+        let new_total = node_group_count
+            .checked_mul(replicas_per_shard + 1)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValue",
+                    format!(
+                        "Shard count {node_group_count} with {replicas_per_shard} replicas per shard overflows."
+                    ),
+                )
+            })?;
+
+        group.num_node_groups = node_group_count;
+        group.num_cache_clusters = new_total;
+        group.member_clusters = build_member_clusters(&id, new_total);
+        // Cluster-mode flag tracks shard count > 1 unless the user already
+        // opted into cluster_mode=enabled at create time.
+        if node_group_count > 1 {
+            group.cluster_enabled = true;
+        }
+
+        let group = group.clone();
         let region = state.region.clone();
-        let xml = replication_group_xml(group, &region);
+        let xml = replication_group_xml(&group, &region);
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(

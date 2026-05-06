@@ -2564,3 +2564,185 @@ async fn elasticache_create_cache_cluster_round_trips_extended_fields() {
         .await
         .unwrap();
 }
+
+// ── Replica + shard-count mutation tests ──
+
+#[tokio::test]
+async fn elasticache_modify_replication_group_shard_configuration_changes_shard_count() {
+    if !docker_available() {
+        return;
+    }
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("shard-rg")
+        .replication_group_description("multi-shard")
+        .num_node_groups(2)
+        .replicas_per_node_group(1)
+        .send()
+        .await
+        .unwrap();
+
+    // Increase shard count: 2 -> 3.
+    client
+        .modify_replication_group_shard_configuration()
+        .replication_group_id("shard-rg")
+        .node_group_count(3)
+        .apply_immediately(true)
+        .send()
+        .await
+        .unwrap();
+
+    let described = client
+        .describe_replication_groups()
+        .replication_group_id("shard-rg")
+        .send()
+        .await
+        .unwrap();
+    let group = &described.replication_groups()[0];
+    assert_eq!(
+        group.node_groups().len(),
+        3,
+        "ModifyReplicationGroupShardConfiguration must update NodeGroups"
+    );
+    let ids: Vec<&str> = group
+        .node_groups()
+        .iter()
+        .filter_map(|n| n.node_group_id())
+        .collect();
+    assert!(ids.contains(&"0001"));
+    assert!(ids.contains(&"0002"));
+    assert!(ids.contains(&"0003"));
+
+    // Decrease shard count: 3 -> 2 with NodeGroupsToRetain.
+    client
+        .modify_replication_group_shard_configuration()
+        .replication_group_id("shard-rg")
+        .node_group_count(2)
+        .apply_immediately(true)
+        .node_groups_to_retain("0001")
+        .node_groups_to_retain("0002")
+        .send()
+        .await
+        .unwrap();
+
+    let described = client
+        .describe_replication_groups()
+        .replication_group_id("shard-rg")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(described.replication_groups()[0].node_groups().len(), 2);
+}
+
+#[tokio::test]
+async fn elasticache_modify_replication_group_shard_configuration_rejects_non_cluster_change() {
+    if !docker_available() {
+        return;
+    }
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("single-rg")
+        .replication_group_description("single shard")
+        .send()
+        .await
+        .unwrap();
+
+    // Non-cluster mode: NodeGroupCount must stay 1.
+    let result = client
+        .modify_replication_group_shard_configuration()
+        .replication_group_id("single-rg")
+        .node_group_count(3)
+        .apply_immediately(true)
+        .send()
+        .await;
+    assert!(
+        result.is_err(),
+        "non-cluster replication group should reject NodeGroupCount change"
+    );
+}
+
+#[tokio::test]
+async fn elasticache_increase_replica_count_per_shard() {
+    if !docker_available() {
+        return;
+    }
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("rep-up-rg")
+        .replication_group_description("replica scale up")
+        .num_node_groups(2)
+        .replicas_per_node_group(1)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .increase_replica_count()
+        .replication_group_id("rep-up-rg")
+        .apply_immediately(true)
+        .new_replica_count(2)
+        .send()
+        .await
+        .unwrap();
+
+    let described = client
+        .describe_replication_groups()
+        .replication_group_id("rep-up-rg")
+        .send()
+        .await
+        .unwrap();
+    let group = &described.replication_groups()[0];
+    // 2 shards × (1 primary + 2 replicas) = 6 member clusters.
+    assert_eq!(
+        group.member_clusters().len(),
+        6,
+        "IncreaseReplicaCount must rebuild member_clusters per shard"
+    );
+}
+
+#[tokio::test]
+async fn elasticache_decrease_replica_count_per_shard() {
+    if !docker_available() {
+        return;
+    }
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_replication_group()
+        .replication_group_id("rep-dn-rg")
+        .replication_group_description("replica scale down")
+        .num_node_groups(2)
+        .replicas_per_node_group(2)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .decrease_replica_count()
+        .replication_group_id("rep-dn-rg")
+        .apply_immediately(true)
+        .new_replica_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    let described = client
+        .describe_replication_groups()
+        .replication_group_id("rep-dn-rg")
+        .send()
+        .await
+        .unwrap();
+    let group = &described.replication_groups()[0];
+    // 2 shards × (1 primary + 1 replica) = 4 member clusters.
+    assert_eq!(group.member_clusters().len(), 4);
+}
