@@ -1364,3 +1364,288 @@ async fn eb_rule_starts_stepfunctions_execution() {
         &aws_sdk_sfn::types::ExecutionStatus::Succeeded
     );
 }
+
+/// K7: PutTargets/ListTargetsByRule must round-trip every advanced field
+/// AWS sends/returns — RoleArn, DeadLetterConfig, RetryPolicy,
+/// EcsParameters (with NetworkConfiguration), BatchParameters,
+/// KinesisParameters, RedshiftDataParameters, SqsParameters
+/// (MessageGroupId for FIFO), HttpParameters, SageMakerPipelineParameters,
+/// AppSyncParameters, and InputTransformer. Also verifies ListRules emits
+/// RoleArn on the rule summary.
+#[tokio::test]
+async fn eb_put_targets_full_field_roundtrip() {
+    use aws_sdk_eventbridge::types::{
+        AppSyncParameters, AwsVpcConfiguration, BatchArrayProperties, BatchParameters,
+        BatchRetryStrategy, CapacityProviderStrategyItem, DeadLetterConfig, EcsParameters,
+        HttpParameters, InputTransformer, KinesisParameters, LaunchType, NetworkConfiguration,
+        PlacementConstraint, PlacementConstraintType, PlacementStrategy, PlacementStrategyType,
+        PropagateTags, RedshiftDataParameters, RetryPolicy, SageMakerPipelineParameter,
+        SageMakerPipelineParameters, SqsParameters, Tag,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.eventbridge_client().await;
+
+    // Rule with a RoleArn to exercise ListRules summary emission.
+    let rule_role_arn = "arn:aws:iam::123456789012:role/eb-rule-role";
+    client
+        .put_rule()
+        .name("k7-rule")
+        .event_pattern(r#"{"source":["k7.app"]}"#)
+        .role_arn(rule_role_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // ListRules should surface RoleArn on the Rule summary.
+    let listed = client.list_rules().send().await.unwrap();
+    let summary = listed
+        .rules()
+        .iter()
+        .find(|r| r.name() == Some("k7-rule"))
+        .expect("rule listed");
+    assert_eq!(summary.role_arn(), Some(rule_role_arn));
+
+    let target_role_arn = "arn:aws:iam::123456789012:role/eb-target-role";
+    let dlq_arn = "arn:aws:sqs:us-east-1:123456789012:dlq";
+
+    let target = Target::builder()
+        .id("full-target")
+        .arn("arn:aws:sqs:us-east-1:123456789012:queue.fifo")
+        .role_arn(target_role_arn)
+        .input_path("$.detail")
+        .dead_letter_config(DeadLetterConfig::builder().arn(dlq_arn).build())
+        .retry_policy(
+            RetryPolicy::builder()
+                .maximum_retry_attempts(7)
+                .maximum_event_age_in_seconds(3600)
+                .build(),
+        )
+        .ecs_parameters(
+            EcsParameters::builder()
+                .task_definition_arn("arn:aws:ecs:us-east-1:123456789012:task-definition/my-task:3")
+                .task_count(2)
+                .launch_type(LaunchType::Fargate)
+                .platform_version("1.4.0")
+                .group("my-group")
+                .reference_id("ref-1")
+                .enable_ecs_managed_tags(true)
+                .enable_execute_command(true)
+                .propagate_tags(PropagateTags::TaskDefinition)
+                .network_configuration(
+                    NetworkConfiguration::builder()
+                        .awsvpc_configuration(
+                            AwsVpcConfiguration::builder()
+                                .subnets("subnet-aaaaaaaa")
+                                .subnets("subnet-bbbbbbbb")
+                                .security_groups("sg-11111111")
+                                .assign_public_ip(
+                                    aws_sdk_eventbridge::types::AssignPublicIp::Enabled,
+                                )
+                                .build()
+                                .unwrap(),
+                        )
+                        .build(),
+                )
+                .capacity_provider_strategy(
+                    CapacityProviderStrategyItem::builder()
+                        .capacity_provider("FARGATE_SPOT")
+                        .weight(1)
+                        .base(0)
+                        .build()
+                        .unwrap(),
+                )
+                .placement_constraints(
+                    PlacementConstraint::builder()
+                        .r#type(PlacementConstraintType::DistinctInstance)
+                        .build(),
+                )
+                .placement_strategy(
+                    PlacementStrategy::builder()
+                        .r#type(PlacementStrategyType::Spread)
+                        .field("attribute:ecs.availability-zone")
+                        .build(),
+                )
+                .tags(Tag::builder().key("env").value("prod").build().unwrap())
+                .build()
+                .unwrap(),
+        )
+        .batch_parameters(
+            BatchParameters::builder()
+                .job_definition("arn:aws:batch:us-east-1:123456789012:job-definition/jd:1")
+                .job_name("my-job")
+                .array_properties(BatchArrayProperties::builder().size(10).build())
+                .retry_strategy(BatchRetryStrategy::builder().attempts(3).build())
+                .build()
+                .unwrap(),
+        )
+        .kinesis_parameters(
+            KinesisParameters::builder()
+                .partition_key_path("$.detail.id")
+                .build()
+                .unwrap(),
+        )
+        .redshift_data_parameters(
+            RedshiftDataParameters::builder()
+                .database("analytics")
+                .db_user("svc")
+                .secret_manager_arn(
+                    "arn:aws:secretsmanager:us-east-1:123456789012:secret:redshift-AbCdEf",
+                )
+                .sql("SELECT 1")
+                .sqls("SELECT 1")
+                .sqls("SELECT 2")
+                .statement_name("stmt-1")
+                .with_event(true)
+                .build()
+                .unwrap(),
+        )
+        .sqs_parameters(SqsParameters::builder().message_group_id("group-1").build())
+        .http_parameters(
+            HttpParameters::builder()
+                .header_parameters("X-Trace", "abc123")
+                .path_parameter_values("v1")
+                .query_string_parameters("from", "eb")
+                .build(),
+        )
+        .sage_maker_pipeline_parameters(
+            SageMakerPipelineParameters::builder()
+                .pipeline_parameter_list(
+                    SageMakerPipelineParameter::builder()
+                        .name("p1")
+                        .value("v1")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .app_sync_parameters(
+            AppSyncParameters::builder()
+                .graph_ql_operation("query Q { hello }")
+                .build(),
+        )
+        .input_transformer(
+            InputTransformer::builder()
+                .input_paths_map("id", "$.detail.id")
+                .input_paths_map("type", "$.detail-type")
+                .input_template(r#"{"id":<id>,"type":<type>}"#)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+
+    client
+        .put_targets()
+        .rule("k7-rule")
+        .targets(target)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .list_targets_by_rule()
+        .rule("k7-rule")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.targets().len(), 1);
+    let got = &resp.targets()[0];
+
+    assert_eq!(got.id(), "full-target");
+    assert_eq!(got.arn(), "arn:aws:sqs:us-east-1:123456789012:queue.fifo");
+    assert_eq!(got.role_arn(), Some(target_role_arn));
+    assert_eq!(got.input_path(), Some("$.detail"));
+
+    let dlc = got.dead_letter_config().expect("dlc");
+    assert_eq!(dlc.arn(), Some(dlq_arn));
+
+    let rp = got.retry_policy().expect("retry policy");
+    assert_eq!(rp.maximum_retry_attempts(), Some(7));
+    assert_eq!(rp.maximum_event_age_in_seconds(), Some(3600));
+
+    let ecs = got.ecs_parameters().expect("ecs");
+    assert_eq!(
+        ecs.task_definition_arn(),
+        "arn:aws:ecs:us-east-1:123456789012:task-definition/my-task:3"
+    );
+    assert_eq!(ecs.task_count(), Some(2));
+    assert_eq!(ecs.launch_type(), Some(&LaunchType::Fargate));
+    assert_eq!(ecs.platform_version(), Some("1.4.0"));
+    assert_eq!(ecs.group(), Some("my-group"));
+    assert_eq!(ecs.reference_id(), Some("ref-1"));
+    assert!(ecs.enable_ecs_managed_tags());
+    assert!(ecs.enable_execute_command());
+    assert_eq!(ecs.propagate_tags(), Some(&PropagateTags::TaskDefinition));
+    let awsvpc = ecs
+        .network_configuration()
+        .and_then(|nc| nc.awsvpc_configuration())
+        .expect("awsvpc");
+    assert_eq!(
+        awsvpc.subnets(),
+        &["subnet-aaaaaaaa".to_string(), "subnet-bbbbbbbb".to_string()]
+    );
+    assert_eq!(awsvpc.security_groups(), &["sg-11111111".to_string()]);
+    assert_eq!(
+        awsvpc.assign_public_ip(),
+        Some(&aws_sdk_eventbridge::types::AssignPublicIp::Enabled)
+    );
+    assert_eq!(ecs.capacity_provider_strategy().len(), 1);
+    assert_eq!(
+        ecs.capacity_provider_strategy()[0].capacity_provider(),
+        "FARGATE_SPOT"
+    );
+    assert_eq!(ecs.placement_constraints().len(), 1);
+    assert_eq!(ecs.placement_strategy().len(), 1);
+    assert_eq!(ecs.tags().len(), 1);
+    assert_eq!(ecs.tags()[0].key(), "env");
+
+    let batch = got.batch_parameters().expect("batch");
+    assert_eq!(
+        batch.job_definition(),
+        "arn:aws:batch:us-east-1:123456789012:job-definition/jd:1"
+    );
+    assert_eq!(batch.job_name(), "my-job");
+    assert_eq!(batch.array_properties().map(|a| a.size()), Some(10));
+    assert_eq!(batch.retry_strategy().map(|r| r.attempts()), Some(3));
+
+    let kin = got.kinesis_parameters().expect("kinesis");
+    assert_eq!(kin.partition_key_path(), "$.detail.id");
+
+    let rs = got.redshift_data_parameters().expect("redshift");
+    assert_eq!(rs.database(), "analytics");
+    assert_eq!(rs.db_user(), Some("svc"));
+    assert_eq!(rs.sql(), Some("SELECT 1"));
+    assert_eq!(rs.sqls().len(), 2);
+    assert_eq!(rs.statement_name(), Some("stmt-1"));
+    assert!(rs.with_event());
+    assert!(rs.secret_manager_arn().unwrap().contains("redshift-"));
+
+    let sqs = got.sqs_parameters().expect("sqs");
+    assert_eq!(sqs.message_group_id(), Some("group-1"));
+
+    let http = got.http_parameters().expect("http");
+    assert_eq!(
+        http.header_parameters().expect("headers").get("X-Trace"),
+        Some(&"abc123".to_string())
+    );
+    assert_eq!(http.path_parameter_values(), &["v1".to_string()]);
+    assert_eq!(
+        http.query_string_parameters().expect("query").get("from"),
+        Some(&"eb".to_string())
+    );
+
+    let sm = got.sage_maker_pipeline_parameters().expect("sagemaker");
+    assert_eq!(sm.pipeline_parameter_list().len(), 1);
+    assert_eq!(sm.pipeline_parameter_list()[0].name(), "p1");
+    assert_eq!(sm.pipeline_parameter_list()[0].value(), "v1");
+
+    let app = got.app_sync_parameters().expect("appsync");
+    assert_eq!(app.graph_ql_operation(), Some("query Q { hello }"));
+
+    let it = got.input_transformer().expect("input transformer");
+    assert_eq!(it.input_template(), r#"{"id":<id>,"type":<type>}"#);
+    let map = it.input_paths_map().expect("input paths map");
+    assert_eq!(map.get("id"), Some(&"$.detail.id".to_string()));
+    assert_eq!(map.get("type"), Some(&"$.detail-type".to_string()));
+}

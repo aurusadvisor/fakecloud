@@ -746,6 +746,9 @@ impl EventBridgeService {
                 if let Some(ref se) = r.schedule_expression {
                     obj["ScheduleExpression"] = json!(se);
                 }
+                if let Some(ref role) = r.role_arn {
+                    obj["RoleArn"] = json!(role);
+                }
                 if let Some(ref mb) = r.managed_by {
                     obj["ManagedBy"] = json!(mb);
                 }
