@@ -1957,32 +1957,72 @@ async fn ssm_execution_preview() {
 }
 
 // -- Sessions --
+//
+// Real fakecloud behavior: StartSession + ResumeSession return 500
+// `InternalServerError` because we don't run a websocket data plane and
+// `InternalServerError` is the only Smithy-declared error that fits the
+// "data plane is gone" failure mode. Tests drive Describe/Terminate via
+// the admin inject endpoint instead. Conformance pins both paths so a
+// regression on either side fails loud.
 
 #[test_action("ssm", "StartSession", checksum = "bbfb0d76")]
 #[test_action("ssm", "ResumeSession", checksum = "da827500")]
-#[test_action("ssm", "DescribeSessions", checksum = "6bc26ec4")]
-#[test_action("ssm", "TerminateSession", checksum = "e8d1b586")]
 #[tokio::test]
-async fn ssm_session_lifecycle() {
+async fn ssm_start_resume_session_returns_internal_error() {
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
 
-    let start = client
+    let err = client
         .start_session()
         .target("i-conf001")
         .send()
         .await
-        .unwrap();
-    let session_id = start.session_id().unwrap().to_string();
-    assert!(start.token_value().is_some());
+        .unwrap_err();
+    let svc_err = err.into_service_error();
+    let code = svc_err.meta().code().unwrap_or_default().to_string();
+    assert_eq!(code, "InternalServerError");
 
-    let resume = client
+    let err = client
         .resume_session()
-        .session_id(&session_id)
+        .session_id("session-000000000001")
+        .send()
+        .await
+        .unwrap_err();
+    let svc_err = err.into_service_error();
+    let code = svc_err.meta().code().unwrap_or_default().to_string();
+    assert_eq!(code, "InternalServerError");
+}
+
+#[test_action("ssm", "DescribeSessions", checksum = "6bc26ec4")]
+#[test_action("ssm", "TerminateSession", checksum = "e8d1b586")]
+#[tokio::test]
+async fn ssm_describe_terminate_via_inject() {
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Inject a session through the admin endpoint instead of going
+    // through StartSession.
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/_fakecloud/ssm/sessions/inject",
+            server.endpoint()
+        ))
+        .json(&serde_json::json!({
+            "target": "i-conf001",
+            "reason": "conformance-test"
+        }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resume.session_id().unwrap(), session_id);
+    assert!(resp.status().is_success(), "inject endpoint failed");
+    let session_id = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .expect("response missing sessionId");
 
     let desc = client
         .describe_sessions()
@@ -1991,6 +2031,7 @@ async fn ssm_session_lifecycle() {
         .await
         .unwrap();
     assert_eq!(desc.sessions().len(), 1);
+    assert_eq!(desc.sessions()[0].session_id().unwrap(), session_id);
 
     client
         .terminate_session()
@@ -1998,6 +2039,14 @@ async fn ssm_session_lifecycle() {
         .send()
         .await
         .unwrap();
+
+    let desc = client
+        .describe_sessions()
+        .state(aws_sdk_ssm::types::SessionState::History)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(desc.sessions().len(), 1);
 }
 
 #[test_action("ssm", "StartAccessRequest", checksum = "1b32a067")]

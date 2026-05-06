@@ -10,6 +10,46 @@ use crate::state::{SsmSession, SsmState};
 
 use super::{missing, SsmService};
 
+/// Documentation pointer returned in the StartSession 501 message so callers
+/// learn about the admin-inject + echo-mode escape hatches without having to
+/// dig through the source.
+const SSM_SESSION_DOCS_URL: &str =
+    "https://fakecloud.dev/docs/reference/limitations/#ssm-session-manager-data-plane";
+
+/// Token sentinel returned in echo mode so callers can tell at a glance the
+/// stream URL is not a real SSM data-plane websocket.
+pub(crate) const ECHO_TOKEN_SENTINEL: &str = "fakecloud-echo-mode-not-real-websocket";
+
+/// Env var that opts a session into "echo mode": StartSession/ResumeSession
+/// return canned-but-honest responses (with the sentinel token) instead of
+/// the 501 error. Tests that don't actually drive the websocket can flip
+/// this on to keep their existing flow working.
+const ECHO_MODE_ENV: &str = "FAKECLOUD_SSM_SESSION_ECHO";
+
+fn echo_mode_enabled() -> bool {
+    std::env::var(ECHO_MODE_ENV)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false)
+}
+
+/// We use `InternalServerError` rather than a fakecloud-specific code because
+/// the SSM Smithy model only declares `InternalServerError`, `InvalidDocument`,
+/// and `TargetNotConnected` for StartSession/ResumeSession. Picking a code
+/// outside that set would break Smithy conformance and produce undeclared
+/// errors in SDK client deserialization.
+fn not_implemented_session_error(action: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "InternalServerError",
+        format!(
+            "{action} via SSM data plane is not implemented in fakecloud — \
+             there is no real websocket server backing the stream URL. \
+             Use admin endpoint POST /_fakecloud/ssm/sessions/inject to inject a session, \
+             or set {ECHO_MODE_ENV}=1 for echo mode. See {SSM_SESSION_DOCS_URL}"
+        ),
+    )
+}
+
 impl SsmService {
     pub(super) fn start_session(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
@@ -21,6 +61,13 @@ impl SsmService {
             .to_string();
         let reason = body["Reason"].as_str().map(|s| s.to_string());
 
+        if !echo_mode_enabled() {
+            return Err(not_implemented_session_error("StartSession"));
+        }
+
+        // Echo mode: still record the session so DescribeSessions/Terminate
+        // round-trip works, but flag the token with the sentinel so tests
+        // can't mistake it for a real websocket handshake.
         let now = Utc::now();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -41,7 +88,7 @@ impl SsmService {
 
         Ok(AwsResponse::ok_json(json!({
             "SessionId": session_id,
-            "TokenValue": format!("token-{session_id}"),
+            "TokenValue": ECHO_TOKEN_SENTINEL,
             "StreamUrl": format!("wss://ssm.us-east-1.amazonaws.com/session/{session_id}"),
         })))
     }
@@ -51,6 +98,10 @@ impl SsmService {
         let session_id = body["SessionId"]
             .as_str()
             .ok_or_else(|| missing("SessionId"))?;
+
+        if !echo_mode_enabled() {
+            return Err(not_implemented_session_error("ResumeSession"));
+        }
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
@@ -65,7 +116,7 @@ impl SsmService {
 
         Ok(AwsResponse::ok_json(json!({
             "SessionId": session.session_id,
-            "TokenValue": format!("token-{}", session.session_id),
+            "TokenValue": ECHO_TOKEN_SENTINEL,
             "StreamUrl": format!("wss://ssm.us-east-1.amazonaws.com/session/{}", session.session_id),
         })))
     }
@@ -78,15 +129,20 @@ impl SsmService {
         validate_optional_string_length("SessionId", body["SessionId"].as_str(), 1, 96)?;
         let session_id = body["SessionId"]
             .as_str()
-            .ok_or_else(|| missing("SessionId"))?;
+            .ok_or_else(|| missing("SessionId"))?
+            .to_string();
 
+        // TerminateSession is allowed even outside echo mode: tests/admin
+        // flows inject sessions through the admin endpoint and need a way
+        // to mark them terminated. AWS itself doesn't error on missing IDs,
+        // so we mirror that: flip the status if the session exists, return
+        // success either way.
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if let Some(session) = state.sessions.get_mut(session_id) {
+        if let Some(session) = state.sessions.get_mut(&session_id) {
             session.status = "Terminated".to_string();
             session.end_date = Some(Utc::now());
         }
-        // AWS TerminateSession doesn't error on non-existent sessions
 
         Ok(AwsResponse::ok_json(json!({ "SessionId": session_id })))
     }
@@ -103,6 +159,9 @@ impl SsmService {
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        // DescribeSessions is the read-side of both the echo-mode flow and
+        // the admin inject endpoint, so it always serves whatever state
+        // contains regardless of FAKECLOUD_SSM_SESSION_ECHO.
         let sessions: Vec<Value> = state
             .sessions
             .values()

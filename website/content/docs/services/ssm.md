@@ -38,6 +38,37 @@ curl -X POST "$ENDPOINT/_fakecloud/ssm/commands/$CMD_ID/fail" \
 
 `instanceId`, `statusDetails`, and `standardErrorContent` are all optional. See [introspection reference](/docs/reference/introspection/#ssm).
 
+## Session Manager
+
+`StartSession` and `ResumeSession` return `500 InternalServerError` by default.
+fakecloud doesn't run a real SSM data-plane websocket, and returning a fake
+stream URL would lull integration tests into thinking the session was live.
+We use `InternalServerError` rather than a fakecloud-specific error code
+because the SSM Smithy model only declares `InternalServerError`,
+`InvalidDocument`, and `TargetNotConnected` for these operations — picking a
+code outside that set would break SDK error deserialization. The error
+message points at the escape hatches:
+
+**Echo mode** — set `FAKECLOUD_SSM_SESSION_ECHO=1` to make `StartSession` /
+`ResumeSession` succeed with a sentinel token (`fakecloud-echo-mode-not-real-websocket`).
+The session is recorded in state so `DescribeSessions` and `TerminateSession`
+round-trip. Use this when your test only exercises the AWS SDK control flow
+and doesn't actually attach to the websocket.
+
+**Admin inject** — drop a session record into state directly:
+
+```bash
+curl -X POST "$ENDPOINT/_fakecloud/ssm/sessions/inject" \
+  -H "content-type: application/json" \
+  -d '{"target":"i-001","reason":"smoke"}'
+```
+
+Body fields: `target` (required), `accountId`, `status`
+(`Connected` | `Terminated`, default `Connected`), `owner` (defaults to
+account-root IAM ARN), `reason`, `sessionId` (optional explicit ID).
+Returns `{"sessionId": "..."}`. After injection, `DescribeSessions` and
+`TerminateSession` work normally.
+
 ## SecureString encryption
 
 SecureString parameters are encrypted through the KMS hook on `PutParameter`

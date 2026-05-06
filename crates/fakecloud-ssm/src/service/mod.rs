@@ -166,6 +166,53 @@ impl SsmService {
         state.parameter_policy_events.clear();
     }
 
+    /// Admin: inject a fake SSM session record so DescribeSessions /
+    /// TerminateSession round-trip without going through StartSession (which
+    /// returns 501 unless `FAKECLOUD_SSM_SESSION_ECHO=1`). The injected
+    /// session is otherwise indistinguishable from one created by StartSession
+    /// in echo mode. Returns the assigned `SessionId`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn inject_session(
+        &self,
+        account_id: &str,
+        target: &str,
+        status: Option<&str>,
+        owner: Option<&str>,
+        reason: Option<&str>,
+        session_id: Option<&str>,
+    ) -> String {
+        let now = chrono::Utc::now();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        let id = match session_id {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                state.session_counter += 1;
+                format!("session-{:012x}", state.session_counter)
+            }
+        };
+        let resolved_status = status.unwrap_or("Connected").to_string();
+        let end_date = if resolved_status == "Terminated" {
+            Some(now)
+        } else {
+            None
+        };
+        let resolved_owner = owner.map(|s| s.to_string()).unwrap_or_else(|| {
+            fakecloud_aws::arn::Arn::global("iam", &state.account_id, "root").to_string()
+        });
+        let session = crate::state::SsmSession {
+            session_id: id.clone(),
+            target: target.to_string(),
+            status: resolved_status,
+            start_date: now,
+            end_date,
+            owner: resolved_owner,
+            reason: reason.map(|s| s.to_string()),
+        };
+        state.sessions.insert(id.clone(), session);
+        id
+    }
+
     /// Persist current state as a snapshot. Held across the
     /// clone-serialize-write sequence to prevent stale-last writes,
     /// with serde + file I/O offloaded to the blocking pool.

@@ -1122,6 +1122,7 @@ async fn main() {
     let ssm_state_for_admin = ssm_state.clone();
     let ssm_state_for_fail = ssm_state.clone();
     let ssm_state_for_policy_events = ssm_state.clone();
+    let ssm_state_for_session_inject = ssm_state.clone();
     let mut ssm_service = SsmService::new(ssm_state)
         .with_secretsmanager(secretsmanager_state.clone())
         .with_kms_hook(kms_hook_for_services.clone());
@@ -3372,6 +3373,30 @@ async fn main() {
                     let svc = fakecloud_ssm::SsmService::new(ss.clone());
                     svc.clear_parameter_policy_events(&account);
                     axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        )
+        .route(
+            // Drop a fake SSM session record into state. StartSession
+            // returns 501 by default (no real websocket data plane); this
+            // endpoint lets tests still exercise DescribeSessions /
+            // TerminateSession without flipping FAKECLOUD_SSM_SESSION_ECHO.
+            "/_fakecloud/ssm/sessions/inject",
+            axum::routing::post({
+                let ss = ssm_state_for_session_inject;
+                move |axum::Json(body): axum::Json<types::InjectSsmSessionRequest>| async move {
+                    let default_account = ss.read().default_account_id().to_string();
+                    let account = body.account_id.as_deref().unwrap_or(&default_account);
+                    let svc = fakecloud_ssm::SsmService::new(ss.clone());
+                    let session_id = svc.inject_session(
+                        account,
+                        &body.target,
+                        body.status.as_deref(),
+                        body.owner.as_deref(),
+                        body.reason.as_deref(),
+                        body.session_id.as_deref(),
+                    );
+                    axum::Json(types::InjectSsmSessionResponse { session_id })
                 }
             }),
         )

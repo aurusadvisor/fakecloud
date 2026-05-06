@@ -1406,8 +1406,90 @@ fn execution_preview_lifecycle() {
 
 // ── Sessions ──────────────────────────────────────────────────
 
+fn expect_err(result: Result<AwsResponse, AwsServiceError>) -> AwsServiceError {
+    match result {
+        Ok(_) => panic!("expected an error, got Ok"),
+        Err(e) => e,
+    }
+}
+
 #[test]
-fn session_lifecycle() {
+fn start_session_returns_internal_error_without_echo_mode() {
+    // Belt-and-braces in case a parallel test polluted the env. The
+    // module guards `serial_test` aren't on the workspace dev-deps yet,
+    // so we just remove and verify the default path.
+    std::env::remove_var("FAKECLOUD_SSM_SESSION_ECHO");
+
+    let svc = make_service();
+    let req = make_request("StartSession", json!({ "Target": "i-001" }));
+    let err = expect_err(svc.start_session(&req));
+    // We use InternalServerError (declared in the SSM Smithy model) instead
+    // of a fakecloud-specific error code so SDK clients deserialize a known
+    // shape and conformance variants stay green.
+    assert_eq!(err.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(err.code(), "InternalServerError");
+    // The error message must point at the documented escape hatches.
+    assert!(err.message().contains("FAKECLOUD_SSM_SESSION_ECHO"));
+    assert!(err.message().contains("/_fakecloud/ssm/sessions/inject"));
+}
+
+#[test]
+fn resume_session_returns_internal_error_without_echo_mode() {
+    std::env::remove_var("FAKECLOUD_SSM_SESSION_ECHO");
+
+    let svc = make_service();
+    let req = make_request(
+        "ResumeSession",
+        json!({ "SessionId": "session-000000000001" }),
+    );
+    let err = expect_err(svc.resume_session(&req));
+    assert_eq!(err.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(err.code(), "InternalServerError");
+}
+
+#[test]
+fn injected_session_round_trips_describe_and_terminate() {
+    // Default (no echo mode): admin inject + DescribeSessions + Terminate
+    // remains the supported flow.
+    std::env::remove_var("FAKECLOUD_SSM_SESSION_ECHO");
+
+    let svc = make_service();
+
+    let session_id = svc.inject_session(
+        "123456789012",
+        "i-injected",
+        None,
+        None,
+        Some("admin-test"),
+        None,
+    );
+    assert!(session_id.starts_with("session-"));
+
+    // Describe (Active) sees it.
+    let req = make_request("DescribeSessions", json!({ "State": "Active" }));
+    let resp = svc.describe_sessions(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(body["Sessions"][0]["Reason"].as_str(), Some("admin-test"));
+
+    // Terminate is allowed even without echo mode.
+    let req = make_request("TerminateSession", json!({ "SessionId": session_id }));
+    svc.terminate_session(&req).unwrap();
+
+    let req = make_request("DescribeSessions", json!({ "State": "History" }));
+    let resp = svc.describe_sessions(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Sessions"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn echo_mode_full_lifecycle() {
+    // Drive the legacy lifecycle path with echo mode flipped on. We have
+    // to set + unset the env var inline since this test mutates global
+    // process state; the explicit `remove_var` calls in the 501 tests
+    // above keep them isolated regardless of run order.
+    std::env::set_var("FAKECLOUD_SSM_SESSION_ECHO", "1");
+
     let svc = make_service();
 
     // Start
@@ -1415,13 +1497,22 @@ fn session_lifecycle() {
     let resp = svc.start_session(&req).unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     let session_id = body["SessionId"].as_str().unwrap().to_string();
-    assert!(body["TokenValue"].as_str().is_some());
+    // Echo mode must mark the token with the sentinel so callers can't
+    // mistake it for a real websocket handshake.
+    assert_eq!(
+        body["TokenValue"].as_str(),
+        Some("fakecloud-echo-mode-not-real-websocket")
+    );
 
     // Resume
-    let req = make_request("ResumeSession", json!({ "SessionId": session_id }));
+    let req = make_request("ResumeSession", json!({ "SessionId": session_id.clone() }));
     let resp = svc.resume_session(&req).unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["SessionId"].as_str().unwrap(), session_id);
+    assert_eq!(
+        body["TokenValue"].as_str(),
+        Some("fakecloud-echo-mode-not-real-websocket")
+    );
 
     // Describe (Active)
     let req = make_request("DescribeSessions", json!({ "State": "Active" }));
@@ -1438,6 +1529,8 @@ fn session_lifecycle() {
     let resp = svc.describe_sessions(&req).unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["Sessions"].as_array().unwrap().len(), 1);
+
+    std::env::remove_var("FAKECLOUD_SSM_SESSION_ECHO");
 }
 
 #[test]
