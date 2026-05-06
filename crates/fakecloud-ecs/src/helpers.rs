@@ -488,7 +488,10 @@ pub(crate) fn task_to_json(task: &Task) -> Value {
             Value::Null
         },
     );
-    map.insert("enableExecuteCommand".into(), json!(false));
+    map.insert(
+        "enableExecuteCommand".into(),
+        json!(task.enable_execute_command),
+    );
     map.insert("ephemeralStorage".into(), json!({ "sizeInGiB": 20 }));
     map.insert("healthStatus".into(), json!(aggregate_task_health(task)));
     map.insert("version".into(), json!(1));
@@ -652,6 +655,15 @@ pub(crate) fn spawn_service_tasks(
     let family = service.family.clone();
     let revision = service.revision;
     let service_tag = format!("ecs-svc/{}", service.service_name);
+    // Resolve task tags from the propagateTags strategy. AWS copies
+    // TaskDefinition.tags or Service.tags onto each spawned Task; the
+    // default ("NONE") leaves the task untagged.
+    let propagated_tags: Vec<TagEntry> = match service.propagate_tags.as_deref() {
+        Some("TASK_DEFINITION") => td.tags.clone(),
+        Some("SERVICE") => service.tags.clone(),
+        _ => Vec::new(),
+    };
+    let service_exec = service.enable_execute_command;
 
     let mut ids = Vec::with_capacity(count as usize);
     for _ in 0..count {
@@ -759,10 +771,11 @@ pub(crate) fn spawn_service_tasks(
             started_by_ref_id: None,
             execution_role_arn: exec_role.clone(),
             task_role_arn: task_role.clone(),
-            tags: Vec::new(),
+            tags: propagated_tags.clone(),
             awslogs,
             captured_logs: String::new(),
             protection: None,
+            enable_execute_command: service_exec,
         };
         state.tasks.insert(task_id.clone(), task);
         if let Some(cluster) = state.clusters.get_mut(&cluster_name) {

@@ -73,7 +73,12 @@ impl EcsService {
             .unwrap_or(1) as usize;
         let group = opt_str(&body, "group").map(String::from);
         let started_by = opt_str(&body, "startedBy").map(String::from);
-        let tags = parse_tags(&body);
+        let enable_execute_command = body
+            .get("enableExecuteCommand")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let propagate_tags = opt_str(&body, "propagateTags").map(String::from);
+        let mut tags = parse_tags(&body);
 
         // PassRole trust check on any role overrides supplied via the
         // overrides.taskRoleArn / overrides.executionRoleArn fields.
@@ -124,6 +129,15 @@ impl EcsService {
         let td_task_role = td.task_role_arn.clone();
         let td_exec_role = td.execution_role_arn.clone();
         let td_containers = td.container_definitions.clone();
+        // RunTask supports propagateTags=TASK_DEFINITION to copy the
+        // TaskDefinition's tags onto each spawned task, in addition to
+        // any tags supplied directly in the request body. Real AWS
+        // unions the two sets; explicit tags win on key conflicts.
+        if propagate_tags.as_deref() == Some("TASK_DEFINITION") {
+            let mut td_tags = td.tags.clone();
+            td_tags.retain(|t| !tags.iter().any(|x| x.key == t.key));
+            tags.extend(td_tags);
+        }
 
         let mut spawned_tasks: Vec<String> = Vec::new();
         let mut task_jsons: Vec<Value> = Vec::new();
@@ -253,6 +267,7 @@ impl EcsService {
                 awslogs,
                 captured_logs: String::new(),
                 protection: None,
+                enable_execute_command,
             };
             state.tasks.insert(task_id.clone(), task.clone());
             if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
@@ -637,6 +652,7 @@ mod multi_container_tests {
             awslogs: None,
             captured_logs: String::new(),
             protection: None,
+            enable_execute_command: false,
         };
         for name in ["app", "sidecar"] {
             task.containers.push(Container {
@@ -866,6 +882,7 @@ mod port_mapping_tests {
             awslogs: None,
             captured_logs: String::new(),
             protection: None,
+            enable_execute_command: false,
         };
         task.last_status = "PENDING".into();
         acct.tasks.insert("abc".into(), task);

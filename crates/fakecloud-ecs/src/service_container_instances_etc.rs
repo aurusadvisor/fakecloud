@@ -834,18 +834,28 @@ impl EcsService {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // Resolve runtime container id.
+        // Resolve runtime container id and gate on the task's
+        // enableExecuteCommand flag. AWS rejects ExecuteCommand on
+        // tasks that didn't opt in (whether launched directly via
+        // RunTask or spawned by a service with enableExecuteCommand=false)
+        // with `InvalidParameterException`.
         let container_id = {
             let accounts = self.state.read();
             let state = accounts
                 .get(&request.account_id)
                 .ok_or_else(|| task_not_found(&task_ref))?;
             let id = task_id_from_ref(&task_ref);
-            state
+            let task = state
                 .tasks
                 .get(&id)
-                .and_then(|t| t.containers.first())
-                .and_then(|c| c.runtime_id.clone())
+                .ok_or_else(|| task_not_found(&task_ref))?;
+            if !task.enable_execute_command {
+                return Err(invalid_parameter(format!(
+                    "The execute command failed because execute command was not enabled when the task ({}) was run or the task is not running.",
+                    task.task_arn
+                )));
+            }
+            task.containers.first().and_then(|c| c.runtime_id.clone())
         };
 
         let session_id = format!("ecs-execute-command-{}", uuid::Uuid::new_v4());

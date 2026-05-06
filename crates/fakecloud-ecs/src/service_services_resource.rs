@@ -331,9 +331,13 @@ impl EcsService {
             let mut spawn: Vec<String> = Vec::new();
             let mut stop: Vec<String> = Vec::new();
 
-            // Tasks belonging to this service (by startedBy convention):
+            // Tasks belonging to this service (by startedBy convention).
+            // Track per-task protection so scale-down skips protected ones
+            // (UpdateTaskProtection). Real AWS only terminates a protected
+            // task when nothing else is eligible.
             let service_tag = format!("ecs-svc/{}", service_name);
-            let current_tasks: Vec<(String, String)> = state
+            let now = Utc::now();
+            let current_tasks: Vec<(String, String, bool)> = state
                 .tasks
                 .iter()
                 .filter(|(_, t)| {
@@ -341,7 +345,14 @@ impl EcsService {
                         && t.cluster_name == cluster_name
                         && t.last_status != "STOPPED"
                 })
-                .map(|(id, t)| (id.clone(), t.task_definition_arn.clone()))
+                .map(|(id, t)| {
+                    let protected = t
+                        .protection
+                        .as_ref()
+                        .filter(|p| p.enabled && p.expiration.is_none_or(|exp| exp > now))
+                        .is_some();
+                    (id.clone(), t.task_definition_arn.clone(), protected)
+                })
                 .collect();
 
             let current_count = current_tasks.len() as i32;
@@ -357,9 +368,28 @@ impl EcsService {
                 );
                 spawn.append(&mut new_ids);
             } else if effective_desired < current_count {
-                let remove = (current_count - effective_desired) as usize;
-                for (id, _) in current_tasks.iter().take(remove) {
-                    stop.push(id.clone());
+                let mut remove = (current_count - effective_desired) as usize;
+                // First pass: drain unprotected tasks. Only fall back to
+                // protected ones when there's nothing else left to stop.
+                for (id, _, protected) in current_tasks.iter() {
+                    if remove == 0 {
+                        break;
+                    }
+                    if !*protected {
+                        stop.push(id.clone());
+                        remove -= 1;
+                    }
+                }
+                if remove > 0 {
+                    for (id, _, protected) in current_tasks.iter() {
+                        if remove == 0 {
+                            break;
+                        }
+                        if *protected && !stop.contains(id) {
+                            stop.push(id.clone());
+                            remove -= 1;
+                        }
+                    }
                 }
             }
 
@@ -380,10 +410,10 @@ impl EcsService {
                 // are skipped here via `stop.contains(id)`).
                 let kept_on_new_td: i32 = current_tasks
                     .iter()
-                    .filter(|(id, t_arn)| *t_arn == new_td_arn_match && !stop.contains(id))
+                    .filter(|(id, t_arn, _)| *t_arn == new_td_arn_match && !stop.contains(id))
                     .count() as i32;
-                for (id, t_arn) in &current_tasks {
-                    if *t_arn != new_td_arn_match && !stop.contains(id) {
+                for (id, t_arn, protected) in &current_tasks {
+                    if *t_arn != new_td_arn_match && !stop.contains(id) && !*protected {
                         stop.push(id.clone());
                     }
                 }
