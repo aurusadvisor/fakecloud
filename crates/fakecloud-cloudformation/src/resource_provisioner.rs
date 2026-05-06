@@ -8444,6 +8444,10 @@ impl ResourceProvisioner {
                         .collect()
                 })
                 .unwrap_or_default(),
+            db_cluster_identifier: props
+                .get("DBClusterIdentifier")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         };
         let endpoint = inst.endpoint_address.clone();
         let endpoint_port = inst.port;

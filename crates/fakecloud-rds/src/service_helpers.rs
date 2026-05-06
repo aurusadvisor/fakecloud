@@ -534,6 +534,7 @@ pub(crate) fn build_restored_instance(
         domain_iam_role_name: None,
         domain_auth_secret_arn: None,
         domain_dns_ips: Vec::new(),
+        db_cluster_identifier: None,
     }
 }
 
@@ -617,6 +618,7 @@ pub(crate) fn build_s3_restored_instance(
         domain_iam_role_name: None,
         domain_auth_secret_arn: None,
         domain_dns_ips: Vec::new(),
+        db_cluster_identifier: None,
     }
 }
 
@@ -694,6 +696,7 @@ pub(crate) fn build_pit_restored_instance(
         domain_iam_role_name: source.domain_iam_role_name.clone(),
         domain_auth_secret_arn: source.domain_auth_secret_arn.clone(),
         domain_dns_ips: source.domain_dns_ips.clone(),
+        db_cluster_identifier: source.db_cluster_identifier.clone(),
     }
 }
 
@@ -773,6 +776,7 @@ pub(crate) fn build_read_replica_instance(
         domain_iam_role_name: source.domain_iam_role_name.clone(),
         domain_auth_secret_arn: source.domain_auth_secret_arn.clone(),
         domain_dns_ips: source.domain_dns_ips.clone(),
+        db_cluster_identifier: source.db_cluster_identifier.clone(),
     }
 }
 

@@ -647,6 +647,7 @@ mod tests {
                 domain_iam_role_name: None,
                 domain_auth_secret_arn: None,
                 domain_dns_ips: Vec::new(),
+                db_cluster_identifier: None,
             },
         );
 

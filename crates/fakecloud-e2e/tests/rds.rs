@@ -1486,3 +1486,313 @@ async fn rds_modify_db_cluster_unknown_cluster_errors() {
         Some("DBClusterNotFoundFault")
     );
 }
+
+/// Real RestoreDBClusterFromSnapshot path:
+///   1. Create cluster with a writer instance attached via DBClusterIdentifier.
+///   2. Write rows.
+///   3. CreateDBClusterSnapshot — dumps writer's database into the snapshot.
+///   4. Drop the writer (so source data is gone).
+///   5. RestoreDBClusterFromSnapshot to a new cluster id.
+///   6. Attach a fresh writer to the restored cluster — pending dump replays.
+///   7. Connect to new writer, verify rows survived.
+#[tokio::test]
+async fn rds_restore_db_cluster_from_snapshot_recovers_data() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    // 1. Create source cluster.
+    client
+        .create_db_cluster()
+        .db_cluster_identifier("m7-source-cluster")
+        .engine("aurora-postgresql")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .send()
+        .await
+        .expect("create source cluster");
+
+    // Attach a writer instance bound to the cluster.
+    client
+        .create_db_instance()
+        .db_instance_identifier("m7-source-writer")
+        .db_cluster_identifier("m7-source-cluster")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .expect("create writer");
+
+    let writer = helpers::wait_for_db_available(&client, "m7-source-writer", 180).await;
+    let endpoint = writer.endpoint().expect("writer endpoint");
+
+    // 2. Write rows on the writer.
+    let (writer_client, conn) = connect_with_retry(
+        endpoint.address().unwrap(),
+        endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "appdb",
+    )
+    .await
+    .expect("connect to writer");
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    writer_client
+        .execute("CREATE TABLE m7_rows (id INT, value TEXT)", &[])
+        .await
+        .expect("create table");
+    writer_client
+        .execute(
+            "INSERT INTO m7_rows VALUES (1, 'cluster-snapshot-survives')",
+            &[],
+        )
+        .await
+        .expect("insert row");
+
+    // 3. Snapshot the cluster (dumps writer into snapshot).
+    client
+        .create_db_cluster_snapshot()
+        .db_cluster_snapshot_identifier("m7-cluster-snap")
+        .db_cluster_identifier("m7-source-cluster")
+        .send()
+        .await
+        .expect("snapshot cluster");
+
+    // 4. Drop the source writer so the data only survives in the snapshot.
+    client
+        .delete_db_instance()
+        .db_instance_identifier("m7-source-writer")
+        .skip_final_snapshot(true)
+        .send()
+        .await
+        .expect("drop writer");
+
+    // 5. Restore the snapshot into a new cluster id.
+    client
+        .restore_db_cluster_from_snapshot()
+        .db_cluster_identifier("m7-restored-cluster")
+        .snapshot_identifier("m7-cluster-snap")
+        .engine("aurora-postgresql")
+        .send()
+        .await
+        .expect("restore cluster");
+
+    // 6. Create a writer in the restored cluster — the staged dump
+    //    replays into its container before status flips to available.
+    client
+        .create_db_instance()
+        .db_instance_identifier("m7-restored-writer")
+        .db_cluster_identifier("m7-restored-cluster")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .expect("create restored writer");
+
+    let restored = helpers::wait_for_db_available(&client, "m7-restored-writer", 180).await;
+    let restored_endpoint = restored.endpoint().expect("restored endpoint");
+
+    // 7. Verify rows survived.
+    let (restored_client, conn) = connect_with_retry(
+        restored_endpoint.address().unwrap(),
+        restored_endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "appdb",
+    )
+    .await
+    .expect("connect to restored writer");
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let row = restored_client
+        .query_one("SELECT value FROM m7_rows WHERE id = 1", &[])
+        .await
+        .expect("query restored row");
+    let value: String = row.get(0);
+    assert_eq!(value, "cluster-snapshot-survives");
+}
+
+/// Real RestoreDBClusterToPointInTime path: dumps the source cluster's
+/// writer live, stages the dump on the new cluster id, and the next
+/// CreateDBInstance attached to the new cluster replays the data.
+#[tokio::test]
+async fn rds_restore_db_cluster_to_point_in_time_clones_data() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_cluster()
+        .db_cluster_identifier("m7-pit-source")
+        .engine("aurora-postgresql")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .send()
+        .await
+        .expect("create source cluster");
+
+    client
+        .create_db_instance()
+        .db_instance_identifier("m7-pit-writer")
+        .db_cluster_identifier("m7-pit-source")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .expect("create writer");
+
+    let writer = helpers::wait_for_db_available(&client, "m7-pit-writer", 180).await;
+    let endpoint = writer.endpoint().expect("writer endpoint");
+    let (writer_client, conn) = connect_with_retry(
+        endpoint.address().unwrap(),
+        endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "appdb",
+    )
+    .await
+    .expect("connect");
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    writer_client
+        .execute("CREATE TABLE m7_pit_rows (id INT, value TEXT)", &[])
+        .await
+        .expect("create table");
+    writer_client
+        .execute("INSERT INTO m7_pit_rows VALUES (42, 'pit-payload')", &[])
+        .await
+        .expect("insert");
+
+    client
+        .restore_db_cluster_to_point_in_time()
+        .db_cluster_identifier("m7-pit-target")
+        .source_db_cluster_identifier("m7-pit-source")
+        .use_latest_restorable_time(true)
+        .send()
+        .await
+        .expect("restore PIT cluster");
+
+    client
+        .create_db_instance()
+        .db_instance_identifier("m7-pit-restored-writer")
+        .db_cluster_identifier("m7-pit-target")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .send()
+        .await
+        .expect("create restored writer");
+
+    let restored = helpers::wait_for_db_available(&client, "m7-pit-restored-writer", 180).await;
+    let restored_endpoint = restored.endpoint().expect("restored endpoint");
+    let (restored_client, conn) = connect_with_retry(
+        restored_endpoint.address().unwrap(),
+        restored_endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "appdb",
+    )
+    .await
+    .expect("connect to PIT writer");
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let row = restored_client
+        .query_one("SELECT value FROM m7_pit_rows WHERE id = 42", &[])
+        .await
+        .expect("query restored row");
+    let value: String = row.get(0);
+    assert_eq!(value, "pit-payload");
+}
+
+/// Real RestoreDBInstanceToPointInTime path. The op already dumps the
+/// source instance live and replays into the target; this test pins the
+/// behavior end-to-end so regressions surface.
+#[tokio::test]
+async fn rds_restore_db_instance_to_point_in_time_clones_data() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    create_instance(&client, "m7-pit-instance-source").await;
+    let source = client
+        .describe_db_instances()
+        .db_instance_identifier("m7-pit-instance-source")
+        .send()
+        .await
+        .expect("describe source");
+    let source_endpoint = source.db_instances()[0].endpoint().unwrap();
+    let (writer_client, conn) = connect_with_retry(
+        source_endpoint.address().unwrap(),
+        source_endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "appdb",
+    )
+    .await
+    .expect("connect");
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    writer_client
+        .execute("CREATE TABLE m7_inst_rows (id INT, value TEXT)", &[])
+        .await
+        .expect("create table");
+    writer_client
+        .execute(
+            "INSERT INTO m7_inst_rows VALUES (7, 'instance-pit-payload')",
+            &[],
+        )
+        .await
+        .expect("insert");
+
+    client
+        .restore_db_instance_to_point_in_time()
+        .source_db_instance_identifier("m7-pit-instance-source")
+        .target_db_instance_identifier("m7-pit-instance-target")
+        .use_latest_restorable_time(true)
+        .send()
+        .await
+        .expect("restore instance PIT");
+
+    let restored = helpers::wait_for_db_available(&client, "m7-pit-instance-target", 180).await;
+    let restored_endpoint = restored.endpoint().expect("restored endpoint");
+    let (restored_client, conn) = connect_with_retry(
+        restored_endpoint.address().unwrap(),
+        restored_endpoint.port().unwrap(),
+        "admin",
+        "secret123",
+        "appdb",
+    )
+    .await
+    .expect("connect to restored");
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let row = restored_client
+        .query_one("SELECT value FROM m7_inst_rows WHERE id = 7", &[])
+        .await
+        .expect("query restored row");
+    let value: String = row.get(0);
+    assert_eq!(value, "instance-pit-payload");
+}

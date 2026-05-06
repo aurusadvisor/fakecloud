@@ -267,6 +267,13 @@ impl RdsService {
         self
     }
 
+    /// Crate-internal accessor for the optional runtime; needed by the
+    /// extras handler so cluster snapshot/restore paths can dump and
+    /// replay member databases via the live container runtime.
+    pub(crate) fn runtime_ref(&self) -> Option<&Arc<RdsRuntime>> {
+        self.runtime.as_ref()
+    }
+
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
         self
@@ -411,6 +418,11 @@ impl AwsService for RdsService {
             "RestoreDBInstanceFromS3" => self.restore_db_instance_from_s3(&request).await,
             "DescribeDBLogFiles" => self.describe_db_log_files(&request).await,
             "DownloadDBLogFilePortion" => self.download_db_log_file_portion(&request).await,
+            "CreateDBClusterSnapshot" => self.create_db_cluster_snapshot(&request).await,
+            "RestoreDBClusterFromSnapshot" => self.restore_db_cluster_from_snapshot(&request).await,
+            "RestoreDBClusterToPointInTime" => {
+                self.restore_db_cluster_to_point_in_time(&request).await
+            }
             _ => self.handle_extra_action(&request),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
@@ -489,6 +501,7 @@ impl RdsService {
         )?;
         let copy_tags_to_snapshot =
             parse_optional_bool(optional_query_param(request, "CopyTagsToSnapshot").as_deref())?;
+        let db_cluster_identifier = optional_query_param(request, "DBClusterIdentifier");
 
         validate_create_request(
             &db_instance_identifier,
@@ -604,6 +617,7 @@ impl RdsService {
                 domain_iam_role_name: None,
                 domain_auth_secret_arn: None,
                 domain_dns_ips: Vec::new(),
+                db_cluster_identifier: db_cluster_identifier.clone(),
             };
             state.finish_instance_creation(placeholder.clone());
             placeholder
@@ -628,11 +642,13 @@ impl RdsService {
             let engine_version = engine_version.clone();
             let master_username = master_username.clone();
             let master_user_password = master_user_password.clone();
+            let logical_db_name_task = logical_db_name.clone();
             let account_id = request.account_id.clone();
             let region = request.region.clone();
             let arn = instance_arn.clone();
             let snapshot_store = self.snapshot_store.clone();
             let snapshot_lock = self.snapshot_lock.clone();
+            let cluster_id_for_attach = db_cluster_identifier.clone();
             tokio::spawn(async move {
                 match runtime
                     .ensure_postgres(
@@ -641,13 +657,54 @@ impl RdsService {
                         &engine_version,
                         &master_username,
                         &master_user_password,
-                        &logical_db_name,
+                        &logical_db_name_task,
                         &account_id,
                         &region,
                     )
                     .await
                 {
                     Ok(running) => {
+                        // If the cluster has a pending restore dump
+                        // staged by RestoreDBClusterFromSnapshot /
+                        // RestoreDBClusterToPointInTime, drain it and
+                        // replay onto this fresh instance. We do this
+                        // before flipping status to available so the
+                        // first read of "available" sees restored data.
+                        let pending_dump = if let Some(ref cid) = cluster_id_for_attach {
+                            let mut accounts = state_handle.write();
+                            let state = accounts.get_or_create(&account_id);
+                            state
+                                .extras
+                                .get_mut("clusters")
+                                .and_then(|m| m.get_mut(cid))
+                                .and_then(|entry| entry.as_object_mut())
+                                .and_then(|obj| obj.remove("PendingRestoreDumpB64"))
+                                .and_then(|v| v.as_str().map(str::to_string))
+                                .and_then(|b64| {
+                                    use base64::Engine;
+                                    base64::engine::general_purpose::STANDARD
+                                        .decode(b64.as_bytes())
+                                        .ok()
+                                })
+                        } else {
+                            None
+                        };
+                        if let Some(dump) = pending_dump {
+                            if let Err(error) = runtime
+                                .restore_database(
+                                    &id,
+                                    &engine,
+                                    &master_username,
+                                    &master_user_password,
+                                    &logical_db_name_task,
+                                    &dump,
+                                )
+                                .await
+                            {
+                                tracing::error!(%error, db_instance_identifier=%id, "cluster restore dump replay failed");
+                            }
+                        }
+
                         {
                             let mut accounts = state_handle.write();
                             let state = accounts.get_or_create(&account_id);
@@ -657,6 +714,11 @@ impl RdsService {
                                 inst.port = i32::from(running.host_port);
                                 inst.host_port = running.host_port;
                                 inst.container_id = running.container_id;
+                            }
+                            // Register as cluster member so failover /
+                            // restore paths can find the writer.
+                            if let Some(ref cid) = cluster_id_for_attach {
+                                attach_cluster_member(state, cid, &id);
                             }
                         }
                         // Persist the flipped status. Without this the
@@ -2543,6 +2605,400 @@ impl RdsService {
         ))
     }
 
+    /// Real CreateDBClusterSnapshot: locates the cluster's writer
+    /// member, dumps its database synchronously via the runtime, and
+    /// stores the dump alongside the snapshot's metadata so a later
+    /// RestoreDBClusterFromSnapshot can replay the exact state.
+    async fn create_db_cluster_snapshot(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use serde_json::json;
+        let snapshot_id = required_query_param(request, "DBClusterSnapshotIdentifier")?;
+        let cluster_id = required_query_param(request, "DBClusterIdentifier")?;
+        let arn = format!(
+            "arn:aws:rds:{}:{}:cluster-snapshot:{}",
+            request.region, request.account_id, snapshot_id
+        );
+
+        let writer_info = {
+            let accounts = self.state.read();
+            accounts.get(&request.account_id).and_then(|state| {
+                let cluster_entry = state.extras.get("clusters")?.get(&cluster_id)?;
+                let writer_id = cluster_entry
+                    .get("WriterDBInstanceIdentifier")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        cluster_entry
+                            .get("DBClusterMembers")
+                            .and_then(|m| m.as_array())
+                            .and_then(|arr| {
+                                arr.iter()
+                                    .find(|m| m["IsClusterWriter"].as_bool() == Some(true))
+                                    .or_else(|| arr.first())
+                                    .and_then(|m| m["DBInstanceIdentifier"].as_str())
+                                    .map(str::to_string)
+                            })
+                    })?;
+                let inst = state.instances.get(&writer_id)?;
+                Some((
+                    inst.db_instance_identifier.clone(),
+                    inst.engine.clone(),
+                    inst.master_username.clone(),
+                    inst.master_user_password.clone(),
+                    inst.db_name
+                        .clone()
+                        .unwrap_or_else(|| default_db_name(&inst.engine).to_string()),
+                ))
+            })
+        };
+
+        let dump_b64 = if let Some((wid, eng, user, pass, db)) = writer_info {
+            if let Some(runtime) = self.runtime_ref() {
+                match runtime.dump_database(&wid, &eng, &user, &pass, &db).await {
+                    Ok(data) => {
+                        use base64::Engine;
+                        Some(base64::engine::general_purpose::STANDARD.encode(&data))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            cluster = %cluster_id,
+                            writer = %wid,
+                            "cluster snapshot dump failed; falling back to metadata-only snapshot"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            let mut entry = state
+                .extras
+                .get("clusters")
+                .and_then(|m| m.get(&cluster_id))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "DBClusterSnapshotIdentifier".to_string(),
+                    json!(snapshot_id),
+                );
+                obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
+                obj.insert("DBClusterIdentifier".to_string(), json!(cluster_id));
+                obj.insert("Status".to_string(), json!("available"));
+                obj.insert("SnapshotType".to_string(), json!("manual"));
+                if let Some(b64) = dump_b64.as_ref() {
+                    obj.insert("DumpDataB64".to_string(), json!(b64));
+                }
+            }
+            state
+                .extras
+                .entry("cluster_snapshots".to_string())
+                .or_default()
+                .insert(snapshot_id.clone(), entry);
+        }
+
+        self.emit_event(
+            RdsSourceType::DbClusterSnapshot,
+            &snapshot_id,
+            &arn,
+            "RDS-EVENT-0074",
+            &["backup"],
+            "DB cluster snapshot created",
+        );
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            query_response_xml(
+                "CreateDBClusterSnapshot",
+                RDS_NS,
+                &crate::extras::cluster_snapshot_xml(&snapshot_id, &arn, &cluster_id),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    /// Real RestoreDBClusterFromSnapshot: clones the source cluster's
+    /// metadata into the new cluster id, strips member tracking so the
+    /// restored cluster starts empty, and stages the snapshot's dump
+    /// data on the new cluster so the next CreateDBInstance with this
+    /// cluster id replays it onto the fresh writer.
+    async fn restore_db_cluster_from_snapshot(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use serde_json::json;
+        let target = required_query_param(request, "DBClusterIdentifier")?;
+        let snapshot_id = optional_query_param(request, "SnapshotIdentifier")
+            .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MissingParameter",
+                    "SnapshotIdentifier is required",
+                )
+            })?;
+        let arn = format!(
+            "arn:aws:rds:{}:{}:cluster:{}",
+            request.region, request.account_id, target
+        );
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let snapshot = state
+            .extras
+            .get("cluster_snapshots")
+            .and_then(|m| m.get(&snapshot_id))
+            .cloned()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBClusterSnapshotNotFoundFault",
+                    format!("DBClusterSnapshot {snapshot_id} not found."),
+                )
+            })?;
+        let source_cluster_id = snapshot
+            .get("DBClusterIdentifier")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let pending_dump_b64 = snapshot
+            .get("DumpDataB64")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let mut entry = state
+            .extras
+            .get("clusters")
+            .and_then(|m| m.get(&source_cluster_id))
+            .cloned()
+            .unwrap_or_else(|| {
+                json!({
+                    "Engine": optional_query_param(request, "Engine").unwrap_or_else(|| "aurora-postgresql".to_string()),
+                    "EngineVersion": optional_query_param(request, "EngineVersion").unwrap_or_else(|| "15.3".to_string()),
+                    "MasterUsername": "postgres",
+                    "Port": 5432,
+                })
+            });
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("DBClusterIdentifier".to_string(), json!(target));
+            obj.insert("DBClusterArn".to_string(), json!(arn));
+            obj.insert("Status".to_string(), json!("available"));
+            obj.insert(
+                "Endpoint".to_string(),
+                json!(format!(
+                    "{target}.cluster-xxx.{}.rds.amazonaws.com",
+                    request.region
+                )),
+            );
+            obj.insert(
+                "ReaderEndpoint".to_string(),
+                json!(format!(
+                    "{target}.cluster-ro-xxx.{}.rds.amazonaws.com",
+                    request.region
+                )),
+            );
+            obj.remove("ReplicationSourceIdentifier");
+            obj.remove("DBClusterMembers");
+            obj.remove("WriterDBInstanceIdentifier");
+            obj.remove("DBClusterSnapshotIdentifier");
+            obj.remove("DBClusterSnapshotArn");
+            obj.remove("DumpDataB64");
+            if let Some(engine) = optional_query_param(request, "Engine") {
+                obj.insert("Engine".to_string(), json!(engine));
+            }
+            if let Some(version) = optional_query_param(request, "EngineVersion") {
+                obj.insert("EngineVersion".to_string(), json!(version));
+            }
+            if let Some(port) =
+                optional_query_param(request, "Port").and_then(|p| p.parse::<i64>().ok())
+            {
+                obj.insert("Port".to_string(), json!(port));
+            }
+            if let Some(b64) = pending_dump_b64 {
+                obj.insert("PendingRestoreDumpB64".to_string(), json!(b64));
+            }
+        }
+        state
+            .extras
+            .entry("clusters".to_string())
+            .or_default()
+            .insert(target.clone(), entry);
+        drop(accounts);
+
+        self.emit_event(
+            RdsSourceType::DbCluster,
+            &target,
+            &arn,
+            "RDS-EVENT-0170",
+            &["creation"],
+            "DB cluster restored from snapshot",
+        );
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            query_response_xml(
+                "RestoreDBClusterFromSnapshot",
+                RDS_NS,
+                &crate::extras::db_cluster_xml(&target, &arn),
+                &request.request_id,
+            ),
+        ))
+    }
+
+    /// Real RestoreDBClusterToPointInTime: dumps the source cluster's
+    /// writer live, clones the source cluster's metadata to the new
+    /// id, and stages the dump on the new cluster so the first
+    /// CreateDBInstance attached to it replays the data.
+    async fn restore_db_cluster_to_point_in_time(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        use serde_json::json;
+        let target = required_query_param(request, "DBClusterIdentifier")?;
+        let source = required_query_param(request, "SourceDBClusterIdentifier")?;
+        let arn = format!(
+            "arn:aws:rds:{}:{}:cluster:{}",
+            request.region, request.account_id, target
+        );
+
+        let writer_info = {
+            let accounts = self.state.read();
+            accounts.get(&request.account_id).and_then(|state| {
+                let cluster_entry = state.extras.get("clusters")?.get(&source)?;
+                let writer_id = cluster_entry
+                    .get("WriterDBInstanceIdentifier")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        cluster_entry
+                            .get("DBClusterMembers")
+                            .and_then(|m| m.as_array())
+                            .and_then(|arr| {
+                                arr.iter()
+                                    .find(|m| m["IsClusterWriter"].as_bool() == Some(true))
+                                    .or_else(|| arr.first())
+                                    .and_then(|m| m["DBInstanceIdentifier"].as_str())
+                                    .map(str::to_string)
+                            })
+                    })?;
+                let inst = state.instances.get(&writer_id)?;
+                Some((
+                    inst.db_instance_identifier.clone(),
+                    inst.engine.clone(),
+                    inst.master_username.clone(),
+                    inst.master_user_password.clone(),
+                    inst.db_name
+                        .clone()
+                        .unwrap_or_else(|| default_db_name(&inst.engine).to_string()),
+                ))
+            })
+        };
+
+        let pending_dump_b64 = if let Some((wid, eng, user, pass, db)) = writer_info {
+            if let Some(runtime) = self.runtime_ref() {
+                match runtime.dump_database(&wid, &eng, &user, &pass, &db).await {
+                    Ok(data) => {
+                        use base64::Engine;
+                        Some(base64::engine::general_purpose::STANDARD.encode(&data))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            cluster = %source,
+                            writer = %wid,
+                            "cluster PIT dump failed; falling back to metadata-only restore"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&request.account_id);
+        let mut entry = state
+            .extras
+            .get("clusters")
+            .and_then(|m| m.get(&source))
+            .cloned()
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBClusterNotFoundFault",
+                    format!("DBCluster {source} not found."),
+                )
+            })?;
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("DBClusterIdentifier".to_string(), json!(target));
+            obj.insert("DBClusterArn".to_string(), json!(arn));
+            obj.insert("Status".to_string(), json!("available"));
+            obj.insert(
+                "Endpoint".to_string(),
+                json!(format!(
+                    "{target}.cluster-xxx.{}.rds.amazonaws.com",
+                    request.region
+                )),
+            );
+            obj.insert(
+                "ReaderEndpoint".to_string(),
+                json!(format!(
+                    "{target}.cluster-ro-xxx.{}.rds.amazonaws.com",
+                    request.region
+                )),
+            );
+            obj.remove("DBClusterMembers");
+            obj.remove("WriterDBInstanceIdentifier");
+            if let Some(restore_time) = optional_query_param(request, "RestoreToTime") {
+                obj.insert("RestoreToTime".to_string(), json!(restore_time));
+            }
+            if let Some(latest) = optional_query_param(request, "UseLatestRestorableTime") {
+                obj.insert("UseLatestRestorableTime".to_string(), json!(latest));
+            }
+            if let Some(b64) = pending_dump_b64 {
+                obj.insert("PendingRestoreDumpB64".to_string(), json!(b64));
+            }
+        }
+        state
+            .extras
+            .entry("clusters".to_string())
+            .or_default()
+            .insert(target.clone(), entry);
+        drop(accounts);
+
+        self.emit_event(
+            RdsSourceType::DbCluster,
+            &target,
+            &arn,
+            "RDS-EVENT-0171",
+            &["creation"],
+            "DB cluster restored to point in time",
+        );
+
+        Ok(AwsResponse::xml(
+            StatusCode::OK,
+            query_response_xml(
+                "RestoreDBClusterToPointInTime",
+                RDS_NS,
+                &crate::extras::db_cluster_xml(&target, &arn),
+                &request.request_id,
+            ),
+        ))
+    }
+
     async fn describe_db_log_files(
         &self,
         request: &AwsRequest,
@@ -3368,6 +3824,50 @@ fn map_log_file_to_container_path(engine: &str, log_file_name: &str) -> String {
 pub(crate) struct PaginationResult<T> {
     items: Vec<T>,
     next_marker: Option<String>,
+}
+
+/// Attach `instance_id` to the cluster's `DBClusterMembers` array,
+/// promoting it to writer when the cluster has none. Idempotent:
+/// re-attaching an existing member is a no-op.
+fn attach_cluster_member(state: &mut RdsState, cluster_id: &str, instance_id: &str) {
+    use serde_json::{json, Value};
+    let Some(map) = state.extras.get_mut("clusters") else {
+        return;
+    };
+    let Some(entry) = map.get_mut(cluster_id) else {
+        return;
+    };
+    let Some(obj) = entry.as_object_mut() else {
+        return;
+    };
+    let mut members: Vec<Value> = obj
+        .get("DBClusterMembers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if members
+        .iter()
+        .any(|m| m["DBInstanceIdentifier"].as_str() == Some(instance_id))
+    {
+        return;
+    }
+    let has_writer = members
+        .iter()
+        .any(|m| m["IsClusterWriter"].as_bool() == Some(true));
+    let promotion_tier = (members.len() as i64) + 1;
+    members.push(json!({
+        "DBInstanceIdentifier": instance_id,
+        "IsClusterWriter": !has_writer,
+        "DBClusterParameterGroupStatus": "in-sync",
+        "PromotionTier": promotion_tier,
+    }));
+    obj.insert("DBClusterMembers".to_string(), Value::Array(members));
+    if !has_writer {
+        obj.insert(
+            "WriterDBInstanceIdentifier".to_string(),
+            Value::String(instance_id.to_string()),
+        );
+    }
 }
 
 #[path = "service_helpers.rs"]
