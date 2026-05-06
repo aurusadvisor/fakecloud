@@ -7,6 +7,7 @@ pub(crate) fn run_states<'a>(
     input: Value,
     delivery: &'a Option<Arc<DeliveryBus>>,
     dynamodb_state: &'a Option<SharedDynamoDbState>,
+    registry: &'a Option<crate::service::SharedServiceRegistry>,
     shared_state: &'a SharedStepFunctionsState,
     execution_arn: &'a str,
 ) -> StatesResult<'a> {
@@ -112,6 +113,7 @@ pub(crate) fn run_states<'a>(
                         effective_input,
                         delivery,
                         dynamodb_state,
+                        registry,
                         shared_state,
                         execution_arn,
                     )
@@ -124,6 +126,7 @@ pub(crate) fn run_states<'a>(
                         effective_input,
                         delivery,
                         dynamodb_state,
+                        registry,
                         shared_state,
                         execution_arn,
                     )
@@ -136,6 +139,7 @@ pub(crate) fn run_states<'a>(
                         effective_input,
                         delivery,
                         dynamodb_state,
+                        registry,
                         shared_state,
                         execution_arn,
                     )

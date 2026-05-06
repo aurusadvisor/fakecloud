@@ -9,6 +9,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::pagination::paginate;
+use fakecloud_core::registry::ServiceRegistry;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_core::validation::*;
 use fakecloud_dynamodb::SharedDynamoDbState;
@@ -61,10 +62,18 @@ const SUPPORTED: &[&str] = &[
     "ValidateStateMachineDefinition",
 ];
 
+/// Handle to the central service registry, set by `main.rs` after every service
+/// has been registered. Wrapped in `OnceLock` so `StepFunctionsService` can be
+/// constructed (and registered into the very registry it later reads back) before
+/// the registry itself is finalized. The interpreter snapshots the inner `Arc`
+/// when it needs to dispatch generic `aws-sdk:*` Task integrations.
+pub type SharedServiceRegistry = Arc<std::sync::OnceLock<Arc<ServiceRegistry>>>;
+
 pub struct StepFunctionsService {
     state: SharedStepFunctionsState,
     delivery: Option<Arc<DeliveryBus>>,
     dynamodb_state: Option<SharedDynamoDbState>,
+    registry: Option<SharedServiceRegistry>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
 }
@@ -75,6 +84,7 @@ impl StepFunctionsService {
             state,
             delivery: None,
             dynamodb_state: None,
+            registry: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
@@ -87,6 +97,15 @@ impl StepFunctionsService {
 
     pub fn with_dynamodb(mut self, dynamodb_state: SharedDynamoDbState) -> Self {
         self.dynamodb_state = Some(dynamodb_state);
+        self
+    }
+
+    /// Hand the service a deferred-fill handle to the central [`ServiceRegistry`].
+    /// `main.rs` calls [`OnceLock::set`] on the inner cell after every service
+    /// has been registered; until then the interpreter falls back to its
+    /// hand-coded SDK integrations (lambda invoke, sqs sendMessage, …).
+    pub fn with_registry(mut self, registry: SharedServiceRegistry) -> Self {
+        self.registry = Some(registry);
         self
     }
 
@@ -493,6 +512,7 @@ impl StepFunctionsService {
         let input_clone = input;
         let delivery = self.delivery.clone();
         let dynamodb_state = self.dynamodb_state.clone();
+        let registry = self.registry.clone();
         tokio::spawn(async move {
             interpreter::execute_state_machine(
                 shared_state,
@@ -501,6 +521,7 @@ impl StepFunctionsService {
                 input_clone,
                 delivery,
                 dynamodb_state,
+                registry,
             )
             .await;
         });
@@ -1666,6 +1687,7 @@ pub fn start_execution_from_delivery(
     state: &SharedStepFunctionsState,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
+    registry: &Option<SharedServiceRegistry>,
     state_machine_arn: &str,
     input: &str,
 ) {
@@ -1726,6 +1748,7 @@ pub fn start_execution_from_delivery(
     let shared_state = state.clone();
     let delivery = delivery.clone();
     let dynamodb_state = dynamodb_state.clone();
+    let registry = registry.clone();
     let input = Some(input.to_string());
     tokio::spawn(async move {
         interpreter::execute_state_machine(
@@ -1735,6 +1758,7 @@ pub fn start_execution_from_delivery(
             input,
             delivery,
             dynamodb_state,
+            registry,
         )
         .await;
     });

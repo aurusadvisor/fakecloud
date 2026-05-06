@@ -3823,6 +3823,7 @@ version = "0.13.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "fakecloud-aws",
  "fakecloud-core",

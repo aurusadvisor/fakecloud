@@ -12,6 +12,7 @@ use fakecloud_dynamodb::SharedDynamoDbState;
 use crate::choice::evaluate_choice;
 use crate::error_handling::{find_catcher, should_retry};
 use crate::io_processing::{apply_input_path, apply_output_path, apply_result_path};
+use crate::service::SharedServiceRegistry;
 use crate::state::{ExecutionStatus, HistoryEvent, SharedStepFunctionsState};
 
 /// Execute a state machine definition with the given input.
@@ -23,6 +24,7 @@ pub async fn execute_state_machine(
     input: Option<String>,
     delivery: Option<Arc<DeliveryBus>>,
     dynamodb_state: Option<SharedDynamoDbState>,
+    registry: Option<SharedServiceRegistry>,
 ) {
     let def: Value = match serde_json::from_str(&definition) {
         Ok(v) => v,
@@ -64,12 +66,14 @@ pub async fn execute_state_machine(
     let execution_arn_clone = execution_arn.clone();
     let delivery_clone = delivery.clone();
     let dynamodb_state_clone = dynamodb_state.clone();
+    let registry_clone = registry.clone();
     let handle = tokio::spawn(async move {
         run_states(
             &def_owned,
             raw_input,
             &delivery_clone,
             &dynamodb_state_clone,
+            &registry_clone,
             &state_clone,
             &execution_arn_clone,
         )
@@ -161,6 +165,7 @@ async fn run_task_state(
     input: Value,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
+    registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
@@ -180,6 +185,7 @@ async fn run_task_state(
         &input,
         delivery,
         dynamodb_state,
+        registry,
         shared_state,
         execution_arn,
         entered_event_id,
@@ -211,6 +217,7 @@ async fn run_parallel_state(
     input: Value,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
+    registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
@@ -230,6 +237,7 @@ async fn run_parallel_state(
         &input,
         delivery,
         dynamodb_state,
+        registry,
         shared_state,
         execution_arn,
     )
@@ -260,6 +268,7 @@ async fn run_map_state(
     input: Value,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
+    registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
@@ -279,6 +288,7 @@ async fn run_map_state(
         &input,
         delivery,
         dynamodb_state,
+        registry,
         shared_state,
         execution_arn,
     )
@@ -351,11 +361,13 @@ async fn execute_wait_state(state_def: &Value, input: &Value) {
 
 /// Execute a Task state: invoke the resource (Lambda, SQS, SNS, EventBridge, DynamoDB),
 /// apply I/O processing, handle Retry.
+#[allow(clippy::too_many_arguments)]
 async fn execute_task_state(
     state_def: &Value,
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
+    registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
     entered_event_id: i64,
@@ -409,6 +421,8 @@ async fn execute_task_state(
             &task_input,
             delivery,
             dynamodb_state,
+            registry,
+            execution_arn,
             timeout_seconds,
             heartbeat_seconds,
             shared_state,
@@ -476,6 +490,7 @@ async fn execute_parallel_state(
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
+    registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Result<Value, (String, String)> {
@@ -508,11 +523,12 @@ async fn execute_parallel_state(
         let branch_input = effective_input.clone();
         let delivery = delivery.clone();
         let ddb = dynamodb_state.clone();
+        let reg = registry.clone();
         let state = shared_state.clone();
         let arn = execution_arn.to_string();
 
         handles.push(tokio::spawn(async move {
-            run_states(&branch, branch_input, &delivery, &ddb, &state, &arn).await
+            run_states(&branch, branch_input, &delivery, &ddb, &reg, &state, &arn).await
         }));
     }
 
@@ -560,6 +576,7 @@ async fn execute_map_state(
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
+    registry: &Option<SharedServiceRegistry>,
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Result<Value, (String, String)> {
@@ -605,6 +622,7 @@ async fn execute_map_state(
         let iter_def = iterator_def.clone();
         let delivery = delivery.clone();
         let ddb = dynamodb_state.clone();
+        let reg = registry.clone();
         let state = shared_state.clone();
         let arn = execution_arn.to_string();
         let sem = semaphore.clone();
@@ -632,7 +650,8 @@ async fn execute_map_state(
                 .acquire()
                 .await
                 .map_err(|_| ("States.Runtime".to_string(), "Semaphore closed".to_string()))?;
-            let result = run_states(&iter_def, item_input, &delivery, &ddb, &state, &arn).await;
+            let result =
+                run_states(&iter_def, item_input, &delivery, &ddb, &reg, &state, &arn).await;
             Ok::<(usize, Result<Value, (String, String)>), (String, String)>((index, result))
         }));
     }
@@ -706,6 +725,8 @@ async fn invoke_resource(
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
+    registry: &Option<SharedServiceRegistry>,
+    execution_arn: &str,
     timeout_seconds: Option<u64>,
     heartbeat_seconds: Option<u64>,
     shared_state: &SharedStepFunctionsState,
@@ -766,10 +787,189 @@ async fn invoke_resource(
         return invoke_dynamodb_update_item(input, dynamodb_state);
     }
 
+    // Generic AWS SDK integration: arn:aws:states:::aws-sdk:<service>:<action>[.<wait>]
+    // Routes the call to the registered service via the central
+    // ServiceRegistry, passing the Task's `Parameters` block as the
+    // request body. Mirrors the AWS SDK service integration pattern in
+    // real Step Functions.
+    if let Some(rest) = resource.strip_prefix("arn:aws:states:::aws-sdk:") {
+        let account_id = account_from_execution_arn(execution_arn);
+        return invoke_aws_sdk_integration(rest, input, registry, &account_id).await;
+    }
+
     Err((
         "States.TaskFailed".to_string(),
         format!("Unsupported resource: {resource}"),
     ))
+}
+
+/// Convert an SDK integration action (camelCase, e.g. `getItem`) to its
+/// PascalCase wire form (`GetItem`). Step Functions Task ARNs use
+/// camelCase, but the underlying AWS service handlers expect PascalCase
+/// `X-Amz-Target`-style action names.
+fn camel_to_pascal(action: &str) -> String {
+    let mut chars = action.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+    }
+}
+
+/// Map a Step Functions SDK integration service id to the corresponding
+/// fakecloud `service_name()`. Most match 1:1, but a handful of AWS SDK
+/// service ids differ from the SigV4 service identifier we register
+/// services under (e.g. `sfn` -> `states`, `cloudwatchlogs` -> `logs`).
+fn map_sdk_service_id(service_id: &str) -> &str {
+    match service_id {
+        "sfn" => "states",
+        "cloudwatchlogs" => "logs",
+        "elasticloadbalancingv2" => "elasticloadbalancingv2",
+        // Default: pass through unchanged.
+        other => other,
+    }
+}
+
+/// Dispatch a Step Functions `aws-sdk:<service>:<action>` Task to the
+/// registered service via the central [`fakecloud_core::registry::ServiceRegistry`].
+/// `tail` is the trailing portion of the resource ARN after the
+/// `aws-sdk:` prefix (e.g. `dynamodb:getItem` or `sqs:sendMessage.waitForTaskToken`).
+/// Extract the AWS account id from a Step Functions execution ARN
+/// (`arn:aws:states:<region>:<account>:execution:...`). Falls back to
+/// the AWS-conventional fixture id if the ARN is malformed.
+fn account_from_execution_arn(execution_arn: &str) -> String {
+    execution_arn
+        .split(':')
+        .nth(4)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("123456789012")
+        .to_string()
+}
+
+async fn invoke_aws_sdk_integration(
+    tail: &str,
+    input: &Value,
+    registry: &Option<SharedServiceRegistry>,
+    account_id: &str,
+) -> Result<Value, (String, String)> {
+    use bytes::Bytes;
+    use fakecloud_core::service::AwsRequest;
+    use http::{HeaderMap, Method};
+
+    let registry_handle = registry.as_ref().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "No service registry configured for aws-sdk integration".to_string(),
+        )
+    })?;
+    let registry_arc = registry_handle.get().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "Service registry not yet initialised; aws-sdk integration unavailable".to_string(),
+        )
+    })?;
+
+    // Split `<service>:<action>[.<modifier>]`. Modifiers like
+    // `.waitForTaskToken` and `.sync` are accepted but ignored — the
+    // integration runs synchronously regardless.
+    let mut parts = tail.splitn(2, ':');
+    let service_id = parts.next().filter(|s| !s.is_empty()).ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            format!("Invalid aws-sdk Resource ARN: missing service in '{tail}'"),
+        )
+    })?;
+    let action_with_mod = parts.next().filter(|s| !s.is_empty()).ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            format!("Invalid aws-sdk Resource ARN: missing action in '{tail}'"),
+        )
+    })?;
+    let action_camel = action_with_mod
+        .split('.')
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            (
+                "States.TaskFailed".to_string(),
+                format!("Invalid aws-sdk Resource ARN: empty action in '{tail}'"),
+            )
+        })?;
+
+    let action_pascal = camel_to_pascal(action_camel);
+    let service_name = map_sdk_service_id(service_id).to_string();
+
+    let service = registry_arc.get(&service_name).ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            format!("Unknown aws-sdk service '{service_id}'"),
+        )
+    })?;
+
+    // Serialize the Parameters block as the JSON request body. Most
+    // fakecloud services accept JSON for any action (DynamoDB JSON,
+    // SQS+SNS+SES JSON, EventBridge JSON), so the same encoding works
+    // across the board.
+    let body_bytes = Bytes::from(
+        serde_json::to_vec(input).expect("serde_json::Value serialization is infallible"),
+    );
+
+    let req = AwsRequest {
+        service: service_name.clone(),
+        action: action_pascal.clone(),
+        region: "us-east-1".to_string(),
+        account_id: account_id.to_string(),
+        request_id: uuid::Uuid::new_v4().to_string(),
+        headers: HeaderMap::new(),
+        query_params: std::collections::HashMap::new(),
+        body: body_bytes,
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: vec![],
+        raw_path: "/".to_string(),
+        raw_query: String::new(),
+        method: Method::POST,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    };
+
+    let response = service.handle(req).await.map_err(|err| {
+        // Surface the AWS error code as the State error so Catch/Retry
+        // can match on it (e.g. `DynamoDb.ResourceNotFoundException`).
+        let code = err.code().to_string();
+        let msg = err.message();
+        let prefix_service = match service_name.as_str() {
+            "dynamodb" => "DynamoDb".to_string(),
+            "states" => "Sfn".to_string(),
+            other => camel_to_pascal(other),
+        };
+        (
+            format!("{prefix_service}.{code}"),
+            format!("{action_pascal} failed: {msg}"),
+        )
+    })?;
+
+    // Read the response body and parse as JSON. Tasks always return JSON.
+    let response_bytes = match response.body {
+        fakecloud_core::service::ResponseBody::Bytes(b) => b,
+        fakecloud_core::service::ResponseBody::File { .. } => {
+            return Err((
+                "States.TaskFailed".to_string(),
+                "aws-sdk integration: file-backed response not supported".to_string(),
+            ));
+        }
+    };
+
+    if response_bytes.is_empty() {
+        return Ok(json!({}));
+    }
+    let parsed: Value = serde_json::from_slice(&response_bytes).map_err(|e| {
+        (
+            "States.TaskFailed".to_string(),
+            format!("aws-sdk integration: failed to parse response JSON: {e}"),
+        )
+    })?;
+
+    Ok(parsed)
 }
 
 #[derive(Clone, Copy)]

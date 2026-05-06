@@ -3727,3 +3727,223 @@ async fn sfn_activity_failure_propagates_to_execution() {
     worker.await.unwrap();
     assert_eq!(status, "FAILED");
 }
+
+// --- Generic aws-sdk:* integration tests (CC1) ---
+//
+// These cover the generalised
+// `arn:aws:states:::aws-sdk:<service>:<action>` form that AWS Step
+// Functions supports for ~250 SDK actions, dispatched in fakecloud
+// through the central ServiceRegistry. The legacy `optimized` ARNs
+// (e.g. `arn:aws:states:::dynamodb:getItem`) are exercised above.
+
+#[tokio::test]
+async fn sfn_aws_sdk_dynamodb_get_item() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+    let ddb = server.dynamodb_client().await;
+
+    ddb.create_table()
+        .table_name("aws-sdk-ddb-table")
+        .attribute_definitions(
+            aws_sdk_dynamodb::types::AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(aws_sdk_dynamodb::types::ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            aws_sdk_dynamodb::types::KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(aws_sdk_dynamodb::types::KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Pre-seed an item so the Task's GetItem returns it.
+    ddb.put_item()
+        .table_name("aws-sdk-ddb-table")
+        .item(
+            "pk",
+            aws_sdk_dynamodb::types::AttributeValue::S("seed-1".to_string()),
+        )
+        .item(
+            "payload",
+            aws_sdk_dynamodb::types::AttributeValue::S("hello-via-aws-sdk".to_string()),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let definition = json!({
+        "StartAt": "Lookup",
+        "States": {
+            "Lookup": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:dynamodb:getItem",
+                "Parameters": {
+                    "TableName": "aws-sdk-ddb-table",
+                    "Key": {"pk": {"S": "seed-1"}}
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = sfn
+        .create_state_machine()
+        .name("aws-sdk-ddb-getitem-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&sfn, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = sfn
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output["Item"]["pk"]["S"], "seed-1");
+    assert_eq!(output["Item"]["payload"]["S"], "hello-via-aws-sdk");
+}
+
+#[tokio::test]
+async fn sfn_aws_sdk_sqs_send_message() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+    let sqs = server.sqs_client().await;
+
+    let queue = sqs
+        .create_queue()
+        .queue_name("aws-sdk-sqs-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap();
+
+    let definition = json!({
+        "StartAt": "Send",
+        "States": {
+            "Send": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:sqs:sendMessage",
+                "Parameters": {
+                    "QueueUrl": queue_url,
+                    "MessageBody": "hello-via-aws-sdk-sqs"
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = sfn
+        .create_state_machine()
+        .name("aws-sdk-sqs-send-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&sfn, start.execution_arn()).await;
+    let desc = sfn
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        "SUCCEEDED",
+        "execution failed: error={:?} cause={:?}",
+        desc.error(),
+        desc.cause()
+    );
+
+    // Output should carry the SendMessage response (MessageId,
+    // MD5OfMessageBody) and the message must land in SQS.
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert!(
+        output["MessageId"].is_string(),
+        "expected MessageId in output, got {output:?}"
+    );
+
+    let receive = sqs
+        .receive_message()
+        .queue_url(queue_url)
+        .send()
+        .await
+        .unwrap();
+    let messages = receive.messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].body().unwrap(), "hello-via-aws-sdk-sqs");
+}
+
+#[tokio::test]
+async fn sfn_aws_sdk_unknown_service_fails_task() {
+    // An unmapped `aws-sdk:<service>:<action>` should surface as a
+    // TaskFailed with a States.TaskFailed-style error code, not
+    // crash the interpreter.
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+
+    let definition = json!({
+        "StartAt": "Boom",
+        "States": {
+            "Boom": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::aws-sdk:nosuchservice:doNothing",
+                "Parameters": {},
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = sfn
+        .create_state_machine()
+        .name("aws-sdk-unknown-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&sfn, start.execution_arn()).await;
+    assert_eq!(status, "FAILED");
+}

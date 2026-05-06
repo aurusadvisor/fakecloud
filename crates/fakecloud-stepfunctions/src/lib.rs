@@ -6,7 +6,7 @@ pub mod io_processing;
 pub(crate) mod service;
 pub mod state;
 
-pub use service::{start_execution_from_delivery, StepFunctionsService};
+pub use service::{start_execution_from_delivery, SharedServiceRegistry, StepFunctionsService};
 pub use state::{
     Activity, AliasRoute, SharedStepFunctionsState, StateMachine, StateMachineAlias,
     StateMachineStatus, StateMachineType, StateMachineVersion, StepFunctionsSnapshot,
