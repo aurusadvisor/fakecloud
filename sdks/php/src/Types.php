@@ -591,6 +591,18 @@ final class ForceDlqResponse
     }
 }
 
+final class AppAsTickResponse
+{
+    public function __construct(
+        public readonly int $applied,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['applied']);
+    }
+}
+
 // ── EventBridge ────────────────────────────────────────────────
 
 final class EventBridgeEvent

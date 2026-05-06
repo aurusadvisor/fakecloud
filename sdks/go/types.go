@@ -251,6 +251,12 @@ type ForceDLQResponse struct {
 	MovedMessages uint64 `json:"movedMessages"`
 }
 
+// AppAsTickResponse reports how many Application Auto Scaling
+// policies applied a capacity change on a forced watcher tick.
+type AppAsTickResponse struct {
+	Applied int `json:"applied"`
+}
+
 // ── EventBridge ────────────────────────────────────────────────────
 
 // EventBridgeEvent represents an event put to EventBridge.

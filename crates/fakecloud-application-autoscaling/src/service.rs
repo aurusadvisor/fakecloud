@@ -348,6 +348,7 @@ impl ApplicationAutoScalingService {
                 target_tracking_scaling_policy_configuration: tt_cfg,
                 predictive_scaling_policy_configuration: pred_cfg,
                 alarms: Vec::new(),
+                last_applied_at: None,
             };
             account.scaling_policies.insert(policy_key, policy);
             arn

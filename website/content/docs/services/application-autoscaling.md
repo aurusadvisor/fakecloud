@@ -43,6 +43,46 @@ aws --endpoint-url http://localhost:4566 application-autoscaling describe-scalin
   --service-namespace ecs
 ```
 
+## DynamoDB capacity scaling
+
+The Application Auto Scaling watcher now actually resizes DynamoDB
+provisioned tables in response to scaling policies. The watcher ticks
+every 15 seconds, walks every registered DynamoDB scalable target, and
+applies one of two algorithms per policy:
+
+- **`TargetTrackingScaling`** — reads the latest sample of the
+  `PredefinedMetricSpecification.PredefinedMetricType` metric from
+  CloudWatch (`DynamoDBReadCapacityUtilization` /
+  `DynamoDBWriteCapacityUtilization`, dimensioned by `TableName`),
+  computes `desired = current * (utilisation / TargetValue)`, clamps
+  to `[MinCapacity, MaxCapacity]`, and rounds up before calling the
+  DynamoDB capacity hook. Honours `ScaleInCooldown` /
+  `ScaleOutCooldown`.
+- **`StepScalingScaling`** — fires whenever a CloudWatch alarm whose
+  `AlarmActions` contains the policy ARN transitions to `ALARM`. The
+  first matching `StepAdjustment` is applied via the configured
+  `AdjustmentType` (`ChangeInCapacity`, `ExactCapacity`,
+  `PercentChangeInCapacity` with optional `MinAdjustmentMagnitude`).
+  Honours `Cooldown`.
+
+Each decision lands as a `ScalingActivity` row so
+`DescribeScalingActivities` shows the real history. Unsuccessful
+attempts (cooldown, missing table, billing-mode mismatch) record a
+`Failed` activity with a `NotScaledReason`.
+
+To deterministically force the watcher off the wall-clock interval —
+useful in tests — POST `/_fakecloud/application-autoscaling/tick`. The
+response shape is `{ "applied": <int> }`. The introspection SDKs
+expose this as `fakecloud.applicationAutoscaling.tick()`.
+
 ## Caveats
 
-fakecloud does not actually scale anything. `PutScalingPolicy` and `PutScheduledAction` store configurations verbatim and return them on `Describe*`, but no metric is collected, no alarm is created, and ECS task counts / Lambda concurrency / DynamoDB capacity are never adjusted. Predictive forecasts are deterministic synthetic curves, not actual ML predictions — useful for asserting your code reads the response shape correctly, not for any business logic. Scaling activities are an in-memory log seeded by the service itself; fakecloud doesn't emit any. CloudWatch alarms reported under `ScalingPolicy.Alarms` are always empty.
+The watcher only scales DynamoDB tables today. ECS service
+`DesiredCount`, Lambda provisioned concurrency, RDS Aurora capacity,
+ElastiCache replicas, and the rest of Application Auto Scaling's
+service namespaces still store policy configurations verbatim without
+applying them. Predictive forecasts are deterministic synthetic
+curves, not actual ML predictions. CloudWatch alarms reported under
+`ScalingPolicy.Alarms` remain empty — the watcher resolves alarms by
+walking CloudWatch state directly rather than mirroring AWS's
+auto-attach behaviour.

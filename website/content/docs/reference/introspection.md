@@ -80,6 +80,12 @@ curl http://localhost:4566/_fakecloud/health
 | -------------------------------------------- | ------ | ----------- |
 | `/_fakecloud/dynamodb/ttl-processor/tick`    | POST   | Expire items whose TTL attribute is in the past. |
 
+## Application Auto Scaling
+
+| Endpoint                                     | Method | Description |
+| -------------------------------------------- | ------ | ----------- |
+| `/_fakecloud/application-autoscaling/tick`   | POST   | Force the watcher to evaluate every scaling policy now. Returns `{ "applied": <int> }` — the count of policies that applied a capacity change this tick. |
+
 ## Secrets Manager
 
 | Endpoint                                              | Method | Description |

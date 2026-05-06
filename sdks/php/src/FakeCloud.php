@@ -38,6 +38,7 @@ final class FakeCloud
     private Elbv2Client $elbv2;
     private Route53Client $route53;
     private AcmClient $acm;
+    private ApplicationAutoScalingClient $applicationAutoscaling;
 
     public function __construct(string $baseUrl = self::DEFAULT_BASE_URL)
     {
@@ -62,6 +63,7 @@ final class FakeCloud
         $this->elbv2 = new Elbv2Client($this->http);
         $this->route53 = new Route53Client($this->http);
         $this->acm = new AcmClient($this->http);
+        $this->applicationAutoscaling = new ApplicationAutoScalingClient($this->http);
     }
 
     public function baseUrl(): string
@@ -123,6 +125,7 @@ final class FakeCloud
     public function elbv2(): Elbv2Client { return $this->elbv2; }
     public function route53(): Route53Client { return $this->route53; }
     public function acm(): AcmClient { return $this->acm; }
+    public function applicationAutoscaling(): ApplicationAutoScalingClient { return $this->applicationAutoscaling; }
 }
 
 // ── Sub-clients ────────────────────────────────────────────────
@@ -286,6 +289,18 @@ final class SqsClient
     {
         return ForceDlqResponse::fromArray(
             $this->http->postEmpty('/_fakecloud/sqs/' . HttpTransport::encodePath($queueName) . '/force-dlq')
+        );
+    }
+}
+
+final class ApplicationAutoScalingClient
+{
+    public function __construct(private readonly HttpTransport $http) {}
+
+    public function tick(): AppAsTickResponse
+    {
+        return AppAsTickResponse::fromArray(
+            $this->http->postEmpty('/_fakecloud/application-autoscaling/tick')
         );
     }
 }

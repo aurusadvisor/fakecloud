@@ -1,5 +1,5 @@
 pub(crate) mod service;
-pub(crate) mod state;
+pub mod state;
 pub mod streams;
 pub mod streams_dataplane;
 pub mod ttl;

@@ -502,6 +502,18 @@ class ExpirationTickResponse:
 
 
 @dataclass
+class AppAsTickResponse:
+    """Result of forcing one Application Auto Scaling watcher tick."""
+
+    applied: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AppAsTickResponse:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
 class ForceDlqResponse:
     moved_messages: int
 
