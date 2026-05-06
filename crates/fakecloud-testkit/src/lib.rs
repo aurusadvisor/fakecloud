@@ -756,12 +756,12 @@ impl TestServer {
         aws_sdk_sesv2::Client::new(&self.aws_config().await)
     }
 
-    pub async fn cognito_client(&self) -> aws_sdk_cognitoidentityprovider::Client {
-        aws_sdk_cognitoidentityprovider::Client::new(&self.aws_config().await)
-    }
-
     pub async fn cognito_identity_client(&self) -> aws_sdk_cognitoidentity::Client {
         aws_sdk_cognitoidentity::Client::new(&self.aws_config().await)
+    }
+
+    pub async fn cognito_client(&self) -> aws_sdk_cognitoidentityprovider::Client {
+        aws_sdk_cognitoidentityprovider::Client::new(&self.aws_config().await)
     }
 
     pub async fn sfn_client(&self) -> aws_sdk_sfn::Client {

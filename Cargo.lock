@@ -3121,6 +3121,7 @@ dependencies = [
  "aws-sdk-cloudformation",
  "aws-sdk-cloudfront",
  "aws-sdk-cloudwatchlogs",
+ "aws-sdk-cognitoidentity",
  "aws-sdk-cognitoidentityprovider",
  "aws-sdk-dynamodb",
  "aws-sdk-ecr",
