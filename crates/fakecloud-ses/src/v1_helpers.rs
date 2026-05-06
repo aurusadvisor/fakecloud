@@ -255,41 +255,68 @@ pub(crate) fn check_v1_sending_enabled(
 }
 
 /// Reject sends targeting a recipient on the account suppression list.
-/// Real SES v1 surfaces this as `MessageRejected`.
+/// Real SES v1 surfaces this as `MessageRejected`. Suppression is gated
+/// by the effective `SuppressedReasons` filter (configuration-set scope
+/// first, then account-level fallback).
 pub(crate) fn check_v1_recipients_not_suppressed(
     state: &SharedSesState,
     account_id: &str,
     recipients: &[String],
+    config_set_name: Option<&str>,
 ) -> Result<(), AwsServiceError> {
-    let accounts = state.read();
-    let Some(st) = accounts.get(account_id) else {
-        return Ok(());
-    };
-    for r in recipients {
-        let addr = extract_email_address(r);
-        if addr.is_empty() {
-            continue;
+    let mut hit = false;
+    {
+        let accounts = state.read();
+        let Some(st) = accounts.get(account_id) else {
+            return Ok(());
+        };
+        for r in recipients {
+            let addr = extract_email_address(r);
+            if addr.is_empty() {
+                continue;
+            }
+            if st.suppressed_match(addr, config_set_name).is_some() {
+                hit = true;
+                break;
+            }
         }
-        if st.suppressed_destinations.contains_key(addr) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "MessageRejected",
-                "Address is on the suppression list".to_string(),
-            ));
-        }
+    }
+    if hit {
+        bump_suppression_drop(state, account_id);
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "MessageRejected",
+            "Address is on the suppression list".to_string(),
+        ));
     }
     Ok(())
 }
 
-/// True when `addr` is on the account suppression list. Used by bulk
-/// paths that filter per-destination instead of failing the whole batch.
-pub(crate) fn is_address_suppressed(state: &SharedSesState, account_id: &str, addr: &str) -> bool {
+/// Increment the suppression-drop counter; mirrors the v2 helper so
+/// both paths feed the same introspection counter.
+pub(crate) fn bump_suppression_drop(state: &SharedSesState, account_id: &str) {
+    let mut accounts = state.write();
+    let st = accounts.get_or_create(account_id);
+    st.suppressed_drops_total = st.suppressed_drops_total.saturating_add(1);
+}
+
+/// True when `addr` is on the account suppression list AND its stored
+/// reason is enforced under the effective `SuppressedReasons` filter
+/// (configuration-set scope first, then account-level fallback). Used by
+/// bulk paths that filter per-destination instead of failing the whole
+/// batch.
+pub(crate) fn is_address_suppressed(
+    state: &SharedSesState,
+    account_id: &str,
+    addr: &str,
+    config_set_name: Option<&str>,
+) -> bool {
     let accounts = state.read();
     let Some(st) = accounts.get(account_id) else {
         return false;
     };
-    st.suppressed_destinations
-        .contains_key(extract_email_address(addr))
+    st.suppressed_match(extract_email_address(addr), config_set_name)
+        .is_some()
 }
 
 /// Parse a receipt rule from form parameters (for Create/Update).
@@ -1166,7 +1193,12 @@ pub(crate) fn send_email(
         .cloned()
         .collect();
     check_v1_verified_recipients(state, &req.account_id, &recipients)?;
-    check_v1_recipients_not_suppressed(state, &req.account_id, &recipients)?;
+    check_v1_recipients_not_suppressed(
+        state,
+        &req.account_id,
+        &recipients,
+        config_set_name.as_deref(),
+    )?;
 
     let subject = req.query_params.get("Message.Subject.Data").cloned();
     let html_body = req.query_params.get("Message.Body.Html.Data").cloned();
@@ -1243,7 +1275,7 @@ pub(crate) fn send_raw_email(
     }
     let to = parse_member_list(&req.query_params, "Destinations");
     check_v1_verified_recipients(state, &req.account_id, &to)?;
-    check_v1_recipients_not_suppressed(state, &req.account_id, &to)?;
+    check_v1_recipients_not_suppressed(state, &req.account_id, &to, config_set_name.as_deref())?;
 
     let message_id = format!(
         "{:016x}{:016x}-{:08x}-{:04x}",
@@ -1318,7 +1350,12 @@ pub(crate) fn send_templated_email(
         .cloned()
         .collect();
     check_v1_verified_recipients(state, &req.account_id, &recipients)?;
-    check_v1_recipients_not_suppressed(state, &req.account_id, &recipients)?;
+    check_v1_recipients_not_suppressed(
+        state,
+        &req.account_id,
+        &recipients,
+        config_set_name.as_deref(),
+    )?;
 
     let message_id = format!(
         "{:016x}{:016x}-{:08x}-{:04x}",
@@ -1425,8 +1462,9 @@ pub(crate) fn send_bulk_templated_email(
         }
         let any_suppressed = recipients
             .iter()
-            .any(|r| is_address_suppressed(state, &req.account_id, r));
+            .any(|r| is_address_suppressed(state, &req.account_id, r, config_set_name.as_deref()));
         if any_suppressed {
+            bump_suppression_drop(state, &req.account_id);
             inner.push_str(
                 "<member><Status>MessageRejected</Status><Error>Address is on the suppression list</Error></member>",
             );
