@@ -8,6 +8,7 @@ pub mod router;
 pub(crate) mod service;
 pub mod state;
 pub mod websocket;
+pub mod websocket_dispatch;
 
 pub use service::ApiGatewayV2Service;
 pub use state::{

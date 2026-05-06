@@ -2691,7 +2691,7 @@ async fn main() {
     }
 
     let config = DispatchConfig {
-        region: cli.region,
+        region: cli.region.clone(),
         account_id: cli.account_id.clone(),
         verify_sigv4: cli.verify_sigv4,
         iam_mode,
@@ -5136,6 +5136,10 @@ async fn main() {
             "/_fakecloud/apigatewayv2/ws/{api_id}",
             axum::routing::get({
                 let reg = apigatewayv2_ws_registry.clone();
+                let apigw_state = apigatewayv2_state.clone();
+                let lambda_delivery = lambda_delivery.clone();
+                let account_id = cli.account_id.clone();
+                let region = cli.region.clone();
                 move |ws: axum::extract::WebSocketUpgrade,
                       axum::extract::Path(api_id): axum::extract::Path<String>,
                       axum::extract::Query(params): axum::extract::Query<
@@ -5146,6 +5150,10 @@ async fn main() {
                     std::net::SocketAddr,
                 >| {
                     let reg = reg.clone();
+                    let apigw_state = apigw_state.clone();
+                    let lambda_delivery = lambda_delivery.clone();
+                    let account_id = account_id.clone();
+                    let region = region.clone();
                     async move {
                         let stage = params
                             .get("stage")
@@ -5156,40 +5164,167 @@ async fn main() {
                             .and_then(|v| v.to_str().ok())
                             .map(|s| s.to_string());
                         let source_ip = addr.ip().to_string();
+
+                        let mut header_map = std::collections::HashMap::new();
+                        for (k, v) in &headers {
+                            if let Ok(s) = v.to_str() {
+                                header_map.insert(k.to_string(), s.to_string());
+                            }
+                        }
+                        let query_map: std::collections::HashMap<String, String> = params
+                            .into_iter()
+                            .filter(|(k, _)| k != "stage")
+                            .collect();
+
                         ws.on_upgrade(move |socket| async move {
                             let (conn_id, rx) = fakecloud_apigatewayv2::websocket::register(
                                 reg.clone(),
-                                api_id,
-                                stage,
-                                source_ip,
-                                user_agent,
+                                api_id.clone(),
+                                stage.clone(),
+                                source_ip.clone(),
+                                user_agent.clone(),
                             );
                             let conn_id_for_lifecycle = conn_id.clone();
-                            // Echo dispatcher stub — real Lambda dispatch for
-                            // `$default` is wired up in a follow-up; for now
-                            // we just log. `@connections` POST exercises the
-                            // outbound path end-to-end.
-                            let on_message = |bytes: Vec<u8>, is_text: bool| {
-                                let preview =
-                                    String::from_utf8_lossy(&bytes[..bytes.len().min(64)])
-                                        .to_string();
-                                async move {
-                                    tracing::debug!(
-                                        is_text,
-                                        preview = %preview,
-                                        "apigwv2 ws message received"
-                                    );
+                            let connected_at = chrono::Utc::now();
+
+                            // Dispatch $connect route
+                            fakecloud_apigatewayv2::websocket_dispatch::dispatch_websocket_event(
+                                &apigw_state,
+                                lambda_delivery.as_ref(),
+                                &account_id,
+                                &region,
+                                &api_id,
+                                &stage,
+                                &conn_id,
+                                "$connect",
+                                "CONNECT",
+                                None,
+                                &source_ip,
+                                user_agent.as_deref(),
+                                connected_at,
+                                Some(&header_map),
+                                Some(&query_map),
+                            )
+                            .await;
+
+                            let on_disconnect = {
+                                let apigw_state = apigw_state.clone();
+                                let lambda_delivery = lambda_delivery.clone();
+                                let account_id = account_id.clone();
+                                let region = region.clone();
+                                let api_id = api_id.clone();
+                                let stage = stage.clone();
+                                let conn_id = conn_id.clone();
+                                let source_ip = source_ip.clone();
+                                let user_agent = user_agent.clone();
+                                // connected_at is Copy (DateTime<Utc>) — no rebind needed
+                                move || async move {
+                                    fakecloud_apigatewayv2::websocket_dispatch::dispatch_websocket_event(
+                                        &apigw_state,
+                                        lambda_delivery.as_ref(),
+                                        &account_id,
+                                        &region,
+                                        &api_id,
+                                        &stage,
+                                        &conn_id,
+                                        "$disconnect",
+                                        "DISCONNECT",
+                                        None,
+                                        &source_ip,
+                                        user_agent.as_deref(),
+                                        connected_at,
+                                        None,
+                                        None,
+                                    )
+                                    .await;
                                 }
                             };
-                            fakecloud_apigatewayv2::websocket::run_lifecycle_tracked(
+
+                            let on_message = {
+                                let apigw_state = apigw_state.clone();
+                                let lambda_delivery = lambda_delivery.clone();
+                                let account_id = account_id.clone();
+                                let region = region.clone();
+                                let api_id = api_id.clone();
+                                let stage = stage.clone();
+                                let conn_id = conn_id.clone();
+                                let source_ip = source_ip.clone();
+                                let user_agent = user_agent.clone();
+                                // connected_at is Copy (DateTime<Utc>) — no rebind needed
+                                move |bytes: Vec<u8>, is_text: bool| {
+                                    let apigw_state = apigw_state.clone();
+                                    let lambda_delivery = lambda_delivery.clone();
+                                    let account_id = account_id.clone();
+                                    let region = region.clone();
+                                    let api_id = api_id.clone();
+                                    let stage = stage.clone();
+                                    let conn_id = conn_id.clone();
+                                    let source_ip = source_ip.clone();
+                                    let user_agent = user_agent.clone();
+                                    // connected_at is Copy (DateTime<Utc>) — no rebind needed
+                                    async move {
+                                        let body_str = if is_text {
+                                            String::from_utf8_lossy(&bytes).into_owned()
+                                        } else {
+                                            use base64::prelude::*;
+                                            BASE64_STANDARD.encode(&bytes)
+                                        };
+                                        let is_base64 = !is_text;
+
+                                        // Resolve route key via RouteSelectionExpression
+                                        let route_key = {
+                                            let accounts = apigw_state.read();
+                                            let empty = fakecloud_apigatewayv2::ApiGatewayV2State::new(
+                                                &account_id, &region,
+                                            );
+                                            let state = accounts.get(&account_id).unwrap_or(&empty);
+                                            let expression = state
+                                                .apis
+                                                .get(&api_id)
+                                                .map(|a| a.route_selection_expression.as_str())
+                                                .unwrap_or("$request.body.action");
+                                            if is_base64 {
+                                                "$default".to_string()
+                                            } else {
+                                                fakecloud_apigatewayv2::websocket_dispatch::resolve_route_key(
+                                                    expression, &body_str,
+                                                )
+                                            }
+                                        };
+
+                                        fakecloud_apigatewayv2::websocket_dispatch::dispatch_websocket_event(
+                                            &apigw_state,
+                                            lambda_delivery.as_ref(),
+                                            &account_id,
+                                            &region,
+                                            &api_id,
+                                            &stage,
+                                            &conn_id,
+                                            &route_key,
+                                            "MESSAGE",
+                                            Some(&body_str),
+                                            &source_ip,
+                                            user_agent.as_deref(),
+                                            connected_at,
+                                            None,
+                                            None,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            };
+
+                            fakecloud_apigatewayv2::websocket::run_lifecycle_tracked_with_disconnect(
                                 socket,
                                 rx,
                                 on_message,
                                 reg.clone(),
                                 conn_id_for_lifecycle,
+                                on_disconnect,
                             )
                             .await;
-                            fakecloud_apigatewayv2::websocket::deregister(&reg, &conn_id);
+                            fakecloud_apigatewayv2::websocket::deregister(&reg, &conn_id,
+                            );
                         })
                     }
                 }
