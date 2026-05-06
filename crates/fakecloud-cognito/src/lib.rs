@@ -5,10 +5,12 @@ pub mod triggers;
 pub mod user_status;
 
 pub use service::{
-    ensure_pool_signing_key, handle_oauth2_revoke, handle_oauth2_token, handle_oauth2_userinfo,
-    mint_authorization_code, oidc_discovery_document, pool_existence_and_domain,
-    pool_jwks_document, CognitoService, MintAuthorizationCodeError, MintAuthorizationCodeRequest,
-    OAuthRevokeError, OAuthTokenError, OAuthTokenResponse, OAuthUserInfoError,
+    ensure_pool_signing_key, handle_oauth2_authorize, handle_oauth2_revoke, handle_oauth2_token,
+    handle_oauth2_userinfo, mint_authorization_code, oidc_discovery_document,
+    pool_existence_and_domain, pool_jwks_document, CognitoService, MintAuthorizationCodeError,
+    MintAuthorizationCodeRequest, OAuth2AuthorizeError, OAuth2AuthorizeOutcome,
+    OAuth2AuthorizeRequest, OAuthRevokeError, OAuthTokenError, OAuthTokenResponse,
+    OAuthUserInfoError,
 };
 pub use state::{
     default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig,
