@@ -160,7 +160,9 @@ pub async fn dispatch_websocket_event(
         // if the resolved route doesn't exist and there's no `$default`,
         // AWS silently drops the message.
         let routes = state.routes.get(api_id);
-        let route = routes.and_then(|rs| rs.values().find(|r| r.route_key == route_key));
+        let route = routes
+            .and_then(|rs| rs.values().find(|r| r.route_key == route_key))
+            .or_else(|| routes.and_then(|rs| rs.values().find(|r| r.route_key == "$default")));
 
         let Some(route) = route else {
             return;
