@@ -1034,10 +1034,11 @@ mod tests {
         );
         svc.put_log_events(&req).unwrap();
 
-        // Verify data was written to export storage under the S3 bucket path
+        // Verify data was written to export storage under the S3 bucket path.
+        // GetExportedData transparently decompresses gzip payloads back to JSONL.
         let req = make_request(
             "GetExportedData",
-            json!({ "keyPrefix": "delivery-test-bucket/delivery" }),
+            json!({ "keyPrefix": "delivery-test-bucket/aws-logs-write" }),
         );
         let resp = svc.get_exported_data(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();

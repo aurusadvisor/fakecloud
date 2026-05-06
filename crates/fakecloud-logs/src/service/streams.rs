@@ -488,7 +488,9 @@ impl LogsService {
         // Write delivery pipeline events to the destination S3 bucket
         // via the delivery bus so subscribers can read them with real
         // S3 GetObject. Falls back to the internal export_storage map
-        // when no S3 writer is wired (in-process tests).
+        // when no S3 writer is wired (in-process tests). Output is
+        // gzip-compressed JSONL (`.gz`), matching real CloudWatch Logs
+        // delivery to S3.
         if !delivery_targets.is_empty() && !accepted_events.is_empty() {
             let mut data = String::new();
             for event in &accepted_events {
@@ -500,35 +502,34 @@ impl LogsService {
                 data.push_str(&line);
                 data.push('\n');
             }
-            let now_str = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(data.as_bytes()).expect("gzip write");
+            let gz_body = encoder.finish().expect("gzip finish");
+            let now_dt = Utc::now();
+            let date_part = now_dt.format("%Y/%m/%d").to_string();
+            let now_str = now_dt.format("%Y%m%dT%H%M%SZ").to_string();
             let account_id_owned = state.account_id.clone();
             for dest_arn in &delivery_targets {
                 let bucket = dest_arn.strip_prefix("arn:aws:s3:::").unwrap_or(dest_arn);
+                // Mirror the CloudWatch Logs delivery key shape:
+                // `aws-logs-write/<accountId>/<group>/<date>/<stream>-<ts>.gz`.
                 let s3_key = format!(
-                    "delivery/{}/{}/{}",
-                    group_name_owned, stream_name_owned, now_str
+                    "aws-logs-write/{}/{}/{}/{}-{}.gz",
+                    account_id_owned, group_name_owned, date_part, stream_name_owned, now_str,
                 );
-                let body = data.clone().into_bytes();
                 if self
                     .delivery_bus
                     .put_object_to_s3(
                         &account_id_owned,
                         bucket,
                         &s3_key,
-                        body.clone(),
-                        Some("application/x-ndjson"),
+                        gz_body.clone(),
+                        Some("application/x-gzip"),
                     )
                     .is_err()
                 {
-                    let fallback_key = format!(
-                        "{}/delivery/{}/{}/{}",
-                        bucket, group_name_owned, stream_name_owned, now_str
-                    );
-                    let entry = state.export_storage.entry(fallback_key).or_default();
-                    if !entry.is_empty() {
-                        entry.push(b'\n');
-                    }
-                    entry.extend_from_slice(data.as_bytes());
+                    let fallback_key = format!("{bucket}/{s3_key}");
+                    state.export_storage.insert(fallback_key, gz_body.clone());
                 }
             }
         }
