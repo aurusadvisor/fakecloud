@@ -675,8 +675,8 @@ impl EcsRuntime {
                     && state.exit_code != 0
                 {
                     return Err(RuntimeError::ContainerStart(format!(
-                        "container {} dependency on {} (SUCCESS) failed: upstream exited with code {}",
-                        upstream.name, upstream.name, state.exit_code,
+                        "dependency on container {} (SUCCESS) failed: upstream exited with code {}",
+                        upstream.name, state.exit_code,
                     )));
                 }
             }
