@@ -39,6 +39,7 @@ pub fn resolve_route_key(expression: &str, body: &str) -> String {
 }
 
 /// Construct the WebSocket proxy integration event.
+#[allow(clippy::too_many_arguments)]
 fn construct_event(
     api_id: &str,
     stage: &str,
@@ -128,6 +129,7 @@ fn construct_event(
 ///
 /// AWS never fails the WebSocket connection if the Lambda errors; we mirror
 /// that by swallowing invocation failures.
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch_websocket_event(
     state: &SharedApiGatewayV2State,
     lambda_delivery: Option<&Arc<dyn fakecloud_core::delivery::LambdaDelivery>>,
