@@ -794,7 +794,19 @@ async fn invoke_resource(
     // real Step Functions.
     if let Some(rest) = resource.strip_prefix("arn:aws:states:::aws-sdk:") {
         let account_id = account_from_execution_arn(execution_arn);
-        return invoke_aws_sdk_integration(rest, input, registry, &account_id).await;
+        return invoke_aws_sdk_integration(rest, input, registry, &account_id, timeout_seconds)
+            .await;
+    }
+
+    // Optimized service integrations expose `.sync` variants for ECS,
+    // Athena, and Glue. Route them through the same waiter machinery as
+    // `aws-sdk:` so callers can write the AWS-blessed ARN forms.
+    if let Some(tail) = resource.strip_prefix("arn:aws:states:::") {
+        if tail.contains(".sync") {
+            let account_id = account_from_execution_arn(execution_arn);
+            return invoke_aws_sdk_integration(tail, input, registry, &account_id, timeout_seconds)
+                .await;
+        }
     }
 
     Err((
@@ -849,27 +861,15 @@ async fn invoke_aws_sdk_integration(
     input: &Value,
     registry: &Option<SharedServiceRegistry>,
     account_id: &str,
+    timeout_seconds: Option<u64>,
 ) -> Result<Value, (String, String)> {
-    use bytes::Bytes;
-    use fakecloud_core::service::AwsRequest;
-    use http::{HeaderMap, Method};
+    let registry_arc = resolve_registry(registry)?;
 
-    let registry_handle = registry.as_ref().ok_or_else(|| {
-        (
-            "States.TaskFailed".to_string(),
-            "No service registry configured for aws-sdk integration".to_string(),
-        )
-    })?;
-    let registry_arc = registry_handle.get().ok_or_else(|| {
-        (
-            "States.TaskFailed".to_string(),
-            "Service registry not yet initialised; aws-sdk integration unavailable".to_string(),
-        )
-    })?;
-
-    // Split `<service>:<action>[.<modifier>]`. Modifiers like
-    // `.waitForTaskToken` and `.sync` are accepted but ignored — the
-    // integration runs synchronously regardless.
+    // Split `<service>:<action>[.<modifier>]`. The `.waitForTaskToken`
+    // modifier is accepted but ignored — the integration runs synchronously
+    // regardless. The `.sync` modifier triggers a polling loop after the
+    // initial call to wait for the downstream operation to reach a terminal
+    // state.
     let mut parts = tail.splitn(2, ':');
     let service_id = parts.next().filter(|s| !s.is_empty()).ok_or_else(|| {
         (
@@ -893,28 +893,129 @@ async fn invoke_aws_sdk_integration(
                 format!("Invalid aws-sdk Resource ARN: empty action in '{tail}'"),
             )
         })?;
+    let modifiers: Vec<&str> = action_with_mod.split('.').skip(1).collect();
+    let is_sync = modifiers.iter().any(|m| *m == "sync" || *m == "sync:2");
 
     let action_pascal = camel_to_pascal(action_camel);
     let service_name = map_sdk_service_id(service_id).to_string();
 
-    let service = registry_arc.get(&service_name).ok_or_else(|| {
+    // ECS's wire format is camelCase, but Step Functions's optimized
+    // integration takes PascalCase parameter names in the state machine
+    // definition. Translate top-level keys for the ECS service so AWS
+    // Step Functions definitions Just Work against the fake.
+    let translated_input = match service_name.as_str() {
+        "ecs" => translate_ecs_keys_to_camel(input),
+        _ => input.clone(),
+    };
+
+    let initial = call_sdk_action(
+        &registry_arc,
+        &service_name,
+        &action_pascal,
+        &translated_input,
+        account_id,
+    )
+    .await?;
+
+    if !is_sync {
+        return Ok(initial);
+    }
+
+    // `.sync` pattern: dispatch to the per-service waiter that polls until
+    // the downstream operation reaches a terminal state. Returns the full
+    // describe-shape result, or surfaces a terminal failure as
+    // `States.TaskFailed`.
+    sync_wait(
+        &registry_arc,
+        &service_name,
+        &action_pascal,
+        &initial,
+        &translated_input,
+        account_id,
+        timeout_seconds,
+    )
+    .await
+}
+
+/// Translate the top-level PascalCase keys that AWS Step Functions
+/// state machines use for `ecs:runTask` Parameters into the camelCase
+/// shape that the AWS ECS API (and our handler) expects. Unknown keys
+/// pass through unchanged so callers can still send raw camelCase. The
+/// translation is shallow on purpose — nested overrides keep their
+/// existing camelCase shape on real AWS too.
+fn translate_ecs_keys_to_camel(input: &Value) -> Value {
+    let Some(obj) = input.as_object() else {
+        return input.clone();
+    };
+    let mut out = serde_json::Map::with_capacity(obj.len());
+    for (k, v) in obj.iter() {
+        let camel = match k.as_str() {
+            "Cluster" => "cluster",
+            "TaskDefinition" => "taskDefinition",
+            "LaunchType" => "launchType",
+            "Group" => "group",
+            "Overrides" => "overrides",
+            "PlatformVersion" => "platformVersion",
+            "NetworkConfiguration" => "networkConfiguration",
+            "Tags" => "tags",
+            "EnableExecuteCommand" => "enableExecuteCommand",
+            "PropagateTags" => "propagateTags",
+            "ReferenceId" => "referenceId",
+            "StartedBy" => "startedBy",
+            "Count" => "count",
+            "CapacityProviderStrategy" => "capacityProviderStrategy",
+            "PlacementConstraints" => "placementConstraints",
+            "PlacementStrategy" => "placementStrategy",
+            other => other,
+        };
+        out.insert(camel.to_string(), v.clone());
+    }
+    Value::Object(out)
+}
+
+fn resolve_registry(
+    registry: &Option<SharedServiceRegistry>,
+) -> Result<Arc<fakecloud_core::registry::ServiceRegistry>, (String, String)> {
+    let registry_handle = registry.as_ref().ok_or_else(|| {
         (
             "States.TaskFailed".to_string(),
-            format!("Unknown aws-sdk service '{service_id}'"),
+            "No service registry configured for aws-sdk integration".to_string(),
+        )
+    })?;
+    registry_handle.get().cloned().ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "Service registry not yet initialised; aws-sdk integration unavailable".to_string(),
+        )
+    })
+}
+
+/// Call a single AWS SDK action against the registered service handler.
+async fn call_sdk_action(
+    registry: &Arc<fakecloud_core::registry::ServiceRegistry>,
+    service_name: &str,
+    action_pascal: &str,
+    input: &Value,
+    account_id: &str,
+) -> Result<Value, (String, String)> {
+    use bytes::Bytes;
+    use fakecloud_core::service::AwsRequest;
+    use http::{HeaderMap, Method};
+
+    let service = registry.get(service_name).ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            format!("Unknown aws-sdk service '{service_name}'"),
         )
     })?;
 
-    // Serialize the Parameters block as the JSON request body. Most
-    // fakecloud services accept JSON for any action (DynamoDB JSON,
-    // SQS+SNS+SES JSON, EventBridge JSON), so the same encoding works
-    // across the board.
     let body_bytes = Bytes::from(
         serde_json::to_vec(input).expect("serde_json::Value serialization is infallible"),
     );
 
     let req = AwsRequest {
-        service: service_name.clone(),
-        action: action_pascal.clone(),
+        service: service_name.to_string(),
+        action: action_pascal.to_string(),
         region: "us-east-1".to_string(),
         account_id: account_id.to_string(),
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -932,11 +1033,9 @@ async fn invoke_aws_sdk_integration(
     };
 
     let response = service.handle(req).await.map_err(|err| {
-        // Surface the AWS error code as the State error so Catch/Retry
-        // can match on it (e.g. `DynamoDb.ResourceNotFoundException`).
         let code = err.code().to_string();
         let msg = err.message();
-        let prefix_service = match service_name.as_str() {
+        let prefix_service = match service_name {
             "dynamodb" => "DynamoDb".to_string(),
             "states" => "Sfn".to_string(),
             other => camel_to_pascal(other),
@@ -947,7 +1046,6 @@ async fn invoke_aws_sdk_integration(
         )
     })?;
 
-    // Read the response body and parse as JSON. Tasks always return JSON.
     let response_bytes = match response.body {
         fakecloud_core::service::ResponseBody::Bytes(b) => b,
         fakecloud_core::service::ResponseBody::File { .. } => {
@@ -961,14 +1059,252 @@ async fn invoke_aws_sdk_integration(
     if response_bytes.is_empty() {
         return Ok(json!({}));
     }
-    let parsed: Value = serde_json::from_slice(&response_bytes).map_err(|e| {
+    serde_json::from_slice(&response_bytes).map_err(|e| {
         (
             "States.TaskFailed".to_string(),
             format!("aws-sdk integration: failed to parse response JSON: {e}"),
         )
-    })?;
+    })
+}
 
-    Ok(parsed)
+/// Cap on `.sync` polling so a stuck downstream task can't hang an
+/// execution forever. Mirrors the `TimeoutSeconds` knob on the Task state
+/// when one is set; otherwise defaults to 5 minutes which is enough for
+/// the in-process services that ship today (Athena returns synchronously,
+/// ECS tasks finish within seconds even when docker-less).
+const SYNC_DEFAULT_TIMEOUT_SECS: u64 = 300;
+const SYNC_POLL_INTERVAL_MS: u64 = 200;
+
+/// Dispatch `.sync` waiters by service+action. Each waiter polls the
+/// matching describe-style API until the downstream operation reaches a
+/// terminal state, then returns the full describe response.
+async fn sync_wait(
+    registry: &Arc<fakecloud_core::registry::ServiceRegistry>,
+    service_name: &str,
+    action_pascal: &str,
+    initial: &Value,
+    input: &Value,
+    account_id: &str,
+    timeout_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    match (service_name, action_pascal) {
+        ("ecs", "RunTask") => {
+            sync_wait_ecs_run_task(registry, initial, input, account_id, timeout_seconds).await
+        }
+        ("athena", "StartQueryExecution") => {
+            sync_wait_athena_query(registry, initial, account_id, timeout_seconds).await
+        }
+        ("glue", "StartJobRun") => {
+            // Glue has no real job runner in fakecloud; treat the run as
+            // immediately SUCCEEDED so `.sync` callers see a terminal
+            // result rather than spinning forever. Real AWS would poll
+            // `GetJobRun` until JobRunState in {SUCCEEDED,FAILED,STOPPED,
+            // TIMEOUT}, so we synthesize the SUCCEEDED shape.
+            let job_run_id = initial
+                .get("JobRunId")
+                .and_then(Value::as_str)
+                .unwrap_or("synthetic")
+                .to_string();
+            let job_name = input
+                .get("JobName")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Ok(json!({
+                "JobRun": {
+                    "Id": job_run_id,
+                    "JobName": job_name,
+                    "JobRunState": "SUCCEEDED",
+                }
+            }))
+        }
+        _ => Err((
+            "States.TaskFailed".to_string(),
+            format!(
+                "`.sync` is not supported for {service_name}:{action_pascal} yet — \
+                 supported: ecs:RunTask, athena:StartQueryExecution, glue:StartJobRun"
+            ),
+        )),
+    }
+}
+
+async fn sync_wait_ecs_run_task(
+    registry: &Arc<fakecloud_core::registry::ServiceRegistry>,
+    initial: &Value,
+    input: &Value,
+    account_id: &str,
+    timeout_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    let tasks = initial
+        .get("tasks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            (
+                "States.TaskFailed".to_string(),
+                "ecs:RunTask.sync: response missing 'tasks' array".to_string(),
+            )
+        })?;
+    if tasks.is_empty() {
+        return Err((
+            "States.TaskFailed".to_string(),
+            "ecs:RunTask.sync: no tasks were started".to_string(),
+        ));
+    }
+    let task_arns: Vec<String> = tasks
+        .iter()
+        .filter_map(|t| t.get("taskArn").and_then(Value::as_str).map(String::from))
+        .collect();
+    let cluster = input
+        .get("cluster")
+        .or_else(|| input.get("Cluster"))
+        .and_then(Value::as_str)
+        .map(String::from);
+
+    let deadline = sync_deadline(timeout_seconds);
+    loop {
+        let mut describe_input = json!({ "tasks": task_arns });
+        if let Some(c) = &cluster {
+            describe_input["cluster"] = json!(c);
+        }
+        let described = call_sdk_action(
+            registry,
+            "ecs",
+            "DescribeTasks",
+            &describe_input,
+            account_id,
+        )
+        .await?;
+        let described_tasks = described
+            .get("tasks")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let all_stopped = !described_tasks.is_empty()
+            && described_tasks
+                .iter()
+                .all(|t| t.get("lastStatus").and_then(Value::as_str) == Some("STOPPED"));
+        if all_stopped {
+            // Surface non-zero container exit codes or stop codes that map
+            // to AWS-style failures. Per AWS docs, ECS RunTask.sync raises
+            // States.TaskFailed when any container exits non-zero or the
+            // task stops with a failure code.
+            let any_failed = described_tasks.iter().any(|t| {
+                let stop_code = t.get("stopCode").and_then(Value::as_str);
+                let bad_stop = matches!(
+                    stop_code,
+                    Some(
+                        "TaskFailedToStart"
+                            | "EssentialContainerExited"
+                            | "ServiceSchedulerInitiated"
+                    )
+                );
+                let bad_exit = t
+                    .get("containers")
+                    .and_then(Value::as_array)
+                    .map(|cs| {
+                        cs.iter().any(|c| {
+                            c.get("exitCode")
+                                .and_then(Value::as_i64)
+                                .map(|n| n != 0)
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
+                bad_stop || bad_exit
+            });
+            if any_failed {
+                let cause = described_tasks
+                    .iter()
+                    .find_map(|t| {
+                        t.get("stoppedReason")
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    })
+                    .unwrap_or_else(|| "ECS task failed".to_string());
+                return Err(("States.TaskFailed".to_string(), cause));
+            }
+            return Ok(described);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err((
+                "States.Timeout".to_string(),
+                format!(
+                    "ecs:RunTask.sync timed out after {}s waiting for {} task(s) to STOP",
+                    sync_timeout_secs(timeout_seconds),
+                    task_arns.len()
+                ),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(SYNC_POLL_INTERVAL_MS)).await;
+    }
+}
+
+async fn sync_wait_athena_query(
+    registry: &Arc<fakecloud_core::registry::ServiceRegistry>,
+    initial: &Value,
+    account_id: &str,
+    timeout_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    let qid = initial
+        .get("QueryExecutionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            (
+                "States.TaskFailed".to_string(),
+                "athena:StartQueryExecution.sync: response missing QueryExecutionId".to_string(),
+            )
+        })?
+        .to_string();
+
+    let deadline = sync_deadline(timeout_seconds);
+    loop {
+        let described = call_sdk_action(
+            registry,
+            "athena",
+            "GetQueryExecution",
+            &json!({ "QueryExecutionId": qid }),
+            account_id,
+        )
+        .await?;
+        let state = described
+            .get("QueryExecution")
+            .and_then(|qe| qe.get("Status"))
+            .and_then(|s| s.get("State"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match state {
+            "SUCCEEDED" => return Ok(described),
+            "FAILED" | "CANCELLED" => {
+                let cause = described
+                    .get("QueryExecution")
+                    .and_then(|qe| qe.get("Status"))
+                    .and_then(|s| s.get("StateChangeReason"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Athena query reached terminal failure state")
+                    .to_string();
+                return Err(("States.TaskFailed".to_string(), cause));
+            }
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err((
+                "States.Timeout".to_string(),
+                format!(
+                    "athena:StartQueryExecution.sync timed out after {}s for query {qid}",
+                    sync_timeout_secs(timeout_seconds)
+                ),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(SYNC_POLL_INTERVAL_MS)).await;
+    }
+}
+
+fn sync_timeout_secs(timeout_seconds: Option<u64>) -> u64 {
+    timeout_seconds.unwrap_or(SYNC_DEFAULT_TIMEOUT_SECS)
+}
+
+fn sync_deadline(timeout_seconds: Option<u64>) -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(sync_timeout_secs(timeout_seconds))
 }
 
 #[derive(Clone, Copy)]
