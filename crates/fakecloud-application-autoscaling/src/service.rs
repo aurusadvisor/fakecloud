@@ -515,6 +515,7 @@ impl ApplicationAutoScalingService {
                 end_time,
                 scalable_target_action: action,
                 creation_time: Utc::now(),
+                last_fired_at: None,
             };
             account.scheduled_actions.insert(action_key, scheduled);
         }

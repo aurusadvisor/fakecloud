@@ -19,3 +19,15 @@ func (c *ApplicationAutoScalingClient) Tick(ctx context.Context) (*AppAsTickResp
 	}
 	return &out, nil
 }
+
+// ScheduledTick forces the scheduled-action executor to evaluate every
+// ScheduledAction now. Returns the number of actions that fired on
+// this tick. Useful in tests so callers don't have to wait for the
+// wall-clock 30s interval.
+func (c *ApplicationAutoScalingClient) ScheduledTick(ctx context.Context) (*AppAsScheduledTickResponse, error) {
+	var out AppAsScheduledTickResponse
+	if err := c.fc.doPost(ctx, "/_fakecloud/application-autoscaling/scheduled-tick", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

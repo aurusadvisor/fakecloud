@@ -8,6 +8,7 @@ import httpx
 
 from fakecloud.types import (
     ApiGatewayV2RequestsResponse,
+    AppAsScheduledTickResponse,
     AppAsTickResponse,
     AuthEventsResponse,
     BedrockFaultRule,
@@ -603,6 +604,19 @@ class ApplicationAutoScalingClient:
         _check(resp)
         return AppAsTickResponse.from_dict(resp.json())
 
+    async def scheduled_tick(self) -> AppAsScheduledTickResponse:
+        """Force the scheduled-action executor to evaluate every action now.
+
+        Returns the number of scheduled actions that fired on this
+        tick. Useful in tests so callers don't have to wait for the
+        wall-clock 30s interval.
+        """
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/application-autoscaling/scheduled-tick"
+        )
+        _check(resp)
+        return AppAsScheduledTickResponse.from_dict(resp.json())
+
 
 class EventsClient:
     """Async EventBridge introspection client."""
@@ -988,6 +1002,13 @@ class _SyncApplicationAutoScalingClient:
         )
         _check(resp)
         return AppAsTickResponse.from_dict(resp.json())
+
+    def scheduled_tick(self) -> AppAsScheduledTickResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/application-autoscaling/scheduled-tick"
+        )
+        _check(resp)
+        return AppAsScheduledTickResponse.from_dict(resp.json())
 
 
 class _SyncEventsClient:

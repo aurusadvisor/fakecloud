@@ -97,6 +97,12 @@ pub struct ScheduledAction {
     pub end_time: Option<DateTime<Utc>>,
     pub scalable_target_action: Option<ScalableTargetAction>,
     pub creation_time: DateTime<Utc>,
+    /// Last time the executor fired this scheduled action. Used to
+    /// dedupe within the same minute so a cron-every-minute schedule
+    /// doesn't double-fire when the ticker runs more than once during
+    /// the same wall-clock minute.
+    #[serde(default)]
+    pub last_fired_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

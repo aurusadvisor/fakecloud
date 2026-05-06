@@ -284,6 +284,13 @@ pub struct AppAsTickResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppAsScheduledTickResponse {
+    /// Number of scheduled actions that fired this tick.
+    pub fired: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SetSsmCommandStatusRequest {
     pub account_id: Option<String>,
     pub status: String,

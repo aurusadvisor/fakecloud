@@ -12,6 +12,7 @@ fakecloud-aws = { workspace = true }
 fakecloud-core = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 http = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

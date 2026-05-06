@@ -603,6 +603,18 @@ final class AppAsTickResponse
     }
 }
 
+final class AppAsScheduledTickResponse
+{
+    public function __construct(
+        public readonly int $fired,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['fired']);
+    }
+}
+
 // ── EventBridge ────────────────────────────────────────────────
 
 final class EventBridgeEvent

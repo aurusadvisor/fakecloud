@@ -257,6 +257,12 @@ type AppAsTickResponse struct {
 	Applied int `json:"applied"`
 }
 
+// AppAsScheduledTickResponse reports how many Application Auto Scaling
+// scheduled actions fired on a forced executor tick.
+type AppAsScheduledTickResponse struct {
+	Fired int `json:"fired"`
+}
+
 // ── EventBridge ────────────────────────────────────────────────────
 
 // EventBridgeEvent represents an event put to EventBridge.

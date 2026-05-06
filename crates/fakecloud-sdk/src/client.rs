@@ -445,6 +445,23 @@ impl ApplicationAutoScalingClient<'_> {
             .await?;
         FakeCloud::parse(resp).await
     }
+
+    /// Force the scheduled-action executor to evaluate every
+    /// `ScheduledAction` now. Returns the number of actions that
+    /// fired this tick. Useful in tests so callers don't have to wait
+    /// for the wall-clock 30s interval.
+    pub async fn scheduled_tick(&self) -> Result<AppAsScheduledTickResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/application-autoscaling/scheduled-tick",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
 }
 
 // ── EventBridge ─────────────────────────────────────────────────────

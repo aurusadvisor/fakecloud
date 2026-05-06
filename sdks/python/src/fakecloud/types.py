@@ -514,6 +514,18 @@ class AppAsTickResponse:
 
 
 @dataclass
+class AppAsScheduledTickResponse:
+    """Result of forcing one Application Auto Scaling scheduled-action tick."""
+
+    fired: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AppAsScheduledTickResponse:
+        d = _convert_keys(data)
+        return cls(**d)
+
+
+@dataclass
 class ForceDlqResponse:
     moved_messages: int
 

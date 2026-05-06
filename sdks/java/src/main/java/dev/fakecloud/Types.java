@@ -207,6 +207,9 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record AppAsTickResponse(int applied) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record AppAsScheduledTickResponse(int fired) {}
+
     // ── EventBridge ────────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record EventBridgeEvent(

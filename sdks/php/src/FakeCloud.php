@@ -303,6 +303,13 @@ final class ApplicationAutoScalingClient
             $this->http->postEmpty('/_fakecloud/application-autoscaling/tick')
         );
     }
+
+    public function scheduledTick(): AppAsScheduledTickResponse
+    {
+        return AppAsScheduledTickResponse::fromArray(
+            $this->http->postEmpty('/_fakecloud/application-autoscaling/scheduled-tick')
+        );
+    }
 }
 
 final class EventsClient
