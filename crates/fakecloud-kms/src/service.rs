@@ -1314,6 +1314,9 @@ mod service_grants;
 mod helpers;
 pub(crate) use helpers::*;
 
+#[path = "provisioner.rs"]
+pub mod provisioner;
+
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;

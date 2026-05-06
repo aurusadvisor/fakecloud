@@ -71,7 +71,8 @@ use fakecloud_iam::{
     PolicyVersion, SamlProvider, SharedIamState, Tag, VirtualMfaDevice,
 };
 use fakecloud_kinesis::{build_stream_shards, KinesisConsumer, KinesisStream, SharedKinesisState};
-use fakecloud_kms::{KmsAlias, KmsKey, SharedKmsState};
+use fakecloud_kms::provisioner as kms_provisioner;
+use fakecloud_kms::SharedKmsState;
 use fakecloud_lambda::{
     AttachedLayer, EventSourceMapping, FunctionAlias, FunctionUrlConfig, Layer, LayerVersion,
     SharedLambdaState,
@@ -289,6 +290,83 @@ fn parse_elb_rule_conditions(value: Option<&serde_json::Value>) -> Vec<RuleCondi
             }
         })
         .collect()
+}
+
+/// Parse the `KeyPolicy` field of an `AWS::KMS::Key` /
+/// `AWS::KMS::ReplicaKey` resource. CFN allows either a JSON string or
+/// an inline JSON object; we serialize the object form back to a string
+/// to match the [`KmsKey.policy`](fakecloud_kms::KmsKey) shape.
+fn parse_key_policy(props: &serde_json::Value) -> Option<String> {
+    match props.get("KeyPolicy") {
+        Some(v) if v.is_string() => Some(v.as_str().unwrap_or("").to_string()),
+        Some(v) => Some(serde_json::to_string(v).unwrap_or_default()),
+        None => None,
+    }
+}
+
+/// Parse the `Tags` field common to KMS CFN resources: an array of
+/// `{Key, Value}` pairs into a sorted map.
+fn parse_tag_list(props: &serde_json::Value) -> BTreeMap<String, String> {
+    let mut tags: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
+        for t in arr {
+            if let (Some(k), Some(v)) = (
+                t.get("Key").and_then(|x| x.as_str()),
+                t.get("Value").and_then(|x| x.as_str()),
+            ) {
+                tags.insert(k.to_string(), v.to_string());
+            }
+        }
+    }
+    tags
+}
+
+/// Parse the `Properties` of an `AWS::KMS::Key` resource into the
+/// shared [`fakecloud_kms::provisioner::KeyCreationInput`]. Defaults
+/// match AWS: `ENCRYPT_DECRYPT` / `SYMMETRIC_DEFAULT` / `AWS_KMS` /
+/// `Enabled=true`. `RotationPeriodInDays`, `PendingWindowInDays`, and
+/// `BypassPolicyLockoutSafetyCheck` are accepted by the parser for
+/// CFN compatibility but not persisted on the key — the underlying
+/// KMS state doesn't model per-key rotation periods, and the deletion
+/// window only matters at scheduled-deletion time which CFN delete
+/// short-circuits.
+fn parse_kms_key_input(props: &serde_json::Value) -> kms_provisioner::KeyCreationInput {
+    kms_provisioner::KeyCreationInput {
+        description: props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        key_usage: props
+            .get("KeyUsage")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ENCRYPT_DECRYPT")
+            .to_string(),
+        key_spec: props
+            .get("KeySpec")
+            .and_then(|v| v.as_str())
+            .unwrap_or("SYMMETRIC_DEFAULT")
+            .to_string(),
+        origin: props
+            .get("Origin")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AWS_KMS")
+            .to_string(),
+        enabled: props
+            .get("Enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        multi_region: props
+            .get("MultiRegion")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        key_rotation_enabled: props
+            .get("EnableKeyRotation")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        policy: parse_key_policy(props),
+        tags: parse_tag_list(props),
+    }
 }
 
 /// `LogGroupName` properties on Logs CFN resources may carry either a
@@ -1090,6 +1168,9 @@ impl ResourceProvisioner {
             "AWS::ECR::PullThroughCacheRule" => {
                 Some(self.update_ecr_pull_through_cache_rule(existing, new_def)?)
             }
+            "AWS::KMS::Key" => Some(self.update_kms_key(existing, new_def)?),
+            "AWS::KMS::ReplicaKey" => Some(self.update_kms_replica_key(existing, new_def)?),
+            "AWS::KMS::Alias" => Some(self.update_kms_alias(existing, new_def)?),
             _ => None,
         };
 
@@ -4770,133 +4851,59 @@ impl ResourceProvisioner {
     // --- KMS ---
 
     fn create_kms_key(&self, resource: &ResourceDefinition) -> Result<ProvisionResult, String> {
-        let props = &resource.properties;
-        let description = props
-            .get("Description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let enabled = props
-            .get("Enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let key_rotation_enabled = props
-            .get("EnableKeyRotation")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let key_usage = props
-            .get("KeyUsage")
-            .and_then(|v| v.as_str())
-            .unwrap_or("ENCRYPT_DECRYPT")
-            .to_string();
-        let key_spec = props
-            .get("KeySpec")
-            .and_then(|v| v.as_str())
-            .unwrap_or("SYMMETRIC_DEFAULT")
-            .to_string();
-        let multi_region = props
-            .get("MultiRegion")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let origin = props
-            .get("Origin")
-            .and_then(|v| v.as_str())
-            .unwrap_or("AWS_KMS")
-            .to_string();
-        let policy = match props.get("KeyPolicy") {
-            Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
-            Some(v) => serde_json::to_string(v).unwrap_or_default(),
-            None => String::new(),
-        };
-        if !key_spec.starts_with("SYMMETRIC") && !key_spec.starts_with("HMAC") {
-            return Err(format!(
-                "AWS::KMS::Key with KeySpec '{key_spec}' is not yet supported in CloudFormation; only symmetric and HMAC specs are provisioned"
-            ));
-        }
-
-        let mut tags: BTreeMap<String, String> = BTreeMap::new();
-        if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
-            for t in arr {
-                if let (Some(k), Some(v)) = (
-                    t.get("Key").and_then(|x| x.as_str()),
-                    t.get("Value").and_then(|x| x.as_str()),
-                ) {
-                    tags.insert(k.to_string(), v.to_string());
-                }
-            }
-        }
-
-        let key_id = if multi_region {
-            format!("mrk-{}", Uuid::new_v4().as_simple())
-        } else {
-            Uuid::new_v4().to_string()
-        };
-
-        let mut accounts = self.kms_state.write();
-        let state = accounts.get_or_create(&self.account_id);
-        let arn = format!(
-            "arn:aws:kms:{}:{}:key/{}",
-            state.region, state.account_id, key_id
-        );
-        let now = Utc::now().timestamp() as f64;
-
-        // private_key_seed is only consulted for asymmetric KEY_AGREEMENT
-        // specs (ECC DeriveSharedSecret); symmetric and HMAC keys never read
-        // it, so a zero seed is fine for the specs this provisioner accepts.
-        let seed = vec![0u8; 32];
-
-        let encryption_algorithms = if key_usage == "ENCRYPT_DECRYPT" {
-            Some(vec!["SYMMETRIC_DEFAULT".to_string()])
-        } else {
-            None
-        };
-        let mac_algorithms = if key_usage == "GENERATE_VERIFY_MAC" {
-            let alg = match key_spec.as_str() {
-                "HMAC_224" => "HMAC_SHA_224",
-                "HMAC_256" => "HMAC_SHA_256",
-                "HMAC_384" => "HMAC_SHA_384",
-                "HMAC_512" => "HMAC_SHA_512",
-                _ => "HMAC_SHA_256",
-            };
-            Some(vec![alg.to_string()])
-        } else {
-            None
-        };
-
-        let key = KmsKey {
-            key_id: key_id.clone(),
-            arn: arn.clone(),
-            creation_date: now,
-            description,
-            enabled,
-            key_usage,
-            key_spec,
-            key_manager: "CUSTOMER".to_string(),
-            key_state: if enabled { "Enabled" } else { "Disabled" }.to_string(),
-            deletion_date: None,
-            tags,
-            policy,
-            key_rotation_enabled,
-            origin,
-            multi_region,
-            rotations: Vec::new(),
-            signing_algorithms: None,
-            encryption_algorithms,
-            mac_algorithms,
-            custom_key_store_id: None,
-            imported_key_material: false,
-            imported_material_bytes: None,
-            private_key_seed: seed,
-            primary_region: None,
-            asymmetric_private_key_der: None,
-            asymmetric_public_key_der: None,
-        };
-
-        state.keys.insert(key_id.clone(), key);
-
+        let input = parse_kms_key_input(&resource.properties);
+        let (key_id, arn) =
+            kms_provisioner::provision_key(&self.kms_state, &self.account_id, &input)?;
         Ok(ProvisionResult::new(key_id.clone())
             .with("Arn", arn)
             .with("KeyId", key_id))
+    }
+
+    /// Update an `AWS::KMS::Key` in place. Properties that AWS treats
+    /// as immutable (`KeySpec`, `KeyUsage`, `Origin`, `MultiRegion`)
+    /// trigger replacement: when the diff carries one of those, this
+    /// returns an error and the upstream stack engine recreates the
+    /// resource.
+    fn update_kms_key(
+        &self,
+        existing: &StackResource,
+        new_def: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let new_input = parse_kms_key_input(&new_def.properties);
+        let arn = {
+            let mut accounts = self.kms_state.write();
+            let state = accounts.get_or_create(&self.account_id);
+            let key = state
+                .keys
+                .get(&existing.physical_id)
+                .ok_or_else(|| format!("Key '{}' does not exist", existing.physical_id))?;
+            if key.key_spec != new_input.key_spec
+                || key.key_usage != new_input.key_usage
+                || key.origin != new_input.origin
+                || key.multi_region != new_input.multi_region
+            {
+                return Err(
+                    "AWS::KMS::Key updates that change KeySpec, KeyUsage, Origin, or MultiRegion require replacement"
+                        .to_string(),
+                );
+            }
+            key.arn.clone()
+        };
+        kms_provisioner::update_key_properties(
+            &self.kms_state,
+            &self.account_id,
+            &existing.physical_id,
+            kms_provisioner::KeyUpdate {
+                description: Some(new_input.description.clone()),
+                enabled: Some(new_input.enabled),
+                key_rotation_enabled: Some(new_input.key_rotation_enabled),
+                policy: new_input.policy.clone(),
+                tags: Some(new_input.tags.clone()),
+            },
+        )?;
+        Ok(ProvisionResult::new(existing.physical_id.clone())
+            .with("Arn", arn)
+            .with("KeyId", existing.physical_id.clone()))
     }
 
     fn delete_kms_key(&self, physical_id: &str) -> Result<(), String> {
@@ -4920,99 +4927,99 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "PrimaryKeyArn is required".to_string())?
             .to_string();
-        // arn:aws:kms:<region>:<account>:key/<key_id>
-        let parts: Vec<&str> = primary_arn.split(':').collect();
-        if parts.len() < 6 {
-            return Err(format!("Invalid PrimaryKeyArn: {primary_arn}"));
-        }
-        let primary_region = parts[3].to_string();
-        let key_id = parts[5]
-            .strip_prefix("key/")
-            .ok_or_else(|| format!("PrimaryKeyArn missing key/ segment: {primary_arn}"))?
-            .to_string();
         let description = props
             .get("Description")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+            .map(str::to_string);
         let enabled = props
             .get("Enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let policy = match props.get("KeyPolicy") {
-            Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
-            Some(v) => serde_json::to_string(v).unwrap_or_default(),
-            None => String::new(),
-        };
-        let mut tags: BTreeMap<String, String> = BTreeMap::new();
-        if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
-            for t in arr {
-                if let (Some(k), Some(v)) = (
-                    t.get("Key").and_then(|x| x.as_str()),
-                    t.get("Value").and_then(|x| x.as_str()),
-                ) {
-                    tags.insert(k.to_string(), v.to_string());
-                }
-            }
-        }
+        let policy = parse_key_policy(props);
+        let tags = parse_tag_list(props);
 
-        let mut accounts = self.kms_state.write();
-        let state = accounts.get_or_create(&self.account_id);
-        // Source must be a multi-region key in the primary account; look
-        // it up either by raw key_id (when the primary lives in this
-        // state's region) or via the region-keyed slot.
-        let source_storage_keys = [key_id.clone(), format!("{primary_region}:{key_id}")];
-        let source = source_storage_keys
-            .iter()
-            .find_map(|k| state.keys.get(k).cloned())
-            .ok_or_else(|| format!("Primary key {primary_arn} does not exist"))?;
-        if !source.multi_region {
-            return Err(format!(
-                "Primary key {primary_arn} is not a multi-region key"
-            ));
-        }
-
-        // Real AWS uses the same `mrk-...` id across regions; fakecloud
-        // is single-region, so colliding the id with the primary would
-        // overwrite the primary in `state.keys`. Mint a distinct
-        // `mrk-replica-` id whose `primary_region` points back at the
-        // source so DescribeKey reports `MultiRegionKeyType=REPLICA`.
-        let replica_key_id = format!("mrk-replica-{}", Uuid::new_v4().as_simple());
-        let replica_arn = format!(
-            "arn:aws:kms:{}:{}:key/{}",
-            self.region, self.account_id, replica_key_id
-        );
-        let mut replica = source;
-        replica.key_id = replica_key_id.clone();
-        replica.arn = replica_arn.clone();
-        if !description.is_empty() {
-            replica.description = description;
-        }
-        replica.enabled = enabled;
-        replica.key_state = if enabled {
-            "Enabled".to_string()
-        } else {
-            "Disabled".to_string()
-        };
-        if !policy.is_empty() {
-            replica.policy = policy;
-        }
-        if !tags.is_empty() {
-            replica.tags.extend(tags);
-        }
-        replica.deletion_date = None;
-        replica.key_rotation_enabled = false;
-        replica.multi_region = true;
-        replica.rotations = Vec::new();
-        replica.custom_key_store_id = None;
-        replica.imported_key_material = false;
-        replica.imported_material_bytes = None;
-        replica.primary_region = Some(primary_region);
-
-        state.keys.insert(replica_key_id.clone(), replica);
+        let (replica_key_id, replica_arn) = kms_provisioner::provision_replica_key(
+            &self.kms_state,
+            &self.account_id,
+            &primary_arn,
+            description,
+            enabled,
+            policy,
+            tags,
+        )?;
         Ok(ProvisionResult::new(replica_key_id.clone())
             .with("KeyId", replica_key_id)
             .with("Arn", replica_arn))
+    }
+
+    /// Update an `AWS::KMS::ReplicaKey` in place. `PrimaryKeyArn`
+    /// changes are replacement-only, like the AWS contract — we'd
+    /// have to rebuild the replica from a different source. Other
+    /// fields (description, enabled, policy, tags) flow through
+    /// [`update_key_properties`].
+    fn update_kms_replica_key(
+        &self,
+        existing: &StackResource,
+        new_def: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &new_def.properties;
+        let new_primary = props
+            .get("PrimaryKeyArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "PrimaryKeyArn is required".to_string())?;
+        // Compare primary region from existing replica's primary_region
+        // field. Replacement triggers when the primary key changes.
+        {
+            let mut accounts = self.kms_state.write();
+            let state = accounts.get_or_create(&self.account_id);
+            let key = state
+                .keys
+                .get(&existing.physical_id)
+                .ok_or_else(|| format!("ReplicaKey '{}' does not exist", existing.physical_id))?;
+            if let Some(existing_region) = key.primary_region.as_deref() {
+                let parts: Vec<&str> = new_primary.split(':').collect();
+                if parts.len() < 4 || parts[3] != existing_region {
+                    return Err(
+                        "AWS::KMS::ReplicaKey updates that change PrimaryKeyArn require replacement"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let enabled = props
+            .get("Enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let policy = parse_key_policy(props);
+        let tags = parse_tag_list(props);
+        kms_provisioner::update_key_properties(
+            &self.kms_state,
+            &self.account_id,
+            &existing.physical_id,
+            kms_provisioner::KeyUpdate {
+                description,
+                enabled: Some(enabled),
+                key_rotation_enabled: None,
+                policy,
+                tags: Some(tags),
+            },
+        )?;
+        let arn = {
+            let mut accounts = self.kms_state.write();
+            let state = accounts.get_or_create(&self.account_id);
+            state
+                .keys
+                .get(&existing.physical_id)
+                .map(|k| k.arn.clone())
+                .unwrap_or_default()
+        };
+        Ok(ProvisionResult::new(existing.physical_id.clone())
+            .with("KeyId", existing.physical_id.clone())
+            .with("Arn", arn))
     }
 
     fn delete_kms_replica_key(&self, physical_id: &str) -> Result<(), String> {
@@ -5029,48 +5036,49 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "AliasName is required".to_string())?
             .to_string();
-        if !alias_name.starts_with("alias/") {
-            return Err(format!(
-                "AliasName must start with 'alias/'; got '{alias_name}'"
-            ));
-        }
         let target_input = props
             .get("TargetKeyId")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "TargetKeyId is required".to_string())?
             .to_string();
+        let alias = kms_provisioner::provision_alias(
+            &self.kms_state,
+            &self.account_id,
+            &alias_name,
+            &target_input,
+        )?;
+        Ok(ProvisionResult::new(alias))
+    }
 
-        let mut accounts = self.kms_state.write();
-        let state = accounts.get_or_create(&self.account_id);
-
-        let target_key_id = if state.keys.contains_key(&target_input) {
-            target_input.clone()
-        } else if let Some(id) = target_input
-            .strip_prefix("arn:aws:kms:")
-            .and_then(|rest| rest.split(":key/").nth(1))
-        {
-            if state.keys.contains_key(id) {
-                id.to_string()
-            } else {
-                return Err(format!("KMS key '{target_input}' does not exist"));
-            }
-        } else {
-            return Err(format!("KMS key '{target_input}' does not exist"));
-        };
-
-        let alias_arn = format!(
-            "arn:aws:kms:{}:{}:{}",
-            state.region, state.account_id, alias_name
-        );
-        let alias = KmsAlias {
-            alias_name: alias_name.clone(),
-            alias_arn,
-            target_key_id,
-            creation_date: Utc::now().timestamp() as f64,
-        };
-        state.aliases.insert(alias_name.clone(), alias);
-
-        Ok(ProvisionResult::new(alias_name))
+    /// Update an `AWS::KMS::Alias` in place. Changing `AliasName`
+    /// triggers replacement (the alias is the resource's identity);
+    /// only `TargetKeyId` is updatable here.
+    fn update_kms_alias(
+        &self,
+        existing: &StackResource,
+        new_def: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &new_def.properties;
+        let new_alias_name = props
+            .get("AliasName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "AliasName is required".to_string())?;
+        if new_alias_name != existing.physical_id {
+            return Err(
+                "AWS::KMS::Alias updates that change AliasName require replacement".to_string(),
+            );
+        }
+        let target_input = props
+            .get("TargetKeyId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "TargetKeyId is required".to_string())?;
+        kms_provisioner::update_alias_target(
+            &self.kms_state,
+            &self.account_id,
+            &existing.physical_id,
+            target_input,
+        )?;
+        Ok(ProvisionResult::new(existing.physical_id.clone()))
     }
 
     fn delete_kms_alias(&self, physical_id: &str) -> Result<(), String> {
