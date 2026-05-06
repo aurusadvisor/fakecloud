@@ -12,7 +12,8 @@ pub use service::{
 };
 pub use state::{
     default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig,
-    AuthorizationCodeData, CognitoSnapshot, CognitoState, CustomDomainConfig, EmailConfiguration,
+    AuthorizationCodeData, CognitoIdentityProvider, CognitoSnapshot, CognitoState,
+    CustomDomainConfig, EmailConfiguration, IdentityPool, IdentityPoolRoleAttachment,
     PasswordPolicy, PoolPolicies, RecoveryOption, SchemaAttribute, SharedCognitoState,
     SignInPolicy, SmsConfiguration, UserPool, UserPoolClient, UserPoolDomain,
     COGNITO_SNAPSHOT_SCHEMA_VERSION,

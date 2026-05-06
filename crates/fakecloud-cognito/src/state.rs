@@ -92,6 +92,12 @@ pub struct CognitoState {
     /// (pool_id:username) -> WebAuthn credentials
     #[serde(default)]
     pub webauthn_credentials: BTreeMap<String, Vec<WebAuthnCredential>>,
+    /// identity_pool_id -> IdentityPool (Cognito Federated Identities)
+    #[serde(default)]
+    pub identity_pools: BTreeMap<String, IdentityPool>,
+    /// identity_pool_id -> IdentityPoolRoleAttachment
+    #[serde(default)]
+    pub identity_pool_role_attachments: BTreeMap<String, IdentityPoolRoleAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,6 +156,8 @@ impl CognitoState {
             managed_login_brandings: BTreeMap::new(),
             terms: BTreeMap::new(),
             webauthn_credentials: BTreeMap::new(),
+            identity_pools: BTreeMap::new(),
+            identity_pool_role_attachments: BTreeMap::new(),
         }
     }
 
@@ -175,6 +183,8 @@ impl CognitoState {
         self.managed_login_brandings.clear();
         self.terms.clear();
         self.webauthn_credentials.clear();
+        self.identity_pools.clear();
+        self.identity_pool_role_attachments.clear();
     }
 }
 
@@ -535,6 +545,64 @@ pub struct UserPoolDomain {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CustomDomainConfig {
     pub certificate_arn: String,
+}
+
+/// Cognito Federated Identities pool. Distinct from Cognito User Pools —
+/// identity pools issue temporary AWS credentials by federating any of
+/// several login providers (Cognito User Pool, Google, Facebook, SAML,
+/// OIDC, developer-authenticated). The CFN type is `AWS::Cognito::IdentityPool`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IdentityPool {
+    pub identity_pool_id: String,
+    pub identity_pool_name: String,
+    #[serde(default)]
+    pub allow_unauthenticated_identities: bool,
+    #[serde(default)]
+    pub allow_classic_flow: bool,
+    #[serde(default)]
+    pub developer_provider_name: Option<String>,
+    #[serde(default)]
+    pub cognito_identity_providers: Vec<CognitoIdentityProvider>,
+    #[serde(default)]
+    pub open_id_connect_provider_arns: Vec<String>,
+    #[serde(default)]
+    pub saml_provider_arns: Vec<String>,
+    #[serde(default)]
+    pub supported_login_providers: BTreeMap<String, String>,
+    /// Free-form CognitoStreams config blob.
+    #[serde(default)]
+    pub cognito_streams: Option<serde_json::Value>,
+    /// Free-form PushSync config blob.
+    #[serde(default)]
+    pub push_sync: Option<serde_json::Value>,
+    #[serde(default)]
+    pub identity_pool_tags: BTreeMap<String, String>,
+    pub creation_date: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CognitoIdentityProvider {
+    pub provider_name: String,
+    pub client_id: String,
+    #[serde(default)]
+    pub server_side_token_check: bool,
+}
+
+/// Maps an identity pool's authenticated/unauthenticated roles plus any
+/// provider-specific role-mapping rules. CFN type `AWS::Cognito::IdentityPoolRoleAttachment`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IdentityPoolRoleAttachment {
+    pub identity_pool_id: String,
+    /// Attachment id is synthesised at create-time so CFN can produce
+    /// a stable Ref of the form `<pool-id>:<attachment-id>`.
+    pub attachment_id: String,
+    /// `authenticated` / `unauthenticated` -> role ARN.
+    #[serde(default)]
+    pub roles: BTreeMap<String, String>,
+    /// Provider key (e.g. `cognito-idp.us-east-1.amazonaws.com/<pool>:<client>`)
+    /// -> RoleMapping rules JSON. Stored opaquely.
+    #[serde(default)]
+    pub role_mappings: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
