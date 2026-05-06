@@ -94,6 +94,17 @@ Tasks registered with a `taskRoleArn` get `AWS_CONTAINER_CREDENTIALS_FULL_URI` i
 
 AWS SDKs pick this up via the default credential-provider chain, so `aws sts get-caller-identity` (and any other SDK call) from inside the container works out of the box. fakecloud's STS accepts any `AccessKeyId`, so no pre-registration of the role is needed.
 
+### Volumes + mount points
+
+Task-definition `volumes[]` and per-container `mountPoints[]` translate into real `docker run -v` flags so containers see actual files at the paths they expect. Supported volume kinds:
+
+- **Host bind** — `volume.host.sourcePath` is bind-mounted directly. A file written by the container shows up on the host path after the task stops.
+- **EFS** — `efsVolumeConfiguration.fileSystemId` resolves to a host-side stub directory under `/tmp/fakecloud/efs/<filesystemId>[/<rootDirectory>]`. Multiple tasks targeting the same filesystem id share the stub, so a writer task and a reader task can exchange data the same way they would on real EFS.
+- **FSx for Windows** — `fsxWindowsFileServerVolumeConfiguration.fileSystemId` resolves to an analogous stub under `/tmp/fakecloud/fsx/<filesystemId>/<rootDirectory>`.
+- **Docker named volume** — `dockerVolumeConfiguration` passes the volume name through verbatim; docker creates the named volume on first reference.
+
+`mountPoints[].readOnly` is honoured by appending `:ro` to the rendered `-v` flag.
+
 ### Secrets injection
 
 Container definitions can pull secrets from SecretsManager or SSM Parameter Store via the standard `secrets[]` field:
