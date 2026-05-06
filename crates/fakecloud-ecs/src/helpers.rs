@@ -490,15 +490,7 @@ pub(crate) fn task_to_json(task: &Task) -> Value {
     );
     map.insert("enableExecuteCommand".into(), json!(false));
     map.insert("ephemeralStorage".into(), json!({ "sizeInGiB": 20 }));
-    map.insert(
-        "healthStatus".into(),
-        json!(task
-            .containers
-            .iter()
-            .find_map(|c| c.health_status.as_ref())
-            .map(|s| s.as_str())
-            .unwrap_or("HEALTHY")),
-    );
+    map.insert("healthStatus".into(), json!(aggregate_task_health(task)));
     map.insert("version".into(), json!(1));
     if let Some(ref cp) = task.capacity_provider_name {
         map.insert("capacityProviderName".into(), json!(cp));
@@ -524,6 +516,31 @@ pub(crate) fn task_to_json(task: &Task) -> Value {
         );
     }
     Value::Object(map)
+}
+
+/// Aggregate per-container `healthStatus` into the task-level
+/// `healthStatus` AWS surfaces on DescribeTasks. Rules mirror real ECS:
+/// - `UNHEALTHY` if any essential container is `UNHEALTHY`
+/// - `HEALTHY` if every essential container is `HEALTHY`
+/// - `UNKNOWN` otherwise (anything still warming up / no probe defined)
+pub(crate) fn aggregate_task_health(task: &Task) -> &'static str {
+    let essentials: Vec<&Container> = task.containers.iter().filter(|c| c.essential).collect();
+    if essentials.is_empty() {
+        return "UNKNOWN";
+    }
+    let any_unhealthy = essentials
+        .iter()
+        .any(|c| c.health_status.as_deref() == Some("UNHEALTHY"));
+    if any_unhealthy {
+        return "UNHEALTHY";
+    }
+    let all_healthy = essentials
+        .iter()
+        .all(|c| c.health_status.as_deref() == Some("HEALTHY"));
+    if all_healthy {
+        return "HEALTHY";
+    }
+    "UNKNOWN"
 }
 
 pub(crate) fn container_to_json(container: &Container) -> Value {
