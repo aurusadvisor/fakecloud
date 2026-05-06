@@ -35,7 +35,9 @@ const LAMBDA_RUNTIME_NODEJS_FILTER: &str = concat!(
     "test(test_invoke_nodejs18) | ",
     "test(test_invoke_nodejs20) | ",
     "test(test_invoke_nodejs22) | ",
-    "test(test_invoke_nodejs24)",
+    "test(test_invoke_nodejs24) | ",
+    "test(test_invoke_with_response_stream_emits_payload_chunks_and_invoke_complete) | ",
+    "test(test_invoke_with_response_stream_surfaces_handler_errors)",
     ")"
 );
 const LAMBDA_RUNTIME_RUBY_FILTER: &str = concat!(
