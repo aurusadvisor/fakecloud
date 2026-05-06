@@ -288,3 +288,164 @@ async fn cfn_provisions_ecr_policies_and_registry_config() {
     let reg_after = ecr.get_registry_policy().send().await;
     assert!(reg_after.is_err(), "registry policy should be cleared");
 }
+
+const LIFECYCLE_TEMPLATE: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Repo": {
+      "Type": "AWS::ECR::Repository",
+      "Properties": {"RepositoryName": "ecr-cfn-lifecycle-repo"}
+    },
+    "Lifecycle": {
+      "Type": "AWS::ECR::LifecyclePolicy",
+      "Properties": {
+        "RepositoryName": {"Ref": "Repo"},
+        "LifecyclePolicyText": "{\"rules\":[{\"rulePriority\":1,\"description\":\"keep latest 5\",\"selection\":{\"tagStatus\":\"any\",\"countType\":\"imageCountMoreThan\",\"countNumber\":5},\"action\":{\"type\":\"expire\"}}]}"
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_provisions_standalone_ecr_lifecycle_policy() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let ecr = server.ecr_client().await;
+
+    cfn.create_stack()
+        .stack_name("ecr-lifecycle-stack")
+        .template_body(LIFECYCLE_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("ecr-lifecycle-stack")
+        .send()
+        .await
+        .expect("describe_stacks");
+    assert_eq!(
+        described
+            .stacks()
+            .first()
+            .unwrap()
+            .stack_status()
+            .unwrap()
+            .as_str(),
+        "CREATE_COMPLETE"
+    );
+
+    let policy = ecr
+        .get_lifecycle_policy()
+        .repository_name("ecr-cfn-lifecycle-repo")
+        .send()
+        .await
+        .expect("get_lifecycle_policy");
+    assert!(policy
+        .lifecycle_policy_text()
+        .map(|s| s.contains("imageCountMoreThan"))
+        .unwrap_or(false));
+    assert!(
+        policy.last_evaluated_at().is_some(),
+        "PutLifecyclePolicy data path stamps lastEvaluatedAt — provisioner must too"
+    );
+
+    cfn.delete_stack()
+        .stack_name("ecr-lifecycle-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+
+    // Repository is still gone after stack delete (cascades take down
+    // the lifecycle policy with it).
+    let after = ecr
+        .describe_repositories()
+        .repository_names("ecr-cfn-lifecycle-repo")
+        .send()
+        .await;
+    assert!(after.is_err());
+}
+
+const SCANNING_TEMPLATE: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Scanning": {
+      "Type": "AWS::ECR::RegistryScanningConfiguration",
+      "Properties": {
+        "ScanType": "ENHANCED",
+        "Rules": [{
+          "ScanFrequency": "CONTINUOUS_SCAN",
+          "RepositoryFilters": [{"Filter": "prod-*", "FilterType": "WILDCARD"}]
+        }]
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_provisions_ecr_registry_scanning_configuration() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let ecr = server.ecr_client().await;
+
+    cfn.create_stack()
+        .stack_name("ecr-scan-stack")
+        .template_body(SCANNING_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("ecr-scan-stack")
+        .send()
+        .await
+        .expect("describe_stacks");
+    assert_eq!(
+        described
+            .stacks()
+            .first()
+            .unwrap()
+            .stack_status()
+            .unwrap()
+            .as_str(),
+        "CREATE_COMPLETE"
+    );
+
+    let cfg = ecr
+        .get_registry_scanning_configuration()
+        .send()
+        .await
+        .expect("get_registry_scanning_configuration");
+    let scan_cfg = cfg
+        .scanning_configuration()
+        .expect("scanning configuration present");
+    assert_eq!(
+        scan_cfg.scan_type().map(|s| s.as_str()),
+        Some("ENHANCED"),
+        "ScanType should match what CFN provisioned"
+    );
+    assert_eq!(scan_cfg.rules().len(), 1);
+
+    cfn.delete_stack()
+        .stack_name("ecr-scan-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+
+    let after = ecr
+        .get_registry_scanning_configuration()
+        .send()
+        .await
+        .expect("get_registry_scanning_configuration");
+    let after_cfg = after
+        .scanning_configuration()
+        .expect("config present after delete");
+    assert_eq!(
+        after_cfg.scan_type().map(|s| s.as_str()),
+        Some("BASIC"),
+        "delete should revert the registry to the AWS default scan type"
+    );
+    assert!(after_cfg.rules().is_empty());
+}

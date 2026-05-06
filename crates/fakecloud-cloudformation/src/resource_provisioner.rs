@@ -725,6 +725,17 @@ impl ProvisionResult {
         self.attributes.insert(key.to_string(), value.into());
         self
     }
+
+    /// Merge another attribute map into this result. Used by update
+    /// handlers that delegate to a create handler but need to keep the
+    /// existing physical id while inheriting the freshly computed
+    /// attributes.
+    pub fn merge_attributes(mut self, other: BTreeMap<String, String>) -> Self {
+        for (k, v) in other {
+            self.attributes.insert(k, v);
+        }
+        self
+    }
 }
 
 /// Holds references to all service states so CloudFormation can provision resources.
@@ -817,9 +828,13 @@ impl ResourceProvisioner {
             "AWS::KMS::ReplicaKey" => self.create_kms_replica_key(resource),
             "AWS::ECR::Repository" => self.create_ecr_repository(resource),
             "AWS::ECR::RepositoryPolicy" => self.create_ecr_repository_policy(resource),
+            "AWS::ECR::LifecyclePolicy" => self.create_ecr_lifecycle_policy(resource),
             "AWS::ECR::RegistryPolicy" => self.create_ecr_registry_policy(resource),
             "AWS::ECR::ReplicationConfiguration" => {
                 self.create_ecr_replication_configuration(resource)
+            }
+            "AWS::ECR::RegistryScanningConfiguration" => {
+                self.create_ecr_registry_scanning_configuration(resource)
             }
             "AWS::ECR::PullThroughCacheRule" => self.create_ecr_pull_through_cache_rule(resource),
             "AWS::CloudWatch::Alarm" => self.create_cloudwatch_alarm(resource),
@@ -1058,6 +1073,23 @@ impl ResourceProvisioner {
             "AWS::ECS::CapacityProvider" => {
                 Some(self.update_ecs_capacity_provider(existing, new_def)?)
             }
+            "AWS::ECR::Repository" => Some(self.update_ecr_repository(existing, new_def)?),
+            "AWS::ECR::RepositoryPolicy" => {
+                Some(self.update_ecr_repository_policy(existing, new_def)?)
+            }
+            "AWS::ECR::LifecyclePolicy" => {
+                Some(self.update_ecr_lifecycle_policy(existing, new_def)?)
+            }
+            "AWS::ECR::RegistryPolicy" => Some(self.update_ecr_registry_policy(existing, new_def)?),
+            "AWS::ECR::ReplicationConfiguration" => {
+                Some(self.update_ecr_replication_configuration(existing, new_def)?)
+            }
+            "AWS::ECR::RegistryScanningConfiguration" => {
+                Some(self.update_ecr_registry_scanning_configuration(existing, new_def)?)
+            }
+            "AWS::ECR::PullThroughCacheRule" => {
+                Some(self.update_ecr_pull_through_cache_rule(existing, new_def)?)
+            }
             _ => None,
         };
 
@@ -1110,6 +1142,7 @@ impl ResourceProvisioner {
             "AWS::ECS::CapacityProvider" => {
                 self.get_att_ecs_capacity_provider(&resource.physical_id, attribute)
             }
+            "AWS::ECR::Repository" => self.get_att_ecr_repository(&resource.physical_id, attribute),
             _ => None,
         }
     }
@@ -1320,8 +1353,12 @@ impl ResourceProvisioner {
             "AWS::ECR::RepositoryPolicy" => {
                 self.delete_ecr_repository_policy(&resource.physical_id)
             }
+            "AWS::ECR::LifecyclePolicy" => self.delete_ecr_lifecycle_policy(&resource.physical_id),
             "AWS::ECR::RegistryPolicy" => self.delete_ecr_registry_policy(),
             "AWS::ECR::ReplicationConfiguration" => self.delete_ecr_replication_configuration(),
+            "AWS::ECR::RegistryScanningConfiguration" => {
+                self.delete_ecr_registry_scanning_configuration()
+            }
             "AWS::ECR::PullThroughCacheRule" => {
                 self.delete_ecr_pull_through_cache_rule(&resource.physical_id)
             }
@@ -5103,6 +5140,11 @@ impl ResourceProvisioner {
             }
         }
 
+        let empty_on_delete = props
+            .get("EmptyOnDelete")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let mut accounts = self.ecr_state.write();
         let state = accounts.get_or_create(&self.account_id);
         if state.repositories.contains_key(&repository_name) {
@@ -5120,6 +5162,16 @@ impl ResourceProvisioner {
         repo.encryption_configuration.encryption_type = encryption_type;
         repo.encryption_configuration.kms_key = kms_key;
         repo.policy = policy_text;
+        // Apply lifecycle policy synchronously so the store reflects the
+        // initial prune, matching the PutLifecyclePolicy data path.
+        if let Some(policy) = lifecycle_policy.as_ref() {
+            let prune = fakecloud_ecr::evaluate_lifecycle_policy(&repo, policy);
+            for digest in &prune {
+                repo.images.remove(digest);
+                repo.image_tags.retain(|_, d| d != digest);
+            }
+            repo.lifecycle_policy_last_evaluated_at = Some(Utc::now());
+        }
         repo.lifecycle_policy = lifecycle_policy;
         repo.tags = tags;
         let uri = repo.repository_uri.clone();
@@ -5127,7 +5179,9 @@ impl ResourceProvisioner {
 
         Ok(ProvisionResult::new(repository_name)
             .with("Arn", arn)
-            .with("RepositoryUri", uri))
+            .with("RepositoryUri", uri)
+            .with("RegistryId", registry_id)
+            .with("EmptyOnDelete", empty_on_delete.to_string()))
     }
 
     fn delete_ecr_repository(&self, physical_id: &str) -> Result<(), String> {
@@ -5345,6 +5399,376 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         state.pull_through_cache_rules.remove(physical_id);
         Ok(())
+    }
+
+    /// Provision a standalone `AWS::ECR::LifecyclePolicy` against an
+    /// existing repository. Mirrors the `PutLifecyclePolicy` data path:
+    /// the policy text is stored on the repo and applied synchronously
+    /// so the store reflects any prune set immediately. Physical id
+    /// encodes `account/repo` so delete can find the right repository.
+    fn create_ecr_lifecycle_policy(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let repository_name = props
+            .get("RepositoryName")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "RepositoryName is required".to_string())?
+            .to_string();
+        let policy_text = props
+            .get("LifecyclePolicyText")
+            .map(|v| {
+                if v.is_string() {
+                    v.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            })
+            .ok_or_else(|| "LifecyclePolicyText is required".to_string())?;
+        // RegistryId is informational on AWS — accepted but the registry
+        // lookup is always the active account in fakecloud.
+        let _registry_id = props
+            .get("RegistryId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let repo = state
+            .repositories
+            .get_mut(&repository_name)
+            .ok_or_else(|| format!("Repository {repository_name} does not exist"))?;
+        // Run the policy once now so callers see the same prune-on-write
+        // behaviour they get from the JSON `PutLifecyclePolicy` endpoint.
+        let prune = fakecloud_ecr::evaluate_lifecycle_policy(repo, &policy_text);
+        for digest in &prune {
+            repo.images.remove(digest);
+            repo.image_tags.retain(|_, d| d != digest);
+        }
+        repo.lifecycle_policy = Some(policy_text);
+        repo.lifecycle_policy_last_evaluated_at = Some(Utc::now());
+        let registry_id = repo.registry_id.clone();
+        Ok(
+            ProvisionResult::new(format!("{}/{}", self.account_id, repository_name))
+                .with("RepositoryName", repository_name)
+                .with("RegistryId", registry_id),
+        )
+    }
+
+    fn delete_ecr_lifecycle_policy(&self, physical_id: &str) -> Result<(), String> {
+        let repository_name = physical_id
+            .split_once('/')
+            .map(|(_, n)| n.to_string())
+            .unwrap_or_else(|| physical_id.to_string());
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if let Some(repo) = state.repositories.get_mut(&repository_name) {
+            repo.lifecycle_policy = None;
+            repo.lifecycle_policy_last_evaluated_at = None;
+        }
+        Ok(())
+    }
+
+    /// Provision the singleton `AWS::ECR::RegistryScanningConfiguration`.
+    /// One per account; later applies overwrite the prior config —
+    /// matching `PutRegistryScanningConfiguration` semantics.
+    fn create_ecr_registry_scanning_configuration(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        use fakecloud_ecr::state::{
+            RegistryScanningConfiguration, RegistryScanningRule, RepositoryFilter,
+        };
+        let props = &resource.properties;
+        let scan_type = props
+            .get("ScanType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("BASIC")
+            .to_string();
+        let rules: Vec<RegistryScanningRule> = props
+            .get("Rules")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|r| {
+                        let scan_frequency = r
+                            .get("ScanFrequency")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("MANUAL")
+                            .to_string();
+                        let repository_filters: Vec<RepositoryFilter> = r
+                            .get("RepositoryFilters")
+                            .and_then(|v| v.as_array())
+                            .map(|f| {
+                                f.iter()
+                                    .map(|f| RepositoryFilter {
+                                        filter: f
+                                            .get("Filter")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        filter_type: f
+                                            .get("FilterType")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        RegistryScanningRule {
+                            scan_frequency,
+                            repository_filters,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.registry_scanning_configuration = RegistryScanningConfiguration { scan_type, rules };
+        Ok(ProvisionResult::new(self.account_id.clone()))
+    }
+
+    fn delete_ecr_registry_scanning_configuration(&self) -> Result<(), String> {
+        use fakecloud_ecr::state::RegistryScanningConfiguration;
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        // CFN delete reverts to the AWS default (BASIC, no rules).
+        state.registry_scanning_configuration = RegistryScanningConfiguration::default();
+        Ok(())
+    }
+
+    // ECR update_resource handlers. RepositoryName / EcrRepositoryPrefix
+    // are immutable on AWS; CFN replaces the resource if they change.
+    // These handlers refresh the mutable fields and keep the physical id
+    // stable.
+
+    fn update_ecr_repository(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let repository_name = existing.physical_id.clone();
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let repo = state
+            .repositories
+            .get_mut(&repository_name)
+            .ok_or_else(|| format!("Repository {repository_name} no longer exists"))?;
+        if let Some(s) = props.get("ImageTagMutability").and_then(|v| v.as_str()) {
+            repo.image_tag_mutability = s.to_string();
+        }
+        if let Some(b) = props
+            .get("ImageScanningConfiguration")
+            .and_then(|v| v.get("ScanOnPush"))
+            .and_then(|v| v.as_bool())
+        {
+            repo.image_scanning_configuration.scan_on_push = b;
+        }
+        if let Some(cfg) = props.get("EncryptionConfiguration") {
+            if let Some(s) = cfg.get("EncryptionType").and_then(|v| v.as_str()) {
+                repo.encryption_configuration.encryption_type = s.to_string();
+            }
+            if let Some(s) = cfg.get("KmsKey").and_then(|v| v.as_str()) {
+                repo.encryption_configuration.kms_key = Some(s.to_string());
+            }
+        }
+        if let Some(v) = props.get("RepositoryPolicyText") {
+            let text = if v.is_string() {
+                v.as_str().unwrap_or("").to_string()
+            } else {
+                serde_json::to_string(v).unwrap_or_default()
+            };
+            repo.policy = if text.is_empty() { None } else { Some(text) };
+        }
+        if let Some(text) = props
+            .get("LifecyclePolicy")
+            .and_then(|v| v.get("LifecyclePolicyText"))
+            .and_then(|v| v.as_str())
+        {
+            let prune = fakecloud_ecr::evaluate_lifecycle_policy(repo, text);
+            for digest in &prune {
+                repo.images.remove(digest);
+                repo.image_tags.retain(|_, d| d != digest);
+            }
+            repo.lifecycle_policy = Some(text.to_string());
+            repo.lifecycle_policy_last_evaluated_at = Some(Utc::now());
+        }
+        if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
+            let mut tags: BTreeMap<String, String> = BTreeMap::new();
+            for t in arr {
+                if let (Some(k), Some(v)) = (
+                    t.get("Key").and_then(|x| x.as_str()),
+                    t.get("Value").and_then(|x| x.as_str()),
+                ) {
+                    tags.insert(k.to_string(), v.to_string());
+                }
+            }
+            repo.tags = tags;
+        }
+        let arn = repo.repository_arn.clone();
+        let uri = repo.repository_uri.clone();
+        let registry_id = repo.registry_id.clone();
+        Ok(ProvisionResult::new(repository_name)
+            .with("Arn", arn)
+            .with("RepositoryUri", uri)
+            .with("RegistryId", registry_id))
+    }
+
+    fn update_ecr_repository_policy(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let repository_name = physical_id
+            .split_once('/')
+            .map(|(_, n)| n.to_string())
+            .unwrap_or_else(|| physical_id.clone());
+        let policy_text = props
+            .get("PolicyText")
+            .map(|v| {
+                if v.is_string() {
+                    v.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            })
+            .ok_or_else(|| "PolicyText is required".to_string())?;
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let repo = state
+            .repositories
+            .get_mut(&repository_name)
+            .ok_or_else(|| format!("Repository {repository_name} does not exist"))?;
+        repo.policy = Some(policy_text);
+        Ok(ProvisionResult::new(physical_id))
+    }
+
+    fn update_ecr_lifecycle_policy(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let repository_name = physical_id
+            .split_once('/')
+            .map(|(_, n)| n.to_string())
+            .unwrap_or_else(|| physical_id.clone());
+        let policy_text = props
+            .get("LifecyclePolicyText")
+            .map(|v| {
+                if v.is_string() {
+                    v.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            })
+            .ok_or_else(|| "LifecyclePolicyText is required".to_string())?;
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let repo = state
+            .repositories
+            .get_mut(&repository_name)
+            .ok_or_else(|| format!("Repository {repository_name} does not exist"))?;
+        let prune = fakecloud_ecr::evaluate_lifecycle_policy(repo, &policy_text);
+        for digest in &prune {
+            repo.images.remove(digest);
+            repo.image_tags.retain(|_, d| d != digest);
+        }
+        repo.lifecycle_policy = Some(policy_text);
+        repo.lifecycle_policy_last_evaluated_at = Some(Utc::now());
+        let registry_id = repo.registry_id.clone();
+        Ok(ProvisionResult::new(physical_id)
+            .with("RepositoryName", repository_name)
+            .with("RegistryId", registry_id))
+    }
+
+    fn update_ecr_registry_policy(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let policy_text = props
+            .get("PolicyText")
+            .map(|v| {
+                if v.is_string() {
+                    v.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            })
+            .ok_or_else(|| "PolicyText is required".to_string())?;
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.registry_policy = Some(policy_text);
+        Ok(ProvisionResult::new(existing.physical_id.clone())
+            .with("RegistryId", self.account_id.clone()))
+    }
+
+    fn update_ecr_replication_configuration(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        // Updates fully replace the prior config — same as create.
+        let result = self.create_ecr_replication_configuration(resource)?;
+        Ok(ProvisionResult::new(existing.physical_id.clone()).merge_attributes(result.attributes))
+    }
+
+    fn update_ecr_registry_scanning_configuration(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let result = self.create_ecr_registry_scanning_configuration(resource)?;
+        Ok(ProvisionResult::new(existing.physical_id.clone()).merge_attributes(result.attributes))
+    }
+
+    fn update_ecr_pull_through_cache_rule(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let prefix = existing.physical_id.clone();
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let rule = state
+            .pull_through_cache_rules
+            .get_mut(&prefix)
+            .ok_or_else(|| format!("PullThroughCacheRule {prefix} no longer exists"))?;
+        if let Some(s) = props.get("UpstreamRegistryUrl").and_then(|v| v.as_str()) {
+            rule.upstream_registry_url = s.to_string();
+        }
+        if let Some(s) = props.get("UpstreamRegistry").and_then(|v| v.as_str()) {
+            rule.upstream_registry = Some(s.to_string());
+        }
+        if let Some(s) = props.get("CredentialArn").and_then(|v| v.as_str()) {
+            rule.credential_arn = Some(s.to_string());
+        }
+        if let Some(s) = props.get("CustomRoleArn").and_then(|v| v.as_str()) {
+            rule.custom_role_arn = Some(s.to_string());
+        }
+        rule.updated_at = Utc::now();
+        Ok(ProvisionResult::new(prefix))
+    }
+
+    fn get_att_ecr_repository(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.ecr_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let repo = state.repositories.get(physical_id)?;
+        match attribute {
+            "Arn" => Some(repo.repository_arn.clone()),
+            "RepositoryUri" => Some(repo.repository_uri.clone()),
+            "RegistryId" => Some(repo.registry_id.clone()),
+            _ => None,
+        }
     }
 
     // --- CloudWatch ---
