@@ -218,3 +218,275 @@ async fn cfn_provisions_kms_replica_key() {
         "replica should be gone after stack deletion"
     );
 }
+
+const ASYM_TEMPLATE: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "SigningKey": {
+      "Type": "AWS::KMS::Key",
+      "Properties": {
+        "Description": "RSA signing key",
+        "KeyUsage": "SIGN_VERIFY",
+        "KeySpec": "RSA_2048"
+      }
+    },
+    "AgreementKey": {
+      "Type": "AWS::KMS::Key",
+      "Properties": {
+        "Description": "ECC key agreement",
+        "KeyUsage": "KEY_AGREEMENT",
+        "KeySpec": "ECC_NIST_P256"
+      }
+    },
+    "MacKey": {
+      "Type": "AWS::KMS::Key",
+      "Properties": {
+        "Description": "HMAC mac key",
+        "KeyUsage": "GENERATE_VERIFY_MAC",
+        "KeySpec": "HMAC_256"
+      }
+    }
+  },
+  "Outputs": {
+    "SigningKeyId": {"Value": {"Ref": "SigningKey"}},
+    "AgreementKeyId": {"Value": {"Ref": "AgreementKey"}},
+    "MacKeyId": {"Value": {"Ref": "MacKey"}}
+  }
+}"#;
+
+/// CFN must accept SIGN_VERIFY (asymmetric RSA), KEY_AGREEMENT (ECC),
+/// and GENERATE_VERIFY_MAC (HMAC) usages, not just symmetric keys.
+/// The pre-BB14 provisioner rejected anything that wasn't
+/// SYMMETRIC_DEFAULT or HMAC, which left a parity gap with real
+/// CloudFormation.
+#[tokio::test]
+async fn cfn_provisions_asymmetric_and_mac_keys() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let kms = server.kms_client().await;
+
+    cfn.create_stack()
+        .stack_name("asym-kms-stack")
+        .template_body(ASYM_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("asym-kms-stack")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let stack = described.stacks().first().expect("stack present");
+    assert_eq!(stack.stack_status().unwrap().as_str(), "CREATE_COMPLETE");
+
+    let outputs: std::collections::HashMap<&str, &str> = stack
+        .outputs()
+        .iter()
+        .filter_map(|o| Some((o.output_key()?, o.output_value()?)))
+        .collect();
+
+    let signing = kms
+        .describe_key()
+        .key_id(*outputs.get("SigningKeyId").unwrap())
+        .send()
+        .await
+        .expect("describe signing key");
+    let signing_meta = signing.key_metadata().unwrap();
+    assert_eq!(signing_meta.key_usage().unwrap().as_str(), "SIGN_VERIFY");
+    assert_eq!(signing_meta.key_spec().unwrap().as_str(), "RSA_2048");
+    assert!(
+        !signing_meta.signing_algorithms().is_empty(),
+        "signing algorithms should be populated for an RSA key",
+    );
+
+    // GetPublicKey must work — that's the smoke test for asymmetric
+    // keypair generation having actually run during CFN provisioning.
+    let pub_key = kms
+        .get_public_key()
+        .key_id(*outputs.get("SigningKeyId").unwrap())
+        .send()
+        .await
+        .expect("get_public_key");
+    assert!(pub_key.public_key().is_some());
+
+    let agreement = kms
+        .describe_key()
+        .key_id(*outputs.get("AgreementKeyId").unwrap())
+        .send()
+        .await
+        .expect("describe agreement key");
+    assert_eq!(
+        agreement
+            .key_metadata()
+            .unwrap()
+            .key_usage()
+            .unwrap()
+            .as_str(),
+        "KEY_AGREEMENT"
+    );
+
+    let mac = kms
+        .describe_key()
+        .key_id(*outputs.get("MacKeyId").unwrap())
+        .send()
+        .await
+        .expect("describe mac key");
+    assert!(
+        !mac.key_metadata().unwrap().mac_algorithms().is_empty(),
+        "MAC key should publish supported HMAC algorithms",
+    );
+}
+
+const UPDATE_TEMPLATE_V1: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "AppKey": {
+      "Type": "AWS::KMS::Key",
+      "Properties": {
+        "Description": "v1 description",
+        "EnableKeyRotation": false,
+        "Enabled": true
+      }
+    },
+    "OtherKey": {
+      "Type": "AWS::KMS::Key",
+      "Properties": {
+        "Description": "alias re-target",
+        "Enabled": true
+      }
+    },
+    "AppAlias": {
+      "Type": "AWS::KMS::Alias",
+      "Properties": {
+        "AliasName": "alias/cfn-update-test",
+        "TargetKeyId": {"Ref": "AppKey"}
+      }
+    }
+  },
+  "Outputs": {
+    "KeyId": {"Value": {"Ref": "AppKey"}},
+    "OtherKeyId": {"Value": {"Ref": "OtherKey"}}
+  }
+}"#;
+
+const UPDATE_TEMPLATE_V2: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "AppKey": {
+      "Type": "AWS::KMS::Key",
+      "Properties": {
+        "Description": "v2 description",
+        "EnableKeyRotation": true,
+        "Enabled": false
+      }
+    },
+    "OtherKey": {
+      "Type": "AWS::KMS::Key",
+      "Properties": {
+        "Description": "alias re-target",
+        "Enabled": true
+      }
+    },
+    "AppAlias": {
+      "Type": "AWS::KMS::Alias",
+      "Properties": {
+        "AliasName": "alias/cfn-update-test",
+        "TargetKeyId": {"Ref": "OtherKey"}
+      }
+    }
+  },
+  "Outputs": {
+    "KeyId": {"Value": {"Ref": "AppKey"}},
+    "OtherKeyId": {"Value": {"Ref": "OtherKey"}}
+  }
+}"#;
+
+/// Update flow: changing description / enabled / EnableKeyRotation on
+/// an `AWS::KMS::Key` should land in place via `update_resource`, and
+/// repointing an `AWS::KMS::Alias` at a different key shouldn't drop
+/// the alias.
+#[tokio::test]
+async fn cfn_updates_kms_key_and_repoints_alias() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let kms = server.kms_client().await;
+
+    cfn.create_stack()
+        .stack_name("kms-update-stack")
+        .template_body(UPDATE_TEMPLATE_V1)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let stack_v1 = cfn
+        .describe_stacks()
+        .stack_name("kms-update-stack")
+        .send()
+        .await
+        .expect("describe v1");
+    let v1_outputs: std::collections::HashMap<&str, &str> = stack_v1
+        .stacks()
+        .first()
+        .unwrap()
+        .outputs()
+        .iter()
+        .filter_map(|o| Some((o.output_key()?, o.output_value()?)))
+        .collect();
+    let original_key_id = v1_outputs.get("KeyId").unwrap().to_string();
+
+    cfn.update_stack()
+        .stack_name("kms-update-stack")
+        .template_body(UPDATE_TEMPLATE_V2)
+        .send()
+        .await
+        .expect("update_stack");
+
+    let stack_v2 = cfn
+        .describe_stacks()
+        .stack_name("kms-update-stack")
+        .send()
+        .await
+        .expect("describe v2");
+    let outputs: std::collections::HashMap<&str, &str> = stack_v2
+        .stacks()
+        .first()
+        .unwrap()
+        .outputs()
+        .iter()
+        .filter_map(|o| Some((o.output_key()?, o.output_value()?)))
+        .collect();
+    let after_key_id = outputs.get("KeyId").unwrap().to_string();
+    let other_key_id = outputs.get("OtherKeyId").unwrap().to_string();
+
+    // Same physical key — update was in place, not a replacement.
+    assert_eq!(after_key_id, original_key_id);
+
+    let described = kms
+        .describe_key()
+        .key_id(&after_key_id)
+        .send()
+        .await
+        .expect("describe after update");
+    let metadata = described.key_metadata().unwrap();
+    assert_eq!(metadata.description(), Some("v2 description"));
+    assert!(!metadata.enabled());
+
+    let rotation = kms
+        .get_key_rotation_status()
+        .key_id(&after_key_id)
+        .send()
+        .await
+        .expect("rotation status");
+    assert!(rotation.key_rotation_enabled());
+
+    // Alias should now point at OtherKey.
+    let aliases = kms.list_aliases().send().await.expect("list_aliases");
+    let alias = aliases
+        .aliases()
+        .iter()
+        .find(|a| a.alias_name() == Some("alias/cfn-update-test"))
+        .expect("alias still present");
+    assert_eq!(alias.target_key_id(), Some(other_key_id.as_str()));
+}
