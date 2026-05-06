@@ -2542,5 +2542,433 @@ pub fn mint_authorization_code(
     Err(MintAuthorizationCodeError::InvalidClient)
 }
 
+/// Query parameters accepted by [`handle_oauth2_authorize`]. Mirrors
+/// the OAuth 2.0 Authorization Request shape (RFC 6749 §4.1.1 /
+/// §4.2.1) plus the synthetic `username`/`password` pair fakecloud
+/// uses in lieu of a real Hosted-UI login form. Real Cognito would
+/// render an HTML page that POSTs credentials back to itself; for
+/// scripted E2E tests it's simpler to accept the credentials inline
+/// on the initial GET.
+#[derive(Debug, Clone)]
+pub struct OAuth2AuthorizeRequest {
+    pub response_type: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub scope: Option<String>,
+    pub state: Option<String>,
+    pub code_challenge: Option<String>,
+    pub code_challenge_method: Option<String>,
+    pub nonce: Option<String>,
+    /// Test-only synthetic login: when both supplied we attempt a
+    /// password-based auth against the user pool. AWS does this via
+    /// the Hosted UI HTML form; we collapse it into one query so E2E
+    /// tests don't have to scrape HTML.
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+/// Result of [`handle_oauth2_authorize`]. The HTTP wrapper turns
+/// `Redirect` into a 302 with the encoded URL, and `LoginRequired`
+/// into a 200 HTML form (or a JSON error if you'd rather skip the
+/// UI step).
+#[derive(Debug, Clone)]
+pub enum OAuth2AuthorizeOutcome {
+    /// Authorization succeeded; redirect the user agent to this
+    /// absolute URL. For `response_type=code` the params are in the
+    /// query string; for `response_type=token` they're in the URL
+    /// fragment per RFC 6749 §4.2.2.
+    Redirect(String),
+    /// Credentials weren't supplied (or weren't valid) — the wrapper
+    /// should render a synthetic login form pointing back at
+    /// `/oauth2/authorize` with the same query params plus
+    /// `username`/`password` fields.
+    LoginRequired { html: String },
+}
+
+/// Failure modes that bubble out of [`handle_oauth2_authorize`] before
+/// we know it's safe to redirect — i.e. the redirect_uri itself is
+/// untrusted, so per RFC 6749 §4.1.2.1 we MUST NOT bounce errors
+/// back to it. The wrapper returns these as 400 JSON bodies.
+#[derive(Debug, Clone)]
+pub enum OAuth2AuthorizeError {
+    /// `client_id` doesn't resolve to any registered app client.
+    InvalidClient,
+    /// `redirect_uri` isn't on the client's registered `CallbackURLs`.
+    InvalidRedirectUri,
+}
+
+/// Failure modes safe to return *via* the redirect_uri (RFC 6749
+/// §4.1.2.1 / §4.2.2.1) — these encode `error=...` back to the
+/// client's redirect URL with the original `state` preserved.
+#[derive(Debug, Clone, Copy)]
+enum AuthorizeRedirectError {
+    UnsupportedResponseType,
+    InvalidScope,
+    UnauthorizedClient,
+    AccessDenied,
+    InvalidRequest,
+}
+
+impl AuthorizeRedirectError {
+    fn as_oauth_code(self) -> &'static str {
+        match self {
+            Self::UnsupportedResponseType => "unsupported_response_type",
+            Self::InvalidScope => "invalid_scope",
+            Self::UnauthorizedClient => "unauthorized_client",
+            Self::AccessDenied => "access_denied",
+            Self::InvalidRequest => "invalid_request",
+        }
+    }
+}
+
+/// Handle a Cognito Hosted-UI `/oauth2/authorize` request. Implements
+/// both Authorization Code (`response_type=code`) and Implicit
+/// (`response_type=token`) flows.
+///
+/// Validation order matches the RFC: client_id and redirect_uri are
+/// checked first (failures here surface as 400 JSON, never as a
+/// redirect, because we can't trust the supplied redirect_uri yet).
+/// Anything past that point — bad scope, bad credentials, unsupported
+/// response_type — is encoded back via the redirect_uri so the
+/// client-side app can react gracefully.
+pub async fn handle_oauth2_authorize(
+    state: &SharedCognitoState,
+    req: &OAuth2AuthorizeRequest,
+    region: &str,
+) -> Result<OAuth2AuthorizeOutcome, OAuth2AuthorizeError> {
+    // Look up the client and validate redirect_uri *before* trusting
+    // anything else. RFC 6749 §3.1.2.4: an invalid redirect_uri MUST
+    // NOT be redirected to.
+    let (pool_id, callback_urls, allowed_flows, allowed_scopes, oauth_flows_enabled) = {
+        let mas = state.read();
+        let mut found = None;
+        for (_, account) in mas.iter() {
+            if let Some(client) = account.user_pool_clients.get(&req.client_id) {
+                found = Some((
+                    client.user_pool_id.clone(),
+                    client.callback_urls.clone(),
+                    client.allowed_o_auth_flows.clone(),
+                    client.allowed_o_auth_scopes.clone(),
+                    client.allowed_o_auth_flows_user_pool_client,
+                ));
+                break;
+            }
+        }
+        found.ok_or(OAuth2AuthorizeError::InvalidClient)?
+    };
+
+    // AWS allows callback_urls to be empty during early dev; only
+    // enforce when at least one URL is registered.
+    if !callback_urls.is_empty() && !callback_urls.iter().any(|u| u == &req.redirect_uri) {
+        return Err(OAuth2AuthorizeError::InvalidRedirectUri);
+    }
+
+    // From here on, every error redirects back to the client.
+    let response_type = req.response_type.as_str();
+    let requested_scopes: Vec<String> = req
+        .scope
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+
+    // Scope subset check (RFC 6749 §3.3). Skip when the client has
+    // no AllowedOAuthScopes registered (matches mint_authorization_code).
+    if !requested_scopes.is_empty() && !allowed_scopes.is_empty() {
+        for s in &requested_scopes {
+            if !allowed_scopes.iter().any(|a| a == s) {
+                return Ok(OAuth2AuthorizeOutcome::Redirect(build_error_redirect(
+                    &req.redirect_uri,
+                    AuthorizeRedirectError::InvalidScope,
+                    req.state.as_deref(),
+                    matches!(response_type, "token"),
+                )));
+            }
+        }
+    }
+
+    // Map response_type -> required flow (RFC 6749 §3.1.1). Cognito
+    // only honours `code`/`implicit` when the client opted into the
+    // Hosted UI flows.
+    let required_flow = match response_type {
+        "code" => "code",
+        "token" => "implicit",
+        _ => {
+            return Ok(OAuth2AuthorizeOutcome::Redirect(build_error_redirect(
+                &req.redirect_uri,
+                AuthorizeRedirectError::UnsupportedResponseType,
+                req.state.as_deref(),
+                false,
+            )));
+        }
+    };
+    if oauth_flows_enabled
+        && !allowed_flows.is_empty()
+        && !allowed_flows
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case(required_flow))
+    {
+        return Ok(OAuth2AuthorizeOutcome::Redirect(build_error_redirect(
+            &req.redirect_uri,
+            AuthorizeRedirectError::UnauthorizedClient,
+            req.state.as_deref(),
+            response_type == "token",
+        )));
+    }
+
+    // Synthetic login: real Cognito redirects to its hosted form, but
+    // for scripted E2E we accept username/password on the query.
+    let (Some(username), Some(password)) = (req.username.as_deref(), req.password.as_deref())
+    else {
+        return Ok(OAuth2AuthorizeOutcome::LoginRequired {
+            html: render_login_form(req),
+        });
+    };
+
+    // Verify credentials inline. We don't run the
+    // PreAuthentication/PostAuthentication Lambda triggers here —
+    // those fire from the AdminInitiateAuth path and the Hosted UI
+    // is meant to be a thin shell on top of it; we keep this handler
+    // self-contained to avoid the full delivery_ctx plumbing.
+    let credentials_ok = {
+        let mas = state.read();
+        let mut ok = false;
+        for (_, account) in mas.iter() {
+            if let Some(user) = account
+                .users
+                .get(&pool_id)
+                .and_then(|users| users.get(username))
+            {
+                if !user.enabled {
+                    break;
+                }
+                let matches = match (&user.password, &user.temporary_password) {
+                    (Some(p), _) if p == password => true,
+                    (_, Some(tp)) if tp == password => true,
+                    _ => false,
+                };
+                if matches {
+                    ok = true;
+                }
+                break;
+            }
+        }
+        ok
+    };
+    if !credentials_ok {
+        return Ok(OAuth2AuthorizeOutcome::Redirect(build_error_redirect(
+            &req.redirect_uri,
+            AuthorizeRedirectError::AccessDenied,
+            req.state.as_deref(),
+            response_type == "token",
+        )));
+    }
+
+    match response_type {
+        "code" => {
+            let mint_req = MintAuthorizationCodeRequest {
+                user_pool_id: pool_id.clone(),
+                client_id: req.client_id.clone(),
+                username: username.to_string(),
+                redirect_uri: req.redirect_uri.clone(),
+                scopes: requested_scopes,
+                code_challenge: req.code_challenge.clone(),
+                code_challenge_method: req.code_challenge_method.clone(),
+                nonce: req.nonce.clone(),
+            };
+            let code = match mint_authorization_code(state, &mint_req) {
+                Ok(c) => c,
+                // Already validated above; treat residual mismatches
+                // as access_denied to stay honest with the redirect.
+                Err(_) => {
+                    return Ok(OAuth2AuthorizeOutcome::Redirect(build_error_redirect(
+                        &req.redirect_uri,
+                        AuthorizeRedirectError::InvalidRequest,
+                        req.state.as_deref(),
+                        false,
+                    )));
+                }
+            };
+            let mut url = req.redirect_uri.clone();
+            url.push(if url.contains('?') { '&' } else { '?' });
+            url.push_str("code=");
+            url.push_str(&urlencoding_encode(&code));
+            if let Some(s) = req.state.as_deref() {
+                url.push_str("&state=");
+                url.push_str(&urlencoding_encode(s));
+            }
+            Ok(OAuth2AuthorizeOutcome::Redirect(url))
+        }
+        "token" => {
+            // Implicit grant: mint id_token + access_token, return in
+            // fragment per RFC 6749 §4.2.2. No refresh_token (RFC
+            // §4.2.2 explicitly forbids it on implicit).
+            let sub = {
+                let mas = state.read();
+                let mut sub = String::new();
+                for (_, account) in mas.iter() {
+                    if let Some(user) = account
+                        .users
+                        .get(&pool_id)
+                        .and_then(|users| users.get(username))
+                    {
+                        sub = user.sub.clone();
+                        break;
+                    }
+                }
+                sub
+            };
+            let scope_str = if requested_scopes.is_empty() {
+                None
+            } else {
+                Some(requested_scopes.join(" "))
+            };
+            let signing = ensure_pool_signing_key(state, &pool_id).await;
+            let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
+            let tokens = generate_tokens_with_scope(
+                &pool_id,
+                &req.client_id,
+                &sub,
+                username,
+                region,
+                signing_ref,
+                scope_str.as_deref(),
+                req.nonce.as_deref(),
+            );
+            // Persist the access_token so /oauth2/userInfo and
+            // /oauth2/revoke can resolve it back to the user.
+            {
+                let mut mas = state.write();
+                for (_, account) in mas.iter_mut() {
+                    if !account.user_pool_clients.contains_key(&req.client_id) {
+                        continue;
+                    }
+                    account.access_tokens.insert(
+                        tokens.access_token.clone(),
+                        crate::state::AccessTokenData {
+                            user_pool_id: pool_id.clone(),
+                            username: username.to_string(),
+                            client_id: req.client_id.clone(),
+                            issued_at: Utc::now(),
+                        },
+                    );
+                    break;
+                }
+            }
+            let mut fragment = format!(
+                "access_token={}&id_token={}&token_type=Bearer&expires_in=3600",
+                urlencoding_encode(&tokens.access_token),
+                urlencoding_encode(&tokens.id_token),
+            );
+            if let Some(s) = req.state.as_deref() {
+                fragment.push_str("&state=");
+                fragment.push_str(&urlencoding_encode(s));
+            }
+            let url = format!("{}#{fragment}", req.redirect_uri);
+            Ok(OAuth2AuthorizeOutcome::Redirect(url))
+        }
+        _ => unreachable!("response_type already validated"),
+    }
+}
+
+/// Append an `error` (and `state`) param to `redirect_uri` per RFC
+/// 6749 §4.1.2.1 (code flow uses query) / §4.2.2.1 (implicit flow
+/// uses fragment).
+fn build_error_redirect(
+    redirect_uri: &str,
+    err: AuthorizeRedirectError,
+    state: Option<&str>,
+    use_fragment: bool,
+) -> String {
+    let mut params = format!("error={}", err.as_oauth_code());
+    if let Some(s) = state {
+        params.push_str("&state=");
+        params.push_str(&urlencoding_encode(s));
+    }
+    if use_fragment {
+        format!("{redirect_uri}#{params}")
+    } else {
+        let sep = if redirect_uri.contains('?') { '&' } else { '?' };
+        format!("{redirect_uri}{sep}{params}")
+    }
+}
+
+/// Minimal HTML login page rendered when the user agent hits
+/// `/oauth2/authorize` without `username`/`password` query params.
+/// The form POSTs/GETs back to the same endpoint with all the
+/// original OAuth params preserved as hidden fields. Real Cognito's
+/// Hosted UI is far prettier; ours is enough to keep manual smoke
+/// tests honest.
+fn render_login_form(req: &OAuth2AuthorizeRequest) -> String {
+    fn hidden(name: &str, value: &str) -> String {
+        format!(
+            r#"<input type="hidden" name="{}" value="{}">"#,
+            html_escape(name),
+            html_escape(value),
+        )
+    }
+    let mut hiddens = String::new();
+    hiddens.push_str(&hidden("response_type", &req.response_type));
+    hiddens.push_str(&hidden("client_id", &req.client_id));
+    hiddens.push_str(&hidden("redirect_uri", &req.redirect_uri));
+    if let Some(s) = req.scope.as_deref() {
+        hiddens.push_str(&hidden("scope", s));
+    }
+    if let Some(s) = req.state.as_deref() {
+        hiddens.push_str(&hidden("state", s));
+    }
+    if let Some(c) = req.code_challenge.as_deref() {
+        hiddens.push_str(&hidden("code_challenge", c));
+    }
+    if let Some(m) = req.code_challenge_method.as_deref() {
+        hiddens.push_str(&hidden("code_challenge_method", m));
+    }
+    if let Some(n) = req.nonce.as_deref() {
+        hiddens.push_str(&hidden("nonce", n));
+    }
+    format!(
+        r#"<!doctype html>
+<html><head><meta charset="utf-8"><title>fakecloud login</title></head>
+<body>
+<h1>fakecloud Cognito Hosted UI</h1>
+<p>This is a test stand-in for the real Cognito Hosted UI login form.</p>
+<form method="get" action="/oauth2/authorize">
+{hiddens}
+<label>Username <input name="username" autocomplete="username"></label><br>
+<label>Password <input name="password" type="password" autocomplete="current-password"></label><br>
+<button type="submit">Sign in</button>
+</form>
+</body></html>
+"#,
+    )
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Minimal `application/x-www-form-urlencoded` value encoder. Avoids
+/// pulling in a new crate just for this — we only need the
+/// unreserved-set rule (RFC 3986 §2.3) plus space-as-`%20` (NOT `+`,
+/// since these values land in URL fragments and query strings where
+/// `+` is reserved on the fragment side).
+fn urlencoding_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.as_bytes() {
+        let c = *byte;
+        if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~') {
+            out.push(c as char);
+        } else {
+            out.push_str(&format!("%{c:02X}"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests;

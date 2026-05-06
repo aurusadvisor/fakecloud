@@ -133,7 +133,7 @@ func main() {
 | `GetTokens(ctx)` | List active tokens |
 | `ExpireTokens(ctx, req)` | Expire tokens |
 | `GetAuthEvents(ctx)` | List auth events |
-| `MintAuthorizationCode(ctx, req)` | Mint a single-use OAuth2 authorization code (test-only equivalent of /oauth2/authorize) |
+| `MintAuthorizationCode(ctx, req)` | Mint a single-use OAuth2 authorization code (programmatic alternative to driving /oauth2/authorize) |
 
 ### RDS - `fc.RDS()`
 

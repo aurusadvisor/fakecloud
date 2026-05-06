@@ -636,6 +636,7 @@ async fn main() {
     let cognito_token_state = cognito_state.clone();
     let cognito_userinfo_state = cognito_state.clone();
     let cognito_revoke_state = cognito_state.clone();
+    let cognito_authorize_state = cognito_state.clone();
 
     let glue_state: fakecloud_glue::SharedGlueState =
         Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new()));
@@ -3889,6 +3890,108 @@ async fn main() {
                                 pool_domain.as_deref(),
                             )),
                         )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/oauth2/authorize",
+            axum::routing::get({
+                let cs = cognito_authorize_state;
+                move |axum::extract::Query(q): axum::extract::Query<
+                    std::collections::BTreeMap<String, String>,
+                >| {
+                    let cs = cs.clone();
+                    async move {
+                        let region = std::env::var("AWS_DEFAULT_REGION")
+                            .or_else(|_| std::env::var("AWS_REGION"))
+                            .unwrap_or_else(|_| "us-east-1".to_string());
+                        // RFC 6749 §4.1.1 / §4.2.1 mandate at minimum
+                        // `response_type` and `client_id`; `redirect_uri`
+                        // is required when the client has multiple
+                        // callbacks registered. We require it always
+                        // here because we use it as the trust anchor
+                        // for the redirect.
+                        let Some(response_type) = q.get("response_type") else {
+                            return (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::http::HeaderMap::new(),
+                                axum::Json(serde_json::json!({
+                                    "error": "invalid_request",
+                                    "error_description": "response_type is required"
+                                }))
+                                .into_response(),
+                            );
+                        };
+                        let Some(client_id) = q.get("client_id") else {
+                            return (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::http::HeaderMap::new(),
+                                axum::Json(serde_json::json!({
+                                    "error": "invalid_request",
+                                    "error_description": "client_id is required"
+                                }))
+                                .into_response(),
+                            );
+                        };
+                        let Some(redirect_uri) = q.get("redirect_uri") else {
+                            return (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                axum::http::HeaderMap::new(),
+                                axum::Json(serde_json::json!({
+                                    "error": "invalid_request",
+                                    "error_description": "redirect_uri is required"
+                                }))
+                                .into_response(),
+                            );
+                        };
+                        let req = fakecloud_cognito::OAuth2AuthorizeRequest {
+                            response_type: response_type.clone(),
+                            client_id: client_id.clone(),
+                            redirect_uri: redirect_uri.clone(),
+                            scope: q.get("scope").cloned(),
+                            state: q.get("state").cloned(),
+                            code_challenge: q.get("code_challenge").cloned(),
+                            code_challenge_method: q.get("code_challenge_method").cloned(),
+                            nonce: q.get("nonce").cloned(),
+                            username: q.get("username").cloned(),
+                            password: q.get("password").cloned(),
+                        };
+                        match fakecloud_cognito::handle_oauth2_authorize(&cs, &req, &region).await {
+                            Ok(fakecloud_cognito::OAuth2AuthorizeOutcome::Redirect(url)) => {
+                                let mut headers = axum::http::HeaderMap::new();
+                                if let Ok(loc) = axum::http::HeaderValue::from_str(&url) {
+                                    headers.insert(axum::http::header::LOCATION, loc);
+                                }
+                                (axum::http::StatusCode::FOUND, headers, String::new().into_response())
+                            }
+                            Ok(fakecloud_cognito::OAuth2AuthorizeOutcome::LoginRequired {
+                                html,
+                            }) => {
+                                let mut headers = axum::http::HeaderMap::new();
+                                headers.insert(
+                                    axum::http::header::CONTENT_TYPE,
+                                    axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+                                );
+                                (axum::http::StatusCode::OK, headers, html.into_response())
+                            }
+                            Err(err) => {
+                                let code = match err {
+                                    fakecloud_cognito::OAuth2AuthorizeError::InvalidClient => {
+                                        "invalid_client"
+                                    }
+                                    fakecloud_cognito::OAuth2AuthorizeError::InvalidRedirectUri => {
+                                        "invalid_request"
+                                    }
+                                };
+                                (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::http::HeaderMap::new(),
+                                    axum::Json(serde_json::json!({"error": code}))
+                                        .into_response(),
+                                )
+                            }
+                        }
                     }
                 }
             }),
