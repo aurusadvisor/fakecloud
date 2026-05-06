@@ -90,6 +90,9 @@ pub fn service_protocol(service_name: &str) -> Protocol {
         "cognito-idp" => Protocol::Json {
             target_prefix: "AWSCognitoIdentityProviderService",
         },
+        "cognito-identity" => Protocol::Json {
+            target_prefix: "AWSCognitoIdentityService",
+        },
         "kinesis" => Protocol::Json {
             target_prefix: "Kinesis_20131202",
         },
@@ -1590,6 +1593,12 @@ mod tests {
                 "cognito-idp",
                 Protocol::Json {
                     target_prefix: "AWSCognitoIdentityProviderService",
+                },
+            ),
+            (
+                "cognito-identity",
+                Protocol::Json {
+                    target_prefix: "AWSCognitoIdentityService",
                 },
             ),
             (

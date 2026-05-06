@@ -98,6 +98,12 @@ pub struct CognitoState {
     /// identity_pool_id -> IdentityPoolRoleAttachment
     #[serde(default)]
     pub identity_pool_role_attachments: BTreeMap<String, IdentityPoolRoleAttachment>,
+    /// identity_id -> FederatedIdentity. Identity IDs are minted by GetId
+    /// and are namespaced `<region>:<uuid>`. They live alongside identity
+    /// pools but are tracked in their own map so list operations don't
+    /// have to walk every pool.
+    #[serde(default)]
+    pub federated_identities: BTreeMap<String, FederatedIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +164,7 @@ impl CognitoState {
             webauthn_credentials: BTreeMap::new(),
             identity_pools: BTreeMap::new(),
             identity_pool_role_attachments: BTreeMap::new(),
+            federated_identities: BTreeMap::new(),
         }
     }
 
@@ -185,6 +192,7 @@ impl CognitoState {
         self.webauthn_credentials.clear();
         self.identity_pools.clear();
         self.identity_pool_role_attachments.clear();
+        self.federated_identities.clear();
     }
 }
 
@@ -603,6 +611,29 @@ pub struct IdentityPoolRoleAttachment {
     /// -> RoleMapping rules JSON. Stored opaquely.
     #[serde(default)]
     pub role_mappings: BTreeMap<String, serde_json::Value>,
+}
+
+/// A single federated identity minted by the cognito-identity service's
+/// `GetId` action. Each identity has a stable id `<region>:<uuid>` and
+/// optionally a set of `Logins` provider mappings (the access tokens
+/// that were exchanged for the identity).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FederatedIdentity {
+    pub identity_id: String,
+    pub identity_pool_id: String,
+    /// `provider_name` -> `provider_user_id` for every login linked to
+    /// this identity. Authenticated identities have at least one entry;
+    /// unauthenticated identities have an empty map.
+    #[serde(default)]
+    pub logins: BTreeMap<String, String>,
+    /// Set of developer-authenticated login keys (e.g.
+    /// `login.mygame.com=user-123`). Tracked separately so
+    /// `LookupDeveloperIdentity` and friends can scan without walking
+    /// every login provider entry.
+    #[serde(default)]
+    pub developer_logins: BTreeMap<String, String>,
+    pub creation_date: DateTime<Utc>,
+    pub last_modified_date: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

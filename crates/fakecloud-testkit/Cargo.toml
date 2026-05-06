@@ -31,6 +31,7 @@ sdk-clients = [
     "dep:aws-sdk-cloudformation",
     "dep:aws-sdk-ses",
     "dep:aws-sdk-sesv2",
+    "dep:aws-sdk-cognitoidentity",
     "dep:aws-sdk-cognitoidentityprovider",
     "dep:aws-sdk-sfn",
     "dep:aws-sdk-apigateway",
@@ -80,6 +81,7 @@ aws-sdk-elasticache = { version = "1", optional = true }
 aws-sdk-cloudformation = { version = "1", optional = true }
 aws-sdk-ses = { version = "1", optional = true }
 aws-sdk-sesv2 = { version = "1", optional = true }
+aws-sdk-cognitoidentity = { version = "1", optional = true }
 aws-sdk-cognitoidentityprovider = { version = "1", optional = true }
 aws-sdk-sfn = { version = "1", optional = true }
 aws-sdk-apigateway = { version = "1", optional = true }

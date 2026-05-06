@@ -2,6 +2,7 @@ mod auth;
 mod branding;
 mod config;
 mod groups;
+mod identity_pools;
 mod identity_providers;
 mod legacy;
 mod mfa;
@@ -9,6 +10,8 @@ mod misc;
 mod resource_servers;
 mod user_pools;
 mod users;
+
+pub use identity_pools::CognitoIdentityService;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

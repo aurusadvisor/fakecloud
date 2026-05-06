@@ -368,6 +368,7 @@ fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
         s if s.starts_with("secretsmanager") => "secretsmanager",
         s if s.starts_with("TrentService") => "kms",
         s if s.starts_with("AWSCognitoIdentityProviderService") => "cognito-idp",
+        s if s.starts_with("AWSCognitoIdentityService") => "cognito-identity",
         s if s.starts_with("Kinesis_20131202") => "kinesis",
         s if s.starts_with("AmazonEC2ContainerRegistry_V") => "ecr",
         s if s.starts_with("AmazonEC2ContainerServiceV") => "ecs",
