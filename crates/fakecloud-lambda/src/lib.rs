@@ -1,3 +1,4 @@
+pub mod eventstream;
 pub mod extras;
 pub mod filter;
 pub mod resource_policy;

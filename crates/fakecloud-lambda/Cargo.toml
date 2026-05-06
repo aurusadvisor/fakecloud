@@ -27,6 +27,8 @@ tracing = { workspace = true }
 zip = { workspace = true }
 tempfile = { workspace = true }
 percent-encoding = { workspace = true }
+crc32fast = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }

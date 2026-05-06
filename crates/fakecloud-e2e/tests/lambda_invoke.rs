@@ -618,3 +618,148 @@ async fn test_invoke_no_code() {
         .await;
     assert!(result.is_err());
 }
+
+// ---- InvokeWithResponseStream ----
+
+const NODEJS_STREAMING_HANDLER: &str = r#"
+exports.handler = awslambda.streamifyResponse
+    ? awslambda.streamifyResponse(async (event, responseStream, context) => {
+        // Emit three discrete chunks; the RIE flushes each `write`
+        // separately so fakecloud should observe three payload chunks.
+        responseStream.setContentType("text/plain");
+        responseStream.write("chunk-one|");
+        responseStream.write("chunk-two|");
+        responseStream.write("chunk-three");
+        responseStream.end();
+    })
+    : async (event) => {
+        // Older runtime without streamifyResponse — return a buffered
+        // body. fakecloud will still surface this as a single
+        // PayloadChunk + InvokeComplete, exercising the same code path.
+        return "chunk-one|chunk-two|chunk-three";
+    };
+"#;
+
+#[tokio::test]
+async fn test_invoke_with_response_stream_emits_payload_chunks_and_invoke_complete() {
+    use aws_sdk_lambda::types::InvokeWithResponseStreamResponseEvent;
+
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    let zip = make_zip(&[("index.js", NODEJS_STREAMING_HANDLER.as_bytes())]);
+
+    client
+        .create_function()
+        .function_name("stream-func")
+        .runtime(Runtime::Nodejs22x)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
+        .send()
+        .await
+        .unwrap();
+
+    let mut resp = client
+        .invoke_with_response_stream()
+        .function_name("stream-func")
+        .payload(Blob::new(b"{}".to_vec()))
+        .send()
+        .await
+        .expect("InvokeWithResponseStream should succeed");
+
+    // The SDK parses our eventstream frames into typed events. Walk
+    // the stream collecting payload bytes until we see InvokeComplete.
+    let mut payload = Vec::<u8>::new();
+    let mut payload_chunk_count = 0;
+    let mut saw_invoke_complete = false;
+    while let Some(event) = resp
+        .event_stream
+        .recv()
+        .await
+        .expect("event stream should not error")
+    {
+        match event {
+            InvokeWithResponseStreamResponseEvent::PayloadChunk(chunk) => {
+                payload_chunk_count += 1;
+                if let Some(blob) = chunk.payload {
+                    payload.extend_from_slice(blob.as_ref());
+                }
+            }
+            InvokeWithResponseStreamResponseEvent::InvokeComplete(complete) => {
+                saw_invoke_complete = true;
+                assert!(
+                    complete.error_code.is_none(),
+                    "expected no error, got {:?}",
+                    complete.error_code
+                );
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_invoke_complete, "missing InvokeComplete event");
+    assert!(
+        payload_chunk_count >= 1,
+        "expected at least one PayloadChunk, got {payload_chunk_count}"
+    );
+    let text = String::from_utf8(payload).expect("payload is utf-8");
+    assert!(
+        text.contains("chunk-one") && text.contains("chunk-two") && text.contains("chunk-three"),
+        "payload missing expected chunks: {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_invoke_with_response_stream_surfaces_handler_errors() {
+    use aws_sdk_lambda::types::InvokeWithResponseStreamResponseEvent;
+
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    // Handler that always throws — we expect to see the error
+    // surface inside the terminal InvokeComplete event.
+    let throwing = r#"
+exports.handler = async (event) => {
+    throw new Error("boom from streaming handler");
+};
+"#;
+    let zip = make_zip(&[("index.js", throwing.as_bytes())]);
+
+    client
+        .create_function()
+        .function_name("stream-err-func")
+        .runtime(Runtime::Nodejs22x)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(FunctionCode::builder().zip_file(Blob::new(zip)).build())
+        .send()
+        .await
+        .unwrap();
+
+    let mut resp = client
+        .invoke_with_response_stream()
+        .function_name("stream-err-func")
+        .payload(Blob::new(b"{}".to_vec()))
+        .send()
+        .await
+        .expect("InvokeWithResponseStream should reach handler");
+
+    let mut saw_error_complete = false;
+    while let Some(event) = resp
+        .event_stream
+        .recv()
+        .await
+        .expect("event stream should not error")
+    {
+        if let InvokeWithResponseStreamResponseEvent::InvokeComplete(complete) = event {
+            // The handler threw — the buffered body Lambda returns
+            // contains errorMessage/errorType, which our handler maps
+            // to ErrorCode + ErrorDetails on the terminal event.
+            assert!(
+                complete.error_code.is_some(),
+                "expected ErrorCode to be set on handler error"
+            );
+            saw_error_complete = true;
+        }
+    }
+    assert!(saw_error_complete, "missing InvokeComplete with error");
+}

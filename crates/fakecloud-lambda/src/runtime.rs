@@ -59,6 +59,28 @@ pub struct ContainerRuntime {
     docker_config: Option<Arc<TempDir>>,
 }
 
+/// Wrapper around an in-flight streaming invocation. Yields raw body
+/// chunks via [`Self::next_chunk`] until the RIE closes the response,
+/// at which point the final `Ok(None)` signals the caller to emit the
+/// terminal `InvokeComplete` frame.
+pub struct StreamingInvocation {
+    resp: reqwest::Response,
+}
+
+impl StreamingInvocation {
+    /// Read the next chunk of the function's response body. Returns
+    /// `Ok(None)` once the RIE has finished streaming. Buffered
+    /// handlers tend to deliver a single chunk; streaming handlers
+    /// deliver one chunk per `responseStream.write(...)` call.
+    pub async fn next_chunk(&mut self) -> Result<Option<bytes::Bytes>, RuntimeError> {
+        match self.resp.chunk().await {
+            Ok(Some(b)) => Ok(Some(b)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(RuntimeError::InvocationFailed(e.to_string())),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("no code ZIP provided for function {0}")]
@@ -142,6 +164,70 @@ impl ContainerRuntime {
         payload: &[u8],
         layers: &[Vec<u8>],
     ) -> Result<Vec<u8>, RuntimeError> {
+        let port = self.ensure_warm_container(func, layers).await?;
+
+        // POST to the RIE endpoint
+        let url = format!(
+            "http://localhost:{}/2015-03-31/functions/function/invocations",
+            port
+        );
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .body(payload.to_vec())
+            .timeout(Duration::from_secs(func.timeout as u64 + 5))
+            .send()
+            .await
+            .map_err(|e| RuntimeError::InvocationFailed(e.to_string()))?;
+
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| RuntimeError::InvocationFailed(e.to_string()))?;
+
+        Ok(body.to_vec())
+    }
+
+    /// Invoke a Lambda function and yield the raw HTTP body as a stream
+    /// of byte chunks. Each chunk corresponds to one HTTP frame the RIE
+    /// flushed to the wire — for streaming-aware handlers (Node.js
+    /// `awslambda.streamifyResponse`, Python streaming response, custom
+    /// runtimes that flush mid-handler) this preserves the chunk
+    /// boundaries the function emitted. Buffered handlers come back as
+    /// a single chunk, which is still a valid streamed response.
+    pub async fn invoke_streaming(
+        &self,
+        func: &LambdaFunction,
+        payload: &[u8],
+        layers: &[Vec<u8>],
+    ) -> Result<StreamingInvocation, RuntimeError> {
+        let port = self.ensure_warm_container(func, layers).await?;
+
+        let url = format!(
+            "http://localhost:{}/2015-03-31/functions/function/invocations",
+            port
+        );
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .body(payload.to_vec())
+            .timeout(Duration::from_secs(func.timeout as u64 + 5))
+            .send()
+            .await
+            .map_err(|e| RuntimeError::InvocationFailed(e.to_string()))?;
+
+        Ok(StreamingInvocation { resp })
+    }
+
+    /// Resolve a warm container for `func`, starting one if its
+    /// fingerprint doesn't match (or there isn't one yet). Returns the
+    /// host port the RIE is bound to. Shared by `invoke` and
+    /// `invoke_streaming` so both paths use the same warm-pool logic.
+    async fn ensure_warm_container(
+        &self,
+        func: &LambdaFunction,
+        layers: &[Vec<u8>],
+    ) -> Result<u16, RuntimeError> {
         // Zip-based functions need code bytes; image-based functions have
         // everything baked into the image. Defer the zip check until we
         // know we need to start a fresh container.
@@ -167,73 +253,51 @@ impl ContainerRuntime {
             }
         };
 
-        let port = match port {
-            Some(p) => p,
-            None => {
-                // Serialize container startup per function to prevent duplicates
-                let startup_lock = {
-                    let mut starting = self.starting.write();
-                    starting
-                        .entry(func.function_name.clone())
-                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                        .clone()
-                };
-                let _guard = startup_lock.lock().await;
+        if let Some(p) = port {
+            return Ok(p);
+        }
 
-                // Re-check after acquiring lock — another task may have started it
-                let existing_port = {
-                    let containers = self.containers.read();
-                    containers
-                        .get(&func.function_name)
-                        .filter(|c| c.deploy_id == deploy_id)
-                        .map(|c| {
-                            *c.last_used.write() = Instant::now();
-                            c.host_port
-                        })
-                };
-                if let Some(p) = existing_port {
-                    p
-                } else {
-                    self.stop_container(&func.function_name).await;
-                    let container = if is_image {
-                        self.start_image_container(func, layers, &deploy_id).await?
-                    } else {
-                        let zip_bytes = func
-                            .code_zip
-                            .as_ref()
-                            .ok_or_else(|| RuntimeError::NoCodeZip(func.function_name.clone()))?;
-                        self.start_container(func, zip_bytes, layers, &deploy_id)
-                            .await?
-                    };
-                    let p = container.host_port;
-                    self.containers
-                        .write()
-                        .insert(func.function_name.clone(), container);
-                    p
-                }
-            }
+        // Serialize container startup per function to prevent duplicates
+        let startup_lock = {
+            let mut starting = self.starting.write();
+            starting
+                .entry(func.function_name.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
         };
+        let _guard = startup_lock.lock().await;
 
-        // POST to the RIE endpoint
-        let url = format!(
-            "http://localhost:{}/2015-03-31/functions/function/invocations",
-            port
-        );
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(&url)
-            .body(payload.to_vec())
-            .timeout(Duration::from_secs(func.timeout as u64 + 5))
-            .send()
-            .await
-            .map_err(|e| RuntimeError::InvocationFailed(e.to_string()))?;
+        // Re-check after acquiring lock — another task may have started it
+        let existing_port = {
+            let containers = self.containers.read();
+            containers
+                .get(&func.function_name)
+                .filter(|c| c.deploy_id == deploy_id)
+                .map(|c| {
+                    *c.last_used.write() = Instant::now();
+                    c.host_port
+                })
+        };
+        if let Some(p) = existing_port {
+            return Ok(p);
+        }
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| RuntimeError::InvocationFailed(e.to_string()))?;
-
-        Ok(body.to_vec())
+        self.stop_container(&func.function_name).await;
+        let container = if is_image {
+            self.start_image_container(func, layers, &deploy_id).await?
+        } else {
+            let zip_bytes = func
+                .code_zip
+                .as_ref()
+                .ok_or_else(|| RuntimeError::NoCodeZip(func.function_name.clone()))?;
+            self.start_container(func, zip_bytes, layers, &deploy_id)
+                .await?
+        };
+        let p = container.host_port;
+        self.containers
+            .write()
+            .insert(func.function_name.clone(), container);
+        Ok(p)
     }
 
     /// Start a container for a `PackageType=Image` function. The image is
