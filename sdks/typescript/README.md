@@ -116,14 +116,14 @@ Top-level client. Defaults to `http://localhost:4566`.
 
 ### `fc.cognito`
 
-| Method                           | Description                                                                             |
-| -------------------------------- | --------------------------------------------------------------------------------------- |
-| `getUserCodes(poolId, username)` | Get confirmation codes for a user                                                       |
-| `getConfirmationCodes()`         | List all confirmation codes                                                             |
-| `confirmUser(req)`               | Confirm a user (bypass verification)                                                    |
-| `getTokens()`                    | List all active tokens                                                                  |
-| `expireTokens(req)`              | Expire tokens (optionally filtered)                                                     |
-| `getAuthEvents()`                | List auth events                                                                        |
+| Method                           | Description                                                                                         |
+| -------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `getUserCodes(poolId, username)` | Get confirmation codes for a user                                                                   |
+| `getConfirmationCodes()`         | List all confirmation codes                                                                         |
+| `confirmUser(req)`               | Confirm a user (bypass verification)                                                                |
+| `getTokens()`                    | List all active tokens                                                                              |
+| `expireTokens(req)`              | Expire tokens (optionally filtered)                                                                 |
+| `getAuthEvents()`                | List auth events                                                                                    |
 | `mintAuthorizationCode(req)`     | Mint a single-use OAuth2 authorization code (programmatic alternative to driving /oauth2/authorize) |
 
 ### `fc.rds`
