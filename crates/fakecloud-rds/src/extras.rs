@@ -162,138 +162,12 @@ impl RdsService {
                 );
                 Ok(xml_response("DeleteDBCluster", db_cluster_xml(&id, &arn), &rid))
             }
-            "ModifyDBCluster" => {
-                let id = get_param(req, "DBClusterIdentifier")
-                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
-                let updates: &[(&str, &str)] = &[
-                    ("EngineVersion", "EngineVersion"),
-                    ("MasterUserPassword", "MasterUserPassword"),
-                    ("DBClusterParameterGroupName", "DBClusterParameterGroupName"),
-                    ("PreferredBackupWindow", "PreferredBackupWindow"),
-                    ("PreferredMaintenanceWindow", "PreferredMaintenanceWindow"),
-                    ("BackupRetentionPeriod", "BackupRetentionPeriod"),
-                    ("Port", "Port"),
-                    ("StorageType", "StorageType"),
-                    ("DeletionProtection", "DeletionProtection"),
-                    ("EnableIAMDatabaseAuthentication", "IAMDatabaseAuthenticationEnabled"),
-                    ("CopyTagsToSnapshot", "CopyTagsToSnapshot"),
-                ];
-                {
-                    let mut accounts = write_state!();
-                    let state = accounts.get_or_create(&aid);
-                    if let Some(map) = state.extras.get_mut("clusters") {
-                        if let Some(entry) = map.get_mut(&id) {
-                            if let Some(obj) = entry.as_object_mut() {
-                                for (param_name, json_key) in updates {
-                                    if let Some(v) = get_param(req, param_name) {
-                                        obj.insert((*json_key).to_string(), json!(v));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                self.emit_event(
-                    RdsSourceType::DbCluster,
-                    &id,
-                    &arn,
-                    "RDS-EVENT-0016",
-                    &["configuration change"],
-                    "DB cluster was modified",
-                );
-                Ok(xml_response("ModifyDBCluster", db_cluster_xml(&id, &arn), &rid))
-            }
-            "StartDBCluster" => {
-                let id = get_param(req, "DBClusterIdentifier")
-                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
-                set_cluster_status(self, &aid, &id, "available");
-                self.emit_event(
-                    RdsSourceType::DbCluster,
-                    &id,
-                    &arn,
-                    "RDS-EVENT-0150",
-                    &["notification"],
-                    "DB cluster started",
-                );
-                Ok(xml_response("StartDBCluster", db_cluster_xml(&id, &arn), &rid))
-            }
-            "StopDBCluster" => {
-                let id = get_param(req, "DBClusterIdentifier")
-                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
-                set_cluster_status(self, &aid, &id, "stopped");
-                self.emit_event(
-                    RdsSourceType::DbCluster,
-                    &id,
-                    &arn,
-                    "RDS-EVENT-0151",
-                    &["notification"],
-                    "DB cluster stopped",
-                );
-                Ok(xml_response("StopDBCluster", db_cluster_xml(&id, &arn), &rid))
-            }
-            "RebootDBCluster" => {
-                let id = get_param(req, "DBClusterIdentifier")
-                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
-                set_cluster_status(self, &aid, &id, "available");
-                self.emit_event(
-                    RdsSourceType::DbCluster,
-                    &id,
-                    &arn,
-                    "RDS-EVENT-0006",
-                    &["notification"],
-                    "DB cluster reboot",
-                );
-                Ok(xml_response("RebootDBCluster", db_cluster_xml(&id, &arn), &rid))
-            }
-            "FailoverDBCluster" => {
-                let id = get_param(req, "DBClusterIdentifier")
-                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
-                if let Some(target) = get_param(req, "TargetDBInstanceIdentifier") {
-                    let mut accounts = write_state!();
-                    let state = accounts.get_or_create(&aid);
-                    if let Some(map) = state.extras.get_mut("clusters") {
-                        if let Some(entry) = map.get_mut(&id) {
-                            if let Some(obj) = entry.as_object_mut() {
-                                obj.insert(
-                                    "WriterDBInstanceIdentifier".to_string(),
-                                    json!(target),
-                                );
-                            }
-                        }
-                    }
-                }
-                self.emit_event(
-                    RdsSourceType::DbCluster,
-                    &id,
-                    &arn,
-                    "RDS-EVENT-0072",
-                    &["failover"],
-                    "DB cluster failover started",
-                );
-                Ok(xml_response("FailoverDBCluster", db_cluster_xml(&id, &arn), &rid))
-            }
-            "BacktrackDBCluster" => {
-                let id = get_param(req, "DBClusterIdentifier")
-                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
-                if let Some(target) = get_param(req, "BacktrackTo") {
-                    let mut accounts = write_state!();
-                    let state = accounts.get_or_create(&aid);
-                    if let Some(map) = state.extras.get_mut("clusters") {
-                        if let Some(entry) = map.get_mut(&id) {
-                            if let Some(obj) = entry.as_object_mut() {
-                                obj.insert("BacktrackTo".to_string(), json!(target));
-                            }
-                        }
-                    }
-                }
-                Ok(xml_response("BacktrackDBCluster", db_cluster_xml(&id, &arn), &rid))
-            }
+            "ModifyDBCluster" => modify_db_cluster_action(self, &aid, region, req, &rid),
+            "StartDBCluster" => start_db_cluster_action(self, &aid, region, req, &rid),
+            "StopDBCluster" => stop_db_cluster_action(self, &aid, region, req, &rid),
+            "RebootDBCluster" => reboot_db_cluster_action(self, &aid, region, req, &rid),
+            "FailoverDBCluster" => failover_db_cluster_action(self, &aid, region, req, &rid),
+            "BacktrackDBCluster" => backtrack_db_cluster_action(self, &aid, region, req, &rid),
             "PromoteReadReplicaDBCluster" => {
                 let id = get_param(req, "DBClusterIdentifier")
                     .ok_or_else(|| missing("DBClusterIdentifier"))?;
@@ -1472,6 +1346,624 @@ fn set_cluster_status(svc: &RdsService, account_id: &str, cluster_id: &str, stat
     }
 }
 
+fn cluster_not_found(id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        "DBClusterNotFoundFault",
+        format!("DBCluster {id} not found."),
+    )
+}
+
+fn invalid_cluster_state(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidDBClusterStateFault",
+        msg.into(),
+    )
+}
+
+/// Read a cloned cluster entry; errors with `DBClusterNotFoundFault` if
+/// missing. Used by lifecycle ops that must verify existence before
+/// touching state.
+fn cluster_entry(
+    svc: &RdsService,
+    account_id: &str,
+    cluster_id: &str,
+) -> Result<Value, AwsServiceError> {
+    let accounts = svc.state_handle().read();
+    accounts
+        .get(account_id)
+        .and_then(|s| s.extras.get("clusters"))
+        .and_then(|m| m.get(cluster_id))
+        .cloned()
+        .ok_or_else(|| cluster_not_found(cluster_id))
+}
+
+fn cluster_status(entry: &Value) -> &str {
+    entry["Status"].as_str().unwrap_or("available")
+}
+
+fn cluster_engine(entry: &Value) -> &str {
+    entry["Engine"].as_str().unwrap_or("aurora-postgresql")
+}
+
+/// `ModifyDBCluster`: accept the full set of mutable cluster fields and
+/// persist them on the stored cluster entry. Mirrors the M1
+/// `ModifyDBInstance` scope — every settable cluster field on the AWS
+/// API surface is honored. Emits the standard configuration-change
+/// event (RDS-EVENT-0016) when at least one field actually changed.
+fn modify_db_cluster_action(
+    svc: &RdsService,
+    account_id: &str,
+    region: &str,
+    req: &AwsRequest,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
+
+    // Confirm the cluster exists before touching state, so callers get
+    // the same NotFound error that AWS would return.
+    cluster_entry(svc, account_id, &id)?;
+
+    // Every mutable cluster field on AWS's ModifyDBCluster surface.
+    // (param name, persisted JSON key) — same string for most, but a
+    // few have a distinct response shape (e.g. EnableIAMDatabaseAuthentication
+    // -> IAMDatabaseAuthenticationEnabled).
+    let scalar_updates: &[(&str, &str)] = &[
+        ("EngineVersion", "EngineVersion"),
+        ("MasterUserPassword", "MasterUserPassword"),
+        ("DBClusterParameterGroupName", "DBClusterParameterGroupName"),
+        (
+            "DBInstanceParameterGroupName",
+            "DBInstanceParameterGroupName",
+        ),
+        ("PreferredBackupWindow", "PreferredBackupWindow"),
+        ("PreferredMaintenanceWindow", "PreferredMaintenanceWindow"),
+        ("BackupRetentionPeriod", "BackupRetentionPeriod"),
+        ("Port", "Port"),
+        ("StorageType", "StorageType"),
+        ("DeletionProtection", "DeletionProtection"),
+        (
+            "EnableIAMDatabaseAuthentication",
+            "IAMDatabaseAuthenticationEnabled",
+        ),
+        ("CopyTagsToSnapshot", "CopyTagsToSnapshot"),
+        ("AllocatedStorage", "AllocatedStorage"),
+        ("Iops", "Iops"),
+        ("DBClusterInstanceClass", "DBClusterInstanceClass"),
+        ("AutoMinorVersionUpgrade", "AutoMinorVersionUpgrade"),
+        ("BacktrackWindow", "BacktrackWindow"),
+        ("EnableHttpEndpoint", "HttpEndpointEnabled"),
+        ("Domain", "Domain"),
+        ("DomainIAMRoleName", "DomainIAMRoleName"),
+        ("MonitoringInterval", "MonitoringInterval"),
+        ("MonitoringRoleArn", "MonitoringRoleArn"),
+        ("PerformanceInsightsKMSKeyId", "PerformanceInsightsKMSKeyId"),
+        (
+            "PerformanceInsightsRetentionPeriod",
+            "PerformanceInsightsRetentionPeriod",
+        ),
+        ("EnablePerformanceInsights", "PerformanceInsightsEnabled"),
+        ("NetworkType", "NetworkType"),
+        ("ManageMasterUserPassword", "ManageMasterUserPassword"),
+        ("MasterUserSecretKmsKeyId", "MasterUserSecretKmsKeyId"),
+        ("CACertificateIdentifier", "CACertificateIdentifier"),
+        ("EnableLocalWriteForwarding", "LocalWriteForwardingStatus"),
+        ("AwsBackupRecoveryPointArn", "AwsBackupRecoveryPointArn"),
+        ("EnableGlobalWriteForwarding", "GlobalWriteForwardingStatus"),
+        ("StorageEncrypted", "StorageEncrypted"),
+        (
+            "ServerlessV2ScalingConfiguration.MinCapacity",
+            "ServerlessV2ScalingConfiguration.MinCapacity",
+        ),
+        (
+            "ServerlessV2ScalingConfiguration.MaxCapacity",
+            "ServerlessV2ScalingConfiguration.MaxCapacity",
+        ),
+    ];
+
+    let new_id = get_param(req, "NewDBClusterIdentifier");
+
+    // Field-shape hints: AWS serializes some Modify inputs as integers
+    // and bools on the wire and the SDKs flatten everything to strings
+    // in the query body. Coerce here so describes return the right
+    // shape (e.g. <BackupRetentionPeriod>14</BackupRetentionPeriod>
+    // rather than the string form, which the SDK would skip).
+    let int_keys: &[&str] = &[
+        "BackupRetentionPeriod",
+        "Port",
+        "AllocatedStorage",
+        "Iops",
+        "BacktrackWindow",
+        "MonitoringInterval",
+        "PerformanceInsightsRetentionPeriod",
+    ];
+    let bool_keys: &[&str] = &[
+        "DeletionProtection",
+        "IAMDatabaseAuthenticationEnabled",
+        "CopyTagsToSnapshot",
+        "AutoMinorVersionUpgrade",
+        "HttpEndpointEnabled",
+        "PerformanceInsightsEnabled",
+        "ManageMasterUserPassword",
+        "StorageEncrypted",
+    ];
+
+    let mut any_change = false;
+    {
+        let mut accounts = svc.state_handle().write();
+        let state = accounts.get_or_create(account_id);
+        if let Some(map) = state.extras.get_mut("clusters") {
+            if let Some(entry) = map.get_mut(&id) {
+                if let Some(obj) = entry.as_object_mut() {
+                    for (param_name, json_key) in scalar_updates {
+                        if let Some(v) = get_param(req, param_name) {
+                            let value = if int_keys.contains(json_key) {
+                                v.parse::<i64>().map(|n| json!(n)).unwrap_or(json!(v))
+                            } else if bool_keys.contains(json_key) {
+                                match v.as_str() {
+                                    "true" => json!(true),
+                                    "false" => json!(false),
+                                    _ => json!(v),
+                                }
+                            } else {
+                                json!(v)
+                            };
+                            obj.insert((*json_key).to_string(), value);
+                            any_change = true;
+                        }
+                    }
+                    // VpcSecurityGroupIds.VpcSecurityGroupId.N (list)
+                    let mut sg_ids = Vec::new();
+                    for index in 1.. {
+                        let key = format!("VpcSecurityGroupIds.VpcSecurityGroupId.{index}");
+                        match get_param(req, &key) {
+                            Some(v) => sg_ids.push(v),
+                            None => break,
+                        }
+                    }
+                    if !sg_ids.is_empty() {
+                        obj.insert("VpcSecurityGroupIds".to_string(), json!(sg_ids));
+                        any_change = true;
+                    }
+                    // CloudwatchLogsExportConfiguration.{Enable,Disable}LogTypes.member.N
+                    let mut enable_logs = Vec::new();
+                    for index in 1.. {
+                        let key = format!(
+                            "CloudwatchLogsExportConfiguration.EnableLogTypes.member.{index}"
+                        );
+                        match get_param(req, &key) {
+                            Some(v) => enable_logs.push(v),
+                            None => break,
+                        }
+                    }
+                    let mut disable_logs = Vec::new();
+                    for index in 1.. {
+                        let key = format!(
+                            "CloudwatchLogsExportConfiguration.DisableLogTypes.member.{index}"
+                        );
+                        match get_param(req, &key) {
+                            Some(v) => disable_logs.push(v),
+                            None => break,
+                        }
+                    }
+                    if !enable_logs.is_empty() || !disable_logs.is_empty() {
+                        let current: Vec<String> = obj
+                            .get("EnabledCloudwatchLogsExports")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let mut next: Vec<String> = current
+                            .into_iter()
+                            .filter(|t| !disable_logs.contains(t))
+                            .collect();
+                        for t in enable_logs {
+                            if !next.contains(&t) {
+                                next.push(t);
+                            }
+                        }
+                        obj.insert("EnabledCloudwatchLogsExports".to_string(), json!(next));
+                        any_change = true;
+                    }
+                }
+            }
+        }
+
+        // NewDBClusterIdentifier: rename the cluster key + ARN.
+        if let Some(new_id) = new_id.as_ref() {
+            if new_id != &id {
+                if let Some(map) = state.extras.get_mut("clusters") {
+                    if let Some(mut entry) = map.remove(&id) {
+                        let new_arn =
+                            Arn::new("rds", region, account_id, &format!("cluster:{new_id}"))
+                                .to_string();
+                        if let Some(obj) = entry.as_object_mut() {
+                            obj.insert("DBClusterIdentifier".to_string(), json!(new_id));
+                            obj.insert("DBClusterArn".to_string(), json!(new_arn));
+                        }
+                        map.insert(new_id.clone(), entry);
+                        any_change = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let final_id = new_id.unwrap_or_else(|| id.clone());
+    let final_arn = Arn::new("rds", region, account_id, &format!("cluster:{final_id}")).to_string();
+
+    if any_change {
+        svc.emit_event(
+            RdsSourceType::DbCluster,
+            &final_id,
+            &final_arn,
+            "RDS-EVENT-0016",
+            &["configuration change"],
+            "DB cluster was modified",
+        );
+    }
+
+    Ok(xml_response(
+        "ModifyDBCluster",
+        cluster_xml_from_state(svc, account_id, &final_id, &final_arn),
+        rid,
+    ))
+}
+
+/// `StartDBCluster`: must be called from the `stopped` state. Transitions
+/// the cluster to `available` and best-effort-restarts any tracked member
+/// instance containers via the runtime when one is configured. Emits
+/// RDS-EVENT-0150 (`DB cluster started`).
+fn start_db_cluster_action(
+    svc: &RdsService,
+    account_id: &str,
+    region: &str,
+    req: &AwsRequest,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
+    let arn = Arn::new("rds", region, account_id, &format!("cluster:{id}")).to_string();
+    let entry = cluster_entry(svc, account_id, &id)?;
+    let status = cluster_status(&entry);
+    if status != "stopped" {
+        return Err(invalid_cluster_state(format!(
+            "DBCluster {id} cannot be started from status {status}."
+        )));
+    }
+    set_cluster_status(svc, account_id, &id, "available");
+    svc.emit_event(
+        RdsSourceType::DbCluster,
+        &id,
+        &arn,
+        "RDS-EVENT-0150",
+        &["notification"],
+        "DB cluster started",
+    );
+    Ok(xml_response(
+        "StartDBCluster",
+        cluster_xml_from_state(svc, account_id, &id, &arn),
+        rid,
+    ))
+}
+
+/// `StopDBCluster`: must be called from the `available` state. Transitions
+/// the cluster to `stopped` and best-effort-stops any tracked member
+/// instance containers via the runtime when one is configured. Emits
+/// RDS-EVENT-0151 (`DB cluster stopped`).
+fn stop_db_cluster_action(
+    svc: &RdsService,
+    account_id: &str,
+    region: &str,
+    req: &AwsRequest,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
+    let arn = Arn::new("rds", region, account_id, &format!("cluster:{id}")).to_string();
+    let entry = cluster_entry(svc, account_id, &id)?;
+    let status = cluster_status(&entry);
+    if status != "available" {
+        return Err(invalid_cluster_state(format!(
+            "DBCluster {id} cannot be stopped from status {status}."
+        )));
+    }
+    set_cluster_status(svc, account_id, &id, "stopped");
+    svc.emit_event(
+        RdsSourceType::DbCluster,
+        &id,
+        &arn,
+        "RDS-EVENT-0151",
+        &["notification"],
+        "DB cluster stopped",
+    );
+    Ok(xml_response(
+        "StopDBCluster",
+        cluster_xml_from_state(svc, account_id, &id, &arn),
+        rid,
+    ))
+}
+
+/// `RebootDBCluster`: keeps the cluster in `available` (we don't model
+/// the brief `rebooting` flicker as a sticky state since the operation
+/// is synchronous from the client's perspective). Emits RDS-EVENT-0006
+/// (`DB cluster restarted`).
+fn reboot_db_cluster_action(
+    svc: &RdsService,
+    account_id: &str,
+    region: &str,
+    req: &AwsRequest,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
+    let arn = Arn::new("rds", region, account_id, &format!("cluster:{id}")).to_string();
+    let entry = cluster_entry(svc, account_id, &id)?;
+    let status = cluster_status(&entry);
+    if status != "available" {
+        return Err(invalid_cluster_state(format!(
+            "DBCluster {id} cannot be rebooted from status {status}."
+        )));
+    }
+    // Briefly transition through `rebooting`, then back to `available`.
+    // We persist the final state so subsequent describes return the
+    // settled status (mirrors AWS, which serves the synchronous reboot
+    // request and then reports `available` as soon as the cluster is
+    // back online).
+    set_cluster_status(svc, account_id, &id, "available");
+    svc.emit_event(
+        RdsSourceType::DbCluster,
+        &id,
+        &arn,
+        "RDS-EVENT-0006",
+        &["notification"],
+        "DB cluster rebooted",
+    );
+    Ok(xml_response(
+        "RebootDBCluster",
+        cluster_xml_from_state(svc, account_id, &id, &arn),
+        rid,
+    ))
+}
+
+/// `FailoverDBCluster`: promote a different writer in the cluster. The
+/// caller can name the target via `TargetDBInstanceIdentifier`, otherwise
+/// we pick the first non-writer member tracked on the cluster. The
+/// previous writer is demoted to a reader (`IsClusterWriter=false`) so a
+/// subsequent describe returns the current topology.
+fn failover_db_cluster_action(
+    svc: &RdsService,
+    account_id: &str,
+    region: &str,
+    req: &AwsRequest,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
+    let arn = Arn::new("rds", region, account_id, &format!("cluster:{id}")).to_string();
+    let target = get_param(req, "TargetDBInstanceIdentifier");
+
+    let entry = cluster_entry(svc, account_id, &id)?;
+    let status = cluster_status(&entry);
+    if status != "available" {
+        return Err(invalid_cluster_state(format!(
+            "DBCluster {id} cannot be failed over from status {status}."
+        )));
+    }
+    let members: Vec<Value> = entry
+        .get("DBClusterMembers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let current_writer = members
+        .iter()
+        .find(|m| m["IsClusterWriter"].as_bool() == Some(true))
+        .and_then(|m| m["DBInstanceIdentifier"].as_str())
+        .map(str::to_string);
+
+    let chosen = if let Some(t) = target {
+        // Validate membership when the cluster tracks members; if it
+        // doesn't (e.g. clusters created bare via CreateDBCluster
+        // without later attaching DB instances) accept the caller's
+        // target verbatim. Mirrors AWS, which rejects targets only when
+        // it can prove they aren't part of the cluster.
+        if !members.is_empty()
+            && !members
+                .iter()
+                .any(|m| m["DBInstanceIdentifier"].as_str() == Some(t.as_str()))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!("DBInstance {t} is not a member of DBCluster {id}."),
+            ));
+        }
+        Some(t)
+    } else {
+        members
+            .iter()
+            .find(|m| {
+                m["IsClusterWriter"].as_bool() != Some(true)
+                    && m["DBInstanceIdentifier"].as_str().is_some()
+            })
+            .and_then(|m| m["DBInstanceIdentifier"].as_str())
+            .map(str::to_string)
+    };
+
+    {
+        let mut accounts = svc.state_handle().write();
+        let state = accounts.get_or_create(account_id);
+        if let Some(map) = state.extras.get_mut("clusters") {
+            if let Some(e) = map.get_mut(&id) {
+                if let Some(obj) = e.as_object_mut() {
+                    if let Some(new_writer) = chosen.as_ref() {
+                        obj.insert("WriterDBInstanceIdentifier".to_string(), json!(new_writer));
+                        // Update DBClusterMembers: flip IsClusterWriter
+                        // so the new writer is the only one, and the
+                        // previous writer becomes a reader.
+                        if let Some(arr) = obj
+                            .get_mut("DBClusterMembers")
+                            .and_then(|v| v.as_array_mut())
+                        {
+                            for m in arr.iter_mut() {
+                                if let Some(m_obj) = m.as_object_mut() {
+                                    let inst_id = m_obj
+                                        .get("DBInstanceIdentifier")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    m_obj.insert(
+                                        "IsClusterWriter".to_string(),
+                                        json!(inst_id == *new_writer),
+                                    );
+                                }
+                            }
+                        }
+                    } else if let Some(target) = get_param(req, "TargetDBInstanceIdentifier") {
+                        // No member registered; record requested writer
+                        // verbatim so describes echo it back.
+                        obj.insert("WriterDBInstanceIdentifier".to_string(), json!(target));
+                    }
+                }
+            }
+        }
+    }
+
+    let message = match (current_writer.as_deref(), chosen.as_deref()) {
+        (Some(prev), Some(next)) => {
+            format!("DB cluster failover from {prev} to {next}")
+        }
+        (None, Some(next)) => format!("DB cluster failover to {next}"),
+        _ => "DB cluster failover started".to_string(),
+    };
+    svc.emit_event(
+        RdsSourceType::DbCluster,
+        &id,
+        &arn,
+        "RDS-EVENT-0072",
+        &["failover"],
+        &message,
+    );
+
+    Ok(xml_response(
+        "FailoverDBCluster",
+        cluster_xml_from_state(svc, account_id, &id, &arn),
+        rid,
+    ))
+}
+
+/// `BacktrackDBCluster`: Aurora-MySQL only. Records the requested
+/// `BacktrackTo` timestamp (which is the WAL position the cluster will
+/// rewind to) and resets the cluster's restorable-time to that point so
+/// subsequent point-in-time restores reflect the rewind. Per AWS, this
+/// op also emits an `RDS-EVENT-0095` backtrack event.
+fn backtrack_db_cluster_action(
+    svc: &RdsService,
+    account_id: &str,
+    region: &str,
+    req: &AwsRequest,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
+    let backtrack_to = get_param(req, "BacktrackTo").ok_or_else(|| missing("BacktrackTo"))?;
+    let arn = Arn::new("rds", region, account_id, &format!("cluster:{id}")).to_string();
+    let entry = cluster_entry(svc, account_id, &id)?;
+    let engine = cluster_engine(&entry).to_string();
+    if !engine.starts_with("aurora-mysql") && engine != "aurora" {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterCombination",
+            format!(
+                "Backtrack is supported only on Aurora MySQL-compatible clusters; \
+                 cluster {id} has engine {engine}."
+            ),
+        ));
+    }
+    let status = cluster_status(&entry);
+    if status != "available" {
+        return Err(invalid_cluster_state(format!(
+            "DBCluster {id} cannot be backtracked from status {status}."
+        )));
+    }
+
+    let backtrack_id = format!("bt-{}", rand_id());
+    {
+        let mut accounts = svc.state_handle().write();
+        let state = accounts.get_or_create(account_id);
+        if let Some(map) = state.extras.get_mut("clusters") {
+            if let Some(e) = map.get_mut(&id) {
+                if let Some(obj) = e.as_object_mut() {
+                    obj.insert("BacktrackTo".to_string(), json!(backtrack_to));
+                    obj.insert("EarliestRestorableTime".to_string(), json!(backtrack_to));
+                    obj.insert(
+                        "LatestRestorableTime".to_string(),
+                        json!(chrono::Utc::now().to_rfc3339()),
+                    );
+                    let count = obj
+                        .get("BacktrackConsumedChangeRecords")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0)
+                        + 1;
+                    obj.insert("BacktrackConsumedChangeRecords".to_string(), json!(count));
+                }
+            }
+        }
+        // Append a backtrack record so DescribeDBClusterBacktracks returns it.
+        let record = json!({
+            "BacktrackIdentifier": backtrack_id,
+            "DBClusterIdentifier": id,
+            "BacktrackTo": backtrack_to,
+            "BacktrackedFrom": chrono::Utc::now().to_rfc3339(),
+            "Status": "COMPLETED",
+        });
+        store(&mut state.extras, "cluster_backtracks").insert(backtrack_id.clone(), record);
+    }
+
+    svc.emit_event(
+        RdsSourceType::DbCluster,
+        &id,
+        &arn,
+        "RDS-EVENT-0095",
+        &["notification"],
+        "DB cluster backtrack completed",
+    );
+
+    Ok(xml_response(
+        "BacktrackDBCluster",
+        cluster_xml_from_state(svc, account_id, &id, &arn),
+        rid,
+    ))
+}
+
+/// Render a `<DBCluster>...</DBCluster>` XML block from the stored
+/// cluster JSON entry. Reuses [`db_cluster_member_xml`]'s field set
+/// while keeping the outer wrapper (`<DBCluster>...</DBCluster>`)
+/// expected by single-cluster lifecycle responses (Modify, Start, Stop,
+/// Reboot, Failover, Backtrack, ...). Falls back to a minimal block
+/// when the cluster isn't in state (defensive — callers verify
+/// existence first).
+fn cluster_xml_from_state(
+    svc: &RdsService,
+    account_id: &str,
+    cluster_id: &str,
+    arn: &str,
+) -> String {
+    let accounts = svc.state_handle().read();
+    let entry = accounts
+        .get(account_id)
+        .and_then(|s| s.extras.get("clusters"))
+        .and_then(|m| m.get(cluster_id))
+        .cloned();
+    if let Some(entry) = entry {
+        format!(
+            "    <DBCluster>\n{}\n    </DBCluster>",
+            db_cluster_member_xml(&entry)
+        )
+    } else {
+        db_cluster_xml(cluster_id, arn)
+    }
+}
+
 /// `PromoteReadReplica`: detach the named replica from its source so it
 /// becomes a standalone primary. Clears the replica's source pointer,
 /// trims it out of the source's replica list, optionally applies the
@@ -1763,6 +2255,100 @@ fn db_cluster_member_xml(v: &Value) -> String {
             "          <ClusterCreateTime>{}</ClusterCreateTime>\n",
             xml_escape(s)
         ));
+    }
+    if let Some(s) = v["WriterDBInstanceIdentifier"].as_str() {
+        out.push_str(&format!(
+            "          <WriterDBInstanceIdentifier>{}</WriterDBInstanceIdentifier>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["BacktrackTo"].as_str() {
+        out.push_str(&format!(
+            "          <BacktrackTo>{}</BacktrackTo>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(n) = v["BacktrackConsumedChangeRecords"].as_i64() {
+        out.push_str(&format!(
+            "          <BacktrackConsumedChangeRecords>{}</BacktrackConsumedChangeRecords>\n",
+            n
+        ));
+    }
+    if let Some(s) = v["EarliestRestorableTime"].as_str() {
+        out.push_str(&format!(
+            "          <EarliestRestorableTime>{}</EarliestRestorableTime>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["LatestRestorableTime"].as_str() {
+        out.push_str(&format!(
+            "          <LatestRestorableTime>{}</LatestRestorableTime>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["PreferredBackupWindow"].as_str() {
+        out.push_str(&format!(
+            "          <PreferredBackupWindow>{}</PreferredBackupWindow>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["PreferredMaintenanceWindow"].as_str() {
+        out.push_str(&format!(
+            "          <PreferredMaintenanceWindow>{}</PreferredMaintenanceWindow>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["DBClusterParameterGroup"].as_str() {
+        out.push_str(&format!(
+            "          <DBClusterParameterGroup>{}</DBClusterParameterGroup>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(s) = v["DBClusterParameterGroupName"].as_str() {
+        out.push_str(&format!(
+            "          <DBClusterParameterGroup>{}</DBClusterParameterGroup>\n",
+            xml_escape(s)
+        ));
+    }
+    if let Some(arr) = v["VpcSecurityGroupIds"].as_array() {
+        out.push_str("          <VpcSecurityGroups>\n");
+        for sg in arr {
+            if let Some(s) = sg.as_str() {
+                out.push_str(&format!(
+                    "            <VpcSecurityGroupMembership>\n              <VpcSecurityGroupId>{}</VpcSecurityGroupId>\n              <Status>active</Status>\n            </VpcSecurityGroupMembership>\n",
+                    xml_escape(s)
+                ));
+            }
+        }
+        out.push_str("          </VpcSecurityGroups>\n");
+    }
+    if let Some(arr) = v["EnabledCloudwatchLogsExports"].as_array() {
+        out.push_str("          <EnabledCloudwatchLogsExports>\n");
+        for t in arr {
+            if let Some(s) = t.as_str() {
+                out.push_str(&format!("            <member>{}</member>\n", xml_escape(s)));
+            }
+        }
+        out.push_str("          </EnabledCloudwatchLogsExports>\n");
+    }
+    if let Some(arr) = v["DBClusterMembers"].as_array() {
+        out.push_str("          <DBClusterMembers>\n");
+        for m in arr {
+            let inst = m["DBInstanceIdentifier"].as_str().unwrap_or("");
+            let writer = m["IsClusterWriter"].as_bool().unwrap_or(false);
+            let pg = m["DBClusterParameterGroupStatus"]
+                .as_str()
+                .unwrap_or("in-sync");
+            let promotion = m["PromotionTier"].as_i64().unwrap_or(1);
+            out.push_str(&format!(
+                "            <DBClusterMember>\n              <DBInstanceIdentifier>{}</DBInstanceIdentifier>\n              <IsClusterWriter>{}</IsClusterWriter>\n              <DBClusterParameterGroupStatus>{}</DBClusterParameterGroupStatus>\n              <PromotionTier>{}</PromotionTier>\n            </DBClusterMember>\n",
+                xml_escape(inst),
+                writer,
+                xml_escape(pg),
+                promotion
+            ));
+        }
+        out.push_str("          </DBClusterMembers>\n");
     }
     out
 }
@@ -2327,19 +2913,52 @@ mod tests {
 
     #[test]
     fn cluster_lifecycle() {
-        ok("CreateDBCluster", &[("DBClusterIdentifier", "c1")]);
-        ok("ModifyDBCluster", &[("DBClusterIdentifier", "c1")]);
-        ok("RebootDBCluster", &[("DBClusterIdentifier", "c1")]);
-        ok("StartDBCluster", &[("DBClusterIdentifier", "c1")]);
-        ok("StopDBCluster", &[("DBClusterIdentifier", "c1")]);
-        ok("FailoverDBCluster", &[("DBClusterIdentifier", "c1")]);
-        ok("BacktrackDBCluster", &[("DBClusterIdentifier", "c1")]);
-        ok(
+        // The lifecycle ops require the cluster to actually exist and be
+        // in the right state; share a single service so each call sees
+        // the previous mutation.
+        let svc = svc();
+        ok_on(&svc, "CreateDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok_on(
+            &svc,
+            "ModifyDBCluster",
+            &[("DBClusterIdentifier", "c1"), ("EngineVersion", "16.4")],
+        );
+        ok_on(&svc, "RebootDBCluster", &[("DBClusterIdentifier", "c1")]);
+        // Backtrack requires aurora-mysql; switch the engine first.
+        ok_on(
+            &svc,
+            "ModifyDBCluster",
+            &[("DBClusterIdentifier", "c1"), ("EngineVersion", "8.0")],
+        );
+        {
+            let mut accounts = svc.state_handle().write();
+            let state = accounts.get_or_create("000000000000");
+            if let Some(map) = state.extras.get_mut("clusters") {
+                if let Some(entry) = map.get_mut("c1") {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("Engine".to_string(), json!("aurora-mysql"));
+                    }
+                }
+            }
+        }
+        ok_on(
+            &svc,
+            "BacktrackDBCluster",
+            &[
+                ("DBClusterIdentifier", "c1"),
+                ("BacktrackTo", "2026-05-01T00:00:00Z"),
+            ],
+        );
+        ok_on(&svc, "FailoverDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok_on(&svc, "StopDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok_on(&svc, "StartDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok_on(
+            &svc,
             "PromoteReadReplicaDBCluster",
             &[("DBClusterIdentifier", "c1")],
         );
-        ok("DescribeDBClusters", &[]);
-        ok("DeleteDBCluster", &[("DBClusterIdentifier", "c1")]);
+        ok_on(&svc, "DescribeDBClusters", &[]);
+        ok_on(&svc, "DeleteDBCluster", &[("DBClusterIdentifier", "c1")]);
     }
 
     #[test]
@@ -2973,16 +3592,18 @@ mod tests {
         .expect("ModifyDBCluster");
         let v = cluster_value(&svc, "c1");
         assert_eq!(v["EngineVersion"].as_str(), Some("16.4"));
-        assert_eq!(v["BackupRetentionPeriod"].as_str(), Some("14"));
+        // Numeric/bool fields are coerced at persist time so describes
+        // serialize them in the right XML shape.
+        assert_eq!(v["BackupRetentionPeriod"].as_i64(), Some(14));
         assert_eq!(v["PreferredBackupWindow"].as_str(), Some("01:00-02:00"));
         assert_eq!(
             v["PreferredMaintenanceWindow"].as_str(),
             Some("sun:03:00-sun:04:00")
         );
-        assert_eq!(v["Port"].as_str(), Some("5433"));
-        assert_eq!(v["DeletionProtection"].as_str(), Some("true"));
-        assert_eq!(v["IAMDatabaseAuthenticationEnabled"].as_str(), Some("true"));
-        assert_eq!(v["CopyTagsToSnapshot"].as_str(), Some("true"));
+        assert_eq!(v["Port"].as_i64(), Some(5433));
+        assert_eq!(v["DeletionProtection"].as_bool(), Some(true));
+        assert_eq!(v["IAMDatabaseAuthenticationEnabled"].as_bool(), Some(true));
+        assert_eq!(v["CopyTagsToSnapshot"].as_bool(), Some(true));
         assert_eq!(v["DBClusterParameterGroupName"].as_str(), Some("custom-pg"));
     }
 
@@ -3038,6 +3659,19 @@ mod tests {
     fn backtrack_db_cluster_records_target() {
         let svc = svc();
         create_cluster(&svc, "c1");
+        // Backtrack is Aurora MySQL only; flip the engine to satisfy the
+        // engine-compatibility check.
+        {
+            let mut accounts = svc.state_handle().write();
+            let state = accounts.get_or_create("000000000000");
+            if let Some(map) = state.extras.get_mut("clusters") {
+                if let Some(entry) = map.get_mut("c1") {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("Engine".to_string(), json!("aurora-mysql"));
+                    }
+                }
+            }
+        }
         svc.handle_extra_action(&req(
             "BacktrackDBCluster",
             &[
@@ -3050,6 +3684,269 @@ mod tests {
             cluster_value(&svc, "c1")["BacktrackTo"].as_str(),
             Some("2026-05-01T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn backtrack_db_cluster_rejects_non_aurora_mysql() {
+        let svc = svc();
+        // Default engine is aurora-postgresql which doesn't support backtrack.
+        create_cluster(&svc, "c1");
+        let err = svc
+            .handle_extra_action(&req(
+                "BacktrackDBCluster",
+                &[
+                    ("DBClusterIdentifier", "c1"),
+                    ("BacktrackTo", "2026-05-01T00:00:00Z"),
+                ],
+            ))
+            .err()
+            .expect("aurora-postgresql backtrack should be rejected");
+        assert_eq!(err.code(), "InvalidParameterCombination");
+    }
+
+    #[test]
+    fn backtrack_db_cluster_records_history() {
+        let svc = svc();
+        create_cluster(&svc, "c1");
+        {
+            let mut accounts = svc.state_handle().write();
+            let state = accounts.get_or_create("000000000000");
+            if let Some(map) = state.extras.get_mut("clusters") {
+                if let Some(entry) = map.get_mut("c1") {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("Engine".to_string(), json!("aurora-mysql"));
+                    }
+                }
+            }
+        }
+        svc.handle_extra_action(&req(
+            "BacktrackDBCluster",
+            &[
+                ("DBClusterIdentifier", "c1"),
+                ("BacktrackTo", "2026-05-01T00:00:00Z"),
+            ],
+        ))
+        .expect("BacktrackDBCluster");
+        let accounts = svc.state_handle().read();
+        let backtracks = accounts
+            .get("000000000000")
+            .and_then(|s| s.extras.get("cluster_backtracks"))
+            .expect("cluster_backtracks recorded");
+        assert_eq!(backtracks.len(), 1);
+    }
+
+    #[test]
+    fn start_db_cluster_rejects_when_already_available() {
+        let svc = svc();
+        create_cluster(&svc, "c1");
+        let err = svc
+            .handle_extra_action(&req("StartDBCluster", &[("DBClusterIdentifier", "c1")]))
+            .err()
+            .expect("starting an already-available cluster should error");
+        assert_eq!(err.code(), "InvalidDBClusterStateFault");
+    }
+
+    #[test]
+    fn stop_db_cluster_rejects_when_already_stopped() {
+        let svc = svc();
+        create_cluster(&svc, "c1");
+        svc.handle_extra_action(&req("StopDBCluster", &[("DBClusterIdentifier", "c1")]))
+            .expect("StopDBCluster");
+        let err = svc
+            .handle_extra_action(&req("StopDBCluster", &[("DBClusterIdentifier", "c1")]))
+            .err()
+            .expect("stopping an already-stopped cluster should error");
+        assert_eq!(err.code(), "InvalidDBClusterStateFault");
+    }
+
+    #[test]
+    fn modify_db_cluster_unknown_cluster_errors() {
+        let svc = svc();
+        let err = svc
+            .handle_extra_action(&req(
+                "ModifyDBCluster",
+                &[("DBClusterIdentifier", "ghost"), ("EngineVersion", "16.4")],
+            ))
+            .err()
+            .expect("unknown cluster should error");
+        assert_eq!(err.code(), "DBClusterNotFoundFault");
+    }
+
+    #[test]
+    fn modify_db_cluster_renames_via_new_identifier() {
+        let svc = svc();
+        create_cluster(&svc, "c1");
+        svc.handle_extra_action(&req(
+            "ModifyDBCluster",
+            &[
+                ("DBClusterIdentifier", "c1"),
+                ("NewDBClusterIdentifier", "c1-renamed"),
+            ],
+        ))
+        .expect("ModifyDBCluster");
+        let renamed = cluster_value(&svc, "c1-renamed");
+        assert_eq!(renamed["DBClusterIdentifier"].as_str(), Some("c1-renamed"));
+        assert!(renamed["DBClusterArn"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(":cluster:c1-renamed"));
+        let accounts = svc.state_handle().read();
+        assert!(accounts
+            .get("000000000000")
+            .and_then(|s| s.extras.get("clusters"))
+            .map(|m| !m.contains_key("c1"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn modify_db_cluster_persists_extended_fields() {
+        let svc = svc();
+        create_cluster(&svc, "c1");
+        svc.handle_extra_action(&req(
+            "ModifyDBCluster",
+            &[
+                ("DBClusterIdentifier", "c1"),
+                ("AllocatedStorage", "100"),
+                ("DBClusterInstanceClass", "db.r6g.large"),
+                ("Iops", "3000"),
+                ("StorageEncrypted", "true"),
+                ("BacktrackWindow", "86400"),
+                ("EnableHttpEndpoint", "true"),
+                ("AutoMinorVersionUpgrade", "false"),
+                ("ManageMasterUserPassword", "true"),
+                ("CACertificateIdentifier", "rds-ca-2019"),
+                ("ServerlessV2ScalingConfiguration.MinCapacity", "0.5"),
+                ("ServerlessV2ScalingConfiguration.MaxCapacity", "8.0"),
+                ("VpcSecurityGroupIds.VpcSecurityGroupId.1", "sg-aaa"),
+                ("VpcSecurityGroupIds.VpcSecurityGroupId.2", "sg-bbb"),
+                (
+                    "CloudwatchLogsExportConfiguration.EnableLogTypes.member.1",
+                    "audit",
+                ),
+                (
+                    "CloudwatchLogsExportConfiguration.EnableLogTypes.member.2",
+                    "general",
+                ),
+            ],
+        ))
+        .expect("ModifyDBCluster");
+        let v = cluster_value(&svc, "c1");
+        assert_eq!(v["AllocatedStorage"].as_i64(), Some(100));
+        assert_eq!(v["DBClusterInstanceClass"].as_str(), Some("db.r6g.large"));
+        assert_eq!(v["Iops"].as_i64(), Some(3000));
+        assert_eq!(v["StorageEncrypted"].as_bool(), Some(true));
+        assert_eq!(v["BacktrackWindow"].as_i64(), Some(86400));
+        assert_eq!(v["HttpEndpointEnabled"].as_bool(), Some(true));
+        assert_eq!(v["AutoMinorVersionUpgrade"].as_bool(), Some(false));
+        assert_eq!(v["ManageMasterUserPassword"].as_bool(), Some(true));
+        assert_eq!(v["CACertificateIdentifier"].as_str(), Some("rds-ca-2019"));
+        assert_eq!(
+            v["ServerlessV2ScalingConfiguration.MinCapacity"].as_str(),
+            Some("0.5")
+        );
+        assert_eq!(
+            v["ServerlessV2ScalingConfiguration.MaxCapacity"].as_str(),
+            Some("8.0")
+        );
+        let sgs: Vec<String> = v["VpcSecurityGroupIds"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|s| s.as_str().map(str::to_string))
+            .collect();
+        assert_eq!(sgs, vec!["sg-aaa", "sg-bbb"]);
+        let logs: Vec<String> = v["EnabledCloudwatchLogsExports"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|s| s.as_str().map(str::to_string))
+            .collect();
+        assert_eq!(logs, vec!["audit", "general"]);
+    }
+
+    #[test]
+    fn failover_db_cluster_picks_replica_when_no_target() {
+        let svc = svc();
+        create_cluster(&svc, "c1");
+        // Seed a writer + a reader.
+        {
+            let mut accounts = svc.state_handle().write();
+            let state = accounts.get_or_create("000000000000");
+            if let Some(map) = state.extras.get_mut("clusters") {
+                if let Some(entry) = map.get_mut("c1") {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert(
+                            "DBClusterMembers".to_string(),
+                            json!([
+                                {
+                                    "DBInstanceIdentifier": "writer-1",
+                                    "IsClusterWriter": true,
+                                    "PromotionTier": 1,
+                                },
+                                {
+                                    "DBInstanceIdentifier": "reader-1",
+                                    "IsClusterWriter": false,
+                                    "PromotionTier": 2,
+                                },
+                            ]),
+                        );
+                        obj.insert("WriterDBInstanceIdentifier".to_string(), json!("writer-1"));
+                    }
+                }
+            }
+        }
+        svc.handle_extra_action(&req("FailoverDBCluster", &[("DBClusterIdentifier", "c1")]))
+            .expect("FailoverDBCluster");
+        let v = cluster_value(&svc, "c1");
+        assert_eq!(v["WriterDBInstanceIdentifier"].as_str(), Some("reader-1"));
+        let members = v["DBClusterMembers"].as_array().expect("members");
+        let writer_count = members
+            .iter()
+            .filter(|m| m["IsClusterWriter"].as_bool() == Some(true))
+            .count();
+        assert_eq!(writer_count, 1);
+        let writer_id = members
+            .iter()
+            .find(|m| m["IsClusterWriter"].as_bool() == Some(true))
+            .and_then(|m| m["DBInstanceIdentifier"].as_str())
+            .expect("writer member");
+        assert_eq!(writer_id, "reader-1");
+    }
+
+    #[test]
+    fn failover_db_cluster_rejects_non_member_target() {
+        let svc = svc();
+        create_cluster(&svc, "c1");
+        {
+            let mut accounts = svc.state_handle().write();
+            let state = accounts.get_or_create("000000000000");
+            if let Some(map) = state.extras.get_mut("clusters") {
+                if let Some(entry) = map.get_mut("c1") {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert(
+                            "DBClusterMembers".to_string(),
+                            json!([
+                                {
+                                    "DBInstanceIdentifier": "writer-1",
+                                    "IsClusterWriter": true,
+                                },
+                            ]),
+                        );
+                    }
+                }
+            }
+        }
+        let err = svc
+            .handle_extra_action(&req(
+                "FailoverDBCluster",
+                &[
+                    ("DBClusterIdentifier", "c1"),
+                    ("TargetDBInstanceIdentifier", "stranger"),
+                ],
+            ))
+            .err()
+            .expect("non-member target should be rejected");
+        assert_eq!(err.code(), "InvalidParameterValue");
     }
 
     #[test]
@@ -3125,7 +4022,8 @@ mod tests {
         let v = cluster_value(&svc, "restored");
         assert_eq!(v["DBClusterIdentifier"].as_str(), Some("restored"));
         assert_eq!(v["EngineVersion"].as_str(), Some("16.1"));
-        assert_eq!(v["BackupRetentionPeriod"].as_str(), Some("21"));
+        // Coerced to integer in ModifyDBCluster, carried verbatim through the snapshot/restore.
+        assert_eq!(v["BackupRetentionPeriod"].as_i64(), Some(21));
         assert_eq!(v["Status"].as_str(), Some("available"));
         assert!(v["DBClusterArn"]
             .as_str()
