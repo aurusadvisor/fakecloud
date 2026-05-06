@@ -669,4 +669,3 @@ async fn cognito_identity_unlink_identity() {
         .await
         .unwrap();
 }
-
