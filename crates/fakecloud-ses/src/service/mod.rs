@@ -5,7 +5,7 @@ mod identities;
 mod misc;
 mod sending;
 mod suppression;
-mod templates;
+pub(crate) mod templates;
 
 use async_trait::async_trait;
 use http::{Method, StatusCode};

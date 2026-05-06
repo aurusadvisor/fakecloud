@@ -574,6 +574,10 @@ async fn test_send_templated_email_v1() {
     let emails = resp["emails"].as_array().unwrap();
     assert_eq!(emails.len(), 1);
     assert_eq!(emails[0]["templateName"], "greet");
+    // Subject + html_body must be the rendered output, not the raw
+    // template source. Real SES returns the substituted text downstream.
+    assert_eq!(emails[0]["subject"], "Hi World");
+    assert_eq!(emails[0]["htmlBody"], "<p>Hello World</p>");
 }
 
 #[tokio::test]
