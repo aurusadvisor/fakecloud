@@ -56,6 +56,10 @@ LocalStack paywalls API Gateway v1. fakecloud implements the full REST API surfa
 - **CreateDocumentationPart** with the full property language: storage works, but property templating semantics are stubbed
 - WAF wiring, VPC private endpoints, and edge-level canary deployments — these belong on the v1 follow-up roadmap
 
+## Limitations
+
+- The data plane is partially implemented. `MOCK`, `HTTP`/`HTTP_PROXY`, and `AWS_PROXY` (Lambda) integrations work. AWS direct service integrations, VTL templates, VPC_LINK resolution, binary media types, and gateway response customization are either stubbed or not yet implemented.
+
 ## Source
 
 - [`crates/fakecloud-apigateway`](https://github.com/faiscadev/fakecloud/tree/main/crates/fakecloud-apigateway)
