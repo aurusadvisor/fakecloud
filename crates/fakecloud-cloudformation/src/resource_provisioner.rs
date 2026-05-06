@@ -1026,6 +1026,32 @@ impl ResourceProvisioner {
             "AWS::ApiGateway::BasePathMapping" => {
                 Some(self.update_apigw_base_path_mapping(existing, new_def)?)
             }
+            "AWS::ApiGatewayV2::Api" => Some(self.update_apigwv2_api(existing, new_def)?),
+            "AWS::ApiGatewayV2::Route" => Some(self.update_apigwv2_route(existing, new_def)?),
+            "AWS::ApiGatewayV2::Integration" => {
+                Some(self.update_apigwv2_integration(existing, new_def)?)
+            }
+            "AWS::ApiGatewayV2::IntegrationResponse" => {
+                Some(self.update_apigwv2_integration_response(existing, new_def)?)
+            }
+            "AWS::ApiGatewayV2::RouteResponse" => {
+                Some(self.update_apigwv2_route_response(existing, new_def)?)
+            }
+            "AWS::ApiGatewayV2::Stage" => Some(self.update_apigwv2_stage(existing, new_def)?),
+            "AWS::ApiGatewayV2::Deployment" => {
+                Some(self.update_apigwv2_deployment(existing, new_def)?)
+            }
+            "AWS::ApiGatewayV2::Authorizer" => {
+                Some(self.update_apigwv2_authorizer(existing, new_def)?)
+            }
+            "AWS::ApiGatewayV2::DomainName" => {
+                Some(self.update_apigwv2_domain_name(existing, new_def)?)
+            }
+            "AWS::ApiGatewayV2::ApiMapping" => {
+                Some(self.update_apigwv2_api_mapping(existing, new_def)?)
+            }
+            "AWS::ApiGatewayV2::VpcLink" => Some(self.update_apigwv2_vpc_link(existing, new_def)?),
+            "AWS::ApiGatewayV2::Model" => Some(self.update_apigwv2_model(existing, new_def)?),
             _ => None,
         };
 
@@ -13757,6 +13783,565 @@ impl ResourceProvisioner {
             map.remove(physical_id);
         }
         Ok(())
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::Api. CFN keeps the same
+    /// ApiId across updates; only mutable properties (Name, Description,
+    /// CORS, RouteSelectionExpression, etc.) are rewritten.
+    fn update_apigwv2_api(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = existing.physical_id.clone();
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let api = state
+            .apis
+            .get_mut(&api_id)
+            .ok_or_else(|| format!("Api {api_id} no longer exists in state"))?;
+
+        if let Some(s) = props.get("Name").and_then(|v| v.as_str()) {
+            api.name = s.to_string();
+        }
+        if let Some(s) = props.get("ProtocolType").and_then(|v| v.as_str()) {
+            api.protocol_type = s.to_string();
+        }
+        api.description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| api.description.clone());
+        if let Some(s) = props
+            .get("RouteSelectionExpression")
+            .and_then(|v| v.as_str())
+        {
+            api.route_selection_expression = s.to_string();
+        }
+        if let Some(s) = props
+            .get("ApiKeySelectionExpression")
+            .and_then(|v| v.as_str())
+        {
+            api.api_key_selection_expression = s.to_string();
+        }
+        if let Some(b) = props
+            .get("DisableExecuteApiEndpoint")
+            .and_then(|v| v.as_bool())
+        {
+            api.disable_execute_api_endpoint = b;
+        }
+        if let Some(s) = props.get("IpAddressType").and_then(|v| v.as_str()) {
+            api.ip_address_type = s.to_string();
+        }
+        if let Some(cors) = props.get("CorsConfiguration").and_then(|v| v.as_object()) {
+            api.cors_configuration = Some(ApiGwV2CorsConfiguration {
+                allow_credentials: cors.get("AllowCredentials").and_then(|v| v.as_bool()),
+                allow_headers: cors
+                    .get("AllowHeaders")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    }),
+                allow_methods: cors
+                    .get("AllowMethods")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    }),
+                allow_origins: cors
+                    .get("AllowOrigins")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    }),
+                expose_headers: cors
+                    .get("ExposeHeaders")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    }),
+                max_age: cors
+                    .get("MaxAge")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n as i32),
+            });
+        }
+        if let Some(obj) = props.get("Tags").and_then(|v| v.as_object()) {
+            let tags: BTreeMap<String, String> = obj
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+            api.tags = Some(tags);
+        }
+
+        let api_endpoint = api.api_endpoint.clone();
+        Ok(ProvisionResult::new(api_id.clone())
+            .with("ApiId", api_id)
+            .with("ApiEndpoint", api_endpoint))
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::Route. The RouteId is
+    /// stable across updates; only Target / AuthorizationType /
+    /// AuthorizerId / RouteKey are rewritten.
+    fn update_apigwv2_route(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let route_id = existing.physical_id.clone();
+
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let routes = state
+            .routes
+            .get_mut(&api_id)
+            .ok_or_else(|| format!("Api {api_id} not yet provisioned"))?;
+        let route = routes
+            .get_mut(&route_id)
+            .ok_or_else(|| format!("Route {route_id} not yet provisioned for api {api_id}"))?;
+        if let Some(s) = props.get("RouteKey").and_then(|v| v.as_str()) {
+            route.route_key = s.to_string();
+        }
+        if let Some(s) = props.get("Target").and_then(|v| v.as_str()) {
+            route.target = Some(s.to_string());
+        }
+        if let Some(s) = props.get("AuthorizationType").and_then(|v| v.as_str()) {
+            route.authorization_type = Some(s.to_string());
+        }
+        if let Some(s) = props.get("AuthorizerId").and_then(|v| v.as_str()) {
+            route.authorizer_id = Some(s.to_string());
+        }
+        Ok(ProvisionResult::new(route_id.clone())
+            .with("RouteId", route_id)
+            .with("ApiId", api_id))
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::Integration.
+    fn update_apigwv2_integration(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let integration_id = existing.physical_id.clone();
+
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let integrations = state
+            .integrations
+            .get_mut(&api_id)
+            .ok_or_else(|| format!("Api {api_id} not yet provisioned"))?;
+        let integ = integrations.get_mut(&integration_id).ok_or_else(|| {
+            format!("Integration {integration_id} not yet provisioned for api {api_id}")
+        })?;
+        if let Some(s) = props.get("IntegrationType").and_then(|v| v.as_str()) {
+            integ.integration_type = s.to_string();
+        }
+        if let Some(s) = props.get("IntegrationUri").and_then(|v| v.as_str()) {
+            integ.integration_uri = Some(s.to_string());
+        }
+        if let Some(s) = props.get("PayloadFormatVersion").and_then(|v| v.as_str()) {
+            integ.payload_format_version = Some(s.to_string());
+        }
+        if let Some(n) = props.get("TimeoutInMillis").and_then(|v| v.as_i64()) {
+            integ.timeout_in_millis = Some(n);
+        }
+        Ok(ProvisionResult::new(integration_id.clone())
+            .with("IntegrationId", integration_id)
+            .with("ApiId", api_id))
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::IntegrationResponse. The
+    /// composite physical id `{integration_id}/{response_id}` is stable
+    /// across updates; only the embedded response body is rewritten.
+    fn update_apigwv2_integration_response(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let composite_key = existing.physical_id.clone();
+        let (integration_id, response_id) = composite_key
+            .split_once('/')
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .ok_or_else(|| format!("Invalid IntegrationResponse physical id: {composite_key}"))?;
+        let key_expr = props
+            .get("IntegrationResponseKey")
+            .and_then(|v| v.as_str())
+            .ok_or("IntegrationResponseKey is required")?
+            .to_string();
+        let body = serde_json::json!({
+            "integrationResponseId": response_id,
+            "integrationId": integration_id,
+            "integrationResponseKey": key_expr,
+            "responseTemplates": props.get("ResponseTemplates").cloned().unwrap_or(serde_json::json!({})),
+            "responseParameters": props.get("ResponseParameters").cloned().unwrap_or(serde_json::json!({})),
+            "templateSelectionExpression": props.get("TemplateSelectionExpression").and_then(|v| v.as_str()),
+            "contentHandlingStrategy": props.get("ContentHandlingStrategy").and_then(|v| v.as_str()),
+        });
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let map = state
+            .integration_responses
+            .get_mut(&api_id)
+            .ok_or_else(|| format!("No integration responses found for api {api_id}"))?;
+        if !map.contains_key(&composite_key) {
+            return Err(format!(
+                "IntegrationResponse {composite_key} not yet provisioned for api {api_id}"
+            ));
+        }
+        map.insert(composite_key.clone(), body);
+        Ok(ProvisionResult::new(composite_key)
+            .with("IntegrationResponseId", response_id)
+            .with("IntegrationId", integration_id)
+            .with("ApiId", api_id))
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::RouteResponse. Composite
+    /// physical id `{route_id}/{response_id}` is preserved.
+    fn update_apigwv2_route_response(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let composite = existing.physical_id.clone();
+        let (route_id, response_id) = composite
+            .split_once('/')
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .ok_or_else(|| format!("Invalid RouteResponse physical id: {composite}"))?;
+        let key_expr = props
+            .get("RouteResponseKey")
+            .and_then(|v| v.as_str())
+            .ok_or("RouteResponseKey is required")?
+            .to_string();
+        let body = serde_json::json!({
+            "routeResponseId": response_id,
+            "routeId": route_id,
+            "routeResponseKey": key_expr,
+            "responseModels": props.get("ResponseModels").cloned().unwrap_or(serde_json::json!({})),
+            "modelSelectionExpression": props.get("ModelSelectionExpression").and_then(|v| v.as_str()),
+            "responseParameters": props.get("ResponseParameters").cloned().unwrap_or(serde_json::json!({})),
+        });
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let map = state
+            .route_responses
+            .get_mut(&api_id)
+            .ok_or_else(|| format!("No route responses found for api {api_id}"))?;
+        if !map.contains_key(&composite) {
+            return Err(format!(
+                "RouteResponse {composite} not yet provisioned for api {api_id}"
+            ));
+        }
+        map.insert(composite.clone(), body);
+        Ok(ProvisionResult::new(composite)
+            .with("RouteResponseId", response_id)
+            .with("RouteId", route_id)
+            .with("ApiId", api_id))
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::Stage. StageName is the
+    /// physical id and stays stable; description / deployment id /
+    /// auto-deploy can change.
+    fn update_apigwv2_stage(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let stage_name = existing.physical_id.clone();
+
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let stages = state
+            .stages
+            .get_mut(&api_id)
+            .ok_or_else(|| format!("Api {api_id} not yet provisioned"))?;
+        let stage = stages
+            .get_mut(&stage_name)
+            .ok_or_else(|| format!("Stage {stage_name} not yet provisioned for api {api_id}"))?;
+        if let Some(s) = props.get("Description").and_then(|v| v.as_str()) {
+            stage.description = Some(s.to_string());
+        }
+        if let Some(s) = props.get("DeploymentId").and_then(|v| v.as_str()) {
+            stage.deployment_id = Some(s.to_string());
+        }
+        if let Some(b) = props.get("AutoDeploy").and_then(|v| v.as_bool()) {
+            stage.auto_deploy = b;
+        }
+        stage.last_updated_date = Some(Utc::now());
+        Ok(ProvisionResult::new(stage_name.clone())
+            .with("StageName", stage_name)
+            .with("ApiId", api_id))
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::Deployment. CFN allows
+    /// editing the Description; the DeploymentId is stable.
+    fn update_apigwv2_deployment(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let deployment_id = existing.physical_id.clone();
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let deps = state
+            .deployments
+            .get_mut(&api_id)
+            .ok_or_else(|| format!("Api {api_id} not yet provisioned"))?;
+        let dep = deps.get_mut(&deployment_id).ok_or_else(|| {
+            format!("Deployment {deployment_id} not yet provisioned for api {api_id}")
+        })?;
+        if let Some(s) = props.get("Description").and_then(|v| v.as_str()) {
+            dep.description = Some(s.to_string());
+        }
+        Ok(ProvisionResult::new(deployment_id.clone())
+            .with("DeploymentId", deployment_id)
+            .with("ApiId", api_id))
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::Authorizer. Mutates the
+    /// stored authorizer in place; the AuthorizerId remains stable.
+    fn update_apigwv2_authorizer(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let authorizer_id = existing.physical_id.clone();
+
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let auths = state
+            .authorizers
+            .get_mut(&api_id)
+            .ok_or_else(|| format!("Api {api_id} not yet provisioned"))?;
+        let auth = auths.get_mut(&authorizer_id).ok_or_else(|| {
+            format!("Authorizer {authorizer_id} not yet provisioned for api {api_id}")
+        })?;
+        if let Some(s) = props.get("Name").and_then(|v| v.as_str()) {
+            auth.name = s.to_string();
+        }
+        if let Some(s) = props.get("AuthorizerType").and_then(|v| v.as_str()) {
+            auth.authorizer_type = s.to_string();
+        }
+        if let Some(s) = props.get("AuthorizerUri").and_then(|v| v.as_str()) {
+            auth.authorizer_uri = Some(s.to_string());
+        }
+        if let Some(arr) = props.get("IdentitySource").and_then(|v| v.as_array()) {
+            auth.identity_source = Some(
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+            );
+        }
+        if let Some(obj) = props.get("JwtConfiguration").and_then(|v| v.as_object()) {
+            auth.jwt_configuration = Some(ApiGwV2JwtConfiguration {
+                audience: obj.get("Audience").and_then(|v| v.as_array()).map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                }),
+                issuer: obj.get("Issuer").and_then(|v| v.as_str()).map(String::from),
+            });
+        }
+        Ok(ProvisionResult::new(authorizer_id.clone())
+            .with("AuthorizerId", authorizer_id)
+            .with("ApiId", api_id))
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::DomainName. The DomainName
+    /// is the physical id and stays stable; configuration / mTLS can
+    /// change.
+    fn update_apigwv2_domain_name(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let domain_name = existing.physical_id.clone();
+        let body = serde_json::json!({
+            "domainName": domain_name,
+            "domainNameConfigurations": props.get("DomainNameConfigurations").cloned().unwrap_or(serde_json::json!([])),
+            "mutualTlsAuthentication": props.get("MutualTlsAuthentication").cloned(),
+            "apiMappingSelectionExpression": null,
+        });
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.domain_names.contains_key(&domain_name) {
+            return Err(format!("DomainName {domain_name} no longer exists"));
+        }
+        state.domain_names.insert(domain_name.clone(), body);
+        Ok(ProvisionResult::new(domain_name.clone()).with("DomainName", domain_name))
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::ApiMapping. The ApiMappingId
+    /// is the physical id; ApiId / Stage / ApiMappingKey can change.
+    fn update_apigwv2_api_mapping(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let domain_name = props
+            .get("DomainName")
+            .and_then(|v| v.as_str())
+            .ok_or("DomainName is required")?
+            .to_string();
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let stage = props
+            .get("Stage")
+            .and_then(|v| v.as_str())
+            .ok_or("Stage is required")?
+            .to_string();
+        let api_mapping_key = props
+            .get("ApiMappingKey")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let id = existing.physical_id.clone();
+        let body = serde_json::json!({
+            "apiMappingId": id,
+            "apiId": api_id,
+            "stage": stage,
+            "apiMappingKey": api_mapping_key,
+        });
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let map = state
+            .api_mappings
+            .get_mut(&domain_name)
+            .ok_or_else(|| format!("DomainName {domain_name} no longer exists"))?;
+        map.insert(id.clone(), body);
+        Ok(ProvisionResult::new(id.clone())
+            .with("ApiMappingId", id)
+            .with("DomainName", domain_name))
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::VpcLink. The VpcLinkId is
+    /// the physical id; Name / SubnetIds / SecurityGroupIds / Tags can
+    /// change.
+    fn update_apigwv2_vpc_link(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let body = state
+            .vpc_links
+            .get_mut(&id)
+            .ok_or_else(|| format!("VpcLink {id} no longer exists"))?;
+        if let Some(s) = props.get("Name").and_then(|v| v.as_str()) {
+            body["name"] = serde_json::Value::String(s.to_string());
+        }
+        if let Some(v) = props.get("SubnetIds").cloned() {
+            body["subnetIds"] = v;
+        }
+        if let Some(v) = props.get("SecurityGroupIds").cloned() {
+            body["securityGroupIds"] = v;
+        }
+        if let Some(v) = props.get("Tags").cloned() {
+            body["tags"] = v;
+        }
+        Ok(ProvisionResult::new(id.clone()).with("VpcLinkId", id))
+    }
+
+    /// In-place update for AWS::ApiGatewayV2::Model. The ModelId is the
+    /// physical id and stays stable; Schema / Description / ContentType
+    /// / Name can change.
+    fn update_apigwv2_model(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = props
+            .get("ApiId")
+            .and_then(|v| v.as_str())
+            .ok_or("ApiId is required")?
+            .to_string();
+        let id = existing.physical_id.clone();
+        let mut accounts = self.apigatewayv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let map = state
+            .models
+            .get_mut(&api_id)
+            .ok_or_else(|| format!("Api {api_id} not yet provisioned"))?;
+        let body = map
+            .get_mut(&id)
+            .ok_or_else(|| format!("Model {id} not yet provisioned for api {api_id}"))?;
+        if let Some(s) = props.get("Name").and_then(|v| v.as_str()) {
+            body["name"] = serde_json::Value::String(s.to_string());
+        }
+        if let Some(s) = props.get("ContentType").and_then(|v| v.as_str()) {
+            body["contentType"] = serde_json::Value::String(s.to_string());
+        }
+        if let Some(s) = props.get("Description").and_then(|v| v.as_str()) {
+            body["description"] = serde_json::Value::String(s.to_string());
+        }
+        if let Some(v) = props.get("Schema") {
+            body["schema"] = serde_json::Value::String(if let Some(s) = v.as_str() {
+                s.to_string()
+            } else {
+                v.to_string()
+            });
+        }
+        Ok(ProvisionResult::new(id.clone())
+            .with("ModelId", id)
+            .with("ApiId", api_id))
     }
 
     // --- SES ---
