@@ -223,6 +223,15 @@ export interface ForceDlqResponse {
   movedMessages: number;
 }
 
+/**
+ * Result of forcing one Application Auto Scaling watcher tick. The
+ * `applied` field is the number of policies that successfully changed
+ * a target's capacity on this tick.
+ */
+export interface AppAsTickResponse {
+  applied: number;
+}
+
 // ── EventBridge ────────────────────────────────────────────────────
 
 export interface EventBridgeEvent {

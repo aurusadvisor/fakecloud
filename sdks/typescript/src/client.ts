@@ -30,6 +30,7 @@ import type {
   SqsMessagesResponse,
   ExpirationTickResponse,
   ForceDlqResponse,
+  AppAsTickResponse,
   EventHistoryResponse,
   FireRuleRequest,
   FireRuleResponse,
@@ -226,6 +227,24 @@ export class SqsClient {
   async forceDlq(queueName: string): Promise<ForceDlqResponse> {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/sqs/${encodeURIComponent(queueName)}/force-dlq`,
+      { method: "POST" },
+    );
+    return parse(resp);
+  }
+}
+
+/**
+ * Application Auto Scaling watcher introspection client. The watcher
+ * periodically reads CloudWatch metrics, evaluates each scaling
+ * policy, and applies capacity changes on registered scalable
+ * targets. The `tick` endpoint forces an immediate evaluation.
+ */
+export class ApplicationAutoScalingClient {
+  constructor(private baseUrl: string) {}
+
+  async tick(): Promise<AppAsTickResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/application-autoscaling/tick`,
       { method: "POST" },
     );
     return parse(resp);
@@ -507,6 +526,7 @@ export class FakeCloud {
   private readonly _elbv2: Elbv2Client;
   private readonly _route53: Route53Client;
   private readonly _acm: AcmClient;
+  private readonly _applicationAutoscaling: ApplicationAutoScalingClient;
 
   constructor(baseUrl: string = "http://localhost:4566") {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -531,6 +551,9 @@ export class FakeCloud {
     this._elbv2 = new Elbv2Client(this.baseUrl);
     this._route53 = new Route53Client(this.baseUrl);
     this._acm = new AcmClient(this.baseUrl);
+    this._applicationAutoscaling = new ApplicationAutoScalingClient(
+      this.baseUrl,
+    );
   }
 
   // ── Health & Reset ─────────────────────────────────────────────
@@ -647,6 +670,10 @@ export class FakeCloud {
 
   get acm(): AcmClient {
     return this._acm;
+  }
+
+  get applicationAutoscaling(): ApplicationAutoScalingClient {
+    return this._applicationAutoscaling;
   }
 }
 

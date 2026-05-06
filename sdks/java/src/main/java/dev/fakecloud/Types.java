@@ -202,6 +202,9 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ForceDlqResponse(int movedMessages) {}
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record AppAsTickResponse(int applied) {}
+
     // ── EventBridge ────────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record EventBridgeEvent(

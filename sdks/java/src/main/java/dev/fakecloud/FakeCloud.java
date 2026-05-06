@@ -3,6 +3,7 @@ package dev.fakecloud;
 import static dev.fakecloud.HttpTransport.encodePath;
 
 import dev.fakecloud.Types.ApiGatewayV2RequestsResponse;
+import dev.fakecloud.Types.AppAsTickResponse;
 import dev.fakecloud.Types.AuthEventsResponse;
 import dev.fakecloud.Types.MintAuthorizationCodeRequest;
 import dev.fakecloud.Types.MintAuthorizationCodeResponse;
@@ -100,6 +101,7 @@ public final class FakeCloud {
     private final Elbv2Client elbv2;
     private final Route53Client route53;
     private final AcmClient acm;
+    private final ApplicationAutoScalingClient applicationAutoscaling;
 
     public FakeCloud() {
         this(DEFAULT_BASE_URL);
@@ -127,6 +129,7 @@ public final class FakeCloud {
         this.elbv2 = new Elbv2Client(http);
         this.route53 = new Route53Client(http);
         this.acm = new AcmClient(http);
+        this.applicationAutoscaling = new ApplicationAutoScalingClient(http);
     }
 
     static String trimTrailingSlashes(String url) {
@@ -186,6 +189,7 @@ public final class FakeCloud {
     public Elbv2Client elbv2() { return elbv2; }
     public Route53Client route53() { return route53; }
     public AcmClient acm() { return acm; }
+    public ApplicationAutoScalingClient applicationAutoscaling() { return applicationAutoscaling; }
 
     // ── Sub-clients ────────────────────────────────────────────────
 
@@ -313,6 +317,17 @@ public final class FakeCloud {
             return http.postEmpty(
                     "/_fakecloud/sqs/" + encodePath(queueName) + "/force-dlq",
                     ForceDlqResponse.class);
+        }
+    }
+
+    public static final class ApplicationAutoScalingClient {
+        private final HttpTransport http;
+        ApplicationAutoScalingClient(HttpTransport http) { this.http = http; }
+
+        public AppAsTickResponse tick() {
+            return http.postEmpty(
+                    "/_fakecloud/application-autoscaling/tick",
+                    AppAsTickResponse.class);
         }
     }
 

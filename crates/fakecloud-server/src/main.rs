@@ -13,6 +13,7 @@ use fakecloud_core::dispatch::{self, DispatchConfig};
 use fakecloud_core::registry::ServiceRegistry;
 use fakecloud_sdk::types;
 
+mod appas_hooks;
 mod cli;
 mod dynamodb_streams_lambda_poller;
 mod introspection;
@@ -2595,6 +2596,36 @@ async fn main() {
         tokio::spawn(rt.run_cleanup_loop(std::time::Duration::from_secs(300)));
     }
 
+    // Application Auto Scaling watcher: ticks every 15s, walks all
+    // DynamoDB scaling targets/policies, reads CloudWatch metrics, and
+    // applies capacity changes via the DDB capacity hook. Tests can
+    // skip the wall-clock wait via `/_fakecloud/application-autoscaling/tick`.
+    let appas_metric_reader = Arc::new(appas_hooks::CloudwatchMetricReader::new(
+        cloudwatch_state.clone(),
+    ));
+    let appas_ddb_hook = Arc::new(appas_hooks::DynamoDbCapacityHookImpl::new(
+        dynamodb_state.clone(),
+    ));
+    let appas_watcher_for_admin = Arc::new(
+        fakecloud_application_autoscaling::ScalingWatcher::new(
+            app_autoscaling_state.clone(),
+            appas_metric_reader.clone(),
+            appas_ddb_hook.clone(),
+            cli.region.clone(),
+        )
+        .with_interval(std::time::Duration::from_secs(15)),
+    );
+    {
+        let watcher = fakecloud_application_autoscaling::ScalingWatcher::new(
+            app_autoscaling_state.clone(),
+            appas_metric_reader,
+            appas_ddb_hook,
+            cli.region.clone(),
+        )
+        .with_interval(std::time::Duration::from_secs(15));
+        tokio::spawn(watcher.run());
+    }
+
     let services: Vec<&str> = registry.service_names();
     tracing::info!(services = ?services, "registered services");
 
@@ -3303,6 +3334,16 @@ async fn main() {
                     axum::Json(types::ForceDlqResponse {
                         moved_messages: moved,
                     })
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/application-autoscaling/tick",
+            axum::routing::post({
+                let watcher = appas_watcher_for_admin.clone();
+                move || async move {
+                    let applied = watcher.tick_once();
+                    axum::Json(types::AppAsTickResponse { applied })
                 }
             }),
         )

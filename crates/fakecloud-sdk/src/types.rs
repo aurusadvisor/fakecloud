@@ -272,6 +272,13 @@ pub struct ForceDlqResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppAsTickResponse {
+    /// Number of scaling decisions that were applied this tick.
+    pub applied: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SetSsmCommandStatusRequest {
     pub account_id: Option<String>,
     pub status: String,

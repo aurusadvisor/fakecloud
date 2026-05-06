@@ -1,6 +1,7 @@
 """fakecloud — Python SDK for the fakecloud local AWS emulator."""
 
 from fakecloud.client import (
+    ApplicationAutoScalingClient,
     BedrockClient,
     CognitoClient,
     DynamoDbClient,
@@ -21,6 +22,7 @@ from fakecloud.client import (
 )
 
 __all__ = [
+    "ApplicationAutoScalingClient",
     "BedrockClient",
     "CognitoClient",
     "DynamoDbClient",

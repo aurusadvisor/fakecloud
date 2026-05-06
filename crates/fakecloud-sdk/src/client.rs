@@ -148,6 +148,10 @@ impl FakeCloud {
         EcsClient { fc: self }
     }
 
+    pub fn application_autoscaling(&self) -> ApplicationAutoScalingClient<'_> {
+        ApplicationAutoScalingClient { fc: self }
+    }
+
     // ── Internal helpers ────────────────────────────────────────────
 
     async fn parse<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, Error> {
@@ -411,6 +415,31 @@ impl SqsClient<'_> {
             .post(format!(
                 "{}/_fakecloud/sqs/{}/force-dlq",
                 self.fc.base_url, queue_name
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+}
+
+// ── Application Auto Scaling ────────────────────────────────────────
+
+pub struct ApplicationAutoScalingClient<'a> {
+    fc: &'a FakeCloud,
+}
+
+impl ApplicationAutoScalingClient<'_> {
+    /// Force the watcher to evaluate every scaling policy now. Returns
+    /// the number of policies that applied a capacity change on this
+    /// tick. Useful in tests so callers don't have to wait for the
+    /// wall-clock 15s interval.
+    pub async fn tick(&self) -> Result<AppAsTickResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/application-autoscaling/tick",
+                self.fc.base_url
             ))
             .send()
             .await?;

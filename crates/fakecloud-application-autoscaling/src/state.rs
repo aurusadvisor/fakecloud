@@ -72,6 +72,10 @@ pub struct ScalingPolicy {
     pub target_tracking_scaling_policy_configuration: Option<serde_json::Value>,
     pub predictive_scaling_policy_configuration: Option<serde_json::Value>,
     pub alarms: Vec<Alarm>,
+    /// Last time the watcher applied a scale action through this policy.
+    /// Honours the policy's cooldown so we don't thrash capacity.
+    #[serde(default)]
+    pub last_applied_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

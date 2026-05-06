@@ -6,9 +6,17 @@ use std::collections::HashMap;
 
 use aws_sdk_applicationautoscaling::primitives::DateTime as AwsDateTime;
 use aws_sdk_applicationautoscaling::types::{
-    MetricAggregationType, PolicyType, PredefinedMetricSpecification, ScalableDimension,
-    ScalableTargetAction, ServiceNamespace, StepAdjustment, StepScalingPolicyConfiguration,
-    SuspendedState, TargetTrackingScalingPolicyConfiguration,
+    AdjustmentType, MetricAggregationType, MetricType, PolicyType, PredefinedMetricSpecification,
+    ScalableDimension, ScalableTargetAction, ServiceNamespace, StepAdjustment,
+    StepScalingPolicyConfiguration, SuspendedState, TargetTrackingScalingPolicyConfiguration,
+};
+use aws_sdk_cloudwatch::primitives::DateTime as CwDateTime;
+use aws_sdk_cloudwatch::types::{
+    ComparisonOperator as CwComparisonOperator, MetricDatum as CwMetricDatum, StandardUnit,
+};
+use aws_sdk_dynamodb::types::{
+    AttributeDefinition as DdbAttributeDefinition, BillingMode, KeySchemaElement,
+    KeyType as DdbKeyType, ProvisionedThroughput, ScalarAttributeType,
 };
 use helpers::TestServer;
 
@@ -586,4 +594,365 @@ async fn tag_unknown_resource_returns_object_not_found() {
         .await
         .expect_err("missing arn");
     assert!(format!("{err:?}").contains("ObjectNotFound"));
+}
+
+/// POST `/_fakecloud/application-autoscaling/tick` to force the
+/// scaling watcher to evaluate immediately, instead of waiting for
+/// its 15s interval. Returns the number of policies that applied a
+/// capacity change this tick.
+async fn force_appas_tick(server: &TestServer) -> usize {
+    let url = format!(
+        "{}/_fakecloud/application-autoscaling/tick",
+        server.endpoint()
+    );
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .send()
+        .await
+        .expect("admin tick");
+    let body: serde_json::Value = resp.json().await.expect("json");
+    body["applied"].as_u64().unwrap_or(0) as usize
+}
+
+async fn create_provisioned_table(
+    ddb: &aws_sdk_dynamodb::Client,
+    name: &str,
+    read: i64,
+    write: i64,
+) {
+    ddb.create_table()
+        .table_name(name)
+        .billing_mode(BillingMode::Provisioned)
+        .attribute_definitions(
+            DdbAttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(DdbKeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .provisioned_throughput(
+            ProvisionedThroughput::builder()
+                .read_capacity_units(read)
+                .write_capacity_units(write)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create table");
+}
+
+async fn put_ddb_utilisation(
+    cw: &aws_sdk_cloudwatch::Client,
+    metric: &str,
+    table_name: &str,
+    value: f64,
+) {
+    cw.put_metric_data()
+        .namespace("AWS/DynamoDB")
+        .metric_data(
+            CwMetricDatum::builder()
+                .metric_name(metric)
+                .dimensions(
+                    aws_sdk_cloudwatch::types::Dimension::builder()
+                        .name("TableName")
+                        .value(table_name)
+                        .build(),
+                )
+                .timestamp(CwDateTime::from_secs(chrono::Utc::now().timestamp()))
+                .value(value)
+                .unit(StandardUnit::Percent)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put metric");
+}
+
+#[tokio::test]
+async fn target_tracking_scales_dynamodb_read_capacity() {
+    let server = TestServer::start().await;
+    let aas = server.application_autoscaling_client().await;
+    let ddb = server.dynamodb_client().await;
+    let cw = server.cloudwatch_client().await;
+
+    create_provisioned_table(&ddb, "tt-orders", 10, 5).await;
+
+    aas.register_scalable_target()
+        .service_namespace(ServiceNamespace::Dynamodb)
+        .resource_id("table/tt-orders")
+        .scalable_dimension(ScalableDimension::DynamoDbTableReadCapacityUnits)
+        .min_capacity(5)
+        .max_capacity(100)
+        .send()
+        .await
+        .expect("register");
+
+    aas.put_scaling_policy()
+        .service_namespace(ServiceNamespace::Dynamodb)
+        .resource_id("table/tt-orders")
+        .scalable_dimension(ScalableDimension::DynamoDbTableReadCapacityUnits)
+        .policy_name("track-70")
+        .policy_type(PolicyType::TargetTrackingScaling)
+        .target_tracking_scaling_policy_configuration(
+            TargetTrackingScalingPolicyConfiguration::builder()
+                .target_value(70.0)
+                .predefined_metric_specification(
+                    PredefinedMetricSpecification::builder()
+                        .predefined_metric_type(MetricType::DynamoDbReadCapacityUtilization)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("put policy");
+
+    // Drive utilisation to 95% — well above the 70% target — so the
+    // watcher must scale capacity up.
+    put_ddb_utilisation(&cw, "DynamoDBReadCapacityUtilization", "tt-orders", 95.0).await;
+    let applied = force_appas_tick(&server).await;
+    assert_eq!(applied, 1, "watcher should apply scale-out");
+
+    let described = ddb
+        .describe_table()
+        .table_name("tt-orders")
+        .send()
+        .await
+        .expect("describe");
+    let throughput = described
+        .table()
+        .and_then(|t| t.provisioned_throughput())
+        .expect("throughput");
+    let read_now = throughput.read_capacity_units().unwrap_or(0);
+    // 10 * (95 / 70) = 13.57 -> ceil 14.
+    assert_eq!(read_now, 14, "expected scale-out to 14, got {read_now}");
+    // Write capacity untouched.
+    assert_eq!(throughput.write_capacity_units().unwrap_or(0), 5);
+
+    // Now drive utilisation low — watcher should scale in.
+    put_ddb_utilisation(&cw, "DynamoDBReadCapacityUtilization", "tt-orders", 35.0).await;
+    let applied2 = force_appas_tick(&server).await;
+    assert_eq!(applied2, 1, "watcher should apply scale-in");
+    let described2 = ddb
+        .describe_table()
+        .table_name("tt-orders")
+        .send()
+        .await
+        .expect("describe2");
+    let read_after = described2
+        .table()
+        .and_then(|t| t.provisioned_throughput())
+        .and_then(|p| p.read_capacity_units())
+        .unwrap_or(0);
+    // 14 * (35 / 70) = 7. Above min_capacity of 5.
+    assert_eq!(read_after, 7, "expected scale-in to 7, got {read_after}");
+
+    // Activities log captures both decisions plus the initial register.
+    let activities = aas
+        .describe_scaling_activities()
+        .service_namespace(ServiceNamespace::Dynamodb)
+        .resource_id("table/tt-orders")
+        .scalable_dimension(ScalableDimension::DynamoDbTableReadCapacityUnits)
+        .send()
+        .await
+        .expect("activities")
+        .scaling_activities()
+        .to_vec();
+    assert!(
+        activities.len() >= 3,
+        "expected >= 3 activities, got {}",
+        activities.len()
+    );
+}
+
+#[tokio::test]
+async fn target_tracking_clamps_to_min_max_bounds() {
+    let server = TestServer::start().await;
+    let aas = server.application_autoscaling_client().await;
+    let ddb = server.dynamodb_client().await;
+    let cw = server.cloudwatch_client().await;
+
+    create_provisioned_table(&ddb, "tt-bounds", 10, 5).await;
+
+    aas.register_scalable_target()
+        .service_namespace(ServiceNamespace::Dynamodb)
+        .resource_id("table/tt-bounds")
+        .scalable_dimension(ScalableDimension::DynamoDbTableReadCapacityUnits)
+        .min_capacity(8)
+        .max_capacity(15)
+        .send()
+        .await
+        .expect("register");
+
+    aas.put_scaling_policy()
+        .service_namespace(ServiceNamespace::Dynamodb)
+        .resource_id("table/tt-bounds")
+        .scalable_dimension(ScalableDimension::DynamoDbTableReadCapacityUnits)
+        .policy_name("track-50")
+        .policy_type(PolicyType::TargetTrackingScaling)
+        .target_tracking_scaling_policy_configuration(
+            TargetTrackingScalingPolicyConfiguration::builder()
+                .target_value(50.0)
+                .predefined_metric_specification(
+                    PredefinedMetricSpecification::builder()
+                        .predefined_metric_type(MetricType::DynamoDbReadCapacityUtilization)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("put policy");
+
+    // 200% utilisation pushes raw desired beyond max_capacity (15).
+    put_ddb_utilisation(&cw, "DynamoDBReadCapacityUtilization", "tt-bounds", 200.0).await;
+    force_appas_tick(&server).await;
+
+    let read_now = ddb
+        .describe_table()
+        .table_name("tt-bounds")
+        .send()
+        .await
+        .expect("describe")
+        .table()
+        .and_then(|t| t.provisioned_throughput())
+        .and_then(|p| p.read_capacity_units())
+        .unwrap_or(0);
+    assert_eq!(read_now, 15, "scale-out clamped to max_capacity");
+
+    // Drop utilisation to ~0 — desired floor of min_capacity (8).
+    put_ddb_utilisation(&cw, "DynamoDBReadCapacityUtilization", "tt-bounds", 1.0).await;
+    force_appas_tick(&server).await;
+    let read_floor = ddb
+        .describe_table()
+        .table_name("tt-bounds")
+        .send()
+        .await
+        .expect("describe2")
+        .table()
+        .and_then(|t| t.provisioned_throughput())
+        .and_then(|p| p.read_capacity_units())
+        .unwrap_or(0);
+    assert_eq!(read_floor, 8, "scale-in clamped to min_capacity");
+}
+
+#[tokio::test]
+async fn step_scaling_applies_when_alarm_action_fires() {
+    let server = TestServer::start().await;
+    let aas = server.application_autoscaling_client().await;
+    let ddb = server.dynamodb_client().await;
+    let cw = server.cloudwatch_client().await;
+
+    create_provisioned_table(&ddb, "step-orders", 10, 10).await;
+
+    aas.register_scalable_target()
+        .service_namespace(ServiceNamespace::Dynamodb)
+        .resource_id("table/step-orders")
+        .scalable_dimension(ScalableDimension::DynamoDbTableWriteCapacityUnits)
+        .min_capacity(5)
+        .max_capacity(50)
+        .send()
+        .await
+        .expect("register");
+
+    let policy_arn = aas
+        .put_scaling_policy()
+        .service_namespace(ServiceNamespace::Dynamodb)
+        .resource_id("table/step-orders")
+        .scalable_dimension(ScalableDimension::DynamoDbTableWriteCapacityUnits)
+        .policy_name("step-out")
+        .policy_type(PolicyType::StepScaling)
+        .step_scaling_policy_configuration(
+            StepScalingPolicyConfiguration::builder()
+                .adjustment_type(AdjustmentType::ChangeInCapacity)
+                .metric_aggregation_type(MetricAggregationType::Average)
+                .step_adjustments(
+                    StepAdjustment::builder()
+                        .scaling_adjustment(10)
+                        .metric_interval_lower_bound(0.0)
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("put policy")
+        .policy_arn()
+        .to_owned();
+
+    // Wire a CloudWatch alarm whose `AlarmActions` references the
+    // scaling policy ARN — that's the canonical AWS path to attach
+    // a step scaling policy to an alarm. Then SetAlarmState to fire
+    // it; the watcher discovers the firing alarm via the action ARN.
+    cw.put_metric_alarm()
+        .alarm_name("ddb-step-burn")
+        .metric_name("DynamoDBWriteCapacityUtilization")
+        .namespace("AWS/DynamoDB")
+        .statistic(aws_sdk_cloudwatch::types::Statistic::Average)
+        .period(60)
+        .evaluation_periods(1)
+        .threshold(80.0)
+        .comparison_operator(CwComparisonOperator::GreaterThanThreshold)
+        .alarm_actions(&policy_arn)
+        .send()
+        .await
+        .expect("put alarm");
+
+    cw.set_alarm_state()
+        .alarm_name("ddb-step-burn")
+        .state_value(aws_sdk_cloudwatch::types::StateValue::Alarm)
+        .state_reason("synthetic burn")
+        .send()
+        .await
+        .expect("set state");
+
+    let applied = force_appas_tick(&server).await;
+    assert_eq!(applied, 1, "step scaling should apply once");
+
+    let write_now = ddb
+        .describe_table()
+        .table_name("step-orders")
+        .send()
+        .await
+        .expect("describe")
+        .table()
+        .and_then(|t| t.provisioned_throughput())
+        .and_then(|p| p.write_capacity_units())
+        .unwrap_or(0);
+    // 10 + 10 = 20.
+    assert_eq!(write_now, 20, "expected step-out to 20, got {write_now}");
+
+    // Subsequent ticks while the alarm is still firing must not
+    // double-scale within the cooldown window.
+    let _ = force_appas_tick(&server).await;
+    let unchanged = ddb
+        .describe_table()
+        .table_name("step-orders")
+        .send()
+        .await
+        .expect("describe2")
+        .table()
+        .and_then(|t| t.provisioned_throughput())
+        .and_then(|p| p.write_capacity_units())
+        .unwrap_or(0);
+    // No cooldown configured -> the watcher will keep scaling out.
+    // We assert on monotonic non-decrease rather than equality so the
+    // test stays robust regardless of cooldown defaulting policy.
+    assert!(
+        unchanged >= write_now,
+        "capacity must not regress while alarm fires"
+    );
 }

@@ -124,6 +124,11 @@ func (fc *FakeCloud) Route53() *Route53Client { return &Route53Client{fc: fc} }
 // ACM returns the ACM admin sub-client.
 func (fc *FakeCloud) ACM() *ACMClient { return &ACMClient{fc: fc} }
 
+// ApplicationAutoScaling returns the Application Auto Scaling watcher sub-client.
+func (fc *FakeCloud) ApplicationAutoScaling() *ApplicationAutoScalingClient {
+	return &ApplicationAutoScalingClient{fc: fc}
+}
+
 // ── Error type ─────────────────────────────────────────────────────
 
 // APIError is returned when the server responds with a non-2xx status.

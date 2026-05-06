@@ -35,6 +35,7 @@ from fakecloud.types import (
     ElastiCacheServerlessCachesResponse,
     Elbv2ListenersResponse,
     Elbv2LoadBalancersResponse,
+    AppAsTickResponse,
     Elbv2RulesResponse,
     Elbv2TargetGroupsResponse,
     EventHistoryResponse,
@@ -582,6 +583,27 @@ class SqsClient:
         return ForceDlqResponse.from_dict(resp.json())
 
 
+class ApplicationAutoScalingClient:
+    """Async Application Auto Scaling watcher introspection client."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    async def tick(self) -> AppAsTickResponse:
+        """Force the watcher to evaluate every scaling policy now.
+
+        Returns the number of policies that applied a capacity change
+        on this tick. Useful in tests so callers don't have to wait
+        for the wall-clock 15s interval.
+        """
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/application-autoscaling/tick"
+        )
+        _check(resp)
+        return AppAsTickResponse.from_dict(resp.json())
+
+
 class EventsClient:
     """Async EventBridge introspection client."""
 
@@ -955,6 +977,19 @@ class _SyncSqsClient:
         return ForceDlqResponse.from_dict(resp.json())
 
 
+class _SyncApplicationAutoScalingClient:
+    def __init__(self, client: httpx.Client, base_url: str) -> None:
+        self._client = client
+        self._base = base_url
+
+    def tick(self) -> AppAsTickResponse:
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/application-autoscaling/tick"
+        )
+        _check(resp)
+        return AppAsTickResponse.from_dict(resp.json())
+
+
 class _SyncEventsClient:
     def __init__(self, client: httpx.Client, base_url: str) -> None:
         self._client = client
@@ -1300,6 +1335,10 @@ class FakeCloud:
     def acm(self) -> AcmClient:
         return AcmClient(self._client, self._base)
 
+    @property
+    def application_autoscaling(self) -> ApplicationAutoScalingClient:
+        return ApplicationAutoScalingClient(self._client, self._base)
+
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def aclose(self) -> None:
@@ -1429,6 +1468,10 @@ class FakeCloudSync:
     @property
     def acm(self) -> _SyncAcmClient:
         return _SyncAcmClient(self._client, self._base)
+
+    @property
+    def application_autoscaling(self) -> _SyncApplicationAutoScalingClient:
+        return _SyncApplicationAutoScalingClient(self._client, self._base)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 
