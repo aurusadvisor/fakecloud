@@ -207,6 +207,7 @@ fn db_instance_xml_renders_endpoint_and_status() {
         domain_iam_role_name: None,
         domain_auth_secret_arn: None,
         domain_dns_ips: Vec::new(),
+        db_cluster_identifier: None,
     };
 
     let xml = db_instance_xml(&instance, Some("creating"));
@@ -388,6 +389,7 @@ fn make_instance_with_defaults(id: &str) -> DbInstance {
         domain_iam_role_name: None,
         domain_auth_secret_arn: None,
         domain_dns_ips: Vec::new(),
+        db_cluster_identifier: None,
     }
 }
 
@@ -665,6 +667,7 @@ fn seed_instance(svc: &RdsService, identifier: &str) -> String {
             domain_iam_role_name: None,
             domain_auth_secret_arn: None,
             domain_dns_ips: Vec::new(),
+            db_cluster_identifier: None,
         },
     );
     arn
@@ -2582,6 +2585,7 @@ async fn save_snapshot_static_persists_status_flip_from_bg_task() {
             domain_iam_role_name: None,
             domain_auth_secret_arn: None,
             domain_dns_ips: Vec::new(),
+            db_cluster_identifier: None,
         }
     }
 

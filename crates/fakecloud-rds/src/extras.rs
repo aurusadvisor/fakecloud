@@ -32,7 +32,7 @@ fn rand_id() -> String {
     )
 }
 
-fn xml_response(action: &str, inner: String, request_id: &str) -> AwsResponse {
+pub(crate) fn xml_response(action: &str, inner: String, request_id: &str) -> AwsResponse {
     let body = format!(
         r#"<{action}Response xmlns="{NS}">
   <{action}Result>
@@ -219,6 +219,12 @@ impl RdsService {
             }
 
             // ── DB Cluster snapshots ──
+            // CreateDBClusterSnapshot is implemented in service.rs because
+            // the real path needs the async runtime to dump the writer's
+            // database. We keep a metadata-only fallback here for unit
+            // tests that exercise the extras handler directly without a
+            // runtime wired up; the dispatcher in `RdsService::handle_request`
+            // routes the action through the async path before reaching us.
             "CreateDBClusterSnapshot" => {
                 let id = get_param(req, "DBClusterSnapshotIdentifier")
                     .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
@@ -1177,6 +1183,10 @@ impl RdsService {
                     .get("DBClusterIdentifier")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let pending_dump_b64 = snapshot
+                    .get("DumpDataB64")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 let mut entry = state
                     .extras
                     .get("clusters")
@@ -1203,6 +1213,16 @@ impl RdsService {
                         json!(format!("{target}.cluster-ro-xxx.{region}.rds.amazonaws.com")),
                     );
                     obj.remove("ReplicationSourceIdentifier");
+                    // The new cluster starts empty; the user is expected
+                    // to call CreateDBInstance with DBClusterIdentifier
+                    // pointing here, at which point we replay the dump.
+                    obj.remove("DBClusterMembers");
+                    obj.remove("WriterDBInstanceIdentifier");
+                    // Drop snapshot bookkeeping that leaked in via the
+                    // source-cluster clone path.
+                    obj.remove("DBClusterSnapshotIdentifier");
+                    obj.remove("DBClusterSnapshotArn");
+                    obj.remove("DumpDataB64");
                     if let Some(engine) = get_param(req, "Engine") {
                         obj.insert("Engine".to_string(), json!(engine));
                     }
@@ -1211,6 +1231,12 @@ impl RdsService {
                     }
                     if let Some(port) = get_param(req, "Port").and_then(|p| p.parse::<i64>().ok()) {
                         obj.insert("Port".to_string(), json!(port));
+                    }
+                    // Stage the snapshot dump so the next CreateDBInstance
+                    // joining this cluster replays the data into its
+                    // fresh container.
+                    if let Some(b64) = pending_dump_b64 {
+                        obj.insert("PendingRestoreDumpB64".to_string(), json!(b64));
                     }
                 }
                 store(&mut state.extras, "clusters").insert(target.clone(), entry);
@@ -1229,6 +1255,9 @@ impl RdsService {
                     &rid,
                 ))
             }
+            // Sync metadata-only fallback for RestoreDBClusterToPointInTime;
+            // the dispatcher in `handle_request` routes the action to the
+            // async path that also dumps and stages the source writer.
             "RestoreDBClusterToPointInTime" => {
                 let target = get_param(req, "DBClusterIdentifier")
                     .ok_or_else(|| missing("DBClusterIdentifier"))?;
@@ -1261,6 +1290,8 @@ impl RdsService {
                         "ReaderEndpoint".to_string(),
                         json!(format!("{target}.cluster-ro-xxx.{region}.rds.amazonaws.com")),
                     );
+                    obj.remove("DBClusterMembers");
+                    obj.remove("WriterDBInstanceIdentifier");
                     if let Some(restore_time) = get_param(req, "RestoreToTime") {
                         obj.insert("RestoreToTime".to_string(), json!(restore_time));
                     }
@@ -2151,7 +2182,7 @@ fn switchover_read_replica_action(
 
 // ── XML helpers per resource ──
 
-fn db_cluster_xml(id: &str, arn: &str) -> String {
+pub(crate) fn db_cluster_xml(id: &str, arn: &str) -> String {
     format!(
         "    <DBCluster>\n      <DBClusterIdentifier>{}</DBClusterIdentifier>\n      <DBClusterArn>{}</DBClusterArn>\n      <Status>available</Status>\n    </DBCluster>",
         xml_escape(id), xml_escape(arn)
@@ -2353,7 +2384,7 @@ fn db_cluster_member_xml(v: &Value) -> String {
     out
 }
 
-fn cluster_snapshot_xml(id: &str, arn: &str, cluster: &str) -> String {
+pub(crate) fn cluster_snapshot_xml(id: &str, arn: &str, cluster: &str) -> String {
     format!(
         "    <DBClusterSnapshot>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n      <DBClusterSnapshotArn>{}</DBClusterSnapshotArn>\n      <DBClusterIdentifier>{}</DBClusterIdentifier>\n      <Status>available</Status>\n    </DBClusterSnapshot>",
         xml_escape(id), xml_escape(arn), xml_escape(cluster),
@@ -3325,6 +3356,7 @@ mod tests {
                 domain_iam_role_name: None,
                 domain_auth_secret_arn: None,
                 domain_dns_ips: Vec::new(),
+                db_cluster_identifier: None,
             },
         );
         // Replica points at source.
@@ -3393,6 +3425,7 @@ mod tests {
                 domain_iam_role_name: None,
                 domain_auth_secret_arn: None,
                 domain_dns_ips: Vec::new(),
+                db_cluster_identifier: None,
             },
         );
     }
@@ -4160,6 +4193,7 @@ mod tests {
                 domain_iam_role_name: None,
                 domain_auth_secret_arn: None,
                 domain_dns_ips: Vec::new(),
+                db_cluster_identifier: None,
             },
         );
     }

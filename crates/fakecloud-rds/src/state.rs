@@ -130,6 +130,11 @@ pub struct DbInstance {
     pub domain_auth_secret_arn: Option<String>,
     #[serde(default)]
     pub domain_dns_ips: Vec<String>,
+    /// Aurora cluster the instance is a member of, when set. Mirrors
+    /// `DBClusterIdentifier` on CreateDBInstance / RestoreDB* requests so
+    /// snapshot/restore paths can find the writer for a given cluster.
+    #[serde(default)]
+    pub db_cluster_identifier: Option<String>,
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -969,6 +974,7 @@ mod tests {
                 domain_iam_role_name: None,
                 domain_auth_secret_arn: None,
                 domain_dns_ips: Vec::new(),
+                db_cluster_identifier: None,
             },
         );
 
@@ -1114,6 +1120,7 @@ mod tests {
             domain_iam_role_name: None,
             domain_auth_secret_arn: None,
             domain_dns_ips: Vec::new(),
+            db_cluster_identifier: None,
         }
     }
 
