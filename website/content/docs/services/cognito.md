@@ -29,6 +29,7 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 
 ## OAuth2 / OIDC endpoints
 
+- `GET /oauth2/authorize` — Hosted UI authorization endpoint. Supports `response_type=code` (Authorization Code grant, with optional PKCE `S256`/`plain`) and `response_type=token` (Implicit grant). Validates `client_id`, `redirect_uri` (must match the client's `CallbackURLs`), and `scope` (must be a subset of `AllowedOAuthScopes`). For scripted tests, accepts `username`/`password` query params in lieu of the real Cognito Hosted UI HTML form.
 - `POST /oauth2/token` — token endpoint with `authorization_code`, `client_credentials`, and `refresh_token` grants. RFC 6749 §2.3.1 Basic auth supported. PKCE (S256/plain) verified for `authorization_code`.
 - `GET|POST /oauth2/userInfo` — RFC 7662 user info (bearer access token -> standard OIDC claims).
 - `POST /oauth2/revoke` — RFC 7009 token revocation.
@@ -43,7 +44,7 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 - `GET /_fakecloud/cognito/tokens` — list active tokens (without exposing strings)
 - `POST /_fakecloud/cognito/expire-tokens` — expire tokens for a pool/user
 - `GET /_fakecloud/cognito/auth-events` — list auth events (signup, signin, failures)
-- `POST /_fakecloud/cognito/authorization-codes` — mint a single-use OAuth2 authorization code for the `authorization_code` grant (test-only equivalent of `/oauth2/authorize`)
+- `POST /_fakecloud/cognito/authorization-codes` — mint a single-use OAuth2 authorization code for the `authorization_code` grant (programmatic alternative to driving `/oauth2/authorize`)
 
 ## Cross-service delivery
 
