@@ -45,6 +45,11 @@ pub struct CognitoState {
     /// access_token -> AccessTokenData
     #[serde(default)]
     pub access_tokens: BTreeMap<String, AccessTokenData>,
+    /// One-time authorization codes issued by `/oauth2/authorize` (Y4) and
+    /// the admin mint endpoint, consumed exactly once by `/oauth2/token`'s
+    /// `authorization_code` grant.
+    #[serde(default)]
+    pub authorization_codes: BTreeMap<String, AuthorizationCodeData>,
     /// pool_id -> (group_name -> Group)
     #[serde(default)]
     pub groups: BTreeMap<String, BTreeMap<String, Group>>,
@@ -130,6 +135,7 @@ impl CognitoState {
             refresh_tokens: BTreeMap::new(),
             sessions: BTreeMap::new(),
             access_tokens: BTreeMap::new(),
+            authorization_codes: BTreeMap::new(),
             groups: BTreeMap::new(),
             user_groups: BTreeMap::new(),
             identity_providers: BTreeMap::new(),
@@ -154,6 +160,7 @@ impl CognitoState {
         self.refresh_tokens.clear();
         self.sessions.clear();
         self.access_tokens.clear();
+        self.authorization_codes.clear();
         self.groups.clear();
         self.user_groups.clear();
         self.identity_providers.clear();
@@ -176,6 +183,32 @@ pub struct RefreshTokenData {
     pub user_pool_id: String,
     pub username: String,
     pub client_id: String,
+    pub issued_at: DateTime<Utc>,
+}
+
+/// Single-use OAuth2 authorization code minted by `/oauth2/authorize`
+/// (or the `_fakecloud` admin endpoint pre-Y4). Carries everything the
+/// `/oauth2/token` `authorization_code` grant needs to bind the code
+/// back to the original `(client_id, redirect_uri, scope, PKCE)` tuple
+/// it was issued for.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthorizationCodeData {
+    pub user_pool_id: String,
+    pub client_id: String,
+    pub username: String,
+    pub redirect_uri: String,
+    /// Space-separated scopes requested by the client at /authorize time.
+    pub scopes: Vec<String>,
+    /// Optional PKCE challenge — when present the token endpoint must
+    /// verify the supplied `code_verifier` against this value per RFC
+    /// 7636.
+    pub code_challenge: Option<String>,
+    /// `S256` (default) or `plain`. Stored as-supplied so token endpoint
+    /// can replay the right transform.
+    pub code_challenge_method: Option<String>,
+    /// Optional OIDC `nonce` claim, propagated into the issued id_token
+    /// per OIDC core §3.1.2.1.
+    pub nonce: Option<String>,
     pub issued_at: DateTime<Utc>,
 }
 

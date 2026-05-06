@@ -4,6 +4,8 @@ import static dev.fakecloud.HttpTransport.encodePath;
 
 import dev.fakecloud.Types.ApiGatewayV2RequestsResponse;
 import dev.fakecloud.Types.AuthEventsResponse;
+import dev.fakecloud.Types.MintAuthorizationCodeRequest;
+import dev.fakecloud.Types.MintAuthorizationCodeResponse;
 import dev.fakecloud.Types.BedrockFaultRule;
 import dev.fakecloud.Types.BedrockFaultsResponse;
 import dev.fakecloud.Types.BedrockInvocationsResponse;
@@ -445,6 +447,14 @@ public final class FakeCloud {
 
         public AuthEventsResponse getAuthEvents() {
             return http.get("/_fakecloud/cognito/auth-events", AuthEventsResponse.class);
+        }
+
+        public MintAuthorizationCodeResponse mintAuthorizationCode(
+                MintAuthorizationCodeRequest req) {
+            return http.postJson(
+                    "/_fakecloud/cognito/authorization-codes",
+                    req,
+                    MintAuthorizationCodeResponse.class);
         }
     }
 

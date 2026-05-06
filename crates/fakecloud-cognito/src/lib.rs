@@ -6,14 +6,16 @@ pub mod user_status;
 
 pub use service::{
     ensure_pool_signing_key, handle_oauth2_revoke, handle_oauth2_token, handle_oauth2_userinfo,
-    oidc_discovery_document, pool_existence_and_domain, pool_jwks_document, CognitoService,
+    mint_authorization_code, oidc_discovery_document, pool_existence_and_domain,
+    pool_jwks_document, CognitoService, MintAuthorizationCodeError, MintAuthorizationCodeRequest,
     OAuthRevokeError, OAuthTokenError, OAuthTokenResponse, OAuthUserInfoError,
 };
 pub use state::{
-    default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig, CognitoSnapshot,
-    CognitoState, CustomDomainConfig, EmailConfiguration, PasswordPolicy, PoolPolicies,
-    RecoveryOption, SchemaAttribute, SharedCognitoState, SignInPolicy, SmsConfiguration, UserPool,
-    UserPoolClient, UserPoolDomain, COGNITO_SNAPSHOT_SCHEMA_VERSION,
+    default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig,
+    AuthorizationCodeData, CognitoSnapshot, CognitoState, CustomDomainConfig, EmailConfiguration,
+    PasswordPolicy, PoolPolicies, RecoveryOption, SchemaAttribute, SharedCognitoState,
+    SignInPolicy, SmsConfiguration, UserPool, UserPoolClient, UserPoolDomain,
+    COGNITO_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// `CognitoJwtVerifier` impl backed by the in-process Cognito state.

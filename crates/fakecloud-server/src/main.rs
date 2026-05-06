@@ -3793,7 +3793,7 @@ async fn main() {
             "/oauth2/token",
             axum::routing::post({
                 let cs = cognito_token_state;
-                move |body: String| {
+                move |headers: axum::http::HeaderMap, body: String| {
                     let cs = cs.clone();
                     async move {
                         let params: std::collections::BTreeMap<String, String> =
@@ -3801,10 +3801,21 @@ async fn main() {
                                 Ok(pairs) => pairs.into_iter().collect(),
                                 Err(_) => std::collections::BTreeMap::new(),
                             };
+                        // RFC 6749 §2.3.1 — confidential clients MAY send
+                        // their credentials in the Authorization header
+                        // (`Basic base64(client_id:client_secret)`); we
+                        // treat that header as authoritative and fail
+                        // when it disagrees with the body.
+                        let basic = parse_basic_auth(&headers);
                         let region = std::env::var("AWS_DEFAULT_REGION")
                             .or_else(|_| std::env::var("AWS_REGION"))
                             .unwrap_or_else(|_| "us-east-1".to_string());
-                        match fakecloud_cognito::handle_oauth2_token(&cs, &params, &region).await {
+                        let basic_ref = basic.as_ref().map(|(i, s)| (i.as_str(), s.as_str()));
+                        match fakecloud_cognito::handle_oauth2_token(
+                            &cs, &params, basic_ref, &region,
+                        )
+                        .await
+                        {
                             Ok(resp) => (axum::http::StatusCode::OK, axum::Json(resp.to_json())),
                             Err(err) => {
                                 let status = axum::http::StatusCode::from_u16(err.status_code())
@@ -3970,6 +3981,55 @@ async fn main() {
                             })
                             .collect();
                         axum::Json(types::AuthEventsResponse { events })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/cognito/authorization-codes",
+            axum::routing::post({
+                let cs = cognito_state.clone();
+                move |axum::Json(body): axum::Json<types::MintAuthorizationCodeRequest>| {
+                    let cs = cs.clone();
+                    async move {
+                        let req = fakecloud_cognito::MintAuthorizationCodeRequest {
+                            user_pool_id: body.user_pool_id,
+                            client_id: body.client_id,
+                            username: body.username,
+                            redirect_uri: body.redirect_uri,
+                            scopes: body.scopes,
+                            code_challenge: body.code_challenge,
+                            code_challenge_method: body.code_challenge_method,
+                            nonce: body.nonce,
+                        };
+                        match fakecloud_cognito::mint_authorization_code(&cs, &req) {
+                            Ok(code) => (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!(
+                                    types::MintAuthorizationCodeResponse { code }
+                                )),
+                            ),
+                            Err(err) => {
+                                let (status, msg) = match err {
+                                    fakecloud_cognito::MintAuthorizationCodeError::InvalidClient => (
+                                        axum::http::StatusCode::NOT_FOUND,
+                                        "client_id not found in any pool",
+                                    ),
+                                    fakecloud_cognito::MintAuthorizationCodeError::InvalidRedirectUri => (
+                                        axum::http::StatusCode::BAD_REQUEST,
+                                        "redirect_uri is not a registered callback URL",
+                                    ),
+                                    fakecloud_cognito::MintAuthorizationCodeError::UserNotFound => (
+                                        axum::http::StatusCode::NOT_FOUND,
+                                        "user not found in pool",
+                                    ),
+                                };
+                                (
+                                    status,
+                                    axum::Json(serde_json::json!({"error": msg})),
+                                )
+                            }
+                        }
                     }
                 }
             }),
@@ -5634,6 +5694,28 @@ impl fakecloud_core::delivery::KmsHook for KmsHookAdapter {
             )
             .map_err(|e| e.to_string())
     }
+}
+
+/// Parse a `Authorization: Basic <b64(client_id:client_secret)>` header
+/// into `(client_id, client_secret)`. Returns `None` when the header is
+/// absent, malformed, or the credential pair doesn't contain a colon.
+/// Tolerates URL-encoded credentials per RFC 6749 §2.3.1 by treating
+/// the raw decoded form as the canonical pair.
+fn parse_basic_auth(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
+    use base64::Engine as _;
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let token = value
+        .strip_prefix("Basic ")
+        .or_else(|| value.strip_prefix("basic "))?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(token.trim())
+        .ok()?;
+    let raw = String::from_utf8(decoded).ok()?;
+    let (id, secret) = raw.split_once(':')?;
+    Some((id.to_string(), secret.to_string()))
 }
 
 /// Emit a fatal error through the tracing pipeline, flush stderr so the

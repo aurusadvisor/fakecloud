@@ -327,6 +327,26 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record AuthEventsResponse(List<AuthEvent> events) {}
 
+    /**
+     * Payload for {@code POST /_fakecloud/cognito/authorization-codes}.
+     * Lets test harnesses pre-allocate a single-use OAuth2 authorization
+     * code that the {@code /oauth2/token} {@code authorization_code}
+     * grant later consumes.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record MintAuthorizationCodeRequest(
+            String userPoolId,
+            String clientId,
+            String username,
+            String redirectUri,
+            List<String> scopes,
+            String codeChallenge,
+            String codeChallengeMethod,
+            String nonce) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record MintAuthorizationCodeResponse(String code) {}
+
     // ── Step Functions ─────────────────────────────────────────────
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record StepFunctionsExecution(

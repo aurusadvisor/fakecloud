@@ -85,7 +85,7 @@ Access via properties on the main client:
 | `s3` | S3 | `get_notifications()`, `tick_lifecycle()` |
 | `dynamodb` | DynamoDB | `tick_ttl()` |
 | `secretsmanager` | SecretsManager | `tick_rotation()` |
-| `cognito` | Cognito | `get_user_codes(pool_id, username)`, `get_confirmation_codes()`, `confirm_user(req)`, `get_tokens()`, `expire_tokens(req)`, `get_auth_events()` |
+| `cognito` | Cognito | `get_user_codes(pool_id, username)`, `get_confirmation_codes()`, `confirm_user(req)`, `get_tokens()`, `expire_tokens(req)`, `get_auth_events()`, `mint_authorization_code(req)` |
 | `rds` | RDS | `get_instances()` |
 | `elasticache` | ElastiCache | `get_clusters()`, `get_replication_groups()`, `get_serverless_caches()` |
 | `stepfunctions` | Step Functions | `get_executions()` |

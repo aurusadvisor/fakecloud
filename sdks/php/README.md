@@ -125,6 +125,7 @@ $fc = new FakeCloud('http://localhost:4566'); // explicit base URL
 | `getTokens()`                     | List all active tokens               |
 | `expireTokens($req)`              | Expire tokens (optionally filtered)  |
 | `getAuthEvents()`                 | List auth events                     |
+| `mintAuthorizationCode($req)`     | Mint a single-use OAuth2 authorization code (test-only equivalent of /oauth2/authorize) |
 
 ### `$fc->rds()`
 

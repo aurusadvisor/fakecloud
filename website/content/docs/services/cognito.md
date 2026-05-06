@@ -27,6 +27,14 @@ fakecloud implements **122 of 122** Cognito User Pools operations at 100% Smithy
 
 JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 
+## OAuth2 / OIDC endpoints
+
+- `POST /oauth2/token` — token endpoint with `authorization_code`, `client_credentials`, and `refresh_token` grants. RFC 6749 §2.3.1 Basic auth supported. PKCE (S256/plain) verified for `authorization_code`.
+- `GET|POST /oauth2/userInfo` — RFC 7662 user info (bearer access token -> standard OIDC claims).
+- `POST /oauth2/revoke` — RFC 7009 token revocation.
+- `GET /<pool_id>/.well-known/jwks.json` — RS256 public key for token verification.
+- `GET /<pool_id>/.well-known/openid-configuration` — OIDC discovery document.
+
 ## Introspection
 
 - `GET /_fakecloud/cognito/confirmation-codes` — list all pending confirmation codes across pools
@@ -35,6 +43,7 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 - `GET /_fakecloud/cognito/tokens` — list active tokens (without exposing strings)
 - `POST /_fakecloud/cognito/expire-tokens` — expire tokens for a pool/user
 - `GET /_fakecloud/cognito/auth-events` — list auth events (signup, signin, failures)
+- `POST /_fakecloud/cognito/authorization-codes` — mint a single-use OAuth2 authorization code for the `authorization_code` grant (test-only equivalent of `/oauth2/authorize`)
 
 ## Cross-service delivery
 

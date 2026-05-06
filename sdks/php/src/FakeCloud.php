@@ -436,6 +436,17 @@ final class CognitoClient
             $this->http->get('/_fakecloud/cognito/auth-events')
         );
     }
+
+    public function mintAuthorizationCode(
+        MintAuthorizationCodeRequest $req
+    ): MintAuthorizationCodeResponse {
+        return MintAuthorizationCodeResponse::fromArray(
+            $this->http->postJson(
+                '/_fakecloud/cognito/authorization-codes',
+                $req->toArray()
+            )
+        );
+    }
 }
 
 final class ApiGatewayV2Client

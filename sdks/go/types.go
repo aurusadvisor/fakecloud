@@ -440,6 +440,26 @@ type AuthEventsResponse struct {
 	Events []AuthEvent `json:"events"`
 }
 
+// MintAuthorizationCodeRequest is the payload for the
+// /_fakecloud/cognito/authorization-codes admin endpoint. Lets test
+// harnesses mint a single-use OAuth2 authorization code that the
+// /oauth2/token authorization_code grant can later consume.
+type MintAuthorizationCodeRequest struct {
+	UserPoolID          string   `json:"userPoolId"`
+	ClientID            string   `json:"clientId"`
+	Username            string   `json:"username"`
+	RedirectURI         string   `json:"redirectUri"`
+	Scopes              []string `json:"scopes,omitempty"`
+	CodeChallenge       *string  `json:"codeChallenge,omitempty"`
+	CodeChallengeMethod *string  `json:"codeChallengeMethod,omitempty"`
+	Nonce               *string  `json:"nonce,omitempty"`
+}
+
+// MintAuthorizationCodeResponse is returned after minting a code.
+type MintAuthorizationCodeResponse struct {
+	Code string `json:"code"`
+}
+
 // ── Step Functions ─────────────────────────────────────────────────
 
 // StepFunctionsExecution represents a state machine execution.
