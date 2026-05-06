@@ -99,6 +99,7 @@ zip = "2"
 tempfile = "3"
 regex = "1"
 tokio-postgres = "0.7"
+sqlparser = "0.61"
 
 # Internal crates
 fakecloud-core = { path = "crates/fakecloud-core", version = "0.13.3" }
