@@ -493,9 +493,10 @@ impl CloudFormationService {
 
                 let provisioner = self.provisioner(&found_stack_id, &aid, &req.region);
 
-                let (update_result, stack_id_clone) = {
-                    let mut accounts = self.state.write();
-                    let state = accounts.get_or_create(&aid);
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(&aid);
+
+                let (update_result, sid, stack_name_owned) = {
                     let stack = state
                         .stacks
                         .values_mut()
@@ -509,6 +510,7 @@ impl CloudFormationService {
                                 format!("Stack [{stack_name}] does not exist"),
                             )
                         })?;
+                    stack.status = "UPDATE_IN_PROGRESS".to_string();
                     let result = crate::service::apply_resource_updates(
                         stack,
                         &parsed.resources,
@@ -517,9 +519,10 @@ impl CloudFormationService {
                         &provisioner,
                     );
                     let sid = stack.stack_id.clone();
+                    let sname = stack.name.clone();
                     stack.template = template_body.clone();
                     stack.status = if result.is_err() {
-                        "UPDATE_FAILED".to_string()
+                        "UPDATE_ROLLBACK_COMPLETE".to_string()
                     } else {
                         "UPDATE_COMPLETE".to_string()
                     };
@@ -534,18 +537,48 @@ impl CloudFormationService {
                     if result.is_ok() {
                         stack.outputs.clear();
                     }
-
-                    if let Some(m) = state.extras.get_mut("change_sets") {
-                        if let Some(e) = m.get_mut(&cs_id) {
-                            e["ExecutionStatus"] = json!(if result.is_err() {
-                                "EXECUTE_FAILED"
-                            } else {
-                                "EXECUTE_COMPLETE"
-                            });
-                        }
-                    }
-                    (result, sid)
+                    (result, sid, sname)
                 };
+
+                // Emit lifecycle events on the per-stack event log.
+                crate::service::record_stack_status_event(
+                    state,
+                    &sid,
+                    &stack_name_owned,
+                    "AWS::CloudFormation::Stack",
+                    "UPDATE_IN_PROGRESS",
+                );
+                let final_status = match &update_result {
+                    Ok(changes) => {
+                        crate::service::record_stack_events(
+                            state,
+                            &sid,
+                            &stack_name_owned,
+                            changes,
+                        );
+                        "UPDATE_COMPLETE"
+                    }
+                    Err(_) => "UPDATE_ROLLBACK_COMPLETE",
+                };
+                crate::service::record_stack_status_event(
+                    state,
+                    &sid,
+                    &stack_name_owned,
+                    "AWS::CloudFormation::Stack",
+                    final_status,
+                );
+
+                if let Some(m) = state.extras.get_mut("change_sets") {
+                    if let Some(e) = m.get_mut(&cs_id) {
+                        e["ExecutionStatus"] = json!(if update_result.is_err() {
+                            "EXECUTE_FAILED"
+                        } else {
+                            "EXECUTE_COMPLETE"
+                        });
+                    }
+                }
+
+                drop(accounts);
 
                 if let Err(msg) = update_result {
                     return Err(AwsServiceError::aws_error(
@@ -555,7 +588,6 @@ impl CloudFormationService {
                     ));
                 }
 
-                let _ = stack_id_clone;
                 Ok(xml_response("ExecuteChangeSet", String::new(), &rid))
             }
             "ListChangeSets" => {
@@ -905,7 +937,54 @@ impl CloudFormationService {
             }
 
             // ── Events ──
-            "DescribeStackEvents" => Ok(xml_response("DescribeStackEvents", "    <StackEvents/>".to_string(), &rid)),
+            "DescribeStackEvents" => {
+                let stack_filter = params.get("StackName").cloned();
+                let accounts = self.state.read();
+                let events: Vec<Value> = accounts
+                    .get(&aid)
+                    .map(|s| {
+                        let mut all: Vec<Value> = Vec::new();
+                        for (sid, evs) in &s.events {
+                            // Resolve to find matching stack id by name or id.
+                            let matches = match &stack_filter {
+                                None => true,
+                                Some(filter) => {
+                                    sid == filter
+                                        || s.stacks.values().any(|st| {
+                                            st.stack_id == *sid
+                                                && (st.name == *filter || st.stack_id == *filter)
+                                        })
+                                }
+                            };
+                            if matches {
+                                all.extend(evs.iter().cloned());
+                            }
+                        }
+                        // Newest first, matching real CloudFormation.
+                        all.reverse();
+                        all
+                    })
+                    .unwrap_or_default();
+                let inner = if events.is_empty() {
+                    "    <StackEvents/>".to_string()
+                } else {
+                    format!(
+                        "    <StackEvents>\n{}\n    </StackEvents>",
+                        members_xml(&events, |v| format!(
+                            "        <EventId>{}</EventId>\n        <StackId>{}</StackId>\n        <StackName>{}</StackName>\n        <LogicalResourceId>{}</LogicalResourceId>\n        <PhysicalResourceId>{}</PhysicalResourceId>\n        <ResourceType>{}</ResourceType>\n        <ResourceStatus>{}</ResourceStatus>\n        <Timestamp>{}</Timestamp>",
+                            xml_escape(v["EventId"].as_str().unwrap_or("")),
+                            xml_escape(v["StackId"].as_str().unwrap_or("")),
+                            xml_escape(v["StackName"].as_str().unwrap_or("")),
+                            xml_escape(v["LogicalResourceId"].as_str().unwrap_or("")),
+                            xml_escape(v["PhysicalResourceId"].as_str().unwrap_or("")),
+                            xml_escape(v["ResourceType"].as_str().unwrap_or("")),
+                            xml_escape(v["ResourceStatus"].as_str().unwrap_or("")),
+                            xml_escape(v["Timestamp"].as_str().unwrap_or("")),
+                        )),
+                    )
+                };
+                Ok(xml_response("DescribeStackEvents", inner, &rid))
+            }
             "DescribeEvents" => Ok(xml_response("DescribeEvents", "    <Events/>".to_string(), &rid)),
 
             // ── Hooks ──
