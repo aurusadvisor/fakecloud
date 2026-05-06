@@ -1327,6 +1327,117 @@ async fn bedrock_invoke_model_response_headers() {
     );
 }
 
+// FF1: echo mode + dynamic token counts
+//
+// `FAKECLOUD_BEDROCK_ECHO=1` reflects the user's prompt back as the
+// assistant text, and the response token counts scale with the actual
+// input length instead of the historical 10/20 placeholder.
+
+#[tokio::test]
+async fn bedrock_invoke_model_echo_mode_reflects_prompt() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_BEDROCK_ECHO", "1")]).await;
+    let client = server.bedrock_runtime_client().await;
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "hello"}]
+    }))
+    .unwrap();
+
+    let resp = client
+        .invoke_model()
+        .model_id("anthropic.claude-3-5-sonnet-20241022-v2:0")
+        .content_type("application/json")
+        .accept("application/json")
+        .body(Blob::new(body))
+        .send()
+        .await
+        .unwrap();
+
+    let response_body: serde_json::Value = serde_json::from_slice(resp.body().as_ref()).unwrap();
+    let text = response_body["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("hello"),
+        "echo response missing prompt: {text}"
+    );
+}
+
+#[tokio::test]
+async fn bedrock_invoke_model_default_no_echo_when_var_unset() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_runtime_client().await;
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "hello"}]
+    }))
+    .unwrap();
+
+    let resp = client
+        .invoke_model()
+        .model_id("anthropic.claude-3-5-sonnet-20241022-v2:0")
+        .content_type("application/json")
+        .accept("application/json")
+        .body(Blob::new(body))
+        .send()
+        .await
+        .unwrap();
+
+    let response_body: serde_json::Value = serde_json::from_slice(resp.body().as_ref()).unwrap();
+    let text = response_body["content"][0]["text"].as_str().unwrap();
+    // Default canned phrase, not the prompt.
+    assert!(text.contains("test response from the emulated model"));
+}
+
+#[tokio::test]
+async fn bedrock_invoke_model_token_counts_scale_with_input() {
+    let server = TestServer::start().await;
+    let http_client = reqwest::Client::new();
+
+    let do_call = |prompt: &'static str| {
+        let endpoint = server.endpoint().to_string();
+        let client = http_client.clone();
+        async move {
+            let body = serde_json::json!({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": prompt}]
+            });
+            let resp = client
+                .post(format!(
+                    "{endpoint}/model/anthropic.claude-3-5-sonnet-20241022-v2:0/invoke"
+                ))
+                .header("content-type", "application/json")
+                .header(
+                    "authorization",
+                    "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/bedrock/aws4_request, SignedHeaders=host, Signature=fake",
+                )
+                .body(serde_json::to_string(&body).unwrap())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            resp.headers()
+                .get("x-amzn-bedrock-input-token-count")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        }
+    };
+
+    let short_count = do_call("hi").await;
+    let long_count =
+        do_call("please count many words across this longer message body for tokens").await;
+    assert!(
+        long_count > short_count,
+        "token count should scale with input length (short={short_count}, long={long_count})"
+    );
+}
+
 // Streaming (via raw HTTP — AWS SDK event stream parsing is complex)
 
 #[tokio::test]

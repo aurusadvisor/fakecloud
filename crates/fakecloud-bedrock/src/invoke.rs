@@ -50,8 +50,8 @@ pub(crate) fn invoke_model(
     // Real Bedrock returns dynamic input/output token counts. Approximate
     // each by whitespace-splitting the relevant text — close enough for
     // SDKs that gate on usage.input_tokens / usage.output_tokens metering.
-    let input_tokens = approximate_token_count(&extract_input_text(&input));
-    let output_tokens = approximate_token_count(&extract_output_text(model_id, &response_body));
+    let input_tokens = crate::prompt::count_tokens(&extract_input_text(&input));
+    let output_tokens = crate::prompt::count_tokens(&extract_output_text(model_id, &response_body));
 
     let mut headers = http::HeaderMap::new();
     headers.insert(
@@ -77,17 +77,10 @@ pub(crate) fn invoke_model(
     })
 }
 
-/// Whitespace-tokenize approximation. Real Bedrock uses the model's BPE
-/// tokenizer; we don't carry one. SDKs almost always treat usage as
-/// opaque metering, so a reasonable scalar is enough.
-pub(crate) fn approximate_token_count(text: &str) -> usize {
-    text.split_whitespace().count()
-}
-
 /// Pull the user-supplied prompt out of an InvokeModel request body.
 /// Each provider lays it out differently; we cover the most common
 /// shapes and fall back to the raw body length when nothing matches.
-fn extract_input_text(input: &Value) -> String {
+pub(crate) fn extract_input_text(input: &Value) -> String {
     // Anthropic: messages[] with role+content (string or array of content blocks)
     if let Some(messages) = input.get("messages").and_then(|m| m.as_array()) {
         let mut text = String::new();
@@ -243,12 +236,7 @@ pub(crate) fn count_tokens(
         serde_json::to_string(&input).unwrap_or_default()
     };
 
-    // Rough token count: split by whitespace
-    let token_count = if text.is_empty() {
-        0
-    } else {
-        text.split_whitespace().count()
-    };
+    let token_count = crate::prompt::count_tokens(&text);
 
     Ok(AwsResponse::ok_json(json!({
         "inputTokens": token_count
@@ -256,11 +244,12 @@ pub(crate) fn count_tokens(
 }
 
 /// Generate a deterministic canned response based on the model provider.
-/// When `BEDROCK_ECHO=1` is set in the environment, the assistant text
-/// reflects the user-supplied prompt instead of the canned phrase, so
-/// tests can pin assertions against their own input.
+/// When `FAKECLOUD_FAKECLOUD_BEDROCK_ECHO=1` (or legacy `FAKECLOUD_BEDROCK_ECHO=1`) is set in
+/// the environment, the assistant text reflects the user-supplied prompt
+/// instead of the canned phrase, so tests can pin assertions against
+/// their own input.
 fn generate_canned_response(model_id: &str, input: &Value) -> String {
-    if std::env::var("BEDROCK_ECHO").as_deref() == Ok("1") {
+    if crate::prompt::echo_enabled() {
         return echo_response(model_id, input);
     }
     canned_response_inner(model_id, input)
@@ -281,19 +270,23 @@ fn canned_response_inner(model_id: &str, input: &Value) -> String {
         "generic"
     };
 
+    let prompt = extract_input_text(input);
+    let in_tokens = crate::prompt::count_tokens(&prompt);
     match provider {
-        "anthropic" => anthropic_response(model_id, input),
-        "amazon" => amazon_titan_response(model_id, input),
-        "meta" => meta_llama_response(input),
-        "cohere" => cohere_response(input),
-        "mistral" => mistral_response(input),
-        _ => generic_response(input),
+        "anthropic" => anthropic_response(model_id, in_tokens),
+        "amazon" => amazon_titan_response(model_id, in_tokens),
+        "meta" => meta_llama_response(in_tokens),
+        "cohere" => cohere_response(),
+        "mistral" => mistral_response(),
+        _ => generic_response(),
     }
 }
 
 /// Build a response that echoes the caller's prompt instead of the
 /// canned phrase. The shape matches the same provider-specific JSON that
 /// `canned_response_inner` produces — only the assistant text changes.
+/// Usage fields inside the body are populated via `count_tokens` against
+/// the actual input prompt and echoed output.
 fn echo_response(model_id: &str, input: &Value) -> String {
     let prompt = extract_input_text(input);
     let echoed = if prompt.is_empty() {
@@ -301,6 +294,8 @@ fn echo_response(model_id: &str, input: &Value) -> String {
     } else {
         prompt
     };
+    let in_tokens = crate::prompt::count_tokens(&echoed);
+    let out_tokens = crate::prompt::count_tokens(&echoed);
     if model_id.starts_with("anthropic.") {
         return serde_json::to_string(&json!({
             "id": "msg_fakecloudtest01",
@@ -310,15 +305,15 @@ fn echo_response(model_id: &str, input: &Value) -> String {
             "model": model_id,
             "stop_reason": "end_turn",
             "stop_sequence": null,
-            "usage": { "input_tokens": 0, "output_tokens": 0 }
+            "usage": { "input_tokens": in_tokens, "output_tokens": out_tokens }
         }))
         .expect("serde_json::Value serialization is infallible");
     }
     if model_id.starts_with("amazon.") {
         return serde_json::to_string(&json!({
-            "inputTextTokenCount": 0,
+            "inputTextTokenCount": in_tokens,
             "results": [{
-                "tokenCount": 0,
+                "tokenCount": out_tokens,
                 "outputText": echoed,
                 "completionReason": "FINISH"
             }]
@@ -328,8 +323,8 @@ fn echo_response(model_id: &str, input: &Value) -> String {
     if model_id.starts_with("meta.") {
         return serde_json::to_string(&json!({
             "generation": echoed,
-            "prompt_token_count": 0,
-            "generation_token_count": 0,
+            "prompt_token_count": in_tokens,
+            "generation_token_count": out_tokens,
             "stop_reason": "stop"
         }))
         .expect("serde_json::Value serialization is infallible");
@@ -352,7 +347,13 @@ fn echo_response(model_id: &str, input: &Value) -> String {
         .expect("serde_json::Value serialization is infallible")
 }
 
-fn anthropic_response(model_id: &str, _input: &Value) -> String {
+/// Canned text every provider's non-echo branch returns. Centralized so
+/// the body and the corresponding `usage.output_tokens` come from the
+/// same source.
+const CANNED_OUTPUT_TEXT: &str = "This is a test response from the emulated model.";
+
+fn anthropic_response(model_id: &str, in_tokens: u64) -> String {
+    let out_tokens = crate::prompt::count_tokens(CANNED_OUTPUT_TEXT);
     serde_json::to_string(&json!({
         "id": "msg_fakecloudtest01",
         "type": "message",
@@ -360,37 +361,38 @@ fn anthropic_response(model_id: &str, _input: &Value) -> String {
         "content": [
             {
                 "type": "text",
-                "text": "This is a test response from the emulated model."
+                "text": CANNED_OUTPUT_TEXT
             }
         ],
         "model": model_id,
         "stop_reason": "end_turn",
         "stop_sequence": null,
         "usage": {
-            "input_tokens": 10,
-            "output_tokens": 20
+            "input_tokens": in_tokens,
+            "output_tokens": out_tokens
         }
     }))
     .expect("serde_json::Value serialization is infallible")
 }
 
-fn amazon_titan_response(model_id: &str, _input: &Value) -> String {
+fn amazon_titan_response(model_id: &str, in_tokens: u64) -> String {
     // Titan embed models return embedding vectors, not text completions
     if model_id.starts_with("amazon.titan-embed") {
         let embedding: Vec<f64> = (0..256).map(|i| (i as f64 * 0.001).sin()).collect();
         return serde_json::to_string(&json!({
             "embedding": embedding,
-            "inputTextTokenCount": 10
+            "inputTextTokenCount": in_tokens
         }))
         .expect("serde_json::Value serialization is infallible");
     }
 
+    let out_tokens = crate::prompt::count_tokens(CANNED_OUTPUT_TEXT);
     serde_json::to_string(&json!({
-        "inputTextTokenCount": 10,
+        "inputTextTokenCount": in_tokens,
         "results": [
             {
-                "tokenCount": 20,
-                "outputText": "This is a test response from the emulated model.",
+                "tokenCount": out_tokens,
+                "outputText": CANNED_OUTPUT_TEXT,
                 "completionReason": "FINISH"
             }
         ]
@@ -398,24 +400,25 @@ fn amazon_titan_response(model_id: &str, _input: &Value) -> String {
     .expect("serde_json::Value serialization is infallible")
 }
 
-fn meta_llama_response(_input: &Value) -> String {
+fn meta_llama_response(in_tokens: u64) -> String {
+    let out_tokens = crate::prompt::count_tokens(CANNED_OUTPUT_TEXT);
     serde_json::to_string(&json!({
-        "generation": "This is a test response from the emulated model.",
+        "generation": CANNED_OUTPUT_TEXT,
         "prompt_logprobs": null,
         "generation_logprobs": null,
         "stop_reason": "stop",
-        "generation_token_count": 20,
-        "prompt_token_count": 10
+        "generation_token_count": out_tokens,
+        "prompt_token_count": in_tokens
     }))
     .expect("serde_json::Value serialization is infallible")
 }
 
-fn cohere_response(_input: &Value) -> String {
+fn cohere_response() -> String {
     serde_json::to_string(&json!({
         "generations": [
             {
                 "id": "gen-fakecloud-01",
-                "text": "This is a test response from the emulated model.",
+                "text": CANNED_OUTPUT_TEXT,
                 "finish_reason": "COMPLETE",
                 "token_likelihoods": []
             }
@@ -425,11 +428,11 @@ fn cohere_response(_input: &Value) -> String {
     .expect("serde_json::Value serialization is infallible")
 }
 
-fn mistral_response(_input: &Value) -> String {
+fn mistral_response() -> String {
     serde_json::to_string(&json!({
         "outputs": [
             {
-                "text": "This is a test response from the emulated model.",
+                "text": CANNED_OUTPUT_TEXT,
                 "stop_reason": "stop"
             }
         ]
@@ -437,9 +440,9 @@ fn mistral_response(_input: &Value) -> String {
     .expect("serde_json::Value serialization is infallible")
 }
 
-fn generic_response(_input: &Value) -> String {
+fn generic_response() -> String {
     serde_json::to_string(&json!({
-        "output": "This is a test response from the emulated model."
+        "output": CANNED_OUTPUT_TEXT
     }))
     .expect("serde_json::Value serialization is infallible")
 }
@@ -457,7 +460,7 @@ mod tests {
     use std::sync::OnceLock;
 
     /// Global mutex to serialize tests that mutate the process-wide
-    /// `BEDROCK_ECHO` env var with sibling tests in the same binary that
+    /// `FAKECLOUD_BEDROCK_ECHO` env var with sibling tests in the same binary that
     /// observe model behavior. Without it the parallel test harness
     /// races: e.g. `invoke_amazon_titan_embed_returns_vector` runs while
     /// `invoke_echo_mode_reflects_prompt` still has the flag flipped, and
@@ -531,13 +534,13 @@ mod tests {
 
     #[test]
     fn invoke_echo_mode_reflects_prompt() {
-        // BEDROCK_ECHO mutation is process-global; the lock serializes
+        // FAKECLOUD_BEDROCK_ECHO mutation is process-global; the lock serializes
         // this test with sibling tests in the same binary that observe
         // model output (e.g. titan-embed) so they don't race the flag.
         let _g = echo_lock().lock();
-        let prev = std::env::var("BEDROCK_ECHO").ok();
+        let prev = std::env::var("FAKECLOUD_BEDROCK_ECHO").ok();
         // SAFETY: lock above pins us to a single mutation window.
-        unsafe { std::env::set_var("BEDROCK_ECHO", "1") };
+        unsafe { std::env::set_var("FAKECLOUD_BEDROCK_ECHO", "1") };
 
         let s = shared();
         let body = br#"{"messages":[{"role":"user","content":"hello world from echo mode"}]}"#;
@@ -553,8 +556,8 @@ mod tests {
         // SAFETY: see comment above.
         unsafe {
             match prev {
-                Some(p) => std::env::set_var("BEDROCK_ECHO", p),
-                None => std::env::remove_var("BEDROCK_ECHO"),
+                Some(p) => std::env::set_var("FAKECLOUD_BEDROCK_ECHO", p),
+                None => std::env::remove_var("FAKECLOUD_BEDROCK_ECHO"),
             }
         }
     }
@@ -563,7 +566,7 @@ mod tests {
     fn invoke_anthropic_returns_message_format() {
         // Body-shape tests in this module observe the response payload,
         // so they all must serialize with `invoke_echo_mode_reflects_prompt`,
-        // which mutates the process-global `BEDROCK_ECHO` flag and would
+        // which mutates the process-global `FAKECLOUD_BEDROCK_ECHO` flag and would
         // otherwise have them observe the echo branch mid-flip.
         let _g = echo_lock().lock();
         let s = shared();
