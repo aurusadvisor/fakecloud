@@ -716,6 +716,7 @@ mod port_mapping_tests {
             port_mappings,
             network_mode: network_mode.map(String::from),
             depends_on: Vec::new(),
+            health_check: None,
         }
     }
 

@@ -320,8 +320,13 @@ impl EcsRuntime {
         // Wait for the first essential container (or, if none are
         // essential, any container) to exit. ECS task lifetime is
         // bounded by the first essential exit, after which all remaining
-        // containers are stopped.
-        let wait_outcome = self.wait_for_task_exit(&started).await?;
+        // containers are stopped. While polling we also refresh each
+        // container's `healthStatus` from `docker inspect` so
+        // DescribeTasks reflects HEALTHCHECK transitions in near real
+        // time.
+        let wait_outcome = self
+            .wait_for_task_exit_with_health(state, account_id, task_id, &started)
+            .await?;
 
         // Stop and reap any sidecars still running. Best-effort — failures
         // here shouldn't keep the task from transitioning to STOPPED.
@@ -426,18 +431,31 @@ impl EcsRuntime {
         Ok(())
     }
 
-    /// Wait for the task to reach a stop condition: any essential
-    /// container exits, or every container exits when none are essential.
-    /// Returns the index into `started` of the container whose exit
-    /// determined the task lifetime, its exit code, and the stopCode.
-    async fn wait_for_task_exit(
+    /// Wait for the task to reach a stop condition (any essential
+    /// container exits, or every container exits when none are
+    /// essential) while also polling `docker inspect .State.Health.Status`
+    /// on every iteration to push the latest `healthStatus` onto each
+    /// task container — so DescribeTasks shows live HEALTHCHECK
+    /// transitions instead of the boot-time `UNKNOWN`. Returns the
+    /// index into `started` of the container whose exit determined the
+    /// task lifetime, its exit code, and the stopCode.
+    async fn wait_for_task_exit_with_health(
         &self,
+        state: &SharedEcsState,
+        account_id: &str,
+        task_id: &str,
         started: &[RunningContainer],
     ) -> Result<TaskExitOutcome, RuntimeError> {
         let any_essential = started.iter().any(|c| c.essential);
         let mut working: Vec<RunningContainer> = started.to_vec();
         let mut first_exited: Option<usize> = None;
         loop {
+            // Refresh health status before checking exits so a container
+            // that goes UNHEALTHY -> exits in the same iteration leaves
+            // its final health state on the task before we transition to
+            // STOPPED.
+            self.refresh_health_status(state, account_id, task_id, started)
+                .await;
             for (i, rc) in started.iter().enumerate() {
                 if working[i].exit_code.is_some() {
                     continue;
@@ -489,6 +507,60 @@ impl EcsRuntime {
                 });
             }
             sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Inspect each running container's `.State.Health.Status` and push
+    /// the mapped ECS healthStatus onto the task's container list.
+    /// Best-effort: a failed inspect (e.g. container already removed)
+    /// leaves the previous status untouched.
+    async fn refresh_health_status(
+        &self,
+        state: &SharedEcsState,
+        account_id: &str,
+        task_id: &str,
+        started: &[RunningContainer],
+    ) {
+        let mut updates: Vec<(String, String)> = Vec::with_capacity(started.len());
+        for rc in started {
+            let out = Command::new(&self.cli)
+                .args([
+                    "inspect",
+                    "-f",
+                    "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{end}}",
+                    &rc.container_id,
+                ])
+                .output()
+                .await;
+            let status = match out {
+                Ok(o) if o.status.success() => {
+                    let raw = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if raw.is_empty() {
+                        // No HEALTHCHECK on this container — leave the
+                        // ECS-side status as UNKNOWN (matches AWS).
+                        "UNKNOWN".to_string()
+                    } else {
+                        docker_health_to_ecs(&raw).to_string()
+                    }
+                }
+                _ => continue,
+            };
+            updates.push((rc.name.clone(), status));
+        }
+        if updates.is_empty() {
+            return;
+        }
+        let mut accounts = state.write();
+        let Some(s) = accounts.get_mut(account_id) else {
+            return;
+        };
+        let Some(task) = s.tasks.get_mut(task_id) else {
+            return;
+        };
+        for (name, status) in updates {
+            if let Some(c) = task.containers.iter_mut().find(|c| c.name == name) {
+                c.health_status = Some(status);
+            }
         }
     }
 
@@ -739,6 +811,32 @@ pub(crate) struct ContainerPlan {
     /// isn't enforced yet — we just respect the ordering, which is the
     /// observable difference from "launch in declaration order".
     pub(crate) depends_on: Vec<String>,
+    /// Parsed `healthCheck` from the task definition. Translated into
+    /// docker `--health-*` flags on `docker run` so the container's
+    /// health is observable via `docker inspect .State.Health.Status`.
+    /// `None` when the task definition doesn't declare a healthCheck;
+    /// the container's `healthStatus` then stays `UNKNOWN` (matching ECS
+    /// behaviour for tasks without a health probe).
+    pub(crate) health_check: Option<HealthCheckSpec>,
+}
+
+/// Container health check parsed from the ECS task definition. Each
+/// field maps 1:1 to a docker `--health-*` flag on `docker run`. AWS
+/// defaults: interval=30s, timeout=5s, retries=3, startPeriod=0s — we
+/// preserve those defaults at parse time so the argv builder always
+/// has concrete values to emit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HealthCheckSpec {
+    /// `command[]` from the task definition. The first element selects
+    /// the docker syntax: `CMD-SHELL` => `--health-cmd <rest joined by space>`,
+    /// `CMD` => `--health-cmd <rest joined by space>` (still routed to
+    /// `--health-cmd` because docker doesn't accept argv-form here),
+    /// `NONE` => no flag emitted (caller skips emitting healthcheck).
+    pub command: Vec<String>,
+    pub interval_seconds: u32,
+    pub timeout_seconds: u32,
+    pub retries: u32,
+    pub start_period_seconds: u32,
 }
 
 /// One entry in a container's `portMappings`. Mirrors the AWS shape so
@@ -893,6 +991,10 @@ fn build_container_plans(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let health_check = def
+            .as_ref()
+            .and_then(|d| d.get("healthCheck"))
+            .and_then(parse_health_check);
         plans.push(ContainerPlan {
             container_name: container.name.clone(),
             image: container.image.clone(),
@@ -905,6 +1007,7 @@ fn build_container_plans(
             port_mappings,
             network_mode: network_mode.clone(),
             depends_on,
+            health_check,
         });
     }
     let plans = topo_sort_plans(plans);
@@ -981,6 +1084,86 @@ pub(crate) fn __test_parse_port_mapping(value: &serde_json::Value) -> Option<Por
     parse_port_mapping(value)
 }
 
+/// Parse a `healthCheck` block from a task definition's container
+/// definition. Returns `None` for missing `command` or for a command
+/// whose first token is `NONE` (the AWS-documented "disable healthcheck
+/// inherited from image" sentinel — emit no flags rather than a `none`
+/// healthcheck). Defaults follow AWS: 30s/5s/3/0s.
+fn parse_health_check(value: &serde_json::Value) -> Option<HealthCheckSpec> {
+    let cmd_arr = value.get("command")?.as_array()?;
+    let command: Vec<String> = cmd_arr
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    if command.is_empty() {
+        return None;
+    }
+    if command.first().map(|s| s.as_str()) == Some("NONE") {
+        return None;
+    }
+    let read_u32 = |key: &str, default: u32| -> u32 {
+        value
+            .get(key)
+            .and_then(|v| v.as_i64())
+            .filter(|n| (0..=u32::MAX as i64).contains(n))
+            .map(|n| n as u32)
+            .unwrap_or(default)
+    };
+    Some(HealthCheckSpec {
+        command,
+        interval_seconds: read_u32("interval", 30),
+        timeout_seconds: read_u32("timeout", 5),
+        retries: read_u32("retries", 3),
+        start_period_seconds: read_u32("startPeriod", 0),
+    })
+}
+
+/// Render a [`HealthCheckSpec`] into the docker run flags that emulate
+/// the equivalent ECS healthCheck. AWS's `command[0]` is a sentinel
+/// (`CMD-SHELL`/`CMD`/`NONE`); docker's `--health-cmd` always takes a
+/// single shell-string, so we collapse the remaining tokens with spaces
+/// for either sentinel — matching how docker itself stringifies HEALTHCHECK
+/// CMD ["a","b"] back to a shell string at inspect time.
+pub(crate) fn render_health_flags(hc: &HealthCheckSpec) -> Vec<String> {
+    if hc.command.len() < 2 {
+        return Vec::new();
+    }
+    let cmd_kind = hc.command[0].as_str();
+    if cmd_kind != "CMD" && cmd_kind != "CMD-SHELL" {
+        return Vec::new();
+    }
+    let cmd_string = hc.command[1..].join(" ");
+    vec![
+        "--health-cmd".into(),
+        cmd_string,
+        format!("--health-interval={}s", hc.interval_seconds),
+        format!("--health-timeout={}s", hc.timeout_seconds),
+        format!("--health-retries={}", hc.retries),
+        format!("--health-start-period={}s", hc.start_period_seconds),
+    ]
+}
+
+/// Test-only re-export of [`parse_health_check`] so unit tests in
+/// sibling modules can lock in the AWS default-fill behaviour without
+/// us widening the parser's visibility.
+#[cfg(test)]
+pub(crate) fn __test_parse_health_check(value: &serde_json::Value) -> Option<HealthCheckSpec> {
+    parse_health_check(value)
+}
+
+/// Map a docker `.State.Health.Status` value to the ECS `healthStatus`
+/// shape. Docker emits `starting|healthy|unhealthy|none|""` (empty when
+/// the image has no HEALTHCHECK and we didn't add one). ECS only knows
+/// `HEALTHY|UNHEALTHY|UNKNOWN`, so anything that isn't a clean healthy/
+/// unhealthy lands in `UNKNOWN`.
+pub(crate) fn docker_health_to_ecs(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "healthy" => "HEALTHY",
+        "unhealthy" => "UNHEALTHY",
+        _ => "UNKNOWN",
+    }
+}
+
 /// Parse a single `portMappings[]` entry. Returns `None` for entries
 /// that are missing `containerPort` or have a value out of `u16` range.
 /// Defaults: `hostPort` -> `containerPort`, `protocol` -> `tcp`.
@@ -1047,6 +1230,9 @@ pub(crate) fn build_run_argv(
                 pm.container_port, pm.host_port, pm.protocol
             ));
         }
+    }
+    if let Some(ref hc) = plan.health_check {
+        argv.extend(render_health_flags(hc));
     }
     for (k, v) in env {
         let transformed = v
@@ -1640,6 +1826,7 @@ mod tests {
             port_mappings: Vec::new(),
             network_mode: None,
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            health_check: None,
         }
     }
 
@@ -1689,5 +1876,150 @@ mod tests {
         let plans = vec![plan("a", &["b"]), plan("b", &["a"])];
         let ordered = topo_sort_plans(plans);
         assert_eq!(ordered.len(), 2);
+    }
+
+    #[test]
+    fn parse_health_check_fills_aws_defaults() {
+        let v = serde_json::json!({
+            "command": ["CMD-SHELL", "curl -f http://localhost/ || exit 1"],
+        });
+        let hc = __test_parse_health_check(&v).expect("parsed");
+        assert_eq!(hc.command[0], "CMD-SHELL");
+        assert_eq!(hc.interval_seconds, 30);
+        assert_eq!(hc.timeout_seconds, 5);
+        assert_eq!(hc.retries, 3);
+        assert_eq!(hc.start_period_seconds, 0);
+    }
+
+    #[test]
+    fn parse_health_check_overrides_explicit_values() {
+        let v = serde_json::json!({
+            "command": ["CMD", "/probe"],
+            "interval": 7,
+            "timeout": 2,
+            "retries": 9,
+            "startPeriod": 12,
+        });
+        let hc = __test_parse_health_check(&v).expect("parsed");
+        assert_eq!(hc.interval_seconds, 7);
+        assert_eq!(hc.timeout_seconds, 2);
+        assert_eq!(hc.retries, 9);
+        assert_eq!(hc.start_period_seconds, 12);
+    }
+
+    #[test]
+    fn parse_health_check_returns_none_for_none_sentinel() {
+        // ECS uses ["NONE"] to disable an inherited HEALTHCHECK; we
+        // skip emission rather than passing a literal `none` to docker.
+        let v = serde_json::json!({ "command": ["NONE"] });
+        assert!(__test_parse_health_check(&v).is_none());
+    }
+
+    #[test]
+    fn parse_health_check_returns_none_for_missing_command() {
+        let v = serde_json::json!({ "interval": 30 });
+        assert!(__test_parse_health_check(&v).is_none());
+    }
+
+    #[test]
+    fn render_health_flags_emits_full_set_for_cmd_shell() {
+        let hc = HealthCheckSpec {
+            command: vec!["CMD-SHELL".into(), "curl -f http://localhost/".into()],
+            interval_seconds: 15,
+            timeout_seconds: 3,
+            retries: 4,
+            start_period_seconds: 10,
+        };
+        let flags = render_health_flags(&hc);
+        assert_eq!(flags[0], "--health-cmd");
+        assert_eq!(flags[1], "curl -f http://localhost/");
+        assert!(flags.contains(&"--health-interval=15s".to_string()));
+        assert!(flags.contains(&"--health-timeout=3s".to_string()));
+        assert!(flags.contains(&"--health-retries=4".to_string()));
+        assert!(flags.contains(&"--health-start-period=10s".to_string()));
+    }
+
+    #[test]
+    fn render_health_flags_joins_cmd_argv_with_spaces() {
+        // CMD form in ECS is argv-style; docker `--health-cmd` only
+        // accepts a single shell string, so we collapse with spaces.
+        let hc = HealthCheckSpec {
+            command: vec![
+                "CMD".into(),
+                "/bin/probe".into(),
+                "--port".into(),
+                "8080".into(),
+            ],
+            interval_seconds: 30,
+            timeout_seconds: 5,
+            retries: 3,
+            start_period_seconds: 0,
+        };
+        let flags = render_health_flags(&hc);
+        assert_eq!(flags[1], "/bin/probe --port 8080");
+    }
+
+    #[test]
+    fn build_run_argv_emits_health_flags_when_present() {
+        let plan = ContainerPlan {
+            container_name: "app".into(),
+            image: "alpine".into(),
+            env: Vec::new(),
+            entry_point: Vec::new(),
+            command: Vec::new(),
+            secrets_refs: Vec::new(),
+            essential: true,
+            has_task_role: false,
+            port_mappings: Vec::new(),
+            network_mode: None,
+            depends_on: Vec::new(),
+            health_check: Some(HealthCheckSpec {
+                command: vec!["CMD-SHELL".into(), "true".into()],
+                interval_seconds: 5,
+                timeout_seconds: 2,
+                retries: 1,
+                start_period_seconds: 1,
+            }),
+        };
+        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine");
+        let joined = argv.join(" ");
+        assert!(joined.contains("--health-cmd true"), "argv: {joined}");
+        assert!(joined.contains("--health-interval=5s"), "argv: {joined}");
+        assert!(joined.contains("--health-timeout=2s"), "argv: {joined}");
+        assert!(joined.contains("--health-retries=1"), "argv: {joined}");
+        assert!(
+            joined.contains("--health-start-period=1s"),
+            "argv: {joined}"
+        );
+    }
+
+    #[test]
+    fn build_run_argv_emits_no_health_flags_when_absent() {
+        let plan = ContainerPlan {
+            container_name: "app".into(),
+            image: "alpine".into(),
+            env: Vec::new(),
+            entry_point: Vec::new(),
+            command: Vec::new(),
+            secrets_refs: Vec::new(),
+            essential: true,
+            has_task_role: false,
+            port_mappings: Vec::new(),
+            network_mode: None,
+            depends_on: Vec::new(),
+            health_check: None,
+        };
+        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine");
+        assert!(!argv.iter().any(|s| s.starts_with("--health")));
+    }
+
+    #[test]
+    fn docker_health_to_ecs_maps_known_states() {
+        assert_eq!(docker_health_to_ecs("healthy"), "HEALTHY");
+        assert_eq!(docker_health_to_ecs("HEALTHY"), "HEALTHY");
+        assert_eq!(docker_health_to_ecs("unhealthy"), "UNHEALTHY");
+        assert_eq!(docker_health_to_ecs("starting"), "UNKNOWN");
+        assert_eq!(docker_health_to_ecs("none"), "UNKNOWN");
+        assert_eq!(docker_health_to_ecs(""), "UNKNOWN");
     }
 }
