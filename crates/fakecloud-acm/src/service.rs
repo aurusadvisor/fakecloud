@@ -265,8 +265,13 @@ impl AcmService {
                     "IdempotencyToken length must be between 1 and 32",
                 ));
             }
-            if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                return Err(invalid_param("IdempotencyToken must match pattern ^\\w+$"));
+            if !token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(invalid_param(
+                    "IdempotencyToken must match pattern ^[\\w-]+$",
+                ));
             }
         }
         let managed_by = body
@@ -911,10 +916,10 @@ impl AcmService {
         }
         if !idempotency_token
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
             return Err(validation_error(
-                "IdempotencyToken must match pattern ^\\w+$",
+                "IdempotencyToken must match pattern ^[\\w-]+$",
             ));
         }
         let days = body
