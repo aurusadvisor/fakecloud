@@ -95,7 +95,10 @@ impl CloudFrontService {
         let stored = StoredStreamingDistribution {
             id: id.clone(),
             arn: arn.clone(),
-            status: "Deployed".to_string(),
+            // Real CloudFront returns `InProgress` for streaming
+            // distributions just like regular distributions and flips to
+            // `Deployed` once edge propagation completes.
+            status: "InProgress".to_string(),
             last_modified_time: now,
             domain_name: domain,
             etag: etag.clone(),
@@ -108,6 +111,8 @@ impl CloudFrontService {
             account.tags.insert(arn.clone(), tags);
         }
         drop(state);
+
+        self.schedule_streaming_distribution_deploy(id.clone());
 
         let body = render_streaming_distribution(&stored);
         let mut headers = HeaderMap::new();
@@ -183,11 +188,26 @@ impl CloudFrontService {
                 "CallerReference cannot change on UpdateStreamingDistribution",
             ));
         }
-        d.config = cfg;
-        d.etag = generate_etag();
-        d.last_modified_time = Utc::now();
+        // ETag stability: only bump when the config actually changes. A
+        // no-op UpdateStreamingDistribution leaves the ETag and status
+        // untouched, matching real CloudFront.
+        let config_changed = !streaming_configs_equal(&d.config, &cfg);
+        if config_changed {
+            d.config = cfg;
+            d.etag = generate_etag();
+            d.last_modified_time = Utc::now();
+            // UpdateStreamingDistribution kicks off fresh edge
+            // propagation; AWS flips status back to `InProgress` until
+            // the new config lands.
+            d.status = "InProgress".to_string();
+        }
         let snap = d.clone();
         drop(state);
+
+        if config_changed {
+            self.schedule_streaming_distribution_deploy(id.clone());
+        }
+
         let body = render_streaming_distribution(&snap);
         Ok(xml_with_etag(StatusCode::OK, body, &snap.etag, None))
     }
@@ -428,4 +448,21 @@ fn render_active_trusted_signers(cfg: &StreamingDistributionConfig) -> String {
     }
     out.push_str("</ActiveTrustedSigners>");
     out
+}
+
+/// Compare two `StreamingDistributionConfig`s by their canonical XML
+/// representation. Mirrors `service::configs_equal` for the streaming
+/// (RTMP) distribution variant; used so a no-op `UpdateStreamingDistribution`
+/// leaves the ETag stable.
+fn streaming_configs_equal(
+    lhs: &StreamingDistributionConfig,
+    rhs: &StreamingDistributionConfig,
+) -> bool {
+    let Ok(a) = xml_io::to_xml_root("StreamingDistributionConfig", lhs) else {
+        return false;
+    };
+    let Ok(b) = xml_io::to_xml_root("StreamingDistributionConfig", rhs) else {
+        return false;
+    };
+    a == b
 }
