@@ -289,6 +289,16 @@ async fn main() {
         ),
     ));
 
+    // Deferred-fill handle to the central ServiceRegistry. We construct
+    // the cell up front, hand it to StepFunctionsService and the
+    // EventBridge/Scheduler-side StepFunctionsDelivery impls, then
+    // populate it after every service has been registered. The
+    // interpreter snapshots the inner `Arc<ServiceRegistry>` only when
+    // dispatching `arn:aws:states:::aws-sdk:*` Tasks, so unrelated
+    // executions never touch it.
+    let sfn_registry_handle: fakecloud_stepfunctions::SharedServiceRegistry =
+        Arc::new(std::sync::OnceLock::new());
+
     let apigatewayv2_state = Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new(
             &cli.account_id,
@@ -465,11 +475,14 @@ async fn main() {
         if let Some(ref ld) = lambda_delivery {
             sfn_interpreter_bus = sfn_interpreter_bus.with_lambda(ld.clone());
         }
-        Arc::new(stepfunctions_delivery::StepFunctionsDeliveryImpl::new(
-            stepfunctions_state.clone(),
-            Some(Arc::new(sfn_interpreter_bus)),
-            Some(dynamodb_state.clone()),
-        ))
+        Arc::new(
+            stepfunctions_delivery::StepFunctionsDeliveryImpl::new(
+                stepfunctions_state.clone(),
+                Some(Arc::new(sfn_interpreter_bus)),
+                Some(dynamodb_state.clone()),
+            )
+            .with_registry(sfn_registry_handle.clone()),
+        )
     };
 
     let delivery_for_eb = Arc::new(
@@ -2185,7 +2198,8 @@ async fn main() {
     };
     sfn_service = sfn_service
         .with_delivery(sfn_delivery_bus.clone())
-        .with_dynamodb(dynamodb_state.clone());
+        .with_dynamodb(dynamodb_state.clone())
+        .with_registry(sfn_registry_handle.clone());
     let sfn_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -2512,11 +2526,14 @@ async fn main() {
         if let Some(ref ld) = lambda_delivery {
             sfn_interpreter_bus = sfn_interpreter_bus.with_lambda(ld.clone());
         }
-        Arc::new(stepfunctions_delivery::StepFunctionsDeliveryImpl::new(
-            stepfunctions_state.clone(),
-            Some(Arc::new(sfn_interpreter_bus)),
-            Some(dynamodb_state.clone()),
-        ))
+        Arc::new(
+            stepfunctions_delivery::StepFunctionsDeliveryImpl::new(
+                stepfunctions_state.clone(),
+                Some(Arc::new(sfn_interpreter_bus)),
+                Some(dynamodb_state.clone()),
+            )
+            .with_registry(sfn_registry_handle.clone()),
+        )
     };
     let eb_delivery_for_scheduler = {
         let mut inner = DeliveryBus::new()
@@ -5630,7 +5647,17 @@ async fn main() {
             }),
         )
         .fallback(dispatch::dispatch)
-        .layer(Extension(Arc::new(registry)))
+        .layer({
+            let registry_arc = Arc::new(registry);
+            // Now that every service has been registered, give the
+            // Step Functions interpreter a handle to the finalised
+            // registry so `arn:aws:states:::aws-sdk:*` Tasks can
+            // dispatch back into other services. `set` returns Err
+            // if already populated (only possible on hot reload),
+            // which we silently ignore.
+            let _ = sfn_registry_handle.set(registry_arc.clone());
+            Extension(registry_arc)
+        })
         .layer(Extension(Arc::new(config)))
         .layer(TraceLayer::new_for_http());
 

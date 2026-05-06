@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use fakecloud_core::delivery::{DeliveryBus, StepFunctionsDelivery};
 use fakecloud_dynamodb::SharedDynamoDbState;
-use fakecloud_stepfunctions::SharedStepFunctionsState;
+use fakecloud_stepfunctions::{SharedServiceRegistry, SharedStepFunctionsState};
 
 /// Starts Step Functions executions from cross-service delivery (EventBridge, Scheduler).
 pub struct StepFunctionsDeliveryImpl {
     state: SharedStepFunctionsState,
     delivery: Option<Arc<DeliveryBus>>,
     dynamodb_state: Option<SharedDynamoDbState>,
+    registry: Option<SharedServiceRegistry>,
 }
 
 impl StepFunctionsDeliveryImpl {
@@ -23,7 +24,13 @@ impl StepFunctionsDeliveryImpl {
             state,
             delivery,
             dynamodb_state,
+            registry: None,
         }
+    }
+
+    pub fn with_registry(mut self, registry: SharedServiceRegistry) -> Self {
+        self.registry = Some(registry);
+        self
     }
 }
 
@@ -37,6 +44,7 @@ impl StepFunctionsDelivery for StepFunctionsDeliveryImpl {
             &self.state,
             &self.delivery,
             &self.dynamodb_state,
+            &self.registry,
             state_machine_arn,
             input,
         );

@@ -57,6 +57,7 @@ async fn test_simple_pass_state() {
         Some(r#"{"hello":"world"}"#.to_string()),
         None,
         None,
+        None,
     )
     .await;
 
@@ -101,6 +102,7 @@ async fn test_pass_chain() {
         Some("{}".to_string()),
         None,
         None,
+        None,
     )
     .await;
 
@@ -136,6 +138,7 @@ async fn test_succeed_state() {
         Some(r#"{"data": "value"}"#.to_string()),
         None,
         None,
+        None,
     )
     .await;
 
@@ -163,7 +166,16 @@ async fn test_fail_state() {
     })
     .to_string();
 
-    execute_state_machine(state.clone(), arn.to_string(), definition, None, None, None).await;
+    execute_state_machine(
+        state.clone(),
+        arn.to_string(),
+        definition,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
 
     let __a = state.read();
     let s = __a.default_ref();
@@ -197,6 +209,7 @@ async fn test_history_events_recorded() {
         Some("{}".to_string()),
         None,
         None,
+        None,
     )
     .await;
 
@@ -226,6 +239,7 @@ fn drive(state: &SharedStepFunctionsState, arn: &str, def: Value, input: Option<
         arn.to_string(),
         def.to_string(),
         input.map(|s| s.to_string()),
+        None,
         None,
         None,
     );
@@ -619,6 +633,7 @@ fn invalid_definition_json_fails_execution() {
         state.clone(),
         arn.clone(),
         "not json{".to_string(),
+        None,
         None,
         None,
         None,
