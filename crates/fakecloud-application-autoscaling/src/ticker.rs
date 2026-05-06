@@ -21,7 +21,7 @@ use chrono::Utc;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::hooks::{DynamoDbCapacityHook, MetricReader};
+use crate::hooks::{DynamoDbCapacityHook, EcsServiceHook, MetricReader};
 use crate::state::{
     NotScaledReason, ScalableTarget, ScalingActivity, ScalingPolicy,
     SharedApplicationAutoScalingState,
@@ -31,10 +31,18 @@ use crate::state::{
 pub const DDB_READ_DIM: &str = "dynamodb:table:ReadCapacityUnits";
 pub const DDB_WRITE_DIM: &str = "dynamodb:table:WriteCapacityUnits";
 
+/// AWS dimension string for ECS service desired-count scaling.
+pub const ECS_SERVICE_DIM: &str = "ecs:service:DesiredCount";
+
 /// Predefined CloudWatch metric types Application Auto Scaling knows
 /// for DynamoDB.
 const DDB_READ_METRIC: &str = "DynamoDBReadCapacityUtilization";
 const DDB_WRITE_METRIC: &str = "DynamoDBWriteCapacityUtilization";
+
+/// Predefined CloudWatch metric types for ECS service scaling.
+const ECS_CPU_METRIC: &str = "ECSServiceAverageCPUUtilization";
+const ECS_MEMORY_METRIC: &str = "ECSServiceAverageMemoryUtilization";
+const ECS_ALB_METRIC: &str = "ALBRequestCountPerTarget";
 
 /// Default region used to resolve metrics when a target was registered
 /// without a region context. Application Auto Scaling targets are
@@ -45,6 +53,7 @@ pub struct ScalingWatcher {
     state: SharedApplicationAutoScalingState,
     metric_reader: Arc<dyn MetricReader>,
     ddb_hook: Arc<dyn DynamoDbCapacityHook>,
+    ecs_hook: Option<Arc<dyn EcsServiceHook>>,
     region: String,
     interval: Duration,
 }
@@ -60,6 +69,7 @@ impl ScalingWatcher {
             state,
             metric_reader,
             ddb_hook,
+            ecs_hook: None,
             region: region.into(),
             interval: Duration::from_secs(15),
         }
@@ -67,6 +77,11 @@ impl ScalingWatcher {
 
     pub fn with_interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
+        self
+    }
+
+    pub fn with_ecs_hook(mut self, hook: Arc<dyn EcsServiceHook>) -> Self {
+        self.ecs_hook = Some(hook);
         self
     }
 
@@ -88,9 +103,6 @@ impl ScalingWatcher {
             let guard = self.state.read();
             for (account_id, account) in guard.accounts.iter() {
                 for policy in account.scaling_policies.values() {
-                    if policy.service_namespace != "dynamodb" {
-                        continue;
-                    }
                     let key = (
                         policy.service_namespace.clone(),
                         policy.resource_id.clone(),
@@ -102,26 +114,55 @@ impl ScalingWatcher {
                     if suspended_for(target, policy) {
                         continue;
                     }
-                    let Some(table) = ddb_table_from_resource(&policy.resource_id) else {
-                        continue;
-                    };
-                    let Some((read_cur, write_cur)) =
-                        self.ddb_hook
-                            .current_capacity(account_id, &self.region, table)
-                    else {
-                        continue;
-                    };
-                    let current = match policy.scalable_dimension.as_str() {
-                        DDB_READ_DIM => read_cur,
-                        DDB_WRITE_DIM => write_cur,
-                        _ => continue,
-                    };
-                    jobs.push(Job {
-                        account_id: account_id.clone(),
-                        policy: policy.clone(),
-                        target: target.clone(),
-                        current,
-                    });
+                    match policy.service_namespace.as_str() {
+                        "dynamodb" => {
+                            let Some(table) = ddb_table_from_resource(&policy.resource_id) else {
+                                continue;
+                            };
+                            let Some((read_cur, write_cur)) =
+                                self.ddb_hook
+                                    .current_capacity(account_id, &self.region, table)
+                            else {
+                                continue;
+                            };
+                            let current = match policy.scalable_dimension.as_str() {
+                                DDB_READ_DIM => read_cur,
+                                DDB_WRITE_DIM => write_cur,
+                                _ => continue,
+                            };
+                            jobs.push(Job {
+                                account_id: account_id.clone(),
+                                policy: policy.clone(),
+                                target: target.clone(),
+                                current,
+                            });
+                        }
+                        "ecs" => {
+                            let Some(hook) = self.ecs_hook.as_ref() else {
+                                continue;
+                            };
+                            let Some((cluster, service)) =
+                                ecs_service_from_resource(&policy.resource_id)
+                            else {
+                                continue;
+                            };
+                            let Some(current) = hook.current_desired_count(
+                                account_id,
+                                &self.region,
+                                cluster,
+                                service,
+                            ) else {
+                                continue;
+                            };
+                            jobs.push(Job {
+                                account_id: account_id.clone(),
+                                policy: policy.clone(),
+                                target: target.clone(),
+                                current: current as i64,
+                            });
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -154,11 +195,21 @@ impl ScalingWatcher {
         target: &ScalableTarget,
         current: i64,
     ) -> bool {
-        match policy.policy_type.as_str() {
-            "TargetTrackingScaling" => {
-                self.process_target_tracking(account_id, policy, target, current)
-            }
-            "StepScaling" => self.process_step_scaling(account_id, policy, target, current),
+        match policy.service_namespace.as_str() {
+            "dynamodb" => match policy.policy_type.as_str() {
+                "TargetTrackingScaling" => {
+                    self.process_target_tracking(account_id, policy, target, current)
+                }
+                "StepScaling" => self.process_step_scaling(account_id, policy, target, current),
+                _ => false,
+            },
+            "ecs" => match policy.policy_type.as_str() {
+                "TargetTrackingScaling" => {
+                    self.process_ecs_target_tracking(account_id, policy, target, current)
+                }
+                "StepScaling" => self.process_ecs_step_scaling(account_id, policy, target, current),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -498,6 +549,281 @@ impl ScalingWatcher {
             }],
         });
     }
+
+    fn process_ecs_target_tracking(
+        &self,
+        account_id: &str,
+        policy: &ScalingPolicy,
+        target: &ScalableTarget,
+        current: i64,
+    ) -> bool {
+        let Some(cfg) = policy.target_tracking_scaling_policy_configuration.as_ref() else {
+            return false;
+        };
+        let target_value = cfg.get("TargetValue").and_then(Value::as_f64);
+        let Some(target_value) = target_value else {
+            return false;
+        };
+        if target_value <= 0.0 {
+            return false;
+        }
+        let Some(metric_name) = ecs_predefined_metric_for(cfg) else {
+            return false;
+        };
+        let Some((cluster, service)) = ecs_service_from_resource(&policy.resource_id) else {
+            return false;
+        };
+
+        // Build metric dimensions: ServiceName + ClusterName
+        let mut dims = BTreeMap::new();
+        dims.insert("ServiceName".to_string(), service.to_string());
+        dims.insert("ClusterName".to_string(), cluster.to_string());
+        let utilisation = self.metric_reader.latest_sample(
+            account_id,
+            &self.region,
+            "AWS/ECS",
+            metric_name,
+            &dims,
+        );
+        let Some(utilisation) = utilisation else {
+            return false;
+        };
+
+        // desired = current * (utilisation / target_value), clamped to [min, max]
+        let raw = (current as f64) * (utilisation / target_value);
+        let mut desired = raw.ceil() as i64;
+        if desired < target.min_capacity as i64 {
+            desired = target.min_capacity as i64;
+        }
+        if desired > target.max_capacity as i64 {
+            desired = target.max_capacity as i64;
+        }
+        if desired == current {
+            return false;
+        }
+
+        let scale_out = desired > current;
+        let cooldown_secs = cfg
+            .get(if scale_out {
+                "ScaleOutCooldown"
+            } else {
+                "ScaleInCooldown"
+            })
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        if let Some(prev) = policy.last_applied_at {
+            if cooldown_secs > 0
+                && Utc::now().signed_duration_since(prev).num_seconds() < cooldown_secs
+            {
+                self.record_cooldown_skip(
+                    account_id,
+                    policy,
+                    target,
+                    current,
+                    desired,
+                    "TargetTracking",
+                );
+                return false;
+            }
+        }
+
+        self.apply_ecs_desired_count(
+            account_id,
+            policy,
+            target,
+            current,
+            desired,
+            "TargetTracking",
+        )
+    }
+
+    fn process_ecs_step_scaling(
+        &self,
+        account_id: &str,
+        policy: &ScalingPolicy,
+        target: &ScalableTarget,
+        current: i64,
+    ) -> bool {
+        let Some(cfg) = policy.step_scaling_policy_configuration.as_ref() else {
+            return false;
+        };
+        let adjustment_type = cfg
+            .get("AdjustmentType")
+            .and_then(Value::as_str)
+            .unwrap_or("ChangeInCapacity")
+            .to_string();
+        let cooldown_secs = cfg.get("Cooldown").and_then(Value::as_i64).unwrap_or(0);
+
+        let attached_in_alarm = policy.alarms.iter().any(|a| {
+            self.metric_reader
+                .alarm_state(account_id, &self.region, &a.alarm_name)
+                .as_deref()
+                == Some("ALARM")
+        });
+        let action_alarms_firing =
+            self.metric_reader
+                .alarms_firing_for_action(account_id, &self.region, &policy.arn);
+        if !attached_in_alarm && action_alarms_firing.is_empty() {
+            return false;
+        }
+
+        let adjustments = cfg
+            .get("StepAdjustments")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let Some(adj) = adjustments.first() else {
+            return false;
+        };
+        let adjustment = adj
+            .get("ScalingAdjustment")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        if adjustment == 0 {
+            return false;
+        }
+        let mut desired = match adjustment_type.as_str() {
+            "ExactCapacity" => adjustment,
+            "PercentChangeInCapacity" => {
+                let pct = adjustment as f64 / 100.0;
+                let delta = (current as f64 * pct).round() as i64;
+                let min_step = cfg
+                    .get("MinAdjustmentMagnitude")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let signed_delta = if delta == 0 && adjustment != 0 {
+                    if adjustment > 0 {
+                        1
+                    } else {
+                        -1
+                    }
+                } else {
+                    delta
+                };
+                let bumped = if signed_delta.abs() < min_step {
+                    if signed_delta >= 0 {
+                        min_step
+                    } else {
+                        -min_step
+                    }
+                } else {
+                    signed_delta
+                };
+                current + bumped
+            }
+            _ => current + adjustment, // ChangeInCapacity
+        };
+        if desired < target.min_capacity as i64 {
+            desired = target.min_capacity as i64;
+        }
+        if desired > target.max_capacity as i64 {
+            desired = target.max_capacity as i64;
+        }
+        if desired == current {
+            return false;
+        }
+        if let Some(prev) = policy.last_applied_at {
+            if cooldown_secs > 0
+                && Utc::now().signed_duration_since(prev).num_seconds() < cooldown_secs
+            {
+                self.record_cooldown_skip(
+                    account_id,
+                    policy,
+                    target,
+                    current,
+                    desired,
+                    "StepScaling",
+                );
+                return false;
+            }
+        }
+
+        self.apply_ecs_desired_count(account_id, policy, target, current, desired, "StepScaling")
+    }
+
+    fn apply_ecs_desired_count(
+        &self,
+        account_id: &str,
+        policy: &ScalingPolicy,
+        target: &ScalableTarget,
+        current: i64,
+        desired: i64,
+        cause_kind: &str,
+    ) -> bool {
+        let Some(hook) = self.ecs_hook.as_ref() else {
+            return false;
+        };
+        let Some((cluster, service)) = ecs_service_from_resource(&policy.resource_id) else {
+            return false;
+        };
+        let now = Utc::now();
+        let result =
+            hook.set_desired_count(account_id, &self.region, cluster, service, desired as i32);
+
+        let mut state = self.state.write();
+        let account = state.accounts.entry(account_id.to_string()).or_default();
+        let policy_key = (
+            policy.service_namespace.clone(),
+            policy.resource_id.clone(),
+            policy.scalable_dimension.clone(),
+            policy.policy_name.clone(),
+        );
+        let activity = match result {
+            Ok(()) => {
+                if let Some(p) = account.scaling_policies.get_mut(&policy_key) {
+                    p.last_applied_at = Some(now);
+                }
+                ScalingActivity {
+                    activity_id: Uuid::new_v4().to_string(),
+                    service_namespace: policy.service_namespace.clone(),
+                    resource_id: policy.resource_id.clone(),
+                    scalable_dimension: policy.scalable_dimension.clone(),
+                    description: format!(
+                        "Setting desired count to {desired} for {res}",
+                        res = policy.resource_id,
+                    ),
+                    cause: format!(
+                        "policy {policy_name} ({cause_kind}) applied; previous desired count {current}",
+                        policy_name = policy.policy_name,
+                    ),
+                    start_time: now,
+                    end_time: Some(now),
+                    status_code: "Successful".to_string(),
+                    status_message: Some(format!("Successfully set {desired}")),
+                    details: None,
+                    not_scaled_reasons: Vec::new(),
+                }
+            }
+            Err(err) => ScalingActivity {
+                activity_id: Uuid::new_v4().to_string(),
+                service_namespace: policy.service_namespace.clone(),
+                resource_id: policy.resource_id.clone(),
+                scalable_dimension: policy.scalable_dimension.clone(),
+                description: format!(
+                    "Failed to set desired count to {desired} for {res}",
+                    res = policy.resource_id,
+                ),
+                cause: format!(
+                    "policy {policy_name} ({cause_kind}) failed",
+                    policy_name = policy.policy_name,
+                ),
+                start_time: now,
+                end_time: Some(now),
+                status_code: "Failed".to_string(),
+                status_message: Some(err),
+                details: None,
+                not_scaled_reasons: vec![NotScaledReason {
+                    code: "FailedToSetDesiredCount".to_string(),
+                    max_capacity: Some(target.max_capacity),
+                    min_capacity: Some(target.min_capacity),
+                    current_capacity: Some(current as i32),
+                }],
+            },
+        };
+        let success = activity.status_code == "Successful";
+        account.scaling_activities.push(activity);
+        success
+    }
 }
 
 fn predefined_metric_for(cfg: &Value, dimension: &str) -> Option<&'static str> {
@@ -524,6 +850,24 @@ fn ddb_table_from_resource(resource_id: &str) -> Option<&str> {
 /// (`scheduled_executor`) so we don't duplicate the parsing rule.
 pub(crate) fn ddb_table_from_resource_public(resource_id: &str) -> Option<&str> {
     ddb_table_from_resource(resource_id)
+}
+
+/// Parse an ECS resource_id: "service/<cluster>/<service>".
+pub(crate) fn ecs_service_from_resource(resource_id: &str) -> Option<(&str, &str)> {
+    let rest = resource_id.strip_prefix("service/")?;
+    let (cluster, service) = rest.split_once('/')?;
+    Some((cluster, service))
+}
+
+fn ecs_predefined_metric_for(cfg: &Value) -> Option<&'static str> {
+    let predefined = cfg.get("PredefinedMetricSpecification")?;
+    let metric_type = predefined.get("PredefinedMetricType")?.as_str()?;
+    match metric_type {
+        "ECSServiceAverageCPUUtilization" => Some(ECS_CPU_METRIC),
+        "ECSServiceAverageMemoryUtilization" => Some(ECS_MEMORY_METRIC),
+        "ALBRequestCountPerTarget" => Some(ECS_ALB_METRIC),
+        _ => None,
+    }
 }
 
 fn suspended_for(target: &ScalableTarget, policy: &ScalingPolicy) -> bool {

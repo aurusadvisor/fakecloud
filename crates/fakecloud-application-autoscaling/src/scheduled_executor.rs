@@ -26,15 +26,18 @@ use std::time::Duration;
 use chrono::{DateTime, Datelike, NaiveDateTime, TimeZone, Timelike, Utc};
 use uuid::Uuid;
 
-use crate::hooks::DynamoDbCapacityHook;
+use crate::hooks::{DynamoDbCapacityHook, EcsServiceHook};
 use crate::state::{ScalingActivity, ScheduledAction, SharedApplicationAutoScalingState};
-use crate::ticker::{ddb_table_from_resource_public, DDB_READ_DIM, DDB_WRITE_DIM};
+use crate::ticker::{
+    ddb_table_from_resource_public, ecs_service_from_resource, DDB_READ_DIM, DDB_WRITE_DIM,
+};
 
 /// Background loop driver. Construction wires the shared state and the
 /// hooks that apply scaling decisions on real resources.
 pub struct ScheduledActionExecutor {
     state: SharedApplicationAutoScalingState,
     ddb_hook: Arc<dyn DynamoDbCapacityHook>,
+    ecs_hook: Option<Arc<dyn EcsServiceHook>>,
     region: String,
     interval: Duration,
 }
@@ -48,6 +51,7 @@ impl ScheduledActionExecutor {
         Self {
             state,
             ddb_hook,
+            ecs_hook: None,
             region: region.into(),
             interval: Duration::from_secs(30),
         }
@@ -55,6 +59,11 @@ impl ScheduledActionExecutor {
 
     pub fn with_interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
+        self
+    }
+
+    pub fn with_ecs_hook(mut self, hook: Arc<dyn EcsServiceHook>) -> Self {
+        self.ecs_hook = Some(hook);
         self
     }
 
@@ -289,6 +298,37 @@ impl ScheduledActionExecutor {
                 };
                 self.ddb_hook
                     .set_capacity(account_id, &self.region, table, read, write)
+            }
+            "ecs" => {
+                let Some((cluster, service)) = ecs_service_from_resource(&action.resource_id)
+                else {
+                    return Err(format!(
+                        "Cannot derive ECS cluster/service from resource_id {}",
+                        action.resource_id
+                    ));
+                };
+                let Some(hook) = self.ecs_hook.as_ref() else {
+                    return Ok(());
+                };
+                let Some(current) =
+                    hook.current_desired_count(account_id, &self.region, cluster, service)
+                else {
+                    return Err(format!(
+                        "ECS service {service} not found in cluster {cluster}"
+                    ));
+                };
+                // Pin desired count into the new [min, max] window.
+                let mut desired = current as i64;
+                if desired < new_min as i64 {
+                    desired = new_min as i64;
+                }
+                if desired > new_max as i64 {
+                    desired = new_max as i64;
+                }
+                if desired == current as i64 {
+                    return Ok(());
+                }
+                hook.set_desired_count(account_id, &self.region, cluster, service, desired as i32)
             }
             // Other namespaces don't yet have a cross-service apply
             // hook in this crate. Updating the scalable target bounds

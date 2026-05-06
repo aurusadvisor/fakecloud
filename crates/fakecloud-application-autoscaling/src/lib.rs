@@ -4,7 +4,7 @@ pub(crate) mod service;
 pub(crate) mod state;
 pub mod ticker;
 
-pub use hooks::{DynamoDbCapacityHook, MetricReader};
+pub use hooks::{DynamoDbCapacityHook, EcsServiceHook, MetricReader};
 pub use scheduled_executor::ScheduledActionExecutor;
 pub use service::ApplicationAutoScalingService;
 pub use state::{ApplicationAutoScalingAccounts, SharedApplicationAutoScalingState};

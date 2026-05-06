@@ -44,6 +44,32 @@ pub trait MetricReader: Send + Sync {
     ) -> Vec<String>;
 }
 
+/// Applies a desired-count change to an ECS service. Used when a scaling
+/// target's `ServiceNamespace == ecs`.
+pub trait EcsServiceHook: Send + Sync {
+    /// Returns the service's current `desiredCount`, or `None` when the
+    /// cluster or service doesn't exist.
+    fn current_desired_count(
+        &self,
+        account_id: &str,
+        region: &str,
+        cluster_name: &str,
+        service_name: &str,
+    ) -> Option<i32>;
+
+    /// Sets the service's `desiredCount` and returns `Ok(())` on success.
+    /// Returns `Err` when the cluster/service is missing so the caller
+    /// can log a `NotScaled` activity.
+    fn set_desired_count(
+        &self,
+        account_id: &str,
+        region: &str,
+        cluster_name: &str,
+        service_name: &str,
+        desired_count: i32,
+    ) -> Result<(), String>;
+}
+
 /// Applies a capacity change to a DynamoDB table. Used when a scaling
 /// target's `ServiceNamespace == dynamodb`. `dimension` is the AWS
 /// `ScalableDimension` string and selects read vs write capacity.
