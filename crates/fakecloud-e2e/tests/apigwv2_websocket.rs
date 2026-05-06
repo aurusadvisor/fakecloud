@@ -171,9 +171,7 @@ async fn websocket_connect_and_default_route_dispatches_to_lambda() {
         .create_integration()
         .api_id(&api_id)
         .integration_type(aws_sdk_apigatewayv2::types::IntegrationType::AwsProxy)
-        .integration_uri(format!(
-            "arn:aws:lambda:us-east-1:123456789012:function:apigwv2-ws-handler"
-        ))
+        .integration_uri("arn:aws:lambda:us-east-1:123456789012:function:apigwv2-ws-handler")
         .send()
         .await
         .unwrap();
@@ -296,9 +294,7 @@ async fn websocket_message_falls_back_to_default_route() {
         .create_integration()
         .api_id(&api_id)
         .integration_type(aws_sdk_apigatewayv2::types::IntegrationType::AwsProxy)
-        .integration_uri(format!(
-            "arn:aws:lambda:us-east-1:123456789012:function:apigwv2-ws-default-handler"
-        ))
+        .integration_uri("arn:aws:lambda:us-east-1:123456789012:function:apigwv2-ws-default-handler")
         .send()
         .await
         .unwrap();
