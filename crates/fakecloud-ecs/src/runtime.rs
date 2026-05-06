@@ -818,6 +818,11 @@ pub(crate) struct ContainerPlan {
     /// the container's `healthStatus` then stays `UNKNOWN` (matching ECS
     /// behaviour for tasks without a health probe).
     pub(crate) health_check: Option<HealthCheckSpec>,
+    /// Volume mounts resolved by joining the container definition's
+    /// `mountPoints[]` with the task definition's `volumes[]`. Each entry
+    /// renders as one `-v` flag on the `docker run` invocation. Empty when
+    /// the container has no mount points or no matching volume entries.
+    pub(crate) volume_mounts: Vec<VolumeMount>,
 }
 
 /// Container health check parsed from the ECS task definition. Each
@@ -850,6 +855,42 @@ pub(crate) struct PortMapping {
     pub host_port: u16,
     /// Lower-case `tcp` / `udp`. Defaults to `tcp` when omitted.
     pub protocol: String,
+}
+
+/// One resolved `mountPoints` entry on a container plan. Computed at
+/// launch by joining the container definition's `mountPoints` against the
+/// task definition's `volumes` array. Each entry becomes a single
+/// `-v <source>:<containerPath>[:ro]` flag on `docker run`.
+///
+/// Source resolution by volume kind:
+/// - **host bind** (`volume.host.sourcePath` set): bind the host path
+///   into the container at `containerPath`.
+/// - **EFS** (`efsVolumeConfiguration` set): bind a host-side stub
+///   directory at `/tmp/fakecloud/efs/<filesystemId>[/<rootDirectory>]`
+///   so multiple tasks targeting the same filesystem id can share state
+///   the way real EFS would. The stub directory is created with
+///   `mkdir -p` ahead of `docker run`.
+/// - **FSx for Windows** (`fsxWindowsFileServerVolumeConfiguration` set):
+///   stub directory at `/tmp/fakecloud/fsx/<filesystemId>/<rootDirectory>`
+///   created the same way as EFS.
+/// - **Docker named volume** (`dockerVolumeConfiguration` set): pass the
+///   volume name through to docker as a named volume reference.
+/// - **Bare volume** (only `name` set, no host config): treated as an
+///   anonymous docker volume for that task — matches AWS's "Docker
+///   volumes" default scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VolumeMount {
+    /// Left side of `-v`: a host path, a docker named volume, or a stub
+    /// directory under `/tmp/fakecloud/{efs,fsx}/...` for shared FS
+    /// emulation.
+    pub source: String,
+    /// Container-side path, taken verbatim from the container
+    /// definition's `mountPoints[].containerPath`.
+    pub container_path: String,
+    /// `mountPoints[].readOnly` honoured: when true, append `:ro` to the
+    /// `-v` flag so the bind/named volume is read-only inside the
+    /// container. Defaults to false (read-write) when omitted.
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -925,11 +966,26 @@ fn build_container_plans(
         ));
     }
     let has_task_role = task.task_role_arn.is_some();
-    let network_mode = s
+    let task_def = s
         .task_definitions
         .get(&task.family)
-        .and_then(|revs| revs.get(&task.revision))
-        .and_then(|td| td.network_mode.clone());
+        .and_then(|revs| revs.get(&task.revision));
+    let network_mode = task_def.and_then(|td| td.network_mode.clone());
+    // Index `volumes[]` by name so each container's `mountPoints[]` can
+    // resolve its volume in O(1). Real ECS rejects mountPoints that
+    // reference an undeclared volume at register time; we don't yet, so
+    // unresolved names just produce zero mounts at launch.
+    let volumes_by_name: std::collections::HashMap<String, &serde_json::Value> = task_def
+        .map(|td| {
+            td.volumes
+                .iter()
+                .filter_map(|v| {
+                    let name = v.get("name").and_then(|n| n.as_str())?;
+                    Some((name.to_string(), v))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let mut plans = Vec::with_capacity(task.containers.len());
     for container in &task.containers {
         let def = find_container_definition(s, &task.family, task.revision, &container.name);
@@ -995,6 +1051,15 @@ fn build_container_plans(
             .as_ref()
             .and_then(|d| d.get("healthCheck"))
             .and_then(parse_health_check);
+        let volume_mounts = def
+            .as_ref()
+            .and_then(|d| d.get("mountPoints").and_then(|v| v.as_array()).cloned())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|mp| resolve_mount_point(mp, &volumes_by_name))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         plans.push(ContainerPlan {
             container_name: container.name.clone(),
             image: container.image.clone(),
@@ -1008,10 +1073,119 @@ fn build_container_plans(
             network_mode: network_mode.clone(),
             depends_on,
             health_check,
+            volume_mounts,
         });
     }
     let plans = topo_sort_plans(plans);
     Ok(plans)
+}
+
+/// Resolve one `mountPoints[]` entry against the indexed task-definition
+/// volumes. Returns `None` when:
+/// - the entry has no `containerPath` or `sourceVolume`,
+/// - the named volume isn't declared on the task definition.
+///
+/// Returns `Some(VolumeMount)` for every supported volume kind:
+/// host bind, EFS, FSx, named docker volume, anonymous docker volume.
+fn resolve_mount_point(
+    mount_point: &serde_json::Value,
+    volumes_by_name: &std::collections::HashMap<String, &serde_json::Value>,
+) -> Option<VolumeMount> {
+    let container_path = mount_point
+        .get("containerPath")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let source_volume = mount_point.get("sourceVolume").and_then(|v| v.as_str())?;
+    let read_only = mount_point
+        .get("readOnly")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let volume = volumes_by_name.get(source_volume)?;
+    let source = resolve_volume_source(source_volume, volume)?;
+    Some(VolumeMount {
+        source,
+        container_path,
+        read_only,
+    })
+}
+
+/// Map a single task-definition `volumes[]` entry to the source side of a
+/// `docker run -v` flag. The matching here mirrors the AWS volume kinds:
+///
+/// 1. `host.sourcePath` -> use that path directly (bind mount).
+/// 2. `efsVolumeConfiguration.fileSystemId` -> stub directory under
+///    `/tmp/fakecloud/efs/<filesystemId>[/<rootDirectory>]`. Created with
+///    `mkdir -p` so different tasks targeting the same filesystem id
+///    share the same host directory, matching real EFS's "many tasks,
+///    one filesystem" semantics.
+/// 3. `fsxWindowsFileServerVolumeConfiguration.fileSystemId` -> stub
+///    directory under `/tmp/fakecloud/fsx/<filesystemId>/<rootDirectory>`.
+/// 4. `dockerVolumeConfiguration` -> the volume `name` itself (named
+///    docker volume; docker creates it on first reference).
+/// 5. Bare entry (only `name`) -> the volume `name` as an anonymous
+///    docker volume reference, matching AWS's "Docker volumes" default.
+///
+/// Returns `None` when the configuration is malformed (e.g. EFS without
+/// a fileSystemId).
+fn resolve_volume_source(name: &str, volume: &serde_json::Value) -> Option<String> {
+    if let Some(host) = volume.get("host") {
+        if let Some(path) = host.get("sourcePath").and_then(|v| v.as_str()) {
+            // Empty sourcePath means "anonymous host volume" — fall
+            // through to the named-volume default below.
+            if !path.is_empty() {
+                ensure_dir_exists(path);
+                return Some(path.to_string());
+            }
+        }
+    }
+    if let Some(efs) = volume.get("efsVolumeConfiguration") {
+        let fs_id = efs.get("fileSystemId").and_then(|v| v.as_str())?;
+        let root = efs
+            .get("rootDirectory")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/");
+        let path = stub_dir_for("efs", fs_id, root);
+        ensure_dir_exists(&path);
+        return Some(path);
+    }
+    if let Some(fsx) = volume.get("fsxWindowsFileServerVolumeConfiguration") {
+        let fs_id = fsx.get("fileSystemId").and_then(|v| v.as_str())?;
+        let root = fsx
+            .get("rootDirectory")
+            .and_then(|v| v.as_str())
+            .unwrap_or("/");
+        let path = stub_dir_for("fsx", fs_id, root);
+        ensure_dir_exists(&path);
+        return Some(path);
+    }
+    if volume.get("dockerVolumeConfiguration").is_some() {
+        // Named docker volume — docker auto-creates it on first
+        // reference. Pass the volume name through verbatim.
+        return Some(name.to_string());
+    }
+    // Bare volume entry: anonymous docker volume keyed by name.
+    Some(name.to_string())
+}
+
+/// Compose the host stub directory path for an EFS/FSx volume. Falls
+/// back to a single shared directory per filesystem id when
+/// `rootDirectory` is unset or `/`, matching the EFS convention where
+/// the root of the filesystem is the default mount target.
+fn stub_dir_for(kind: &str, fs_id: &str, root: &str) -> String {
+    let trimmed = root.trim_start_matches('/');
+    if trimmed.is_empty() {
+        format!("/tmp/fakecloud/{kind}/{fs_id}")
+    } else {
+        format!("/tmp/fakecloud/{kind}/{fs_id}/{trimmed}")
+    }
+}
+
+/// Best-effort `mkdir -p` so the EFS/FSx stub path exists before the
+/// first task tries to bind-mount it. Failures are ignored — docker
+/// will surface a clear error on the run, and unit tests don't have a
+/// writable `/tmp/fakecloud` in every sandbox.
+fn ensure_dir_exists(path: &str) {
+    let _ = std::fs::create_dir_all(path);
 }
 
 /// Topologically sort container plans so `dependsOn` dependencies start
@@ -1242,6 +1416,15 @@ pub(crate) fn build_run_argv(
             .replace("https://localhost:", "https://host.docker.internal:");
         argv.push("-e".into());
         argv.push(format!("{}={}", k, transformed));
+    }
+    // Volume mounts: one `-v` flag per mountPoints entry, with the
+    // source resolved from the task definition's `volumes[]`. EFS and
+    // FSx stubs were materialised on the host (mkdir -p) before this
+    // function returns, so docker can bind them straight in.
+    for vm in &plan.volume_mounts {
+        argv.push("-v".into());
+        let suffix = if vm.read_only { ":ro" } else { "" };
+        argv.push(format!("{}:{}{}", vm.source, vm.container_path, suffix));
     }
     if let Some(first) = plan.entry_point.first() {
         argv.push("--entrypoint".into());
@@ -1827,6 +2010,7 @@ mod tests {
             network_mode: None,
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             health_check: None,
+            volume_mounts: Vec::new(),
         }
     }
 
@@ -1980,6 +2164,7 @@ mod tests {
                 retries: 1,
                 start_period_seconds: 1,
             }),
+            volume_mounts: Vec::new(),
         };
         let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine");
         let joined = argv.join(" ");
@@ -2008,6 +2193,7 @@ mod tests {
             network_mode: None,
             depends_on: Vec::new(),
             health_check: None,
+            volume_mounts: Vec::new(),
         };
         let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine");
         assert!(!argv.iter().any(|s| s.starts_with("--health")));
@@ -2021,5 +2207,156 @@ mod tests {
         assert_eq!(docker_health_to_ecs("starting"), "UNKNOWN");
         assert_eq!(docker_health_to_ecs("none"), "UNKNOWN");
         assert_eq!(docker_health_to_ecs(""), "UNKNOWN");
+    }
+
+    /// `host.sourcePath` becomes a host bind mount with the path
+    /// passed straight through to docker.
+    #[test]
+    fn resolve_host_bind_volume_uses_source_path() {
+        let mut volumes = std::collections::HashMap::new();
+        let v = serde_json::json!({
+            "name": "data",
+            "host": { "sourcePath": "/var/lib/myapp" }
+        });
+        volumes.insert("data".to_string(), &v);
+        let mp = serde_json::json!({
+            "sourceVolume": "data",
+            "containerPath": "/app/data",
+            "readOnly": false
+        });
+        let resolved = resolve_mount_point(&mp, &volumes).expect("resolved");
+        assert_eq!(resolved.source, "/var/lib/myapp");
+        assert_eq!(resolved.container_path, "/app/data");
+        assert!(!resolved.read_only);
+    }
+
+    /// `readOnly: true` on the mount point appends `:ro` to the
+    /// rendered docker `-v` flag.
+    #[test]
+    fn read_only_mount_renders_ro_suffix() {
+        let plan = ContainerPlan {
+            container_name: "app".into(),
+            image: "alpine".into(),
+            env: Vec::new(),
+            entry_point: Vec::new(),
+            command: Vec::new(),
+            secrets_refs: Vec::new(),
+            essential: true,
+            has_task_role: false,
+            port_mappings: Vec::new(),
+            network_mode: None,
+            depends_on: Vec::new(),
+            health_check: None,
+            volume_mounts: vec![VolumeMount {
+                source: "/host/path".into(),
+                container_path: "/in/container".into(),
+                read_only: true,
+            }],
+        };
+        let argv = build_run_argv(&plan, &[], "task-1", "host-gateway", "alpine");
+        let pair = argv
+            .windows(2)
+            .find(|w| w[0] == "-v")
+            .expect("expected -v flag");
+        assert_eq!(pair[1], "/host/path:/in/container:ro");
+    }
+
+    /// EFS volumes resolve to a stub directory under `/tmp/fakecloud/efs`
+    /// keyed by `fileSystemId`. `rootDirectory` (when set and not `/`)
+    /// is appended so different mount targets within the same
+    /// filesystem stay isolated.
+    #[test]
+    fn resolve_efs_volume_uses_stub_dir() {
+        let mut volumes = std::collections::HashMap::new();
+        let v = serde_json::json!({
+            "name": "efs-vol",
+            "efsVolumeConfiguration": {
+                "fileSystemId": "fs-12345678",
+                "rootDirectory": "/exports/app"
+            }
+        });
+        volumes.insert("efs-vol".to_string(), &v);
+        let mp = serde_json::json!({
+            "sourceVolume": "efs-vol",
+            "containerPath": "/mnt/efs"
+        });
+        let resolved = resolve_mount_point(&mp, &volumes).expect("resolved");
+        assert_eq!(
+            resolved.source,
+            "/tmp/fakecloud/efs/fs-12345678/exports/app"
+        );
+        assert_eq!(resolved.container_path, "/mnt/efs");
+    }
+
+    /// EFS without `rootDirectory` (or with `/`) maps to the root of
+    /// the filesystem stub so multiple tasks targeting the same id
+    /// share state.
+    #[test]
+    fn efs_without_root_directory_uses_filesystem_root() {
+        assert_eq!(
+            stub_dir_for("efs", "fs-abc", "/"),
+            "/tmp/fakecloud/efs/fs-abc"
+        );
+        assert_eq!(
+            stub_dir_for("efs", "fs-abc", ""),
+            "/tmp/fakecloud/efs/fs-abc"
+        );
+    }
+
+    /// `dockerVolumeConfiguration` resolves to the volume name itself,
+    /// which docker treats as a named volume reference. No host path
+    /// is materialised — docker creates the volume on first reference.
+    #[test]
+    fn resolve_docker_named_volume_uses_volume_name() {
+        let mut volumes = std::collections::HashMap::new();
+        let v = serde_json::json!({
+            "name": "named-vol",
+            "dockerVolumeConfiguration": {
+                "scope": "task",
+                "driver": "local"
+            }
+        });
+        volumes.insert("named-vol".to_string(), &v);
+        let mp = serde_json::json!({
+            "sourceVolume": "named-vol",
+            "containerPath": "/data"
+        });
+        let resolved = resolve_mount_point(&mp, &volumes).expect("resolved");
+        assert_eq!(resolved.source, "named-vol");
+        assert_eq!(resolved.container_path, "/data");
+    }
+
+    /// FSx for Windows uses the same stub-directory pattern as EFS but
+    /// scoped under `/tmp/fakecloud/fsx/<filesystemId>/`.
+    #[test]
+    fn resolve_fsx_volume_uses_stub_dir() {
+        let mut volumes = std::collections::HashMap::new();
+        let v = serde_json::json!({
+            "name": "fsx-vol",
+            "fsxWindowsFileServerVolumeConfiguration": {
+                "fileSystemId": "fs-xyz",
+                "rootDirectory": "share"
+            }
+        });
+        volumes.insert("fsx-vol".to_string(), &v);
+        let mp = serde_json::json!({
+            "sourceVolume": "fsx-vol",
+            "containerPath": "C:\\data"
+        });
+        let resolved = resolve_mount_point(&mp, &volumes).expect("resolved");
+        assert_eq!(resolved.source, "/tmp/fakecloud/fsx/fs-xyz/share");
+    }
+
+    /// Mount points that reference an undeclared `sourceVolume` resolve
+    /// to `None` so `build_container_plans` skips them rather than
+    /// emitting a broken `-v` flag.
+    #[test]
+    fn unknown_source_volume_returns_none() {
+        let volumes = std::collections::HashMap::new();
+        let mp = serde_json::json!({
+            "sourceVolume": "missing",
+            "containerPath": "/x"
+        });
+        assert!(resolve_mount_point(&mp, &volumes).is_none());
     }
 }
