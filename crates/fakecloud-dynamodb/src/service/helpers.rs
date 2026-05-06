@@ -10,9 +10,7 @@ use base64::Engine;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use fakecloud_core::service::{AwsResponse, AwsServiceError};
-
-use super::DynamoDbService;
+use fakecloud_core::service::AwsServiceError;
 
 use crate::state::*;
 
@@ -2154,39 +2152,15 @@ pub(crate) fn build_table_description(table: &DynamoTable) -> Value {
     desc
 }
 
-pub(crate) fn execute_partiql_statement(
-    state: &SharedDynamoDbState,
-    account_id: &str,
-    statement: &str,
-    parameters: &[Value],
-) -> Result<AwsResponse, AwsServiceError> {
-    let trimmed = statement.trim();
-    let upper = trimmed.to_ascii_uppercase();
-
-    if upper.starts_with("SELECT") {
-        execute_partiql_select(state, account_id, trimmed, parameters)
-    } else if upper.starts_with("INSERT") {
-        execute_partiql_insert(state, account_id, trimmed, parameters)
-    } else if upper.starts_with("UPDATE") {
-        execute_partiql_update(state, account_id, trimmed, parameters)
-    } else if upper.starts_with("DELETE") {
-        execute_partiql_delete(state, account_id, trimmed, parameters)
-    } else {
-        Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            format!("Unsupported PartiQL statement: {trimmed}"),
-        ))
-    }
-}
-
-/// In-place PartiQL executor used by ExecuteTransaction, which must
-/// hold a single write lock across the whole batch so a mid-batch error
-/// can revert. Returns the response body Value plus the touched table
-/// name and (for write ops) the keys + before/after images so the
-/// caller can emit stream + kinesis events after the transaction
-/// commits — mirroring the per-write hooks in items.rs and the
-/// TransactWriteItems path.
+/// In-place PartiQL executor used by every PartiQL entry point
+/// (ExecuteStatement, BatchExecuteStatement, ExecuteTransaction).
+/// The caller holds the write lock for the batch — ExecuteTransaction
+/// keeps it across the entire all-or-nothing apply phase, single-shot
+/// callers acquire it for one statement. Returns the response body
+/// Value plus the touched table name and (for write ops) the keys +
+/// before/after images so the caller can emit stream + kinesis events
+/// after the lock is released — mirroring the per-write hooks in
+/// items.rs and the TransactWriteItems path.
 pub(crate) struct PartiqlOutcome {
     pub response: Value,
     pub table_name: Option<String>,
@@ -2254,18 +2228,7 @@ pub(crate) fn execute_partiql_in_state(
         let value_str = rest.trim()[value_pos + 5..].trim();
         let item = parse_partiql_value_object(value_str, parameters)?;
         let table = get_table_mut(&mut state.tables, &table_name)?;
-        for key_attr in &table.key_schema {
-            if !item.contains_key(&key_attr.attribute_name) {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationException",
-                    format!(
-                        "One or more parameter values were invalid: Missing the key {} in the item",
-                        key_attr.attribute_name
-                    ),
-                ));
-            }
-        }
+        validate_partiql_item_against_key_schema(table, &item)?;
         let key = extract_key(table, &item);
         if table.find_item_index(&key).is_some() {
             return Err(AwsServiceError::aws_error(
@@ -2387,219 +2350,6 @@ pub(crate) fn execute_partiql_in_state(
     }
 }
 
-/// Parse a simple `SELECT * FROM tablename WHERE pk = 'value'` or with parameters.
-pub(crate) fn execute_partiql_select(
-    state: &SharedDynamoDbState,
-    account_id: &str,
-    statement: &str,
-    parameters: &[Value],
-) -> Result<AwsResponse, AwsServiceError> {
-    // Pattern: SELECT * FROM "tablename" [WHERE col = 'val' | WHERE col = ?]
-    let upper = statement.to_ascii_uppercase();
-    let from_pos = upper.find("FROM").ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "Invalid SELECT statement: missing FROM",
-        )
-    })?;
-
-    let after_from = statement[from_pos + 4..].trim();
-    let (table_name, rest) = parse_partiql_table_name(after_from);
-
-    let __mas = state.read();
-    let empty_state = crate::state::DynamoDbState::new(account_id, "us-east-1");
-    let state = __mas.get(account_id).unwrap_or(&empty_state);
-    let table = get_table(&state.tables, &table_name)?;
-
-    let rest_upper = rest.trim().to_ascii_uppercase();
-    if rest_upper.starts_with("WHERE") {
-        let where_clause = rest.trim()[5..].trim();
-        let matched = evaluate_partiql_where(table, where_clause, parameters)?;
-        let items: Vec<Value> = matched.iter().map(|item| json!(item)).collect();
-        DynamoDbService::ok_json(json!({ "Items": items }))
-    } else {
-        // No WHERE, return all items
-        let items: Vec<Value> = table.items.iter().map(|item| json!(item)).collect();
-        DynamoDbService::ok_json(json!({ "Items": items }))
-    }
-}
-
-pub(crate) fn execute_partiql_insert(
-    state: &SharedDynamoDbState,
-    account_id: &str,
-    statement: &str,
-    parameters: &[Value],
-) -> Result<AwsResponse, AwsServiceError> {
-    // Pattern: INSERT INTO "tablename" VALUE {'pk': 'val', 'attr': 'val'}
-    // or with parameters: INSERT INTO "tablename" VALUE {'pk': ?, 'attr': ?}
-    let upper = statement.to_ascii_uppercase();
-    let into_pos = upper.find("INTO").ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "Invalid INSERT statement: missing INTO",
-        )
-    })?;
-
-    let after_into = statement[into_pos + 4..].trim();
-    let (table_name, rest) = parse_partiql_table_name(after_into);
-
-    let rest_upper = rest.trim().to_ascii_uppercase();
-    let value_pos = rest_upper.find("VALUE").ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "Invalid INSERT statement: missing VALUE",
-        )
-    })?;
-
-    let value_str = rest.trim()[value_pos + 5..].trim();
-    let item = parse_partiql_value_object(value_str, parameters)?;
-
-    let mut __mas = state.write();
-    let state = __mas.get_or_create(account_id);
-    let table = get_table_mut(&mut state.tables, &table_name)?;
-    // Validate every key-schema attribute is present in the item.
-    // Real DDB rejects an INSERT that omits any key attribute with a
-    // ValidationException; without this check we'd silently insert an
-    // item with a phantom default key (the AttributeValue::Null fallback
-    // from `extract_key`) and clobber any prior insert that did the same.
-    for key_attr in &table.key_schema {
-        if !item.contains_key(&key_attr.attribute_name) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ValidationException",
-                format!(
-                    "One or more parameter values were invalid: Missing the key {} in the item",
-                    key_attr.attribute_name
-                ),
-            ));
-        }
-    }
-    let key = extract_key(table, &item);
-    if table.find_item_index(&key).is_some() {
-        // DynamoDB PartiQL INSERT fails if item exists
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "DuplicateItemException",
-            "Duplicate primary key exists in table",
-        ));
-    } else {
-        table.items.push(item);
-    }
-    table.recalculate_stats();
-
-    DynamoDbService::ok_json(json!({}))
-}
-
-pub(crate) fn execute_partiql_update(
-    state: &SharedDynamoDbState,
-    account_id: &str,
-    statement: &str,
-    parameters: &[Value],
-) -> Result<AwsResponse, AwsServiceError> {
-    // Pattern: UPDATE "tablename" SET attr='val' WHERE pk='val'
-    // or: UPDATE "tablename" SET attr=? WHERE pk=?
-    let after_update = statement[6..].trim(); // skip "UPDATE"
-    let (table_name, rest) = parse_partiql_table_name(after_update);
-
-    let rest_upper = rest.trim().to_ascii_uppercase();
-    let set_pos = rest_upper.find("SET").ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "Invalid UPDATE statement: missing SET",
-        )
-    })?;
-
-    let after_set = rest.trim()[set_pos + 3..].trim();
-
-    // Split on WHERE
-    let where_pos = after_set.to_ascii_uppercase().find("WHERE");
-    let (set_clause, where_clause) = if let Some(wp) = where_pos {
-        (&after_set[..wp], after_set[wp + 5..].trim())
-    } else {
-        (after_set, "")
-    };
-
-    let mut __mas = state.write();
-    let state = __mas.get_or_create(account_id);
-    let table = get_table_mut(&mut state.tables, &table_name)?;
-
-    let matched_indices = if !where_clause.is_empty() {
-        find_partiql_where_indices(table, where_clause, parameters)?
-    } else {
-        (0..table.items.len()).collect()
-    };
-
-    // Parse SET assignments: attr=value, attr2=value2
-    let param_offset = count_params_in_str(where_clause);
-    let assignments: Vec<&str> = set_clause.split(',').collect();
-    for idx in &matched_indices {
-        let mut local_offset = param_offset;
-        for assignment in &assignments {
-            let assignment = assignment.trim();
-            if let Some((attr, val_str)) = assignment.split_once('=') {
-                let attr = attr.trim().trim_matches('"');
-                let val_str = val_str.trim();
-                let value = parse_partiql_literal(val_str, parameters, &mut local_offset);
-                if let Some(v) = value {
-                    table.items[*idx].insert(attr.to_string(), v);
-                }
-            }
-        }
-    }
-    table.recalculate_stats();
-
-    DynamoDbService::ok_json(json!({}))
-}
-
-pub(crate) fn execute_partiql_delete(
-    state: &SharedDynamoDbState,
-    account_id: &str,
-    statement: &str,
-    parameters: &[Value],
-) -> Result<AwsResponse, AwsServiceError> {
-    // Pattern: DELETE FROM "tablename" WHERE pk='val'
-    let upper = statement.to_ascii_uppercase();
-    let from_pos = upper.find("FROM").ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "Invalid DELETE statement: missing FROM",
-        )
-    })?;
-
-    let after_from = statement[from_pos + 4..].trim();
-    let (table_name, rest) = parse_partiql_table_name(after_from);
-
-    let rest_upper = rest.trim().to_ascii_uppercase();
-    if !rest_upper.starts_with("WHERE") {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "ValidationException",
-            "DELETE requires a WHERE clause",
-        ));
-    }
-    let where_clause = rest.trim()[5..].trim();
-
-    let mut __mas = state.write();
-    let state = __mas.get_or_create(account_id);
-    let table = get_table_mut(&mut state.tables, &table_name)?;
-
-    let mut indices = find_partiql_where_indices(table, where_clause, parameters)?;
-    // Remove from highest index first to avoid invalidating lower indices
-    indices.sort_unstable();
-    indices.reverse();
-    for idx in indices {
-        table.items.remove(idx);
-    }
-    table.recalculate_stats();
-
-    DynamoDbService::ok_json(json!({}))
-}
-
 /// Parse a table name that may be quoted with double quotes.
 /// Returns (table_name, rest_of_string).
 pub(crate) fn parse_partiql_table_name(s: &str) -> (String, &str) {
@@ -2666,6 +2416,7 @@ pub(crate) enum PartiqlCond {
     Ge(String, Value),
     Between(String, Value, Value),
     In(String, Vec<Value>),
+    Like(String, String),
     BeginsWith(String, Value),
     Contains(String, Value),
     AttributeExists(String),
@@ -2692,6 +2443,9 @@ pub(crate) fn evaluate_partiql_cond(
             Some(v) => vals.iter().any(|x| x == v),
             None => false,
         },
+        PartiqlCond::Like(a, pattern) => {
+            attr_string(item.get(a)).is_some_and(|s| match_like(&s, pattern))
+        }
         PartiqlCond::BeginsWith(a, prefix) => attr_string(item.get(a))
             .zip(attr_string(Some(prefix)))
             .is_some_and(|(s, p)| s.starts_with(&p)),
@@ -2701,6 +2455,83 @@ pub(crate) fn evaluate_partiql_cond(
         PartiqlCond::AttributeExists(a) => item.contains_key(a),
         PartiqlCond::AttributeNotExists(a) => !item.contains_key(a),
     }
+}
+
+/// Match a string against a PartiQL/SQL LIKE pattern. `%` matches any
+/// run of characters (including empty), `_` matches exactly one
+/// character. Both wildcards are anchored — `LIKE 'foo'` requires an
+/// exact match, mirroring DDB PartiQL semantics.
+pub(crate) fn match_like(s: &str, pattern: &str) -> bool {
+    let s_chars: Vec<char> = s.chars().collect();
+    let p_chars: Vec<char> = pattern.chars().collect();
+    like_recurse(&s_chars, 0, &p_chars, 0)
+}
+
+fn like_recurse(s: &[char], si: usize, p: &[char], pi: usize) -> bool {
+    if pi == p.len() {
+        return si == s.len();
+    }
+    match p[pi] {
+        '%' => {
+            // Greedy backtracking: try matching 0..=remaining chars.
+            for k in si..=s.len() {
+                if like_recurse(s, k, p, pi + 1) {
+                    return true;
+                }
+            }
+            false
+        }
+        '_' => si < s.len() && like_recurse(s, si + 1, p, pi + 1),
+        c => si < s.len() && s[si] == c && like_recurse(s, si + 1, p, pi + 1),
+    }
+}
+
+/// Validate that every key-schema attribute is present in the item AND
+/// that its AttributeValue carries the declared scalar type from
+/// `attribute_definitions`. Real DDB rejects an INSERT or PutItem that
+/// omits a key or supplies the wrong type with a `ValidationException`;
+/// without the type check we'd silently accept e.g. `{'pk': 1}` for a
+/// HASH key declared as `S`.
+pub(crate) fn validate_partiql_item_against_key_schema(
+    table: &DynamoTable,
+    item: &HashMap<String, AttributeValue>,
+) -> Result<(), AwsServiceError> {
+    for key_attr in &table.key_schema {
+        let Some(val) = item.get(&key_attr.attribute_name) else {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "One or more parameter values were invalid: Missing the key {} in the item",
+                    key_attr.attribute_name
+                ),
+            ));
+        };
+        // Type check against AttributeDefinitions. AWS only allows
+        // S/N/B for key attribute types.
+        let declared = table
+            .attribute_definitions
+            .iter()
+            .find(|d| d.attribute_name == key_attr.attribute_name)
+            .map(|d| d.attribute_type.as_str());
+        if let Some(expected) = declared {
+            let obj = val.as_object();
+            let actual_tag = obj.and_then(|o| o.keys().next().map(|k| k.as_str()));
+            if actual_tag != Some(expected) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!(
+                        "One or more parameter values were invalid: Type mismatch for key {} expected: {} actual: {}",
+                        key_attr.attribute_name,
+                        expected,
+                        actual_tag.unwrap_or("?"),
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Three-way compare two AttributeValue payloads. Returns `Some(c)`
@@ -2805,6 +2636,21 @@ fn parse_one_partiql_condition(
             }
         }
         return Some(PartiqlCond::In(attr, vals));
+    }
+
+    // LIKE: `attr LIKE 'pattern'` (with `%` and `_` wildcards). The
+    // pattern is always a string; we unwrap the {"S": ...} payload at
+    // parse time so the evaluator can stay scalar-only.
+    if let Some(l) = upper.find(" LIKE ") {
+        let attr = cond[..l].trim().trim_matches('"').to_string();
+        let rhs = cond[l + 6..].trim();
+        let pattern_val = parse_partiql_literal(rhs, parameters, param_idx)?;
+        let pattern = pattern_val
+            .as_object()
+            .and_then(|o| o.get("S"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())?;
+        return Some(PartiqlCond::Like(attr, pattern));
     }
 
     // Operator-style. Order matters: longest operator first so `<=`

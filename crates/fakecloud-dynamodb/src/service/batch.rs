@@ -21,9 +21,9 @@ type PendingKinesis = (
 
 use super::{
     apply_update_expression, build_consumed_capacity, evaluate_condition, execute_partiql_in_state,
-    execute_partiql_statement, extract_key, get_table, get_table_mut,
-    parse_expression_attribute_names, parse_expression_attribute_values, require_str,
-    return_consumed_mode, return_icm_mode, DynamoDbService,
+    extract_key, get_table, get_table_mut, parse_expression_attribute_names,
+    parse_expression_attribute_values, require_str, return_consumed_mode, return_icm_mode,
+    DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -763,7 +763,66 @@ impl DynamoDbService {
         let statement = require_str(&body, "Statement")?;
         let parameters = body["Parameters"].as_array().cloned().unwrap_or_default();
 
-        execute_partiql_statement(&self.state, &req.account_id, statement, &parameters)
+        // Hold the write lock only long enough to mutate state and
+        // capture the change capture record. Stream records are
+        // appended under the write lock; Kinesis delivery happens
+        // after the lock is released so the delivery bus (which may
+        // take a read lock to look up the destination stream) doesn't
+        // deadlock against us. This mirrors items.rs::put_item.
+        let (response, pending_kinesis) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            let region = state.region.clone();
+            let outcome = execute_partiql_in_state(state, statement, &parameters)?;
+            let response = outcome.response.clone();
+
+            let kinesis_info = if let (Some(table_name), Some(event_name)) =
+                (outcome.table_name.as_ref(), outcome.event_name.as_ref())
+            {
+                if let Some(table) = state.tables.get_mut(table_name) {
+                    let keys = outcome.keys.clone().unwrap_or_default();
+                    if table.stream_enabled {
+                        if let Some(record) = crate::streams::generate_stream_record(
+                            table,
+                            event_name,
+                            keys.clone(),
+                            outcome.old_image.clone(),
+                            outcome.new_image.clone(),
+                            &region,
+                        ) {
+                            crate::streams::add_stream_record(table, record);
+                        }
+                    }
+                    DynamoDbService::kinesis_target(table).map(|target| {
+                        (
+                            target,
+                            event_name.clone(),
+                            keys,
+                            outcome.old_image,
+                            outcome.new_image,
+                        )
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            (response, kinesis_info)
+        };
+
+        if let Some((target, event_name, keys, old_image, new_image)) = pending_kinesis {
+            self.deliver_to_kinesis_destinations(
+                &target,
+                &event_name,
+                &keys,
+                old_image.as_ref(),
+                new_image.as_ref(),
+            );
+        }
+
+        Self::ok_json(response)
     }
 
     pub(super) fn batch_execute_statement(
@@ -784,29 +843,74 @@ impl DynamoDbService {
             )
         })?;
 
-        let mut responses: Vec<Value> = Vec::new();
-        for stmt_obj in statements {
-            let statement = stmt_obj["Statement"].as_str().unwrap_or_default();
-            let parameters = stmt_obj["Parameters"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
+        let (responses, pending_kinesis) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            let region = state.region.clone();
+            let mut responses: Vec<Value> = Vec::with_capacity(statements.len());
+            let mut pending_kinesis: Vec<PendingKinesis> = Vec::new();
 
-            match execute_partiql_statement(&self.state, &req.account_id, statement, &parameters) {
-                Ok(resp) => {
-                    let resp_body: Value =
-                        serde_json::from_slice(resp.body.expect_bytes()).unwrap_or_default();
-                    responses.push(resp_body);
-                }
-                Err(e) => {
-                    responses.push(json!({
-                        "Error": {
-                            "Code": "ValidationException",
-                            "Message": e.to_string()
+            for stmt_obj in statements {
+                let statement = stmt_obj["Statement"].as_str().unwrap_or_default();
+                let parameters = stmt_obj["Parameters"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+
+                match execute_partiql_in_state(state, statement, &parameters) {
+                    Ok(outcome) => {
+                        responses.push(outcome.response.clone());
+                        if let (Some(table_name), Some(event_name)) =
+                            (outcome.table_name.as_ref(), outcome.event_name.as_ref())
+                        {
+                            if let Some(table) = state.tables.get_mut(table_name) {
+                                let keys = outcome.keys.clone().unwrap_or_default();
+                                if table.stream_enabled {
+                                    if let Some(record) = crate::streams::generate_stream_record(
+                                        table,
+                                        event_name,
+                                        keys.clone(),
+                                        outcome.old_image.clone(),
+                                        outcome.new_image.clone(),
+                                        &region,
+                                    ) {
+                                        crate::streams::add_stream_record(table, record);
+                                    }
+                                }
+                                if let Some(target) = DynamoDbService::kinesis_target(table) {
+                                    pending_kinesis.push((
+                                        target,
+                                        event_name.clone(),
+                                        keys,
+                                        outcome.old_image,
+                                        outcome.new_image,
+                                    ));
+                                }
+                            }
                         }
-                    }));
+                    }
+                    Err(e) => {
+                        responses.push(json!({
+                            "Error": {
+                                "Code": "ValidationException",
+                                "Message": e.to_string()
+                            }
+                        }));
+                    }
                 }
             }
+
+            (responses, pending_kinesis)
+        };
+
+        for (target, event_name, keys, old_image, new_image) in pending_kinesis {
+            self.deliver_to_kinesis_destinations(
+                &target,
+                &event_name,
+                &keys,
+                old_image.as_ref(),
+                new_image.as_ref(),
+            );
         }
 
         Self::ok_json(json!({ "Responses": responses }))
@@ -839,9 +943,10 @@ impl DynamoDbService {
         // Acquire the write lock once for the whole batch — DDB
         // ExecuteTransaction is all-or-nothing so we cannot release
         // the lock between phases or another writer could observe
-        // partial state.
+        // partial state. Use the caller's account_id so cross-account
+        // STS callers don't accidentally write to the default account.
         let mut accounts = self.state.write();
-        let state = accounts.default_mut();
+        let state = accounts.get_or_create(&req.account_id);
 
         let region = req.region.clone();
 
@@ -1392,6 +1497,64 @@ mod tests {
             2,
             "each PartiQL INSERT must emit one stream record"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_statement_insert_emits_stream_record() {
+        // L4: a single ExecuteStatement INSERT (not via Transaction) on
+        // a stream-enabled table must emit a Stream record so log/CDC
+        // consumers see the same event they would for a PutItem call.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}"}),
+        ))
+        .unwrap();
+
+        let accts = state.read();
+        let table = accts
+            .get("123456789012")
+            .unwrap()
+            .tables
+            .get("Widgets")
+            .unwrap();
+        assert_eq!(table.items.len(), 1);
+        let records = table.stream_records.read();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].event_name, "INSERT");
+    }
+
+    #[tokio::test]
+    async fn batch_execute_statement_emits_stream_record_per_write() {
+        // L4: each statement in a BatchExecuteStatement that succeeds
+        // and mutates the table must emit its own Stream record.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        svc.batch_execute_statement(&req_for(
+            "BatchExecuteStatement",
+            json!({
+                "Statements": [
+                    {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}"},
+                    {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'b'}"},
+                ]
+            }),
+        ))
+        .unwrap();
+
+        let accts = state.read();
+        let table = accts
+            .get("123456789012")
+            .unwrap()
+            .tables
+            .get("Widgets")
+            .unwrap();
+        assert_eq!(table.items.len(), 2);
+        assert_eq!(table.stream_records.read().len(), 2);
     }
 
     #[tokio::test]

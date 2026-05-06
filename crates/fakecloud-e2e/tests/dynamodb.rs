@@ -4506,3 +4506,394 @@ async fn dynamodb_execute_transaction_three_writes_middle_fails_reverts_all() {
         "only the pre-seed INSERT should be on the stream — failed txn emits nothing"
     );
 }
+
+// ── L4: PartiQL real comparators + schema validation + stream emit ──
+
+/// Seed a small mixed-type corpus to exercise comparator/range/membership
+/// predicates in the PartiQL WHERE evaluator. Each row carries:
+///  - `pk` (S, HASH key)
+///  - `score` (N) for numeric comparators
+///  - `name` (S) for LIKE / begins_with / contains / lexicographic
+async fn l4_seed_partiql_table(
+    ddb: &aws_sdk_dynamodb::Client,
+    table_name: &str,
+    enable_streams: bool,
+) {
+    let mut create = ddb
+        .create_table()
+        .table_name(table_name)
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest);
+    if enable_streams {
+        create = create.stream_specification(
+            StreamSpecification::builder()
+                .stream_enabled(true)
+                .stream_view_type(StreamViewType::NewAndOldImages)
+                .build()
+                .unwrap(),
+        );
+    }
+    create.send().await.unwrap();
+
+    for (pk, score, name) in [
+        ("a", 10_i64, "alpha"),
+        ("b", 20, "beta"),
+        ("c", 30, "gamma"),
+        ("d", 40, "delta"),
+    ] {
+        ddb.put_item()
+            .table_name(table_name)
+            .item("pk", AttributeValue::S(pk.into()))
+            .item("score", AttributeValue::N(score.to_string()))
+            .item("name", AttributeValue::S(name.into()))
+            .send()
+            .await
+            .unwrap();
+    }
+}
+
+async fn l4_select_pks(ddb: &aws_sdk_dynamodb::Client, statement: &str) -> Vec<String> {
+    let resp = ddb
+        .execute_statement()
+        .statement(statement)
+        .send()
+        .await
+        .unwrap();
+    let mut pks: Vec<String> = resp
+        .items()
+        .iter()
+        .map(|it| it.get("pk").unwrap().as_s().unwrap().clone())
+        .collect();
+    pks.sort();
+    pks
+}
+
+#[tokio::test]
+async fn dynamodb_partiql_select_numeric_comparators() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let table = "PartiqlNumericComparators";
+    l4_seed_partiql_table(&ddb, table, false).await;
+
+    assert_eq!(
+        l4_select_pks(&ddb, &format!("SELECT * FROM \"{table}\" WHERE score < 25")).await,
+        vec!["a", "b"]
+    );
+    assert_eq!(
+        l4_select_pks(&ddb, &format!("SELECT * FROM \"{table}\" WHERE score > 25")).await,
+        vec!["c", "d"]
+    );
+    assert_eq!(
+        l4_select_pks(
+            &ddb,
+            &format!("SELECT * FROM \"{table}\" WHERE score <= 20")
+        )
+        .await,
+        vec!["a", "b"]
+    );
+    assert_eq!(
+        l4_select_pks(
+            &ddb,
+            &format!("SELECT * FROM \"{table}\" WHERE score >= 30")
+        )
+        .await,
+        vec!["c", "d"]
+    );
+    assert_eq!(
+        l4_select_pks(
+            &ddb,
+            &format!("SELECT * FROM \"{table}\" WHERE score <> 20")
+        )
+        .await,
+        vec!["a", "c", "d"]
+    );
+}
+
+#[tokio::test]
+async fn dynamodb_partiql_select_between_in_like_predicates() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let table = "PartiqlBetweenInLike";
+    l4_seed_partiql_table(&ddb, table, false).await;
+
+    assert_eq!(
+        l4_select_pks(
+            &ddb,
+            &format!("SELECT * FROM \"{table}\" WHERE score BETWEEN 15 AND 35")
+        )
+        .await,
+        vec!["b", "c"]
+    );
+    assert_eq!(
+        l4_select_pks(
+            &ddb,
+            &format!("SELECT * FROM \"{table}\" WHERE pk IN ('a','c')")
+        )
+        .await,
+        vec!["a", "c"]
+    );
+    assert_eq!(
+        l4_select_pks(
+            &ddb,
+            &format!("SELECT * FROM \"{table}\" WHERE name LIKE 'al%'")
+        )
+        .await,
+        vec!["a"]
+    );
+    // `_` matches exactly one character.
+    assert_eq!(
+        l4_select_pks(
+            &ddb,
+            &format!("SELECT * FROM \"{table}\" WHERE name LIKE '_eta'")
+        )
+        .await,
+        vec!["b"]
+    );
+}
+
+#[tokio::test]
+async fn dynamodb_partiql_select_function_predicates() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let table = "PartiqlFunctionPredicates";
+    l4_seed_partiql_table(&ddb, table, false).await;
+
+    assert_eq!(
+        l4_select_pks(
+            &ddb,
+            &format!("SELECT * FROM \"{table}\" WHERE begins_with(name, 'g')")
+        )
+        .await,
+        vec!["c"]
+    );
+    assert_eq!(
+        l4_select_pks(
+            &ddb,
+            &format!("SELECT * FROM \"{table}\" WHERE contains(name, 'lt')")
+        )
+        .await,
+        vec!["d"]
+    );
+    assert_eq!(
+        l4_select_pks(
+            &ddb,
+            &format!("SELECT * FROM \"{table}\" WHERE attribute_exists(score)")
+        )
+        .await,
+        vec!["a", "b", "c", "d"]
+    );
+    assert_eq!(
+        l4_select_pks(
+            &ddb,
+            &format!("SELECT * FROM \"{table}\" WHERE attribute_not_exists(missing)")
+        )
+        .await,
+        vec!["a", "b", "c", "d"]
+    );
+}
+
+#[tokio::test]
+async fn dynamodb_partiql_insert_rejects_missing_partition_key() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let table = "PartiqlMissingPk";
+
+    ddb.create_table()
+        .table_name(table)
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let err = ddb
+        .execute_statement()
+        .statement(format!("INSERT INTO \"{table}\" VALUE {{'data': 'no-pk'}}"))
+        .send()
+        .await
+        .expect_err("insert without partition key must be rejected");
+    let svc_err = err.into_service_error();
+    let msg = format!("{svc_err:?}");
+    assert!(msg.contains("ValidationException"), "got {msg}");
+    assert!(msg.contains("Missing the key pk"), "got {msg}");
+}
+
+#[tokio::test]
+async fn dynamodb_partiql_insert_rejects_wrong_key_type() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let table = "PartiqlWrongKeyType";
+
+    ddb.create_table()
+        .table_name(table)
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Key declared as `S` but the literal is numeric.
+    let err = ddb
+        .execute_statement()
+        .statement(format!("INSERT INTO \"{table}\" VALUE {{'pk': 42}}"))
+        .send()
+        .await
+        .expect_err("insert with wrong-type pk must be rejected");
+    let svc_err = err.into_service_error();
+    let msg = format!("{svc_err:?}");
+    assert!(msg.contains("ValidationException"), "got {msg}");
+    assert!(msg.contains("Type mismatch for key pk"), "got {msg}");
+}
+
+#[tokio::test]
+async fn dynamodb_partiql_execute_statement_emits_stream_record() {
+    // L4: a single ExecuteStatement INSERT on a stream-enabled table
+    // must emit a Stream record so log/CDC consumers see the same
+    // event they would observe after a PutItem call.
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    let streams = server.dynamodb_streams_client().await;
+    let table = "PartiqlStreamEmit";
+    l4_seed_partiql_table(&ddb, table, true).await;
+
+    let stream_arn = ddb
+        .describe_table()
+        .table_name(table)
+        .send()
+        .await
+        .unwrap()
+        .table()
+        .unwrap()
+        .latest_stream_arn()
+        .unwrap()
+        .to_string();
+
+    // Snapshot the stream first so we can count the records that the
+    // PartiQL writes added on top of the four PutItem seeds.
+    let baseline_shard = streams
+        .describe_stream()
+        .stream_arn(&stream_arn)
+        .send()
+        .await
+        .unwrap()
+        .stream_description()
+        .unwrap()
+        .shards()
+        .first()
+        .unwrap()
+        .shard_id()
+        .unwrap()
+        .to_string();
+
+    let baseline_iter = streams
+        .get_shard_iterator()
+        .stream_arn(&stream_arn)
+        .shard_id(&baseline_shard)
+        .shard_iterator_type(aws_sdk_dynamodbstreams::types::ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+    let baseline_records = streams
+        .get_records()
+        .shard_iterator(baseline_iter.shard_iterator().unwrap())
+        .send()
+        .await
+        .unwrap();
+    let baseline_len = baseline_records.records().len();
+
+    // Single ExecuteStatement INSERT.
+    ddb.execute_statement()
+        .statement(format!(
+            "INSERT INTO \"{table}\" VALUE {{'pk': 'partiql-1'}}"
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    // BatchExecuteStatement with two more INSERTs.
+    use aws_sdk_dynamodb::types::BatchStatementRequest;
+    ddb.batch_execute_statement()
+        .statements(
+            BatchStatementRequest::builder()
+                .statement(format!(
+                    "INSERT INTO \"{table}\" VALUE {{'pk': 'partiql-2'}}"
+                ))
+                .build()
+                .unwrap(),
+        )
+        .statements(
+            BatchStatementRequest::builder()
+                .statement(format!(
+                    "INSERT INTO \"{table}\" VALUE {{'pk': 'partiql-3'}}"
+                ))
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let after_iter = streams
+        .get_shard_iterator()
+        .stream_arn(&stream_arn)
+        .shard_id(&baseline_shard)
+        .shard_iterator_type(aws_sdk_dynamodbstreams::types::ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+    let after_records = streams
+        .get_records()
+        .shard_iterator(after_iter.shard_iterator().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        after_records.records().len(),
+        baseline_len + 3,
+        "ExecuteStatement + 2x BatchExecuteStatement INSERTs must each emit a stream record"
+    );
+    let last3 = &after_records.records()[after_records.records().len() - 3..];
+    assert!(last3
+        .iter()
+        .all(|r| r.event_name().unwrap().as_str() == "INSERT"));
+}
