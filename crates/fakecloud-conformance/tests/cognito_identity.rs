@@ -1,9 +1,9 @@
 mod helpers;
 
+use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
 use std::collections::HashMap;
-use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 
 #[test_action("cognito-identity", "CreateIdentityPool", checksum = "a2b71e1f")]
 #[tokio::test]
@@ -34,7 +34,12 @@ async fn cognito_identity_list_identity_pools() {
         .await
         .unwrap();
 
-    let resp = client.list_identity_pools().max_results(10).send().await.unwrap();
+    let resp = client
+        .list_identity_pools()
+        .max_results(10)
+        .send()
+        .await
+        .unwrap();
     assert!(!resp.identity_pools().is_empty());
 }
 
@@ -113,7 +118,9 @@ async fn cognito_identity_delete_identity_pool() {
         .send()
         .await
         .unwrap_err();
-    assert!(err.code() == Some("NotFoundException") || err.code() == Some("ResourceNotFoundException"));
+    assert!(
+        err.code() == Some("NotFoundException") || err.code() == Some("ResourceNotFoundException")
+    );
 }
 
 #[test_action("cognito-identity", "GetId", checksum = "651044ef")]
@@ -224,7 +231,11 @@ async fn cognito_identity_get_credentials_for_identity() {
     assert!(resp.credentials().is_some());
 }
 
-#[test_action("cognito-identity", "GetOpenIdTokenForDeveloperIdentity", checksum = "1c0dbdac")]
+#[test_action(
+    "cognito-identity",
+    "GetOpenIdTokenForDeveloperIdentity",
+    checksum = "1c0dbdac"
+)]
 #[tokio::test]
 async fn cognito_identity_get_open_id_token_for_developer_identity() {
     let server = TestServer::start().await;
@@ -475,7 +486,9 @@ async fn cognito_identity_set_identity_pool_roles() {
         .await
         .unwrap();
     assert_eq!(
-        resp.roles().and_then(|m| m.get("authenticated")).map(String::as_str),
+        resp.roles()
+            .and_then(|m| m.get("authenticated"))
+            .map(String::as_str),
         Some(role_arn.as_str())
     );
 }
@@ -516,7 +529,10 @@ async fn cognito_identity_tag_resource() {
         .await
         .unwrap();
     let pool_id = create.identity_pool_id();
-    let pool_arn = format!("arn:aws:cognito-identity:us-east-1:123456789012:identitypool/{}", pool_id);
+    let pool_arn = format!(
+        "arn:aws:cognito-identity:us-east-1:123456789012:identitypool/{}",
+        pool_id
+    );
 
     client
         .tag_resource()
@@ -551,7 +567,10 @@ async fn cognito_identity_untag_resource() {
         .await
         .unwrap();
     let pool_id = create.identity_pool_id();
-    let pool_arn = format!("arn:aws:cognito-identity:us-east-1:123456789012:identitypool/{}", pool_id);
+    let pool_arn = format!(
+        "arn:aws:cognito-identity:us-east-1:123456789012:identitypool/{}",
+        pool_id
+    );
 
     client
         .tag_resource()
@@ -591,7 +610,10 @@ async fn cognito_identity_list_tags_for_resource() {
         .await
         .unwrap();
     let pool_id = create.identity_pool_id();
-    let pool_arn = format!("arn:aws:cognito-identity:us-east-1:123456789012:identitypool/{}", pool_id);
+    let pool_arn = format!(
+        "arn:aws:cognito-identity:us-east-1:123456789012:identitypool/{}",
+        pool_id
+    );
 
     client
         .tag_resource()
@@ -612,7 +634,6 @@ async fn cognito_identity_list_tags_for_resource() {
         Some("conformance")
     );
 }
-
 
 #[test_action("cognito-identity", "UnlinkIdentity", checksum = "08ce7e8a")]
 #[tokio::test]
@@ -643,6 +664,42 @@ async fn cognito_identity_unlink_identity() {
     client
         .unlink_identity()
         .identity_id(&identity_id)
+        .set_logins(Some(logins))
+        .send()
+        .await
+        .unwrap();
+}
+
+#[test_action("cognito-identity", "LinkIdentity", checksum = "00000000")]
+#[tokio::test]
+async fn cognito_identity_link_identity() {
+    let server = TestServer::start().await;
+    let client = server.cognito_identity_client().await;
+
+    let create = client
+        .create_identity_pool()
+        .identity_pool_name("link-id-pool")
+        .allow_unauthenticated_identities(true)
+        .send()
+        .await
+        .unwrap();
+    let pool_id = create.identity_pool_id().to_string();
+
+    let get_id = client
+        .get_id()
+        .identity_pool_id(&pool_id)
+        .send()
+        .await
+        .unwrap();
+    let identity_id = get_id.identity_id().unwrap().to_string();
+
+    let mut logins = HashMap::new();
+    logins.insert("login.provider".to_string(), "user123".to_string());
+
+    client
+        .link_identity()
+        .identity_id(&identity_id)
+        .identity_pool_id(&pool_id)
         .set_logins(Some(logins))
         .send()
         .await
