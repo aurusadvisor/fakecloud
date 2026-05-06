@@ -425,6 +425,11 @@ pub struct Task {
     /// Task protection state (UpdateTaskProtection). When set, scale-in
     /// and update-service deployments skip this task until the expiry.
     pub protection: Option<TaskProtection>,
+    /// Whether ECS Exec is enabled on this task. Inherited from the
+    /// owning service's `enableExecuteCommand` flag (or supplied
+    /// directly on RunTask). Gated when `ExecuteCommand` is invoked.
+    #[serde(default)]
+    pub enable_execute_command: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

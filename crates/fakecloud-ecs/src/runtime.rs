@@ -2114,6 +2114,7 @@ mod tests {
             awslogs: None,
             captured_logs: String::new(),
             protection: None,
+            enable_execute_command: false,
         }
     }
 
