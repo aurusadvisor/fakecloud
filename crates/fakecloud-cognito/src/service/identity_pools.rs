@@ -77,7 +77,6 @@ impl AwsService for CognitoIdentityService {
             "MergeDeveloperIdentities" => self.merge_developer_identities(&req),
             "UnlinkDeveloperIdentity" => self.unlink_developer_identity(&req),
             "LookupDeveloperIdentity" => self.lookup_developer_identity(&req),
-            "LinkIdentity" => self.link_identity(&req),
             "UnlinkIdentity" => self.unlink_identity(&req),
             "ListIdentities" => self.list_identities(&req),
             "DescribeIdentity" => self.describe_identity(&req),
@@ -107,7 +106,6 @@ impl AwsService for CognitoIdentityService {
             "MergeDeveloperIdentities",
             "UnlinkDeveloperIdentity",
             "LookupDeveloperIdentity",
-            "LinkIdentity",
             "UnlinkIdentity",
             "ListIdentities",
             "DescribeIdentity",
@@ -1007,36 +1005,6 @@ impl CognitoIdentityService {
     }
 
     // --- identity link/unlink ---------------------------------------------
-
-    fn link_identity(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let body = req.json_body();
-        let identity_id = require_str(&body, "IdentityId")?;
-        let logins = parse_string_map(&body["Logins"]);
-        if logins.is_empty() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterException",
-                "Logins is required for LinkIdentity",
-            ));
-        }
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let identity = state
-            .federated_identities
-            .get_mut(identity_id)
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ResourceNotFoundException",
-                    format!("Identity '{identity_id}' not found."),
-                )
-            })?;
-        for (k, v) in logins {
-            identity.logins.insert(k, v);
-        }
-        identity.last_modified_date = Utc::now();
-        Ok(AwsResponse::ok_json(json!({})))
-    }
 
     fn unlink_identity(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
