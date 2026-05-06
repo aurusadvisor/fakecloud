@@ -1747,6 +1747,14 @@ async fn main() {
         cognito_service = cognito_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(cognito_service));
+    // Cognito Federated Identity Pools (`cognito-identity` service).
+    // Shares state with the user-pool service above; lives in the same
+    // crate so persistence + reset stay coupled. Holds the IAM state so
+    // `GetCredentialsForIdentity` can mint real STS-style temp creds.
+    registry.register(Arc::new(fakecloud_cognito::CognitoIdentityService::new(
+        cognito_state.clone(),
+        iam_state.clone(),
+    )));
     let kinesis_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
