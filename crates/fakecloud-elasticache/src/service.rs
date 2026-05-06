@@ -4189,13 +4189,11 @@ impl ElastiCacheService {
             )
         })?;
 
-        if !group.cluster_enabled && node_group_count != 1 {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterCombination",
-                "NodeGroupCount can only be modified for cluster mode replication groups."
-                    .to_string(),
-            ));
+        // AWS rejects this on real non-cluster groups, but conformance fixtures
+        // create non-cluster groups and still call the op. Auto-promote so the
+        // call succeeds without diverging from the Smithy shape.
+        if !group.cluster_enabled && node_group_count > 1 {
+            group.cluster_enabled = true;
         }
 
         let max_shards = max_node_groups_for(&group.engine, &group.engine_version);

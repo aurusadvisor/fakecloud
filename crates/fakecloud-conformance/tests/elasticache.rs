@@ -1448,19 +1448,23 @@ async fn elasticache_cluster_modify_reboot_list() {
 async fn elasticache_modify_replication_group_shard_configuration() {
     let server = TestServer::start().await;
     let client = server.elasticache_client().await;
+    // ModifyReplicationGroupShardConfiguration is cluster-mode only, so
+    // create the group with multiple shards up front.
     client
         .create_replication_group()
         .replication_group_id("rg1")
         .replication_group_description("d")
         .engine("redis")
         .cache_node_type("cache.t4g.micro")
+        .num_node_groups(2)
+        .replicas_per_node_group(1)
         .send()
         .await
         .unwrap();
     client
         .modify_replication_group_shard_configuration()
         .replication_group_id("rg1")
-        .node_group_count(2)
+        .node_group_count(3)
         .apply_immediately(true)
         .send()
         .await
