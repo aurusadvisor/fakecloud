@@ -2626,6 +2626,7 @@ async fn main() {
     let appas_ddb_hook = Arc::new(appas_hooks::DynamoDbCapacityHookImpl::new(
         dynamodb_state.clone(),
     ));
+    let appas_ecs_hook = Arc::new(appas_hooks::EcsServiceHookImpl::new(ecs_state.clone()));
     let appas_watcher_for_admin = Arc::new(
         fakecloud_application_autoscaling::ScalingWatcher::new(
             app_autoscaling_state.clone(),
@@ -2633,6 +2634,7 @@ async fn main() {
             appas_ddb_hook.clone(),
             cli.region.clone(),
         )
+        .with_ecs_hook(appas_ecs_hook.clone())
         .with_interval(std::time::Duration::from_secs(15)),
     );
     {
@@ -2642,6 +2644,7 @@ async fn main() {
             appas_ddb_hook.clone(),
             cli.region.clone(),
         )
+        .with_ecs_hook(appas_ecs_hook.clone())
         .with_interval(std::time::Duration::from_secs(15));
         tokio::spawn(watcher.run());
     }
@@ -2649,8 +2652,8 @@ async fn main() {
     // Application Auto Scaling scheduled action executor: ticks every
     // 30s, walks all ScheduledActions, fires the ones whose Schedule
     // expression is due and applies the configured ScalableTargetAction
-    // bounds across linked resources (DDB capacity today). Tests can
-    // skip the wall-clock wait via the
+    // bounds across linked resources (DDB capacity today; ECS desired
+    // count wired alongside). Tests can skip the wall-clock wait via the
     // `/_fakecloud/application-autoscaling/scheduled-tick` admin route.
     let appas_scheduled_executor_for_admin = Arc::new(
         fakecloud_application_autoscaling::ScheduledActionExecutor::new(
@@ -2658,6 +2661,7 @@ async fn main() {
             appas_ddb_hook.clone(),
             cli.region.clone(),
         )
+        .with_ecs_hook(appas_ecs_hook.clone())
         .with_interval(std::time::Duration::from_secs(30)),
     );
     {
@@ -2666,6 +2670,7 @@ async fn main() {
             appas_ddb_hook,
             cli.region.clone(),
         )
+        .with_ecs_hook(appas_ecs_hook)
         .with_interval(std::time::Duration::from_secs(30));
         tokio::spawn(executor.run());
     }

@@ -5,9 +5,12 @@
 
 use std::collections::BTreeMap;
 
-use fakecloud_application_autoscaling::hooks::{DynamoDbCapacityHook, MetricReader};
+use fakecloud_application_autoscaling::hooks::{
+    DynamoDbCapacityHook, EcsServiceHook, MetricReader,
+};
 use fakecloud_cloudwatch::SharedCloudWatchState;
 use fakecloud_dynamodb::state::SharedDynamoDbState;
+use fakecloud_ecs::SharedEcsState;
 
 /// Reads from in-process CloudWatch metric and alarm state.
 pub struct CloudwatchMetricReader {
@@ -139,6 +142,66 @@ impl DynamoDbCapacityHook for DynamoDbCapacityHookImpl {
                 return Err("WriteCapacityUnits must be > 0".to_string());
             }
             table.provisioned_throughput.write_capacity_units = w;
+        }
+        Ok(())
+    }
+}
+
+/// Mutates an ECS service's desiredCount. The watcher calls
+/// `set_desired_count` after computing a new desired count from
+/// CloudWatch metrics; we update the service's `desired_count` in
+/// place and trigger task spawns/stops via the ECS service's
+/// `UpdateService` path so subsequent `DescribeServices` calls see
+/// the new value.
+pub struct EcsServiceHookImpl {
+    state: SharedEcsState,
+}
+
+impl EcsServiceHookImpl {
+    pub fn new(state: SharedEcsState) -> Self {
+        Self { state }
+    }
+}
+
+impl EcsServiceHook for EcsServiceHookImpl {
+    fn current_desired_count(
+        &self,
+        account_id: &str,
+        _region: &str,
+        cluster_name: &str,
+        service_name: &str,
+    ) -> Option<i32> {
+        let guard = self.state.read();
+        let acct = guard.get(account_id)?;
+        let key = fakecloud_ecs::EcsState::service_key(cluster_name, service_name);
+        acct.services.get(&key).map(|s| s.desired_count)
+    }
+
+    fn set_desired_count(
+        &self,
+        account_id: &str,
+        _region: &str,
+        cluster_name: &str,
+        service_name: &str,
+        desired_count: i32,
+    ) -> Result<(), String> {
+        let mut guard = self.state.write();
+        let acct = guard
+            .get_mut(account_id)
+            .ok_or_else(|| format!("account {account_id} not found"))?;
+        let key = fakecloud_ecs::EcsState::service_key(cluster_name, service_name);
+        let service = acct
+            .services
+            .get_mut(&key)
+            .ok_or_else(|| format!("service {service_name} not found in cluster {cluster_name}"))?;
+        service.desired_count = desired_count;
+        if let Some(d) = service
+            .deployments
+            .iter_mut()
+            .find(|d| d.status == "PRIMARY")
+        {
+            d.desired_count = desired_count;
+            d.updated_at = chrono::Utc::now();
         }
         Ok(())
     }
