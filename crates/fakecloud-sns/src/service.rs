@@ -139,27 +139,49 @@ use fakecloud_aws::xml::xml_escape;
 
 const DEFAULT_PAGE_SIZE: usize = 100;
 
-const DEFAULT_EFFECTIVE_DELIVERY_POLICY: &str = r#"{"defaultHealthyRetryPolicy":{"numNoDelayRetries":0,"numMinDelayRetries":0,"minDelayTarget":20,"maxDelayTarget":20,"numMaxDelayRetries":0,"numRetries":3,"backoffFunction":"linear"},"sicklyRetryPolicy":null,"throttlePolicy":null,"guaranteed":false}"#;
+/// Topic-level default DeliveryPolicy. Real SNS wraps the retry knobs
+/// inside an `http` object because topic-level policies only apply to
+/// HTTP/HTTPS subscribers (other protocols ignore them). Includes
+/// `disableSubscriptionOverrides`, `defaultThrottlePolicy`, and
+/// `defaultRequestPolicy` keys that real SNS surfaces.
+const DEFAULT_TOPIC_DELIVERY_POLICY: &str = r#"{"http":{"defaultHealthyRetryPolicy":{"minDelayTarget":20,"maxDelayTarget":20,"numRetries":3,"numMaxDelayRetries":0,"numNoDelayRetries":0,"numMinDelayRetries":0,"backoffFunction":"linear"},"disableSubscriptionOverrides":false,"defaultThrottlePolicy":null,"defaultRequestPolicy":{"headerContentType":"text/plain; charset=UTF-8"}}}"#;
 
-/// Merge a user-supplied DeliveryPolicy over the SNS default to produce
-/// the EffectiveDeliveryPolicy real SNS surfaces. Falls back to the
-/// default when the user policy is missing, empty, or unparseable
-/// (matching real SNS behaviour).
-fn compute_effective_delivery_policy(user: Option<&str>) -> String {
-    let default: serde_json::Value =
-        serde_json::from_str(DEFAULT_EFFECTIVE_DELIVERY_POLICY).unwrap();
+/// Subscription-level default DeliveryPolicy. Subscription policies
+/// are flat (no `http` wrapper) and include `guaranteed` /
+/// `sicklyRetryPolicy` / `throttlePolicy` keys.
+const DEFAULT_SUBSCRIPTION_DELIVERY_POLICY: &str = r#"{"defaultHealthyRetryPolicy":{"numNoDelayRetries":0,"numMinDelayRetries":0,"minDelayTarget":20,"maxDelayTarget":20,"numMaxDelayRetries":0,"numRetries":3,"backoffFunction":"linear"},"sicklyRetryPolicy":null,"throttlePolicy":null,"guaranteed":false}"#;
+
+/// Merge a user-supplied topic-level DeliveryPolicy over the SNS
+/// default to produce the EffectiveDeliveryPolicy real SNS surfaces.
+/// Falls back to the default when the user policy is missing, empty,
+/// or unparseable (matching real SNS behaviour).
+fn compute_effective_topic_delivery_policy(user: Option<&str>) -> String {
+    compute_effective_policy(user, DEFAULT_TOPIC_DELIVERY_POLICY)
+}
+
+/// Merge a user-supplied subscription-level DeliveryPolicy over the
+/// SNS default to produce the EffectiveDeliveryPolicy real SNS
+/// surfaces. Subscription policies use a flat shape (no `http`
+/// wrapper); HTTP/S subscriptions inherit from the topic policy when
+/// no override is set.
+fn compute_effective_subscription_delivery_policy(user: Option<&str>) -> String {
+    compute_effective_policy(user, DEFAULT_SUBSCRIPTION_DELIVERY_POLICY)
+}
+
+fn compute_effective_policy(user: Option<&str>, default_json: &str) -> String {
+    let default: serde_json::Value = serde_json::from_str(default_json).unwrap();
     let Some(user) = user else {
-        return DEFAULT_EFFECTIVE_DELIVERY_POLICY.to_string();
+        return default_json.to_string();
     };
     let user_trim = user.trim();
     if user_trim.is_empty() {
-        return DEFAULT_EFFECTIVE_DELIVERY_POLICY.to_string();
+        return default_json.to_string();
     }
     let Ok(user_val) = serde_json::from_str::<serde_json::Value>(user_trim) else {
-        return DEFAULT_EFFECTIVE_DELIVERY_POLICY.to_string();
+        return default_json.to_string();
     };
     let merged = merge_json(default, user_val);
-    serde_json::to_string(&merged).unwrap_or_else(|_| DEFAULT_EFFECTIVE_DELIVERY_POLICY.to_string())
+    serde_json::to_string(&merged).unwrap_or_else(|_| default_json.to_string())
 }
 
 fn merge_json(mut base: serde_json::Value, overlay: serde_json::Value) -> serde_json::Value {
@@ -179,6 +201,61 @@ fn merge_json(mut base: serde_json::Value, overlay: serde_json::Value) -> serde_
     } else {
         overlay
     }
+}
+
+/// Apply a dotted-path override (AWS-style) onto a JSON document.
+/// Real SNS accepts `SetTopicAttributes` calls with attribute names
+/// like `DeliveryPolicy.http.defaultHealthyRetryPolicy.numRetries`
+/// (after the leading `DeliveryPolicy.` prefix this is the suffix
+/// passed to this function) and patches the corresponding nested key.
+/// Numeric-looking values become JSON numbers; `true`/`false`/`null`
+/// become JSON literals; everything else stays a string.
+fn apply_dotted_override(doc: &mut serde_json::Value, path: &str, raw_value: &str) {
+    let segments: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return;
+    }
+    let parsed = parse_dotted_value(raw_value);
+    let mut cursor = doc;
+    for (i, seg) in segments.iter().enumerate() {
+        if i == segments.len() - 1 {
+            if let Some(obj) = cursor.as_object_mut() {
+                obj.insert((*seg).to_string(), parsed);
+            }
+            return;
+        }
+        // Replace non-objects with an empty object so we can drill in.
+        if !cursor.get(*seg).map(|v| v.is_object()).unwrap_or(false) {
+            if let Some(obj) = cursor.as_object_mut() {
+                obj.insert((*seg).to_string(), serde_json::json!({}));
+            } else {
+                return;
+            }
+        }
+        cursor = cursor.get_mut(*seg).expect("just inserted");
+    }
+}
+
+fn parse_dotted_value(raw: &str) -> serde_json::Value {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        return serde_json::Value::Bool(true);
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return serde_json::Value::Bool(false);
+    }
+    if trimmed.eq_ignore_ascii_case("null") {
+        return serde_json::Value::Null;
+    }
+    if let Ok(n) = trimmed.parse::<i64>() {
+        return serde_json::Value::from(n);
+    }
+    if let Ok(n) = trimmed.parse::<f64>() {
+        if let Some(num) = serde_json::Number::from_f64(n) {
+            return serde_json::Value::Number(num);
+        }
+    }
+    serde_json::Value::String(raw.to_string())
 }
 
 const VALID_SNS_ACTIONS: &[&str] = &[
@@ -660,10 +737,10 @@ impl SnsService {
         ];
 
         // EffectiveDeliveryPolicy: merge any user-set DeliveryPolicy
-        // over the SNS default so callers see their tuning reflected
-        // (matching real SNS).
+        // over the SNS topic-level default so callers see their
+        // tuning reflected (matching real SNS).
         let user_policy = topic.attributes.get("DeliveryPolicy").map(|s| s.as_str());
-        let effective = compute_effective_delivery_policy(user_policy);
+        let effective = compute_effective_topic_delivery_policy(user_policy);
         entries.push(format_attr("EffectiveDeliveryPolicy", &effective));
 
         // Add all stored attributes
@@ -702,8 +779,31 @@ impl SnsService {
             .get_mut(&topic_arn)
             .ok_or_else(|| not_found("Topic"))?;
 
-        // If setting Policy, compact the JSON
-        if attr_name == "Policy" {
+        // AWS accepts dotted-path attribute names like
+        // `DeliveryPolicy.http.defaultHealthyRetryPolicy.numRetries` to
+        // patch a single nested key without re-sending the full policy
+        // document. Detect that form and merge into the stored
+        // DeliveryPolicy JSON.
+        if let Some(suffix) = attr_name.strip_prefix("DeliveryPolicy.") {
+            let existing = topic
+                .attributes
+                .get("DeliveryPolicy")
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let mut doc: serde_json::Value = if existing.trim().is_empty() {
+                serde_json::from_str(DEFAULT_TOPIC_DELIVERY_POLICY).unwrap()
+            } else {
+                serde_json::from_str(existing).unwrap_or_else(|_| {
+                    serde_json::from_str(DEFAULT_TOPIC_DELIVERY_POLICY).unwrap()
+                })
+            };
+            apply_dotted_override(&mut doc, suffix, &attr_value);
+            let serialized = serde_json::to_string(&doc).unwrap_or_default();
+            topic
+                .attributes
+                .insert("DeliveryPolicy".to_string(), serialized);
+        } else if attr_name == "Policy" {
+            // If setting Policy, compact the JSON
             if let Ok(parsed) = serde_json::from_str::<Value>(&attr_value) {
                 if let Ok(compact) = serde_json::to_string(&parsed) {
                     topic.attributes.insert(attr_name, compact);
@@ -1158,10 +1258,10 @@ impl SnsService {
         }
 
         // EffectiveDeliveryPolicy: merge any subscription-level
-        // DeliveryPolicy over the SNS default so callers see their
-        // tuning reflected (matching real SNS).
+        // DeliveryPolicy over the SNS subscription default so callers
+        // see their tuning reflected (matching real SNS).
         let user_policy = sub.attributes.get("DeliveryPolicy").map(|s| s.as_str());
-        let effective = compute_effective_delivery_policy(user_policy);
+        let effective = compute_effective_subscription_delivery_policy(user_policy);
         entries.push(format_attr("EffectiveDeliveryPolicy", &effective));
 
         for (k, v) in &sub.attributes {
@@ -1690,45 +1790,144 @@ mod tests;
 
 #[cfg(test)]
 mod effective_policy_tests {
-    use super::compute_effective_delivery_policy;
+    use super::{
+        apply_dotted_override, compute_effective_subscription_delivery_policy,
+        compute_effective_topic_delivery_policy,
+    };
     use serde_json::Value;
 
     #[test]
-    fn falls_back_to_default_for_unset_policy() {
-        let v: Value = serde_json::from_str(&compute_effective_delivery_policy(None)).unwrap();
-        assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 3);
-    }
-
-    #[test]
-    fn falls_back_to_default_for_empty_policy() {
-        let v: Value = serde_json::from_str(&compute_effective_delivery_policy(Some(""))).unwrap();
-        assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 3);
-    }
-
-    #[test]
-    fn falls_back_to_default_for_unparseable_policy() {
+    fn topic_default_uses_http_wrapper() {
         let v: Value =
-            serde_json::from_str(&compute_effective_delivery_policy(Some("not json"))).unwrap();
-        assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 3);
+            serde_json::from_str(&compute_effective_topic_delivery_policy(None)).unwrap();
+        assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["numRetries"], 3);
+        assert_eq!(v["http"]["disableSubscriptionOverrides"], false);
+        assert!(v["http"]["defaultThrottlePolicy"].is_null());
+        assert_eq!(
+            v["http"]["defaultRequestPolicy"]["headerContentType"],
+            "text/plain; charset=UTF-8"
+        );
     }
 
     #[test]
-    fn merges_user_set_retry_count() {
-        let user = r#"{"defaultHealthyRetryPolicy":{"numRetries":7}}"#;
+    fn topic_falls_back_to_default_for_empty_policy() {
         let v: Value =
-            serde_json::from_str(&compute_effective_delivery_policy(Some(user))).unwrap();
-        assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 7);
+            serde_json::from_str(&compute_effective_topic_delivery_policy(Some(""))).unwrap();
+        assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["numRetries"], 3);
+    }
+
+    #[test]
+    fn topic_falls_back_to_default_for_unparseable_policy() {
+        let v: Value =
+            serde_json::from_str(&compute_effective_topic_delivery_policy(Some("not json")))
+                .unwrap();
+        assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["numRetries"], 3);
+    }
+
+    #[test]
+    fn topic_merges_user_set_retry_count() {
+        let user = r#"{"http":{"defaultHealthyRetryPolicy":{"numRetries":7}}}"#;
+        let v: Value =
+            serde_json::from_str(&compute_effective_topic_delivery_policy(Some(user))).unwrap();
+        assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["numRetries"], 7);
         // Default fields the user didn't override stay intact.
-        assert_eq!(v["defaultHealthyRetryPolicy"]["minDelayTarget"], 20);
-        assert_eq!(v["defaultHealthyRetryPolicy"]["backoffFunction"], "linear");
+        assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["minDelayTarget"], 20);
+        assert_eq!(
+            v["http"]["defaultHealthyRetryPolicy"]["backoffFunction"],
+            "linear"
+        );
+        assert_eq!(v["http"]["disableSubscriptionOverrides"], false);
     }
 
     #[test]
-    fn user_can_override_top_level_keys() {
+    fn topic_user_can_override_disable_subscription_overrides() {
+        let user = r#"{"http":{"disableSubscriptionOverrides":true}}"#;
+        let v: Value =
+            serde_json::from_str(&compute_effective_topic_delivery_policy(Some(user))).unwrap();
+        assert_eq!(v["http"]["disableSubscriptionOverrides"], true);
+        // Untouched defaults remain.
+        assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["numRetries"], 3);
+    }
+
+    #[test]
+    fn subscription_default_is_flat() {
+        let v: Value =
+            serde_json::from_str(&compute_effective_subscription_delivery_policy(None)).unwrap();
+        assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 3);
+        assert_eq!(v["guaranteed"], false);
+        // No `http` wrapper at subscription level.
+        assert!(v.get("http").is_none());
+    }
+
+    #[test]
+    fn subscription_merges_user_set_retry_count() {
+        let user = r#"{"defaultHealthyRetryPolicy":{"numRetries":5}}"#;
+        let v: Value =
+            serde_json::from_str(&compute_effective_subscription_delivery_policy(Some(user)))
+                .unwrap();
+        assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 5);
+        assert_eq!(v["defaultHealthyRetryPolicy"]["minDelayTarget"], 20);
+        assert_eq!(v["guaranteed"], false);
+    }
+
+    #[test]
+    fn subscription_user_can_override_top_level_keys() {
         let user = r#"{"guaranteed":true}"#;
         let v: Value =
-            serde_json::from_str(&compute_effective_delivery_policy(Some(user))).unwrap();
+            serde_json::from_str(&compute_effective_subscription_delivery_policy(Some(user)))
+                .unwrap();
         assert_eq!(v["guaranteed"], true);
         assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 3);
+    }
+
+    #[test]
+    fn dotted_override_patches_nested_int() {
+        let mut doc: Value =
+            serde_json::json!({"http": {"defaultHealthyRetryPolicy": {"numRetries": 3}}});
+        apply_dotted_override(&mut doc, "http.defaultHealthyRetryPolicy.numRetries", "5");
+        assert_eq!(doc["http"]["defaultHealthyRetryPolicy"]["numRetries"], 5);
+    }
+
+    #[test]
+    fn dotted_override_patches_nested_bool() {
+        let mut doc: Value = serde_json::json!({"http": {}});
+        apply_dotted_override(&mut doc, "http.disableSubscriptionOverrides", "true");
+        assert_eq!(doc["http"]["disableSubscriptionOverrides"], true);
+    }
+
+    #[test]
+    fn dotted_override_creates_missing_path() {
+        let mut doc: Value = serde_json::json!({});
+        apply_dotted_override(
+            &mut doc,
+            "http.defaultRequestPolicy.headerContentType",
+            "application/json",
+        );
+        assert_eq!(
+            doc["http"]["defaultRequestPolicy"]["headerContentType"],
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn dotted_override_handles_null_literal() {
+        let mut doc: Value =
+            serde_json::json!({"http": {"defaultThrottlePolicy": {"maxReceivesPerSecond": 10}}});
+        apply_dotted_override(&mut doc, "http.defaultThrottlePolicy", "null");
+        assert!(doc["http"]["defaultThrottlePolicy"].is_null());
+    }
+
+    #[test]
+    fn dotted_override_keeps_string_for_non_numeric() {
+        let mut doc: Value = serde_json::json!({"http": {}});
+        apply_dotted_override(
+            &mut doc,
+            "http.defaultHealthyRetryPolicy.backoffFunction",
+            "exponential",
+        );
+        assert_eq!(
+            doc["http"]["defaultHealthyRetryPolicy"]["backoffFunction"],
+            "exponential"
+        );
     }
 }

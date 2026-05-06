@@ -372,6 +372,197 @@ async fn sns_get_set_topic_attributes() {
 }
 
 #[tokio::test]
+async fn sns_topic_effective_delivery_policy_default() {
+    // Default EffectiveDeliveryPolicy: real SNS surfaces a fully
+    // populated http-wrapped policy on a fresh topic, not the empty
+    // user-set value.
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("edp-default")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    let attrs = client
+        .get_topic_attributes()
+        .topic_arn(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+    let map = attrs.attributes().unwrap();
+    let effective = map
+        .get("EffectiveDeliveryPolicy")
+        .expect("EffectiveDeliveryPolicy must be present");
+    let v: serde_json::Value = serde_json::from_str(effective).unwrap();
+    assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["numRetries"], 3);
+    assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["minDelayTarget"], 20);
+    assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["maxDelayTarget"], 20);
+    assert_eq!(
+        v["http"]["defaultHealthyRetryPolicy"]["backoffFunction"],
+        "linear"
+    );
+    assert_eq!(v["http"]["disableSubscriptionOverrides"], false);
+    assert!(v["http"]["defaultThrottlePolicy"].is_null());
+    assert_eq!(
+        v["http"]["defaultRequestPolicy"]["headerContentType"],
+        "text/plain; charset=UTF-8"
+    );
+}
+
+#[tokio::test]
+async fn sns_topic_effective_delivery_policy_merges_user_policy() {
+    // Setting a partial DeliveryPolicy must produce an
+    // EffectiveDeliveryPolicy that has the user override layered on
+    // top of the SNS defaults — keys the user didn't touch must keep
+    // their default values.
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("edp-merge")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    let user_policy = r#"{"http":{"defaultHealthyRetryPolicy":{"numRetries":7}}}"#;
+    client
+        .set_topic_attributes()
+        .topic_arn(&topic_arn)
+        .attribute_name("DeliveryPolicy")
+        .attribute_value(user_policy)
+        .send()
+        .await
+        .unwrap();
+
+    let attrs = client
+        .get_topic_attributes()
+        .topic_arn(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+    let map = attrs.attributes().unwrap();
+    let effective = map.get("EffectiveDeliveryPolicy").unwrap();
+    let v: serde_json::Value = serde_json::from_str(effective).unwrap();
+    // User override applied
+    assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["numRetries"], 7);
+    // Defaults kept
+    assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["minDelayTarget"], 20);
+    assert_eq!(
+        v["http"]["defaultHealthyRetryPolicy"]["backoffFunction"],
+        "linear"
+    );
+    assert_eq!(v["http"]["disableSubscriptionOverrides"], false);
+}
+
+#[tokio::test]
+async fn sns_topic_set_delivery_policy_via_dotted_path() {
+    // Real SNS accepts dotted-path attribute names like
+    // `DeliveryPolicy.http.defaultHealthyRetryPolicy.numRetries` to
+    // patch a single nested value without re-sending the whole policy.
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("edp-dotted")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    client
+        .set_topic_attributes()
+        .topic_arn(&topic_arn)
+        .attribute_name("DeliveryPolicy.http.defaultHealthyRetryPolicy.numRetries")
+        .attribute_value("5")
+        .send()
+        .await
+        .unwrap();
+    client
+        .set_topic_attributes()
+        .topic_arn(&topic_arn)
+        .attribute_name("DeliveryPolicy.http.disableSubscriptionOverrides")
+        .attribute_value("true")
+        .send()
+        .await
+        .unwrap();
+
+    let attrs = client
+        .get_topic_attributes()
+        .topic_arn(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+    let map = attrs.attributes().unwrap();
+    let effective = map.get("EffectiveDeliveryPolicy").unwrap();
+    let v: serde_json::Value = serde_json::from_str(effective).unwrap();
+    // Dotted-path override took effect
+    assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["numRetries"], 5);
+    assert_eq!(v["http"]["disableSubscriptionOverrides"], true);
+    // Other defaults remain
+    assert_eq!(v["http"]["defaultHealthyRetryPolicy"]["minDelayTarget"], 20);
+    assert_eq!(
+        v["http"]["defaultRequestPolicy"]["headerContentType"],
+        "text/plain; charset=UTF-8"
+    );
+
+    // The stored DeliveryPolicy itself should reflect both updates
+    let stored = map.get("DeliveryPolicy").unwrap();
+    let stored_v: serde_json::Value = serde_json::from_str(stored).unwrap();
+    assert_eq!(
+        stored_v["http"]["defaultHealthyRetryPolicy"]["numRetries"],
+        5
+    );
+    assert_eq!(stored_v["http"]["disableSubscriptionOverrides"], true);
+}
+
+#[tokio::test]
+async fn sns_subscription_effective_delivery_policy_default() {
+    // Subscription-level EffectiveDeliveryPolicy is flat (no http
+    // wrapper) and includes `guaranteed` / `sicklyRetryPolicy` /
+    // `throttlePolicy` keys.
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("sub-edp-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    let sub = client
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sqs")
+        .endpoint("arn:aws:sqs:us-east-1:123456789012:q")
+        .send()
+        .await
+        .unwrap();
+    let sub_arn = sub.subscription_arn().unwrap().to_string();
+
+    let attrs = client
+        .get_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .send()
+        .await
+        .unwrap();
+    let map = attrs.attributes().unwrap();
+    let effective = map.get("EffectiveDeliveryPolicy").unwrap();
+    let v: serde_json::Value = serde_json::from_str(effective).unwrap();
+    assert_eq!(v["defaultHealthyRetryPolicy"]["numRetries"], 3);
+    assert_eq!(v["guaranteed"], false);
+    assert!(v.get("http").is_none());
+}
+
+#[tokio::test]
 async fn sns_delete_nonexistent_topic_succeeds() {
     let server = TestServer::start().await;
     let client = server.sns_client().await;
