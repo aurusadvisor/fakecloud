@@ -118,3 +118,8 @@ Tests that need deterministic flush timing can `POST /_fakecloud/elbv2/access-lo
 - **HTTPS/TLS termination.** Listeners with `Protocol=HTTPS` are stored exactly; the in-process bind is HTTP-only for now. ACM cert lookup + `rustls` termination + mTLS trust-store wiring lands in a follow-up.
 - **Raw NLB TCP forwarding.** NLB control-plane CRUD is complete; the data-plane TCP byte-copy lands with the TLS work.
 - **`authenticate-oidc` / `authenticate-cognito` actions.** Currently respond `501`; bringing OIDC + Cognito flows online ships separately.
+
+## Limitations
+
+- NLB and GWLB data planes are not implemented. Only the ALB data plane (HTTP request matching, forwarding, fixed-response, redirect, sticky sessions, access logs) is functional.
+- HTTPS/TLS termination is not yet implemented. Listeners with `Protocol=HTTPS` are stored but the in-process bind is HTTP-only.

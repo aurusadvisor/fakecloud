@@ -79,6 +79,10 @@ Configure a response, run code, assert on what was called — see [Testing Bedro
 
 Bedrock is untestable locally without fakecloud. Real Bedrock burns tokens on every test run, hits per-account rate limits, returns non-deterministic output, and requires network access. Testing error paths (retries, fallbacks, circuit breakers) is nearly impossible because you can't reliably make real Bedrock fail. fakecloud solves all of this — free, deterministic, offline, controllable.
 
+## Limitations
+
+- The Bedrock runtime (`InvokeModel`, `Converse`, streaming) runs in echo / configurable-response mode with real token counting and fault injection. It does not perform real model inference. This is intentional for deterministic local testing; use the `BEDROCK_ECHO` env var or the per-model override mechanism to control responses.
+
 ## Source
 
 - [`crates/fakecloud-bedrock`](https://github.com/faiscadev/fakecloud/tree/main/crates/fakecloud-bedrock)
