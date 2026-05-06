@@ -273,11 +273,42 @@ impl EcsRuntime {
         }
         mark_pull_stopped(state, account_id, task_id);
 
-        // Launch every container detached. If any fails to start, kill the
-        // ones we already started and bail — partial-launch state is harder
-        // to reason about than a clean failure.
+        // Launch every container detached, in topological order. Before
+        // each `docker run` we honour the dependent's `dependsOn[]` by
+        // polling docker until each upstream container reaches the
+        // requested condition (START/COMPLETE/SUCCESS/HEALTHY). If any
+        // fails to start (or an upstream gate times out), kill the
+        // already-started containers and bail — partial-launch state is
+        // harder to reason about than a clean failure.
         let mut started: Vec<RunningContainer> = Vec::with_capacity(resolved_plans.len());
         for (idx, (rp, run_image)) in resolved_plans.iter().zip(run_images.iter()).enumerate() {
+            // Wait for every dependsOn[] entry on this container. Upstreams
+            // declared in the same task always show up earlier in the
+            // launch order thanks to topo_sort_plans, so we only ever look
+            // backwards into `started`.
+            for dep in &rp.plan.depends_on {
+                let upstream = match started.iter().find(|c| c.name == dep.container_name) {
+                    Some(u) => u,
+                    // Upstream not in this task definition (we ignored it
+                    // during topo-sort too). Skip the gate — this matches
+                    // the existing "ignore unknown dependency" behaviour.
+                    None => continue,
+                };
+                // Whether the upstream has a healthCheck configured —
+                // governs the HEALTHY shortcut: AWS treats HEALTHY as
+                // immediately satisfied when the upstream has no probe.
+                let upstream_has_health_check = resolved_plans
+                    .iter()
+                    .find(|p| p.plan.container_name == dep.container_name)
+                    .is_some_and(|p| p.plan.health_check.is_some());
+                if let Err(err) = self
+                    .wait_for_depends_on(upstream, dep.condition, upstream_has_health_check)
+                    .await
+                {
+                    self.cleanup_partial_start(&started);
+                    return Err(err);
+                }
+            }
             let argv = build_run_argv(&rp.plan, &rp.env, task_id, &self.host_ip, run_image);
             let mut cmd = Command::new(&self.cli);
             cmd.args(&argv);
@@ -597,6 +628,68 @@ impl EcsRuntime {
         )
     }
 
+    /// Block the launch of a dependent container until its upstream
+    /// reaches the requested `dependsOn[].condition`. We poll
+    /// `docker inspect` at a small interval; the wait is bounded by an
+    /// AWS-style timeout (120s by default — long enough for image
+    /// startup but short enough to surface bugs as a clean
+    /// `ContainerStart` failure).
+    ///
+    /// `upstream_has_health_check` is needed for the `HEALTHY` branch:
+    /// when the upstream has no healthCheck, AWS treats `HEALTHY` as
+    /// immediately satisfied (otherwise the dependent would block
+    /// forever, since docker reports `Health.Status` only when the
+    /// container has a HEALTHCHECK directive).
+    async fn wait_for_depends_on(
+        &self,
+        upstream: &RunningContainer,
+        condition: DependsOnCondition,
+        upstream_has_health_check: bool,
+    ) -> Result<(), RuntimeError> {
+        // Bounded wait — chosen to comfortably cover slow init scripts
+        // without letting a wedged dependency stall a task indefinitely.
+        const WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+        const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+        // HEALTHY against an upstream without a healthCheck: AWS treats
+        // this as immediately satisfied because there's no probe to
+        // observe. Skip the polling loop entirely so the dependent isn't
+        // wedged forever waiting for a status that docker will never set.
+        if matches!(condition, DependsOnCondition::Healthy) && !upstream_has_health_check {
+            return Ok(());
+        }
+
+        let deadline = std::time::Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let inspect = inspect_container_state(&self.cli, &upstream.container_id).await;
+            if let Some(state) = inspect {
+                if condition_is_met(condition, &state) {
+                    return Ok(());
+                }
+                // SUCCESS specifically: if the container exited with a
+                // non-zero code, the gate can never be satisfied. Bail
+                // immediately rather than waiting for the timeout — this
+                // matches ECS's "stoppedReason: dependency failed" path.
+                if matches!(condition, DependsOnCondition::Success)
+                    && state.exited
+                    && state.exit_code != 0
+                {
+                    return Err(RuntimeError::ContainerStart(format!(
+                        "container {} dependency on {} (SUCCESS) failed: upstream exited with code {}",
+                        upstream.name, upstream.name, state.exit_code,
+                    )));
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(RuntimeError::ContainerStart(format!(
+                    "timed out waiting for container {} to reach condition {:?}",
+                    upstream.name, condition,
+                )));
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     /// Best-effort cleanup of containers we already started when a later
     /// container in the task failed to launch. Without this, half-launched
     /// tasks leak docker containers.
@@ -805,12 +898,14 @@ pub(crate) struct ContainerPlan {
     /// ECS treats `awsvpc` as "container is on its own ENI"; the
     /// equivalent in fakecloud is "don't publish to the host".
     pub(crate) network_mode: Option<String>,
-    /// Names of containers this one depends on (`dependsOn[].containerName`).
-    /// Used to topologically order the launch loop so dependencies start
-    /// first. The full set of conditions (START/COMPLETE/SUCCESS/HEALTHY)
-    /// isn't enforced yet — we just respect the ordering, which is the
-    /// observable difference from "launch in declaration order".
-    pub(crate) depends_on: Vec<String>,
+    /// Container dependencies parsed from `dependsOn[]`. Each entry pairs
+    /// the target container name with the condition that must be observed
+    /// before this container is launched: `START` (target exists/running),
+    /// `COMPLETE` (target exited, any code), `SUCCESS` (target exited with
+    /// code 0), or `HEALTHY` (target's docker `Health.Status` is `healthy`).
+    /// Used both to topologically order the launch loop and to gate each
+    /// `docker run` on the upstream condition.
+    pub(crate) depends_on: Vec<DependsOn>,
     /// Parsed `healthCheck` from the task definition. Translated into
     /// docker `--health-*` flags on `docker run` so the container's
     /// health is observable via `docker inspect .State.Health.Status`.
@@ -823,6 +918,50 @@ pub(crate) struct ContainerPlan {
     /// renders as one `-v` flag on the `docker run` invocation. Empty when
     /// the container has no mount points or no matching volume entries.
     pub(crate) volume_mounts: Vec<VolumeMount>,
+}
+
+/// One parsed `dependsOn[]` entry on a container. Pairs the upstream
+/// container name with the condition that must hold before the dependent
+/// container is launched. AWS spells the conditions `START`, `COMPLETE`,
+/// `SUCCESS`, `HEALTHY` and treats anything else as an error at register
+/// time — we mirror that in [`parse_depends_on`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DependsOn {
+    pub container_name: String,
+    pub condition: DependsOnCondition,
+}
+
+/// `dependsOn[].condition` from the task definition. The variants map
+/// 1:1 to AWS's documented values; the launch loop polls docker for the
+/// matching predicate before starting the dependent container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DependsOnCondition {
+    /// Upstream container has been started (docker container exists and
+    /// is either running or has exited).
+    Start,
+    /// Upstream container has exited (any exit code).
+    Complete,
+    /// Upstream container has exited with code 0.
+    Success,
+    /// Upstream container's `Health.Status` is `healthy`. When the
+    /// upstream has no healthCheck configured, AWS treats this as
+    /// immediately satisfied — we do the same.
+    Healthy,
+}
+
+impl DependsOnCondition {
+    /// Parse the AWS-spelled condition string. Returns `None` for
+    /// unrecognised values so callers can surface a `ClientException`
+    /// at register time.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "START" => Some(Self::Start),
+            "COMPLETE" => Some(Self::Complete),
+            "SUCCESS" => Some(Self::Success),
+            "HEALTHY" => Some(Self::Healthy),
+            _ => None,
+        }
+    }
 }
 
 /// Container health check parsed from the ECS task definition. Each
@@ -1039,11 +1178,7 @@ fn build_container_plans(
             .and_then(|d| d.get("dependsOn").and_then(|v| v.as_array()).cloned())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|e| {
-                        e.get("containerName")
-                            .and_then(|v| v.as_str())
-                            .map(String::from)
-                    })
+                    .filter_map(parse_depends_on_entry)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -1188,6 +1323,23 @@ fn ensure_dir_exists(path: &str) {
     let _ = std::fs::create_dir_all(path);
 }
 
+/// Parse one `dependsOn[]` entry. Returns `None` for malformed entries
+/// (missing `containerName`, unrecognised `condition`) so the caller
+/// can drop them silently from the launch plan — register-time
+/// validation already rejects bad values; this is a defensive fallback.
+fn parse_depends_on_entry(value: &serde_json::Value) -> Option<DependsOn> {
+    let container_name = value
+        .get("containerName")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let raw_condition = value.get("condition").and_then(|v| v.as_str())?;
+    let condition = DependsOnCondition::parse(raw_condition)?;
+    Some(DependsOn {
+        container_name,
+        condition,
+    })
+}
+
 /// Topologically sort container plans so `dependsOn` dependencies start
 /// before their dependants. Implements Kahn's algorithm with stable order:
 /// when multiple plans are ready, we keep their original declaration
@@ -1195,8 +1347,9 @@ fn ensure_dir_exists(path: &str) {
 /// user wrote in the task definition. Cycles fall through with the
 /// remaining plans appended in original order — the runtime will still
 /// launch every container; it just can't guarantee dependency ordering
-/// in that degenerate case (matching ECS, which rejects cycles at
-/// register time but we don't validate that yet).
+/// in that degenerate case. Cycles are rejected at register time
+/// (RegisterTaskDefinition -> validate_depends_on_acyclic), so reaching
+/// that branch from a real launch path means a bug elsewhere.
 fn topo_sort_plans(plans: Vec<ContainerPlan>) -> Vec<ContainerPlan> {
     use std::collections::{HashMap, HashSet};
     let names: HashSet<String> = plans.iter().map(|p| p.container_name.clone()).collect();
@@ -1211,13 +1364,18 @@ fn topo_sort_plans(plans: Vec<ContainerPlan>) -> Vec<ContainerPlan> {
     // yet, so be defensive here).
     let mut in_degree: Vec<usize> = plans
         .iter()
-        .map(|p| p.depends_on.iter().filter(|d| names.contains(*d)).count())
+        .map(|p| {
+            p.depends_on
+                .iter()
+                .filter(|d| names.contains(&d.container_name))
+                .count()
+        })
         .collect();
     // dependants[i] = indices of plans that depend on plan i.
     let mut dependants: Vec<Vec<usize>> = vec![Vec::new(); plans.len()];
     for (i, p) in plans.iter().enumerate() {
         for d in &p.depends_on {
-            if let Some(&di) = index.get(d) {
+            if let Some(&di) = index.get(&d.container_name) {
                 dependants[di].push(i);
             }
         }
@@ -1248,6 +1406,147 @@ fn topo_sort_plans(plans: Vec<ContainerPlan>) -> Vec<ContainerPlan> {
         }
     }
     ordered
+}
+
+/// Validate that `containerDefinitions[].dependsOn[]` graph is acyclic.
+/// Real ECS rejects cyclic dependencies at RegisterTaskDefinition time
+/// with a `ClientException`; we mirror that. Returns the offending pair
+/// of container names so the caller can produce a useful error.
+///
+/// Operates directly on the raw JSON definitions (rather than parsed
+/// `ContainerPlan`s) so register-time validation doesn't have to first
+/// build a full plan from a not-yet-stored task definition.
+pub(crate) fn find_depends_on_cycle(
+    container_definitions: &[serde_json::Value],
+) -> Option<(String, String)> {
+    use std::collections::HashMap;
+
+    let names: Vec<String> = container_definitions
+        .iter()
+        .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+    let index: HashMap<&str, usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
+    for (i, cd) in container_definitions.iter().enumerate() {
+        if i >= names.len() {
+            continue;
+        }
+        let Some(deps) = cd.get("dependsOn").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for d in deps {
+            let Some(target) = d.get("containerName").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if let Some(&j) = index.get(target) {
+                // Edge: i depends on j -> for cycle DFS we walk from i to j.
+                adj[i].push(j);
+            }
+        }
+    }
+
+    // DFS with three-colour marking (white=0, gray=1, black=2). When we
+    // hit a gray neighbour we've closed a cycle; report the back-edge as
+    // the offending pair.
+    let mut state = vec![0u8; names.len()];
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for start in 0..names.len() {
+        if state[start] != 0 {
+            continue;
+        }
+        stack.clear();
+        stack.push((start, 0));
+        state[start] = 1;
+        while let Some(&(node, next_edge)) = stack.last() {
+            if next_edge < adj[node].len() {
+                let nb = adj[node][next_edge];
+                stack.last_mut().unwrap().1 += 1;
+                match state[nb] {
+                    0 => {
+                        state[nb] = 1;
+                        stack.push((nb, 0));
+                    }
+                    1 => {
+                        return Some((names[node].clone(), names[nb].clone()));
+                    }
+                    _ => {}
+                }
+            } else {
+                state[node] = 2;
+                stack.pop();
+            }
+        }
+    }
+    None
+}
+
+/// Snapshot of the docker container state we care about for `dependsOn`
+/// gating: whether the container exists/started, whether it's exited,
+/// its exit code, and (when configured) its health status.
+#[derive(Debug, Clone)]
+struct InspectedState {
+    started: bool,
+    exited: bool,
+    exit_code: i64,
+    health: Option<String>,
+}
+
+/// One `docker inspect` call returning every field needed by
+/// [`condition_is_met`]. Returns `None` when the container doesn't exist
+/// yet or inspect fails — the caller will simply retry on the next poll.
+async fn inspect_container_state(cli: &str, container_id: &str) -> Option<InspectedState> {
+    // Compose all four fields into a single inspect format so the gate
+    // costs one process spawn per poll rather than four.
+    let format =
+        "{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}<none>{{end}}";
+    let out = Command::new(cli)
+        .args(["inspect", "-f", format, container_id])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let parts: Vec<&str> = raw.split('|').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let status = parts[0];
+    let running = parts[1] == "true";
+    let exit_code: i64 = parts[2].parse().unwrap_or(-1);
+    let health = match parts[3] {
+        "<none>" | "" => None,
+        other => Some(other.to_string()),
+    };
+    // `created` is the brief moment between docker creating the
+    // container and the entrypoint running. Treat anything past
+    // `created` as "started" for the START condition.
+    let started = running || status == "exited" || status == "running" || status == "dead";
+    let exited = status == "exited" || status == "dead";
+    Some(InspectedState {
+        started,
+        exited,
+        exit_code,
+        health,
+    })
+}
+
+/// Decide whether the polled `state` satisfies a `dependsOn[].condition`.
+/// Encapsulates the AWS semantics so the polling loop is purely
+/// mechanical.
+fn condition_is_met(condition: DependsOnCondition, state: &InspectedState) -> bool {
+    match condition {
+        DependsOnCondition::Start => state.started,
+        DependsOnCondition::Complete => state.exited,
+        DependsOnCondition::Success => state.exited && state.exit_code == 0,
+        DependsOnCondition::Healthy => state.health.as_deref() == Some("healthy"),
+    }
 }
 
 /// Test-only re-export of [`parse_port_mapping`] so sibling test modules
@@ -2008,7 +2307,13 @@ mod tests {
             has_task_role: false,
             port_mappings: Vec::new(),
             network_mode: None,
-            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            depends_on: deps
+                .iter()
+                .map(|s| DependsOn {
+                    container_name: (*s).to_string(),
+                    condition: DependsOnCondition::Start,
+                })
+                .collect(),
             health_check: None,
             volume_mounts: Vec::new(),
         }
@@ -2358,5 +2663,138 @@ mod tests {
             "containerPath": "/x"
         });
         assert!(resolve_mount_point(&mp, &volumes).is_none());
+    }
+
+    /// `find_depends_on_cycle` returns the back-edge endpoints when a
+    /// trivial 2-cycle exists. Real ECS would reject this at register
+    /// time; our service-level handler relies on this helper.
+    #[test]
+    fn find_depends_on_cycle_detects_two_node_cycle() {
+        let cds = vec![
+            serde_json::json!({
+                "name": "a",
+                "image": "alpine",
+                "dependsOn": [{"containerName": "b", "condition": "START"}],
+            }),
+            serde_json::json!({
+                "name": "b",
+                "image": "alpine",
+                "dependsOn": [{"containerName": "a", "condition": "START"}],
+            }),
+        ];
+        let cycle = find_depends_on_cycle(&cds);
+        assert!(cycle.is_some(), "expected cycle to be detected");
+    }
+
+    /// A three-node chain (a -> b -> c) is acyclic and must not be
+    /// flagged. Guards against an over-eager DFS reporting back-edges
+    /// from already-finished nodes.
+    #[test]
+    fn find_depends_on_cycle_accepts_chain() {
+        let cds = vec![
+            serde_json::json!({
+                "name": "a",
+                "image": "alpine",
+                "dependsOn": [{"containerName": "b", "condition": "START"}],
+            }),
+            serde_json::json!({
+                "name": "b",
+                "image": "alpine",
+                "dependsOn": [{"containerName": "c", "condition": "START"}],
+            }),
+            serde_json::json!({
+                "name": "c",
+                "image": "alpine",
+            }),
+        ];
+        assert!(find_depends_on_cycle(&cds).is_none());
+    }
+
+    /// `dependsOn[]` entries that name a container outside the task
+    /// definition are ignored by the cycle check (they can't form a
+    /// cycle by definition; runtime also drops them).
+    #[test]
+    fn find_depends_on_cycle_ignores_unknown_target() {
+        let cds = vec![serde_json::json!({
+            "name": "only",
+            "image": "alpine",
+            "dependsOn": [{"containerName": "ghost", "condition": "START"}],
+        })];
+        assert!(find_depends_on_cycle(&cds).is_none());
+    }
+
+    /// `condition_is_met` covers each AWS condition value against a
+    /// simulated docker inspect snapshot. Pinning these mappings here
+    /// catches accidental re-orderings of the match arms.
+    #[test]
+    fn condition_is_met_matches_aws_semantics() {
+        let running = InspectedState {
+            started: true,
+            exited: false,
+            exit_code: 0,
+            health: None,
+        };
+        let exited_ok = InspectedState {
+            started: true,
+            exited: true,
+            exit_code: 0,
+            health: None,
+        };
+        let exited_fail = InspectedState {
+            started: true,
+            exited: true,
+            exit_code: 1,
+            health: None,
+        };
+        let healthy = InspectedState {
+            started: true,
+            exited: false,
+            exit_code: 0,
+            health: Some("healthy".into()),
+        };
+
+        // START is satisfied as soon as the container has started, even
+        // if it later exited.
+        assert!(condition_is_met(DependsOnCondition::Start, &running));
+        assert!(condition_is_met(DependsOnCondition::Start, &exited_ok));
+
+        // COMPLETE requires an exit, regardless of code.
+        assert!(!condition_is_met(DependsOnCondition::Complete, &running));
+        assert!(condition_is_met(DependsOnCondition::Complete, &exited_ok));
+        assert!(condition_is_met(DependsOnCondition::Complete, &exited_fail));
+
+        // SUCCESS requires an exit AND code 0.
+        assert!(!condition_is_met(DependsOnCondition::Success, &running));
+        assert!(condition_is_met(DependsOnCondition::Success, &exited_ok));
+        assert!(!condition_is_met(DependsOnCondition::Success, &exited_fail));
+
+        // HEALTHY requires Health.Status == "healthy".
+        assert!(!condition_is_met(DependsOnCondition::Healthy, &running));
+        assert!(condition_is_met(DependsOnCondition::Healthy, &healthy));
+    }
+
+    /// `DependsOnCondition::parse` accepts the four AWS-spelled values
+    /// and rejects everything else — register-time validation depends on
+    /// this returning `None` for unknowns.
+    #[test]
+    fn depends_on_condition_parse_round_trips() {
+        assert_eq!(
+            DependsOnCondition::parse("START"),
+            Some(DependsOnCondition::Start)
+        );
+        assert_eq!(
+            DependsOnCondition::parse("COMPLETE"),
+            Some(DependsOnCondition::Complete)
+        );
+        assert_eq!(
+            DependsOnCondition::parse("SUCCESS"),
+            Some(DependsOnCondition::Success)
+        );
+        assert_eq!(
+            DependsOnCondition::parse("HEALTHY"),
+            Some(DependsOnCondition::Healthy)
+        );
+        assert_eq!(DependsOnCondition::parse("start"), None);
+        assert_eq!(DependsOnCondition::parse("ANY"), None);
     }
 }

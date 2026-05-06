@@ -48,6 +48,42 @@ impl EcsService {
                     "Container definition is missing required field: image",
                 ));
             }
+            // Validate `dependsOn[]` entry shape: `condition` must be
+            // one of the AWS-documented values (START/COMPLETE/SUCCESS/
+            // HEALTHY). Real ECS rejects unknown conditions with a
+            // ClientException at register time.
+            if let Some(deps) = cd.get("dependsOn").and_then(|v| v.as_array()) {
+                for dep in deps {
+                    let Some(cond) = dep.get("condition").and_then(|v| v.as_str()) else {
+                        return Err(client_exception(
+                            "Container dependency is missing required field: condition",
+                        ));
+                    };
+                    if crate::runtime::DependsOnCondition::parse(cond).is_none() {
+                        return Err(client_exception(format!(
+                            "Container dependency condition '{cond}' is invalid. Valid values are: START, COMPLETE, SUCCESS, HEALTHY",
+                        )));
+                    }
+                    if dep
+                        .get("containerName")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .is_empty()
+                    {
+                        return Err(client_exception(
+                            "Container dependency is missing required field: containerName",
+                        ));
+                    }
+                }
+            }
+        }
+        // Reject cyclic `dependsOn[]` graphs at register time, the way
+        // real ECS does. Without this gate the runtime would deadlock at
+        // launch waiting on each side of the cycle to come up first.
+        if let Some((from, to)) = crate::runtime::find_depends_on_cycle(&container_definitions) {
+            return Err(client_exception(format!(
+                "Container dependency between '{from}' and '{to}' is cyclic; dependsOn graph must be acyclic",
+            )));
         }
         // PassRole trust check on the task + execution roles. Real AWS
         // rejects RegisterTaskDefinition when the role's trust policy
