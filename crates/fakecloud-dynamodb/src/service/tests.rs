@@ -3530,6 +3530,176 @@ fn execute_transaction() {
     assert!(b["Item"].is_object());
 }
 
+// L4: PartiQL comparator + schema validation coverage. Each test
+// seeds a small set of items and exercises one of the WHERE forms
+// added in L4 (numeric/lexicographic comparators, BETWEEN, IN,
+// LIKE, contains/begins_with/attribute_*) so future regressions
+// surface even before an SDK roundtrip.
+
+fn seed_partiql_corpus(svc: &DynamoDbService) {
+    create_test_table(svc);
+    for (pk, score, name) in [
+        ("a", 10, "alpha"),
+        ("b", 20, "beta"),
+        ("c", 30, "gamma"),
+        ("d", 40, "delta"),
+    ] {
+        let req = make_request(
+            "PutItem",
+            json!({
+                "TableName": "test-table",
+                "Item": {
+                    "pk": {"S": pk},
+                    "score": {"N": score.to_string()},
+                    "name": {"S": name},
+                },
+            }),
+        );
+        svc.put_item(&req).unwrap();
+    }
+}
+
+fn pks_from_select(svc: &DynamoDbService, statement: &str) -> Vec<String> {
+    let req = make_request("ExecuteStatement", json!({ "Statement": statement }));
+    let resp = svc.execute_statement(&req).unwrap();
+    let b = body_json(&resp);
+    let mut pks: Vec<String> = b["Items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|it| it["pk"]["S"].as_str().unwrap().to_string())
+        .collect();
+    pks.sort();
+    pks
+}
+
+#[test]
+fn partiql_select_lt_gt_le_ge_ne_numeric() {
+    let svc = make_service();
+    seed_partiql_corpus(&svc);
+
+    assert_eq!(
+        pks_from_select(&svc, "SELECT * FROM \"test-table\" WHERE score < 25"),
+        vec!["a", "b"]
+    );
+    assert_eq!(
+        pks_from_select(&svc, "SELECT * FROM \"test-table\" WHERE score > 25"),
+        vec!["c", "d"]
+    );
+    assert_eq!(
+        pks_from_select(&svc, "SELECT * FROM \"test-table\" WHERE score <= 20"),
+        vec!["a", "b"]
+    );
+    assert_eq!(
+        pks_from_select(&svc, "SELECT * FROM \"test-table\" WHERE score >= 30"),
+        vec!["c", "d"]
+    );
+    assert_eq!(
+        pks_from_select(&svc, "SELECT * FROM \"test-table\" WHERE score <> 20"),
+        vec!["a", "c", "d"]
+    );
+}
+
+#[test]
+fn partiql_select_between_in_like() {
+    let svc = make_service();
+    seed_partiql_corpus(&svc);
+
+    assert_eq!(
+        pks_from_select(
+            &svc,
+            "SELECT * FROM \"test-table\" WHERE score BETWEEN 15 AND 35"
+        ),
+        vec!["b", "c"]
+    );
+    assert_eq!(
+        pks_from_select(&svc, "SELECT * FROM \"test-table\" WHERE pk IN ('a','c')"),
+        vec!["a", "c"]
+    );
+    assert_eq!(
+        pks_from_select(&svc, "SELECT * FROM \"test-table\" WHERE name LIKE 'al%'"),
+        vec!["a"]
+    );
+    assert_eq!(
+        pks_from_select(&svc, "SELECT * FROM \"test-table\" WHERE name LIKE '_eta'"),
+        vec!["b"]
+    );
+}
+
+#[test]
+fn partiql_select_function_predicates() {
+    let svc = make_service();
+    seed_partiql_corpus(&svc);
+
+    assert_eq!(
+        pks_from_select(
+            &svc,
+            "SELECT * FROM \"test-table\" WHERE begins_with(name, 'g')"
+        ),
+        vec!["c"]
+    );
+    assert_eq!(
+        pks_from_select(
+            &svc,
+            "SELECT * FROM \"test-table\" WHERE contains(name, 'lt')"
+        ),
+        vec!["d"]
+    );
+    assert_eq!(
+        pks_from_select(
+            &svc,
+            "SELECT * FROM \"test-table\" WHERE attribute_exists(score)"
+        ),
+        vec!["a", "b", "c", "d"]
+    );
+    assert_eq!(
+        pks_from_select(
+            &svc,
+            "SELECT * FROM \"test-table\" WHERE attribute_not_exists(missing)"
+        ),
+        vec!["a", "b", "c", "d"]
+    );
+}
+
+#[test]
+fn partiql_insert_rejects_missing_partition_key() {
+    let svc = make_service();
+    create_test_table(&svc);
+    let req = make_request(
+        "ExecuteStatement",
+        json!({
+            "Statement": "INSERT INTO \"test-table\" VALUE {'data': 'no-pk'}"
+        }),
+    );
+    let err = match svc.execute_statement(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected INSERT without pk to fail"),
+    };
+    let dbg = format!("{err:?}");
+    assert!(dbg.contains("ValidationException"), "got {dbg}");
+    assert!(dbg.contains("Missing the key pk"), "got {dbg}");
+}
+
+#[test]
+fn partiql_insert_rejects_wrong_key_type() {
+    let svc = make_service();
+    create_test_table(&svc);
+    // Table key `pk` is declared as type `S` — try to insert a numeric.
+    let req = make_request(
+        "ExecuteStatement",
+        json!({
+            "Statement": "INSERT INTO \"test-table\" VALUE {'pk': 42}"
+        }),
+    );
+    let err = match svc.execute_statement(&req) {
+        Err(e) => e,
+        Ok(_) => panic!("expected INSERT with wrong-type pk to fail"),
+    };
+    let dbg = format!("{err:?}");
+    assert!(dbg.contains("ValidationException"), "got {dbg}");
+    assert!(dbg.contains("Type mismatch for key pk"), "got {dbg}");
+}
+
 // ── Batch write with delete ──
 
 #[test]
