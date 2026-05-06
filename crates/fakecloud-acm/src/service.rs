@@ -217,11 +217,18 @@ impl AcmService {
             .and_then(Value::as_str)
             .ok_or_else(|| invalid_param("DomainName is required"))?
             .to_string();
+        if domain_name.is_empty() || domain_name.len() > 253 {
+            return Err(invalid_param("DomainName length must be between 1 and 253"));
+        }
         let validation_method = body
             .get("ValidationMethod")
             .and_then(Value::as_str)
             .unwrap_or("DNS")
             .to_string();
+        if validation_method != "EMAIL" && validation_method != "DNS" && validation_method != "HTTP"
+        {
+            return Err(invalid_param("Invalid ValidationMethod"));
+        }
         let sans: Vec<String> = body
             .get("SubjectAlternativeNames")
             .and_then(Value::as_array)
@@ -236,18 +243,52 @@ impl AcmService {
             .and_then(Value::as_str)
             .unwrap_or("RSA_2048")
             .to_string();
+        const VALID_KEY_ALGORITHMS: [&str; 7] = [
+            "RSA_1024",
+            "RSA_2048",
+            "RSA_3072",
+            "RSA_4096",
+            "EC_prime256v1",
+            "EC_secp384r1",
+            "EC_secp521r1",
+        ];
+        if !VALID_KEY_ALGORITHMS.contains(&key_algorithm.as_str()) {
+            return Err(invalid_param("Invalid KeyAlgorithm"));
+        }
         let idempotency_token = body
             .get("IdempotencyToken")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(ref token) = idempotency_token {
+            if token.is_empty() || token.len() > 32 {
+                return Err(invalid_param(
+                    "IdempotencyToken length must be between 1 and 32",
+                ));
+            }
+            if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Err(invalid_param("IdempotencyToken must match pattern ^\\w+$"));
+            }
+        }
         let managed_by = body
             .get("ManagedBy")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(ref m) = managed_by {
+            if m != "CLOUDFRONT" {
+                return Err(invalid_param("Invalid ManagedBy"));
+            }
+        }
         let ca_arn = body
             .get("CertificateAuthorityArn")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(ref arn) = ca_arn {
+            if arn.len() < 20 || arn.len() > 2048 {
+                return Err(validation_error(
+                    "CertificateAuthorityArn length must be between 20 and 2048",
+                ));
+            }
+        }
         let tags = parse_tags(body.get("Tags"))?;
         let options = parse_options(body.get("Options"));
 
@@ -385,10 +426,30 @@ impl AcmService {
             .and_then(Value::as_u64)
             .map(|n| n as usize)
             .unwrap_or(100);
+        if !(1..=1000).contains(&max_items) {
+            return Err(validation_error("MaxItems must be between 1 and 1000"));
+        }
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(ref token) = next_token {
+            if token.is_empty() || token.len() > 10000 {
+                return Err(validation_error(
+                    "NextToken length must be between 1 and 10000",
+                ));
+            }
+        }
+        if let Some(sort_by) = body.get("SortBy").and_then(Value::as_str) {
+            if sort_by != "CREATED_AT" {
+                return Err(validation_error("Invalid SortBy"));
+            }
+        }
+        if let Some(sort_order) = body.get("SortOrder").and_then(Value::as_str) {
+            if sort_order != "ASCENDING" && sort_order != "DESCENDING" {
+                return Err(validation_error("Invalid SortOrder"));
+            }
+        }
         let statuses: Vec<String> = body
             .get("CertificateStatuses")
             .and_then(Value::as_array)
@@ -839,10 +900,23 @@ impl AcmService {
 
     fn put_account_configuration(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let _ = body
+        let idempotency_token = body
             .get("IdempotencyToken")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid_param("IdempotencyToken is required"))?;
+        if idempotency_token.is_empty() || idempotency_token.len() > 32 {
+            return Err(validation_error(
+                "IdempotencyToken length must be between 1 and 32",
+            ));
+        }
+        if !idempotency_token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(validation_error(
+                "IdempotencyToken must match pattern ^\\w+$",
+            ));
+        }
         let days = body
             .get("ExpiryEvents")
             .and_then(|v| v.get("DaysBeforeExpiry"))
@@ -899,10 +973,50 @@ impl AcmService {
             .and_then(Value::as_u64)
             .map(|n| n as usize)
             .unwrap_or(100);
+        if !(1..=500).contains(&max_results) {
+            return Err(validation_error("MaxResults must be between 1 and 500"));
+        }
         let next_token = body
             .get("NextToken")
             .and_then(Value::as_str)
             .map(|s| s.to_string());
+        if let Some(ref token) = next_token {
+            if token.is_empty() || token.len() > 10000 {
+                return Err(validation_error(
+                    "NextToken length must be between 1 and 10000",
+                ));
+            }
+        }
+        if let Some(sort_by) = body.get("SortBy").and_then(Value::as_str) {
+            const VALID_SORT_BY: [&str; 18] = [
+                "CREATED_AT",
+                "NOT_AFTER",
+                "STATUS",
+                "RENEWAL_STATUS",
+                "EXPORTED",
+                "IN_USE",
+                "NOT_BEFORE",
+                "KEY_ALGORITHM",
+                "TYPE",
+                "CERTIFICATE_ARN",
+                "COMMON_NAME",
+                "REVOKED_AT",
+                "RENEWAL_ELIGIBILITY",
+                "ISSUED_AT",
+                "MANAGED_BY",
+                "EXPORT_OPTION",
+                "VALIDATION_METHOD",
+                "IMPORTED_AT",
+            ];
+            if !VALID_SORT_BY.contains(&sort_by) {
+                return Err(validation_error("Invalid SortBy"));
+            }
+        }
+        if let Some(sort_order) = body.get("SortOrder").and_then(Value::as_str) {
+            if sort_order != "ASCENDING" && sort_order != "DESCENDING" {
+                return Err(validation_error("Invalid SortOrder"));
+            }
+        }
         let key_types: Vec<String> = body
             .get("FilterStatement")
             .and_then(|f| f.get("Filter"))
@@ -968,6 +1082,10 @@ fn require_certificate_arn(req: &AwsRequest) -> Result<String, AwsServiceError> 
 
 fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidParameterException", msg)
+}
+
+fn validation_error(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg)
 }
 
 fn no_such_certificate(arn: &str) -> AwsServiceError {
@@ -1333,7 +1451,6 @@ fn certificate_search_result_json(c: &StoredCertificate) -> Value {
         },
         "CertificateMetadata": {
             "AcmCertificateMetadata": {
-                "DomainName": c.domain_name,
                 "Status": c.status,
                 "Type": c.cert_type,
                 "InUse": !c.in_use_by.is_empty(),

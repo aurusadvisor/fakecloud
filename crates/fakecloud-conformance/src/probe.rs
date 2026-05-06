@@ -75,6 +75,9 @@ pub fn service_protocol(service_name: &str) -> Protocol {
         "dynamodb" => Protocol::Json {
             target_prefix: "DynamoDB_20120810",
         },
+        "dynamodbstreams" => Protocol::Json {
+            target_prefix: "DynamoDBStreams_20120810",
+        },
         "secretsmanager" => Protocol::Json {
             target_prefix: "secretsmanager",
         },
@@ -99,6 +102,27 @@ pub fn service_protocol(service_name: &str) -> Protocol {
         // Smithy service_name for Step Functions is `states`; SDK calls it SFN.
         "states" => Protocol::Json {
             target_prefix: "AWSStepFunctions",
+        },
+        "organizations" => Protocol::Json {
+            target_prefix: "AWSOrganizationsV20161128",
+        },
+        "acm" => Protocol::Json {
+            target_prefix: "CertificateManager",
+        },
+        "application-autoscaling" => Protocol::Json {
+            target_prefix: "AnyScaleFrontendService",
+        },
+        "wafv2" => Protocol::Json {
+            target_prefix: "AWSWAF_20190729",
+        },
+        "athena" => Protocol::Json {
+            target_prefix: "AmazonAthena",
+        },
+        "firehose" => Protocol::Json {
+            target_prefix: "Firehose_20150804",
+        },
+        "glue" => Protocol::Json {
+            target_prefix: "AWSGlue",
         },
         "s3" => Protocol::Rest,
         "lambda" => Protocol::Rest,
