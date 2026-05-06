@@ -675,15 +675,18 @@ impl EcsRuntime {
                     && state.exit_code != 0
                 {
                     return Err(RuntimeError::ContainerStart(format!(
-                        "dependency on container {} (SUCCESS) failed: upstream exited with code {}",
-                        upstream.name, state.exit_code,
+                        "dependency on container {} ({}) failed: upstream exited with code {}",
+                        upstream.name,
+                        DependsOnCondition::Success.as_aws_str(),
+                        state.exit_code,
                     )));
                 }
             }
             if std::time::Instant::now() >= deadline {
                 return Err(RuntimeError::ContainerStart(format!(
-                    "timed out waiting for container {} to reach condition {:?}",
-                    upstream.name, condition,
+                    "timed out waiting for container {} to reach condition {}",
+                    upstream.name,
+                    condition.as_aws_str(),
                 )));
             }
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -960,6 +963,18 @@ impl DependsOnCondition {
             "SUCCESS" => Some(Self::Success),
             "HEALTHY" => Some(Self::Healthy),
             _ => None,
+        }
+    }
+
+    /// AWS-spelled string for this condition. Used in user-facing error
+    /// messages so timeout/dependency-failed reasons echo back the same
+    /// value the user wrote in their task definition.
+    pub fn as_aws_str(self) -> &'static str {
+        match self {
+            Self::Start => "START",
+            Self::Complete => "COMPLETE",
+            Self::Success => "SUCCESS",
+            Self::Healthy => "HEALTHY",
         }
     }
 }
