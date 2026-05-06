@@ -706,11 +706,32 @@ fn apply_parameters_substitutes_json_path_refs() {
         "list": [ { "x.$": "$.user.id" } ]
     });
     let input = json!({ "user": { "id": 42, "name": "zoe" } });
-    let out = apply_parameters(&template, &input);
+    let out = apply_parameters(&template, &input, None);
     assert_eq!(out["literal"], json!("constant"));
     assert_eq!(out["ref"], json!(42));
     assert_eq!(out["nested"]["inner"], json!("zoe"));
     assert_eq!(out["list"][0]["x"], json!(42));
+}
+
+#[test]
+fn apply_parameters_resolves_context_object() {
+    let template = json!({
+        "token.$": "$$.Task.Token",
+        "exec.$": "$$.Execution.Id",
+        "literal": "static"
+    });
+    let input = json!({ "user": { "id": 42 } });
+    let context = json!({
+        "Task": { "Token": "abc123" },
+        "Execution": { "Id": "arn:aws:states:us-east-1:123:execution:sm:exec" }
+    });
+    let out = apply_parameters(&template, &input, Some(&context));
+    assert_eq!(out["token"], json!("abc123"));
+    assert_eq!(
+        out["exec"],
+        json!("arn:aws:states:us-east-1:123:execution:sm:exec")
+    );
+    assert_eq!(out["literal"], json!("static"));
 }
 
 #[test]

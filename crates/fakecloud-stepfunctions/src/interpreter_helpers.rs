@@ -1042,10 +1042,86 @@ pub(crate) fn cleanup_token(
     }
 }
 
+/// Poll a task token until the worker calls `SendTaskSuccess`,
+/// `SendTaskFailure`, or the heartbeat / timeout windows expire.
+/// Mirrors the polling loop used by `invoke_activity` but is shared
+/// for `.waitForTaskToken` SDK integrations.
+pub(crate) async fn poll_task_token(
+    shared_state: &SharedStepFunctionsState,
+    account_id: &str,
+    token: &str,
+    timeout_seconds: Option<u64>,
+    heartbeat_seconds: Option<u64>,
+) -> Result<Value, (String, String)> {
+    let absolute_deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds.unwrap_or(3600));
+    loop {
+        let now_ts = chrono::Utc::now();
+        let snapshot = {
+            let accounts = shared_state.read();
+            accounts
+                .get(account_id)
+                .and_then(|s| s.task_tokens.get(token).cloned())
+        };
+        let Some(entry) = snapshot else {
+            return Err((
+                "States.TaskFailed".to_string(),
+                "Task token disappeared".to_string(),
+            ));
+        };
+        match entry.status.as_str() {
+            "SUCCEEDED" => {
+                cleanup_token(shared_state, account_id, token);
+                let output = entry.output.unwrap_or_else(|| "{}".to_string());
+                let value: Value = serde_json::from_str(&output).unwrap_or(Value::String(output));
+                return Ok(value);
+            }
+            "FAILED" => {
+                cleanup_token(shared_state, account_id, token);
+                return Err((
+                    entry
+                        .error
+                        .unwrap_or_else(|| "States.TaskFailed".to_string()),
+                    entry.cause.unwrap_or_default(),
+                ));
+            }
+            _ => {}
+        }
+        // Heartbeat timeout: only enforced once the worker has picked up the
+        // task (status == IN_PROGRESS) and a heartbeat window is set.
+        if entry.status == "IN_PROGRESS" {
+            if let Some(hb) = heartbeat_seconds {
+                let last = entry.last_heartbeat_at.unwrap_or(entry.created_at);
+                if (now_ts - last).num_seconds() > hb as i64 {
+                    cleanup_token(shared_state, account_id, token);
+                    return Err((
+                        "States.HeartbeatTimeout".to_string(),
+                        format!("Worker missed heartbeat ({hb}s window)"),
+                    ));
+                }
+            }
+        }
+        if std::time::Instant::now() >= absolute_deadline {
+            cleanup_token(shared_state, account_id, token);
+            let secs = timeout_seconds.unwrap_or(3600);
+            return Err((
+                "States.Timeout".to_string(),
+                format!("Task timed out after {secs} seconds"),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
 /// Apply Parameters template: keys ending with .$ are treated as
 /// JsonPath references *or* ASL intrinsic invocations
 /// (`States.Foo(...)`).
-pub(crate) fn apply_parameters(template: &Value, input: &Value) -> Value {
+///
+/// When `context` is provided, expressions starting with `$$.` resolve
+/// against the context object (Step Functions context object) instead of
+/// the state input. This is how `$$.Task.Token` is substituted for
+/// `.waitForTaskToken` integrations.
+pub(crate) fn apply_parameters(template: &Value, input: &Value, context: Option<&Value>) -> Value {
     match template {
         Value::Object(map) => {
             let mut result = serde_json::Map::new();
@@ -1057,18 +1133,29 @@ pub(crate) fn apply_parameters(template: &Value, input: &Value) -> Value {
                                 tracing::warn!(error = %err, "States intrinsic failed");
                                 Value::Null
                             })
+                        } else if expr.starts_with("$$.") {
+                            if let Some(ctx) = context {
+                                let path = expr.strip_prefix("$$.").unwrap_or(expr);
+                                crate::io_processing::resolve_path(ctx, path)
+                            } else {
+                                Value::Null
+                            }
                         } else {
                             crate::io_processing::resolve_path(input, expr)
                         };
                         result.insert(stripped.to_string(), resolved);
                     }
                 } else {
-                    result.insert(key.clone(), apply_parameters(value, input));
+                    result.insert(key.clone(), apply_parameters(value, input, context));
                 }
             }
             Value::Object(result)
         }
-        Value::Array(arr) => Value::Array(arr.iter().map(|v| apply_parameters(v, input)).collect()),
+        Value::Array(arr) => Value::Array(
+            arr.iter()
+                .map(|v| apply_parameters(v, input, context))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -1221,7 +1308,7 @@ mod tests {
             "literal": "static",
         });
         let input = json!({"name": "Eve", "n": 7});
-        let out = apply_parameters(&template, &input);
+        let out = apply_parameters(&template, &input, None);
         assert_eq!(out["greeting"], json!("Hello Eve, count is 7"));
         assert_eq!(out["literal"], json!("static"));
     }
@@ -1230,7 +1317,7 @@ mod tests {
     fn apply_parameters_falls_back_to_jsonpath_for_non_intrinsics() {
         let template = json!({"x.$": "$.value"});
         let input = json!({"value": 42});
-        let out = apply_parameters(&template, &input);
+        let out = apply_parameters(&template, &input, None);
         assert_eq!(out["x"], json!(42));
     }
 
@@ -1238,7 +1325,7 @@ mod tests {
     fn apply_parameters_intrinsic_failure_yields_null() {
         // Bad call: missing closing paren.
         let template = json!({"y.$": "States.Format('{}'"});
-        let out = apply_parameters(&template, &Value::Null);
+        let out = apply_parameters(&template, &Value::Null, None);
         // Falls through resolve_path since not detected as intrinsic
         // (no `(` after States.Format... actually has `(`, so this *is*
         // an intrinsic and should return Null on failure).
