@@ -590,7 +590,7 @@ pub(crate) fn resolve_qualifier_to_version(
 
 pub struct LambdaService {
     pub(crate) state: SharedLambdaState,
-    runtime: Option<Arc<ContainerRuntime>>,
+    pub(crate) runtime: Option<Arc<ContainerRuntime>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
     pub(crate) delivery_bus: Option<Arc<fakecloud_core::delivery::DeliveryBus>>,
@@ -2040,6 +2040,7 @@ impl AwsService for LambdaService {
             "GetFunction" => "GetFunction",
             "DeleteFunction" => "DeleteFunction",
             "Invoke" => "InvokeFunction",
+            "InvokeWithResponseStream" => "InvokeFunctionWithResponseStream",
             "PublishVersion" => "PublishVersion",
             "AddPermission" => "AddPermission",
             "RemovePermission" => "RemovePermission",
@@ -2054,8 +2055,14 @@ impl AwsService for LambdaService {
         let empty = LambdaState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
         let resource = match action {
-            "GetFunction" | "DeleteFunction" | "InvokeFunction" | "PublishVersion"
-            | "AddPermission" | "RemovePermission" | "GetPolicy" => {
+            "GetFunction"
+            | "DeleteFunction"
+            | "InvokeFunction"
+            | "InvokeFunctionWithResponseStream"
+            | "PublishVersion"
+            | "AddPermission"
+            | "RemovePermission"
+            | "GetPolicy" => {
                 let name = resource_name.unwrap_or_default();
                 if name.is_empty() {
                     "*".to_string()
