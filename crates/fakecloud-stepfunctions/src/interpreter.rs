@@ -181,6 +181,7 @@ async fn run_task_state(
     );
 
     let result = execute_task_state(
+        name,
         state_def,
         &input,
         delivery,
@@ -363,6 +364,7 @@ async fn execute_wait_state(state_def: &Value, input: &Value) {
 /// apply I/O processing, handle Retry.
 #[allow(clippy::too_many_arguments)]
 async fn execute_task_state(
+    name: &str,
     state_def: &Value,
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
@@ -384,16 +386,57 @@ async fn execute_task_state(
         apply_input_path(input, input_path)
     };
 
-    let task_input = if let Some(params) = state_def.get("Parameters") {
-        apply_parameters(params, &effective_input)
-    } else {
-        effective_input
-    };
-
     let retriers = state_def["Retry"].as_array().cloned().unwrap_or_default();
     let timeout_seconds = state_def["TimeoutSeconds"].as_u64();
     let heartbeat_seconds = state_def["HeartbeatSeconds"].as_u64();
     let mut attempt = 0u32;
+
+    let is_wait_for_task_token = resource.contains(".waitForTaskToken");
+    let task_token = if is_wait_for_task_token {
+        let token = format!(
+            "FCToken-{}-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            uuid::Uuid::new_v4().simple(),
+        );
+        let account_id = account_id_from_arn(execution_arn);
+        let context = json!({
+            "Task": { "Token": token.clone() },
+            "Execution": { "Id": execution_arn },
+            "State": { "Name": name },
+        });
+        {
+            let mut accounts = shared_state.write();
+            let state = accounts.get_or_create(account_id);
+            state.task_tokens.insert(
+                token.clone(),
+                crate::state::TaskTokenState {
+                    activity_arn: String::new(),
+                    status: "PENDING".to_string(),
+                    output: None,
+                    error: None,
+                    cause: None,
+                    input: None,
+                    created_at: chrono::Utc::now(),
+                    last_heartbeat_at: None,
+                    heartbeat_seconds: heartbeat_seconds.map(|s| s as i64),
+                    timeout_seconds: timeout_seconds.map(|s| s as i64),
+                },
+            );
+        }
+        Some((token, context))
+    } else {
+        None
+    };
+
+    let task_input = if let Some(params) = state_def.get("Parameters") {
+        if let Some((_, ctx)) = &task_token {
+            apply_parameters(params, &effective_input, Some(ctx))
+        } else {
+            apply_parameters(params, &effective_input, None)
+        }
+    } else {
+        effective_input
+    };
 
     loop {
         add_event(
@@ -431,6 +474,73 @@ async fn execute_task_state(
 
         match invoke_result {
             Ok(result) => {
+                if let Some((token, _)) = &task_token {
+                    let account_id = account_id_from_arn(execution_arn);
+                    match poll_task_token(
+                        shared_state,
+                        account_id,
+                        token,
+                        timeout_seconds,
+                        heartbeat_seconds,
+                    )
+                    .await
+                    {
+                        Ok(output) => {
+                            add_event(
+                                shared_state,
+                                execution_arn,
+                                "TaskSucceeded",
+                                entered_event_id,
+                                json!({
+                                    "resource": resource,
+                                    "output": serde_json::to_string(&output).expect("serde_json::Value serialization is infallible"),
+                                }),
+                            );
+
+                            let selected = if let Some(selector) = state_def.get("ResultSelector") {
+                                apply_parameters(selector, &output, None)
+                            } else {
+                                output
+                            };
+
+                            let after_result = if result_path == Some("null") {
+                                input.clone()
+                            } else {
+                                apply_result_path(input, &selected, result_path)
+                            };
+
+                            let output = if output_path == Some("null") {
+                                json!({})
+                            } else {
+                                apply_output_path(&after_result, output_path)
+                            };
+
+                            return Ok(output);
+                        }
+                        Err((error, cause)) => {
+                            add_event(
+                                shared_state,
+                                execution_arn,
+                                "TaskFailed",
+                                entered_event_id,
+                                json!({ "error": error, "cause": cause }),
+                            );
+
+                            if let Some(delay_ms) = should_retry(&retriers, &error, attempt) {
+                                attempt += 1;
+                                let actual_delay = delay_ms.min(5000);
+                                tokio::time::sleep(tokio::time::Duration::from_millis(
+                                    actual_delay,
+                                ))
+                                .await;
+                                continue;
+                            }
+
+                            return Err((error, cause));
+                        }
+                    }
+                }
+
                 add_event(
                     shared_state,
                     execution_arn,
@@ -443,7 +553,7 @@ async fn execute_task_state(
                 );
 
                 let selected = if let Some(selector) = state_def.get("ResultSelector") {
-                    apply_parameters(selector, &result)
+                    apply_parameters(selector, &result, None)
                 } else {
                     result
                 };
@@ -548,7 +658,7 @@ async fn execute_parallel_state(
 
     // Apply ResultSelector if present
     let selected = if let Some(selector) = state_def.get("ResultSelector") {
-        apply_parameters(selector, &branch_output)
+        apply_parameters(selector, &branch_output, None)
     } else {
         branch_output
     };
@@ -632,7 +742,7 @@ async fn execute_map_state(
             let mut ctx = serde_json::Map::new();
             ctx.insert("value".to_string(), item.clone());
             ctx.insert("index".to_string(), json!(index));
-            apply_parameters(selector, &Value::Object(ctx))
+            apply_parameters(selector, &Value::Object(ctx), None)
         } else {
             item
         };
@@ -696,7 +806,7 @@ async fn execute_map_state(
 
     // Apply ResultSelector if present
     let selected = if let Some(selector) = state_def.get("ResultSelector") {
-        apply_parameters(selector, &map_output)
+        apply_parameters(selector, &map_output, None)
     } else {
         map_output
     };
@@ -1420,67 +1530,14 @@ async fn invoke_activity(
         );
     }
 
-    // Poll for completion. Default poll cadence 200ms; 1 hour absolute
-    // ceiling so a stuck activity can't block the interpreter forever
-    // when no TimeoutSeconds is set on the Task state.
-    let absolute_deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds.unwrap_or(3600));
-    loop {
-        let now_ts = chrono::Utc::now();
-        let snapshot = {
-            let accounts = shared_state.read();
-            accounts
-                .get(&activity_account)
-                .and_then(|s| s.task_tokens.get(&token).cloned())
-        };
-        let Some(entry) = snapshot else {
-            return Err((
-                "States.TaskFailed".to_string(),
-                "Activity task token disappeared".to_string(),
-            ));
-        };
-        match entry.status.as_str() {
-            "SUCCEEDED" => {
-                cleanup_token(shared_state, &activity_account, &token);
-                let output = entry.output.unwrap_or_else(|| "{}".to_string());
-                let value: Value = serde_json::from_str(&output).unwrap_or(Value::String(output));
-                return Ok(value);
-            }
-            "FAILED" => {
-                cleanup_token(shared_state, &activity_account, &token);
-                return Err((
-                    entry
-                        .error
-                        .unwrap_or_else(|| "States.TaskFailed".to_string()),
-                    entry.cause.unwrap_or_default(),
-                ));
-            }
-            _ => {}
-        }
-        // Heartbeat timeout: only enforced once a worker has picked up the
-        // task (status == IN_PROGRESS) and a heartbeat window is set.
-        if entry.status == "IN_PROGRESS" {
-            if let Some(hb) = entry.heartbeat_seconds {
-                let last = entry.last_heartbeat_at.unwrap_or(entry.created_at);
-                if (now_ts - last).num_seconds() > hb {
-                    cleanup_token(shared_state, &activity_account, &token);
-                    return Err((
-                        "States.HeartbeatTimeout".to_string(),
-                        format!("Activity worker missed heartbeat ({hb}s window)"),
-                    ));
-                }
-            }
-        }
-        if std::time::Instant::now() >= absolute_deadline {
-            cleanup_token(shared_state, &activity_account, &token);
-            let secs = timeout_seconds.unwrap_or(3600);
-            return Err((
-                "States.Timeout".to_string(),
-                format!("Activity timed out after {secs} seconds"),
-            ));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    poll_task_token(
+        shared_state,
+        &activity_account,
+        &token,
+        timeout_seconds,
+        heartbeat_seconds,
+    )
+    .await
 }
 
 pub(crate) enum NextState {
