@@ -74,6 +74,27 @@ impl EcsService {
             .cloned()
             .unwrap_or_default();
         let network_configuration = body.get("networkConfiguration").cloned();
+        let platform_version = opt_str(&body, "platformVersion").map(String::from);
+        let health_check_grace_period_seconds = body
+            .get("healthCheckGracePeriodSeconds")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32);
+        let enable_execute_command = body
+            .get("enableExecuteCommand")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let enable_ecs_managed_tags = body
+            .get("enableECSManagedTags")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let propagate_tags = opt_str(&body, "propagateTags").map(String::from);
+        let capacity_provider_strategy: Vec<Value> = body
+            .get("capacityProviderStrategy")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let availability_zone_rebalancing =
+            opt_str(&body, "availabilityZoneRebalancing").map(String::from);
 
         let runtime = self.runtime.clone();
         let account = request.account_id.clone();
@@ -159,6 +180,13 @@ impl EcsService {
                 created_at: Utc::now(),
                 created_by: Some(principal_arn.clone()),
                 role_arn,
+                platform_version: platform_version.clone(),
+                health_check_grace_period_seconds,
+                enable_execute_command,
+                enable_ecs_managed_tags,
+                propagate_tags: propagate_tags.clone(),
+                capacity_provider_strategy: capacity_provider_strategy.clone(),
+                availability_zone_rebalancing: availability_zone_rebalancing.clone(),
             };
             state.services.insert(key.clone(), service.clone());
             if let Some(cluster) = state.clusters.get_mut(&cluster_name) {

@@ -1052,6 +1052,12 @@ impl ResourceProvisioner {
             }
             "AWS::ApiGatewayV2::VpcLink" => Some(self.update_apigwv2_vpc_link(existing, new_def)?),
             "AWS::ApiGatewayV2::Model" => Some(self.update_apigwv2_model(existing, new_def)?),
+            "AWS::ECS::Cluster" => Some(self.update_ecs_cluster(existing, new_def)?),
+            "AWS::ECS::Service" => Some(self.update_ecs_service(existing, new_def)?),
+            "AWS::ECS::TaskDefinition" => Some(self.update_ecs_task_definition(existing, new_def)?),
+            "AWS::ECS::CapacityProvider" => {
+                Some(self.update_ecs_capacity_provider(existing, new_def)?)
+            }
             _ => None,
         };
 
@@ -1098,6 +1104,11 @@ impl ResourceProvisioner {
             }
             "AWS::CloudFront::Distribution" => {
                 self.get_att_cf_distribution(&resource.physical_id, attribute)
+            }
+            "AWS::ECS::Cluster" => self.get_att_ecs_cluster(&resource.physical_id, attribute),
+            "AWS::ECS::Service" => self.get_att_ecs_service(&resource.physical_id, attribute),
+            "AWS::ECS::CapacityProvider" => {
+                self.get_att_ecs_capacity_provider(&resource.physical_id, attribute)
             }
             _ => None,
         }
@@ -8131,13 +8142,17 @@ impl ResourceProvisioner {
             .get("DefaultCapacityProviderStrategy")
             .and_then(|v| v.as_array())
         {
-            cluster.default_capacity_provider_strategy = strategy.clone();
+            cluster.default_capacity_provider_strategy =
+                strategy.iter().cloned().map(lowercase_first_keys).collect();
         }
         if let Some(cfg) = props.get("Configuration") {
-            cluster.configuration = Some(cfg.clone());
+            cluster.configuration = Some(lowercase_first_keys(cfg.clone()));
         }
         if let Some(settings) = props.get("ClusterSettings").and_then(|v| v.as_array()) {
-            cluster.settings = settings.clone();
+            cluster.settings = settings.iter().cloned().map(lowercase_first_keys).collect();
+        }
+        if let Some(scd) = props.get("ServiceConnectDefaults") {
+            cluster.service_connect_defaults = Some(lowercase_first_keys(scd.clone()));
         }
         let mut accounts = self.ecs_state.write();
         let state = accounts.get_or_create(&self.account_id);
@@ -8167,11 +8182,16 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .unwrap_or(&resource.logical_id)
             .to_string();
-        let container_definitions = props
+        // ECS DescribeTaskDefinition emits camelCase keys; CFN ships PascalCase.
+        // Recursively lower the leading char so SDKs deserialize cleanly.
+        let container_definitions: Vec<serde_json::Value> = props
             .get("ContainerDefinitions")
             .and_then(|v| v.as_array())
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .map(lowercase_first_keys)
+            .collect();
         let task_role_arn = props
             .get("TaskRoleArn")
             .and_then(|v| v.as_str())
@@ -8201,16 +8221,34 @@ impl ResourceProvisioner {
             .get("Memory")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let volumes = props
+        let volumes: Vec<serde_json::Value> = props
             .get("Volumes")
             .and_then(|v| v.as_array())
             .cloned()
-            .unwrap_or_default();
-        let placement_constraints = props
+            .unwrap_or_default()
+            .into_iter()
+            .map(lowercase_first_keys)
+            .collect();
+        let placement_constraints: Vec<serde_json::Value> = props
             .get("PlacementConstraints")
             .and_then(|v| v.as_array())
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .map(lowercase_first_keys)
+            .collect();
+        let proxy_configuration = props
+            .get("ProxyConfiguration")
+            .cloned()
+            .map(lowercase_first_keys);
+        let ephemeral_storage = props
+            .get("EphemeralStorage")
+            .cloned()
+            .map(lowercase_first_keys);
+        let runtime_platform = props
+            .get("RuntimePlatform")
+            .cloned()
+            .map(lowercase_first_keys);
         let tags = parse_ecs_tags(props.get("Tags"));
 
         let mut accounts = self.ecs_state.write();
@@ -8242,10 +8280,10 @@ impl ResourceProvisioner {
             ipc_mode: None,
             volumes,
             placement_constraints,
-            proxy_configuration: None,
+            proxy_configuration,
             inference_accelerators: Vec::new(),
-            ephemeral_storage: props.get("EphemeralStorage").cloned(),
-            runtime_platform: props.get("RuntimePlatform").cloned(),
+            ephemeral_storage,
+            runtime_platform,
             requires_attributes: Vec::new(),
             registered_at: Utc::now(),
             registered_by: None,
@@ -8304,7 +8342,7 @@ impl ResourceProvisioner {
             .to_string();
         let desired_count = props
             .get("DesiredCount")
-            .and_then(|v| v.as_i64())
+            .and_then(cfn_as_i64)
             .map(|n| n as i32)
             .unwrap_or(1);
         let launch_type = props
@@ -8323,29 +8361,76 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .unwrap_or("ECS")
             .to_string();
-        let load_balancers = props
+        let load_balancers: Vec<serde_json::Value> = props
             .get("LoadBalancers")
             .and_then(|v| v.as_array())
             .cloned()
-            .unwrap_or_default();
-        let service_registries = props
+            .unwrap_or_default()
+            .into_iter()
+            .map(lowercase_first_keys)
+            .collect();
+        let service_registries: Vec<serde_json::Value> = props
             .get("ServiceRegistries")
             .and_then(|v| v.as_array())
             .cloned()
-            .unwrap_or_default();
-        let placement_constraints = props
+            .unwrap_or_default()
+            .into_iter()
+            .map(lowercase_first_keys)
+            .collect();
+        let placement_constraints: Vec<serde_json::Value> = props
             .get("PlacementConstraints")
             .and_then(|v| v.as_array())
             .cloned()
-            .unwrap_or_default();
-        let placement_strategy = props
+            .unwrap_or_default()
+            .into_iter()
+            .map(lowercase_first_keys)
+            .collect();
+        let placement_strategy: Vec<serde_json::Value> = props
             .get("PlacementStrategies")
             .and_then(|v| v.as_array())
             .cloned()
-            .unwrap_or_default();
-        let network_configuration = props.get("NetworkConfiguration").cloned();
+            .unwrap_or_default()
+            .into_iter()
+            .map(lowercase_first_keys)
+            .collect();
+        let network_configuration = props
+            .get("NetworkConfiguration")
+            .cloned()
+            .map(lowercase_first_keys);
         let role_arn = props
             .get("Role")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let platform_version = props
+            .get("PlatformVersion")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let health_check_grace_period_seconds = props
+            .get("HealthCheckGracePeriodSeconds")
+            .and_then(cfn_as_i64)
+            .map(|n| n as i32);
+        let enable_ecs_managed_tags = props
+            .get("EnableECSManagedTags")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let enable_execute_command = props
+            .get("EnableExecuteCommand")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let propagate_tags = props
+            .get("PropagateTags")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let capacity_provider_strategy: Vec<serde_json::Value> = props
+            .get("CapacityProviderStrategy")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(lowercase_first_keys)
+            .collect();
+        let availability_zone_rebalancing = props
+            .get("AvailabilityZoneRebalancing")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let tags = parse_ecs_tags(props.get("Tags"));
@@ -8384,12 +8469,12 @@ impl ResourceProvisioner {
             minimum_healthy_percent: props
                 .get("DeploymentConfiguration")
                 .and_then(|v| v.get("MinimumHealthyPercent"))
-                .and_then(|v| v.as_i64())
+                .and_then(cfn_as_i64)
                 .map(|n| n as i32),
             maximum_percent: props
                 .get("DeploymentConfiguration")
                 .and_then(|v| v.get("MaximumPercent"))
-                .and_then(|v| v.as_i64())
+                .and_then(cfn_as_i64)
                 .map(|n| n as i32),
             circuit_breaker: None,
             deployments: Vec::new(),
@@ -8402,6 +8487,13 @@ impl ResourceProvisioner {
             created_at: Utc::now(),
             created_by: None,
             role_arn,
+            platform_version,
+            health_check_grace_period_seconds,
+            enable_execute_command,
+            enable_ecs_managed_tags,
+            propagate_tags,
+            capacity_provider_strategy,
+            availability_zone_rebalancing,
         };
         state.services.insert(key.clone(), service);
         if let Some(c) = state.clusters.get_mut(&cluster_name) {
@@ -8465,6 +8557,221 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         state.capacity_providers.remove(physical_id);
         Ok(())
+    }
+
+    /// In-place update for AWS::ECS::Cluster. ClusterName is immutable —
+    /// CFN replaces the resource if it changes — so we only refresh
+    /// settings/configuration/capacity-provider/tags here. The physical
+    /// id is kept stable.
+    fn update_ecs_cluster(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let cluster_name = existing.physical_id.clone();
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let cluster = state
+            .clusters
+            .get_mut(&cluster_name)
+            .ok_or_else(|| format!("Cluster {cluster_name} no longer exists"))?;
+        if let Some(settings) = props.get("ClusterSettings").and_then(|v| v.as_array()) {
+            cluster.settings = settings.iter().cloned().map(lowercase_first_keys).collect();
+        }
+        if let Some(cfg) = props.get("Configuration") {
+            cluster.configuration = Some(lowercase_first_keys(cfg.clone()));
+        }
+        if let Some(cps) = props.get("CapacityProviders").and_then(|v| v.as_array()) {
+            cluster.capacity_providers = cps
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(strategy) = props
+            .get("DefaultCapacityProviderStrategy")
+            .and_then(|v| v.as_array())
+        {
+            cluster.default_capacity_provider_strategy =
+                strategy.iter().cloned().map(lowercase_first_keys).collect();
+        }
+        if let Some(scd) = props.get("ServiceConnectDefaults") {
+            cluster.service_connect_defaults = Some(lowercase_first_keys(scd.clone()));
+        }
+        if props.get("Tags").is_some() {
+            cluster.tags = parse_ecs_tags(props.get("Tags"));
+        }
+        let cluster_arn = cluster.cluster_arn.clone();
+        Ok(ProvisionResult::new(cluster_name).with("Arn", cluster_arn))
+    }
+
+    /// In-place update for AWS::ECS::Service. Service ARN is keyed by
+    /// cluster + service name, both immutable. CFN replaces the resource
+    /// if either changes, so we only mutate task definition / desired
+    /// count / deployment-related fields here.
+    fn update_ecs_service(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let service_arn = existing.physical_id.clone();
+        let Some((cluster_name, service_name)) = parse_service_arn(&service_arn) else {
+            return Err(format!("Cannot parse service ARN: {service_arn}"));
+        };
+        let key = format!("{cluster_name}/{service_name}");
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let svc = state
+            .services
+            .get_mut(&key)
+            .ok_or_else(|| format!("Service {service_arn} no longer exists"))?;
+        if let Some(td) = props.get("TaskDefinition").and_then(|v| v.as_str()) {
+            svc.task_definition_arn = td.to_string();
+            let (family, revision) = parse_td_arn(td);
+            svc.family = family;
+            svc.revision = revision;
+        }
+        if let Some(n) = props.get("DesiredCount").and_then(cfn_as_i64) {
+            svc.desired_count = n as i32;
+        }
+        if let Some(s) = props.get("LaunchType").and_then(|v| v.as_str()) {
+            svc.launch_type = s.to_string();
+        }
+        if let Some(s) = props.get("PlatformVersion").and_then(|v| v.as_str()) {
+            svc.platform_version = Some(s.to_string());
+        }
+        if let Some(n) = props
+            .get("HealthCheckGracePeriodSeconds")
+            .and_then(cfn_as_i64)
+        {
+            svc.health_check_grace_period_seconds = Some(n as i32);
+        }
+        if let Some(b) = props.get("EnableExecuteCommand").and_then(|v| v.as_bool()) {
+            svc.enable_execute_command = b;
+        }
+        if let Some(b) = props.get("EnableECSManagedTags").and_then(|v| v.as_bool()) {
+            svc.enable_ecs_managed_tags = b;
+        }
+        if let Some(s) = props.get("PropagateTags").and_then(|v| v.as_str()) {
+            svc.propagate_tags = Some(s.to_string());
+        }
+        if let Some(s) = props
+            .get("AvailabilityZoneRebalancing")
+            .and_then(|v| v.as_str())
+        {
+            svc.availability_zone_rebalancing = Some(s.to_string());
+        }
+        if let Some(arr) = props
+            .get("CapacityProviderStrategy")
+            .and_then(|v| v.as_array())
+        {
+            svc.capacity_provider_strategy =
+                arr.iter().cloned().map(lowercase_first_keys).collect();
+        }
+        if let Some(dc) = props.get("DeploymentConfiguration") {
+            if let Some(n) = dc.get("MinimumHealthyPercent").and_then(cfn_as_i64) {
+                svc.minimum_healthy_percent = Some(n as i32);
+            }
+            if let Some(n) = dc.get("MaximumPercent").and_then(cfn_as_i64) {
+                svc.maximum_percent = Some(n as i32);
+            }
+        }
+        if let Some(arr) = props.get("LoadBalancers").and_then(|v| v.as_array()) {
+            svc.load_balancers = arr.iter().cloned().map(lowercase_first_keys).collect();
+        }
+        if let Some(arr) = props.get("ServiceRegistries").and_then(|v| v.as_array()) {
+            svc.service_registries = arr.iter().cloned().map(lowercase_first_keys).collect();
+        }
+        if let Some(arr) = props.get("PlacementConstraints").and_then(|v| v.as_array()) {
+            svc.placement_constraints = arr.iter().cloned().map(lowercase_first_keys).collect();
+        }
+        if let Some(arr) = props.get("PlacementStrategies").and_then(|v| v.as_array()) {
+            svc.placement_strategy = arr.iter().cloned().map(lowercase_first_keys).collect();
+        }
+        if let Some(nc) = props.get("NetworkConfiguration") {
+            svc.network_configuration = Some(lowercase_first_keys(nc.clone()));
+        }
+        if props.get("Tags").is_some() {
+            svc.tags = parse_ecs_tags(props.get("Tags"));
+        }
+        let name = svc.service_name.clone();
+        Ok(ProvisionResult::new(service_arn.clone())
+            .with("Name", name)
+            .with("ServiceArn", service_arn))
+    }
+
+    /// In-place update for AWS::ECS::TaskDefinition. ECS treats every
+    /// register call as a new revision, so a CFN update produces a fresh
+    /// revision and the physical id (the full ARN) shifts. Returning a
+    /// new ARN tells CFN's update path that the resource was replaced.
+    fn update_ecs_task_definition(
+        &self,
+        _existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        // Delegating to create_ecs_task_definition is safe because each
+        // call bumps the revision counter — semantically the right
+        // behaviour for ECS.
+        self.create_ecs_task_definition(resource)
+    }
+
+    /// In-place update for AWS::ECS::CapacityProvider. Name is immutable;
+    /// only the underlying ASG provider config and tags can change.
+    fn update_ecs_capacity_provider(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = existing.physical_id.clone();
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let cp = state
+            .capacity_providers
+            .get_mut(&name)
+            .ok_or_else(|| format!("CapacityProvider {name} no longer exists"))?;
+        if props.get("AutoScalingGroupProvider").is_some() {
+            cp.auto_scaling_group_provider = props.get("AutoScalingGroupProvider").cloned();
+        }
+        if props.get("Tags").is_some() {
+            cp.tags = parse_ecs_tags(props.get("Tags"));
+        }
+        let arn = cp.arn.clone();
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    fn get_att_ecs_cluster(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let cluster = state.clusters.get(physical_id)?;
+        match attribute {
+            "Arn" => Some(cluster.cluster_arn.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_ecs_service(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let (cluster, service) = parse_service_arn(physical_id)?;
+        let key = format!("{cluster}/{service}");
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let svc = state.services.get(&key)?;
+        match attribute {
+            "Name" => Some(svc.service_name.clone()),
+            "ServiceArn" => Some(svc.service_arn.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_ecs_capacity_provider(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.ecs_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let cp = state.capacity_providers.get(physical_id)?;
+        match attribute {
+            "Arn" => Some(cp.arn.clone()),
+            _ => None,
+        }
     }
 
     // --- ACM ---
@@ -15141,6 +15448,16 @@ fn make_apigwv2_id(n: usize) -> String {
 /// camelCase (`burstLimit`, `rateLimit`). Used at the CFN/service
 /// boundary so JSON pulled from the template can flow into the runtime
 /// state without renaming each leaf by hand.
+/// Coerce a CFN-resolved Number/String parameter into i64. CFN
+/// parameters surface here as `Value::String` after `Ref` substitution,
+/// even when the parameter `Type` is `Number`, so we need both paths.
+fn cfn_as_i64(v: &serde_json::Value) -> Option<i64> {
+    if let Some(n) = v.as_i64() {
+        return Some(n);
+    }
+    v.as_str().and_then(|s| s.parse::<i64>().ok())
+}
+
 fn lowercase_first_keys(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {

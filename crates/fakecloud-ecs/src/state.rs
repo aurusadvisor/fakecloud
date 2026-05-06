@@ -524,6 +524,35 @@ pub struct Service {
     pub created_at: DateTime<Utc>,
     pub created_by: Option<String>,
     pub role_arn: Option<String>,
+    /// Fargate platform version label ("LATEST", "1.4.0", etc). Echoed
+    /// back on DescribeServices.
+    #[serde(default)]
+    pub platform_version: Option<String>,
+    /// Seconds an ECS service waits before failing a task on health
+    /// check failures while a load balancer is still warming up.
+    #[serde(default)]
+    pub health_check_grace_period_seconds: Option<i32>,
+    /// Whether ECS Exec is enabled for tasks launched by this service.
+    #[serde(default)]
+    pub enable_execute_command: bool,
+    /// When true, ECS automatically tags tasks/ENIs with cluster + service
+    /// metadata. Off by default to match AWS.
+    #[serde(default)]
+    pub enable_ecs_managed_tags: bool,
+    /// Tag-propagation source: "TASK_DEFINITION", "SERVICE", or "NONE".
+    /// We model the AWS shape — None here means "NONE" was the effective
+    /// value when the service was created.
+    #[serde(default)]
+    pub propagate_tags: Option<String>,
+    /// Mixed capacity-provider weights that the service uses instead of
+    /// (or alongside) `launch_type`. Stored as raw JSON since the field
+    /// is a list of `{ capacityProvider, weight, base }` records.
+    #[serde(default)]
+    pub capacity_provider_strategy: Vec<Value>,
+    /// AZ-rebalancing toggle for ALB-attached services. ENABLED |
+    /// DISABLED (default). Surface field for AvailabilityZoneRebalancing.
+    #[serde(default)]
+    pub availability_zone_rebalancing: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

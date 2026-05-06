@@ -74,6 +74,13 @@ fn resolve_service_key_handles_short_and_long() {
             created_at: chrono::Utc::now(),
             created_by: None,
             role_arn: None,
+            platform_version: None,
+            health_check_grace_period_seconds: None,
+            enable_execute_command: false,
+            enable_ecs_managed_tags: false,
+            propagate_tags: None,
+            capacity_provider_strategy: vec![],
+            availability_zone_rebalancing: None,
         },
     );
     // Long-form: cluster/service.
