@@ -2386,6 +2386,22 @@ pub(crate) fn find_partiql_where_indices(
     where_clause: &str,
     parameters: &[Value],
 ) -> Result<Vec<usize>, AwsServiceError> {
+    // Try the full expression parser first — supports AND/OR/NOT and
+    // parenthesized groups. If the clause doesn't parse cleanly we
+    // fall back to the legacy AND-only path so older callers that
+    // emit non-standard syntax keep matching zero rows instead of
+    // 500-ing.
+    let expr = parse_partiql_where_expr(where_clause, parameters);
+    if let Some(expr) = expr {
+        let mut indices = Vec::new();
+        for (i, item) in table.items.iter().enumerate() {
+            if evaluate_partiql_expr(&expr, item) {
+                indices.push(i);
+            }
+        }
+        return Ok(indices);
+    }
+
     let conditions = split_partiql_and_clauses(where_clause);
     let parsed_conditions = parse_partiql_conditions(&conditions, parameters);
 
@@ -2400,6 +2416,317 @@ pub(crate) fn find_partiql_where_indices(
     }
 
     Ok(indices)
+}
+
+/// AST for a parsed PartiQL WHERE clause. Leaf conditions reuse
+/// [`PartiqlCond`]; the tree adds AND/OR/NOT/parens composition added
+/// in L4 so callers can express anything the DDB FilterExpression
+/// language can.
+#[derive(Debug, Clone)]
+pub(crate) enum PartiqlExpr {
+    Cond(PartiqlCond),
+    And(Box<PartiqlExpr>, Box<PartiqlExpr>),
+    Or(Box<PartiqlExpr>, Box<PartiqlExpr>),
+    Not(Box<PartiqlExpr>),
+}
+
+pub(crate) fn evaluate_partiql_expr(
+    expr: &PartiqlExpr,
+    item: &HashMap<String, AttributeValue>,
+) -> bool {
+    match expr {
+        PartiqlExpr::Cond(c) => evaluate_partiql_cond(c, item),
+        PartiqlExpr::And(l, r) => evaluate_partiql_expr(l, item) && evaluate_partiql_expr(r, item),
+        PartiqlExpr::Or(l, r) => evaluate_partiql_expr(l, item) || evaluate_partiql_expr(r, item),
+        PartiqlExpr::Not(e) => !evaluate_partiql_expr(e, item),
+    }
+}
+
+/// Tokens produced by [`tokenize_partiql_where`]. We keep the original
+/// source slice for `Atom` so the existing condition parser can be
+/// reused without a second tokenizer pass.
+#[derive(Debug, Clone)]
+enum WhereTok<'a> {
+    LParen,
+    RParen,
+    And,
+    Or,
+    Not,
+    Atom(&'a str),
+}
+
+fn tokenize_partiql_where(where_clause: &str) -> Vec<WhereTok<'_>> {
+    let bytes = where_clause.as_bytes();
+    let upper = where_clause.to_ascii_uppercase();
+    let upper_bytes = upper.as_bytes();
+    let mut toks: Vec<WhereTok<'_>> = Vec::new();
+    let mut i = 0usize;
+    let mut atom_start: Option<usize> = None;
+    let mut paren_depth: i32 = 0;
+    let mut in_quote = false;
+    let mut in_atom_paren = 0i32; // tracks `(...)` inside an atom
+
+    fn push_atom<'a>(toks: &mut Vec<WhereTok<'a>>, src: &'a str, start: usize, end: usize) {
+        let slice = src[start..end].trim();
+        if !slice.is_empty() {
+            toks.push(WhereTok::Atom(&src[start..end]));
+        }
+    }
+
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if in_quote {
+            if c == '\'' {
+                in_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '\'' {
+            if atom_start.is_none() {
+                atom_start = Some(i);
+            }
+            in_quote = true;
+            i += 1;
+            continue;
+        }
+
+        // Inside an atom, track parens so begins_with(name, 'a') keeps
+        // its inner `(` tied to the atom.
+        if let Some(start) = atom_start {
+            if c == '(' {
+                in_atom_paren += 1;
+                i += 1;
+                continue;
+            }
+            if c == ')' {
+                if in_atom_paren > 0 {
+                    in_atom_paren -= 1;
+                    i += 1;
+                    continue;
+                }
+                // Top-level `)` closes a group — flush the atom first.
+                push_atom(&mut toks, where_clause, start, i);
+                atom_start = None;
+                toks.push(WhereTok::RParen);
+                paren_depth -= 1;
+                i += 1;
+                continue;
+            }
+            // Look for keyword boundaries: AND / OR / NOT surrounded
+            // by whitespace.
+            if c.is_whitespace() && in_atom_paren == 0 {
+                if let Some((kw, len)) = match_where_keyword(upper_bytes, i) {
+                    push_atom(&mut toks, where_clause, start, i);
+                    atom_start = None;
+                    toks.push(kw);
+                    i += len;
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+
+        // Not currently building an atom.
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == '(' {
+            toks.push(WhereTok::LParen);
+            paren_depth += 1;
+            i += 1;
+            continue;
+        }
+        if c == ')' {
+            toks.push(WhereTok::RParen);
+            paren_depth -= 1;
+            i += 1;
+            continue;
+        }
+        // Could be a leading NOT.
+        if let Some((kw, len)) = match_where_keyword_at_start(upper_bytes, i) {
+            toks.push(kw);
+            i += len;
+            continue;
+        }
+        atom_start = Some(i);
+        i += 1;
+    }
+
+    if let Some(start) = atom_start {
+        push_atom(&mut toks, where_clause, start, bytes.len());
+    }
+
+    if paren_depth != 0 || in_quote {
+        return Vec::new();
+    }
+    toks
+}
+
+/// Match ` AND `, ` OR `, ` NOT ` starting at `i` (`i` is the leading
+/// whitespace). Returns the token plus the consumed length so the
+/// scanner can advance past the trailing whitespace too.
+fn match_where_keyword(upper: &[u8], i: usize) -> Option<(WhereTok<'static>, usize)> {
+    // Need: whitespace at i, then keyword, then whitespace or `(`.
+    if i >= upper.len() || !(upper[i] as char).is_whitespace() {
+        return None;
+    }
+    let after = i + 1;
+    let try_kw = |kw: &[u8], tok: WhereTok<'static>| -> Option<(WhereTok<'static>, usize)> {
+        if after + kw.len() > upper.len() {
+            return None;
+        }
+        if &upper[after..after + kw.len()] != kw {
+            return None;
+        }
+        let trail = after + kw.len();
+        if trail >= upper.len() {
+            return Some((tok, trail - i));
+        }
+        let next = upper[trail] as char;
+        if next.is_whitespace() || next == '(' {
+            Some((tok, trail - i))
+        } else {
+            None
+        }
+    };
+    if let Some(r) = try_kw(b"AND", WhereTok::And) {
+        return Some(r);
+    }
+    if let Some(r) = try_kw(b"OR", WhereTok::Or) {
+        return Some(r);
+    }
+    if let Some(r) = try_kw(b"NOT", WhereTok::Not) {
+        return Some(r);
+    }
+    None
+}
+
+/// Match a leading `NOT`/`AND`/`OR` (binary ops appear here when they
+/// follow a `)` token without preceding whitespace). No leading
+/// whitespace requirement — the caller has already skipped it.
+fn match_where_keyword_at_start(upper: &[u8], i: usize) -> Option<(WhereTok<'static>, usize)> {
+    let try_kw = |kw: &[u8], tok: WhereTok<'static>| -> Option<(WhereTok<'static>, usize)> {
+        if i + kw.len() > upper.len() {
+            return None;
+        }
+        if &upper[i..i + kw.len()] != kw {
+            return None;
+        }
+        let trail = i + kw.len();
+        if trail >= upper.len() {
+            return Some((tok, kw.len()));
+        }
+        let next = upper[trail] as char;
+        if next.is_whitespace() || next == '(' {
+            Some((tok, kw.len()))
+        } else {
+            None
+        }
+    };
+    if let Some(r) = try_kw(b"NOT", WhereTok::Not) {
+        return Some(r);
+    }
+    if let Some(r) = try_kw(b"AND", WhereTok::And) {
+        return Some(r);
+    }
+    if let Some(r) = try_kw(b"OR", WhereTok::Or) {
+        return Some(r);
+    }
+    None
+}
+
+/// Parse a WHERE clause into [`PartiqlExpr`]. Returns `None` when the
+/// clause has no logical operators OR fails to parse — callers fall
+/// back to the legacy AND-only evaluator in that case.
+pub(crate) fn parse_partiql_where_expr(
+    where_clause: &str,
+    parameters: &[Value],
+) -> Option<PartiqlExpr> {
+    let toks = tokenize_partiql_where(where_clause);
+    if toks.is_empty() {
+        return None;
+    }
+    let mut idx = 0usize;
+    let mut param_idx = 0usize;
+    let expr = parse_or(&toks, &mut idx, parameters, &mut param_idx)?;
+    if idx != toks.len() {
+        return None;
+    }
+    Some(expr)
+}
+
+fn parse_or(
+    toks: &[WhereTok<'_>],
+    i: &mut usize,
+    params: &[Value],
+    param_idx: &mut usize,
+) -> Option<PartiqlExpr> {
+    let mut left = parse_and(toks, i, params, param_idx)?;
+    while matches!(toks.get(*i), Some(WhereTok::Or)) {
+        *i += 1;
+        let right = parse_and(toks, i, params, param_idx)?;
+        left = PartiqlExpr::Or(Box::new(left), Box::new(right));
+    }
+    Some(left)
+}
+
+fn parse_and(
+    toks: &[WhereTok<'_>],
+    i: &mut usize,
+    params: &[Value],
+    param_idx: &mut usize,
+) -> Option<PartiqlExpr> {
+    let mut left = parse_not(toks, i, params, param_idx)?;
+    while matches!(toks.get(*i), Some(WhereTok::And)) {
+        *i += 1;
+        let right = parse_not(toks, i, params, param_idx)?;
+        left = PartiqlExpr::And(Box::new(left), Box::new(right));
+    }
+    Some(left)
+}
+
+fn parse_not(
+    toks: &[WhereTok<'_>],
+    i: &mut usize,
+    params: &[Value],
+    param_idx: &mut usize,
+) -> Option<PartiqlExpr> {
+    if matches!(toks.get(*i), Some(WhereTok::Not)) {
+        *i += 1;
+        let inner = parse_not(toks, i, params, param_idx)?;
+        return Some(PartiqlExpr::Not(Box::new(inner)));
+    }
+    parse_primary(toks, i, params, param_idx)
+}
+
+fn parse_primary(
+    toks: &[WhereTok<'_>],
+    i: &mut usize,
+    params: &[Value],
+    param_idx: &mut usize,
+) -> Option<PartiqlExpr> {
+    match toks.get(*i)? {
+        WhereTok::LParen => {
+            *i += 1;
+            let inner = parse_or(toks, i, params, param_idx)?;
+            if !matches!(toks.get(*i), Some(WhereTok::RParen)) {
+                return None;
+            }
+            *i += 1;
+            Some(inner)
+        }
+        WhereTok::Atom(s) => {
+            *i += 1;
+            // Each atom may consume one or more `?` parameters; track
+            // them globally so the order matches statement order.
+            let cond = parse_one_partiql_condition(s.trim(), params, param_idx)?;
+            Some(PartiqlExpr::Cond(cond))
+        }
+        _ => None,
+    }
 }
 
 /// A parsed PartiQL WHERE clause condition. Equality remains the

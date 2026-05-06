@@ -3700,6 +3700,223 @@ fn partiql_insert_rejects_wrong_key_type() {
     assert!(dbg.contains("Type mismatch for key pk"), "got {dbg}");
 }
 
+#[test]
+fn partiql_select_and_or_not_parens() {
+    // L4: WHERE composition with AND/OR/NOT and parens. The AND-only
+    // legacy splitter cannot express these, so this exercises the
+    // recursive expression parser.
+    let svc = make_service();
+    seed_partiql_corpus(&svc);
+
+    // OR — match the lower and upper edges.
+    assert_eq!(
+        pks_from_select(
+            &svc,
+            "SELECT * FROM \"test-table\" WHERE score < 15 OR score > 35"
+        ),
+        vec!["a", "d"]
+    );
+    // NOT inverts a comparator predicate.
+    assert_eq!(
+        pks_from_select(&svc, "SELECT * FROM \"test-table\" WHERE NOT score >= 30"),
+        vec!["a", "b"]
+    );
+    // Parens force OR to bind tighter than AND.
+    assert_eq!(
+        pks_from_select(
+            &svc,
+            "SELECT * FROM \"test-table\" WHERE (score < 15 OR score > 35) AND name <> 'unused'",
+        ),
+        vec!["a", "d"]
+    );
+    // Mixed AND/OR without parens — AND binds tighter.
+    assert_eq!(
+        pks_from_select(
+            &svc,
+            "SELECT * FROM \"test-table\" WHERE score = 10 OR score = 20 AND name = 'beta'",
+        ),
+        vec!["a", "b"]
+    );
+}
+
+#[test]
+fn partiql_select_filter_with_like_and_gt() {
+    // L4 spec: `SELECT * FROM "T" WHERE n > 5 AND s LIKE 'foo%'`
+    // returns the right subset.
+    let svc = make_service();
+    create_test_table(&svc);
+    for (pk, n, s) in [
+        ("k1", 1, "foobar"),
+        ("k2", 6, "foobar"),
+        ("k3", 6, "barfoo"),
+        ("k4", 9, "fooz"),
+    ] {
+        svc.put_item(&make_request(
+            "PutItem",
+            json!({
+                "TableName": "test-table",
+                "Item": {
+                    "pk": {"S": pk},
+                    "n": {"N": n.to_string()},
+                    "s": {"S": s},
+                },
+            }),
+        ))
+        .unwrap();
+    }
+    assert_eq!(
+        pks_from_select(
+            &svc,
+            "SELECT * FROM \"test-table\" WHERE n > 5 AND s LIKE 'foo%'"
+        ),
+        vec!["k2", "k4"]
+    );
+}
+
+#[test]
+fn partiql_update_emits_stream_record() {
+    // L4: UPDATE statements on a stream-enabled table must emit a
+    // MODIFY stream record mirroring the UpdateItem path.
+    let svc = make_service();
+    let req = make_request(
+        "CreateTable",
+        json!({
+            "TableName": "T",
+            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+            "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+            "BillingMode": "PAY_PER_REQUEST",
+            "StreamSpecification": {
+                "StreamEnabled": true,
+                "StreamViewType": "NEW_AND_OLD_IMAGES"
+            }
+        }),
+    );
+    svc.create_table(&req).unwrap();
+    svc.put_item(&make_request(
+        "PutItem",
+        json!({"TableName": "T", "Item": {"pk": {"S": "u1"}, "v": {"N": "1"}}}),
+    ))
+    .unwrap();
+
+    let baseline = {
+        let s = svc.state.read();
+        let n = s
+            .get("123456789012")
+            .unwrap()
+            .tables
+            .get("T")
+            .unwrap()
+            .stream_records
+            .read()
+            .len();
+        n
+    };
+
+    svc.execute_statement(&make_request(
+        "ExecuteStatement",
+        json!({"Statement": "UPDATE \"T\" SET v = 99 WHERE pk = 'u1'"}),
+    ))
+    .unwrap();
+
+    let after = {
+        let s = svc.state.read();
+        let t = s.get("123456789012").unwrap().tables.get("T").unwrap();
+        let recs = t.stream_records.read();
+        let last = recs.last().cloned();
+        (recs.len(), last)
+    };
+    assert_eq!(after.0, baseline + 1);
+    assert_eq!(after.1.unwrap().event_name, "MODIFY");
+}
+
+#[test]
+fn partiql_delete_emits_stream_record() {
+    // L4: DELETE statements must emit a REMOVE stream record.
+    let svc = make_service();
+    let req = make_request(
+        "CreateTable",
+        json!({
+            "TableName": "T",
+            "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+            "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+            "BillingMode": "PAY_PER_REQUEST",
+            "StreamSpecification": {
+                "StreamEnabled": true,
+                "StreamViewType": "NEW_AND_OLD_IMAGES"
+            }
+        }),
+    );
+    svc.create_table(&req).unwrap();
+    svc.put_item(&make_request(
+        "PutItem",
+        json!({"TableName": "T", "Item": {"pk": {"S": "d1"}}}),
+    ))
+    .unwrap();
+
+    let baseline = {
+        let s = svc.state.read();
+        let n = s
+            .get("123456789012")
+            .unwrap()
+            .tables
+            .get("T")
+            .unwrap()
+            .stream_records
+            .read()
+            .len();
+        n
+    };
+
+    svc.execute_statement(&make_request(
+        "ExecuteStatement",
+        json!({"Statement": "DELETE FROM \"T\" WHERE pk = 'd1'"}),
+    ))
+    .unwrap();
+
+    let after = {
+        let s = svc.state.read();
+        let t = s.get("123456789012").unwrap().tables.get("T").unwrap();
+        let recs = t.stream_records.read();
+        let last = recs.last().cloned();
+        (recs.len(), last)
+    };
+    assert_eq!(after.0, baseline + 1);
+    assert_eq!(after.1.unwrap().event_name, "REMOVE");
+}
+
+#[test]
+fn partiql_insert_rejects_missing_sort_key() {
+    // L4: composite-key tables must reject INSERTs that omit the sort
+    // key, matching the partition-key-only check.
+    let svc = make_service();
+    let req = make_request(
+        "CreateTable",
+        json!({
+            "TableName": "T",
+            "KeySchema": [
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"}
+            ],
+            "AttributeDefinitions": [
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"}
+            ],
+            "BillingMode": "PAY_PER_REQUEST"
+        }),
+    );
+    svc.create_table(&req).unwrap();
+    let err = svc
+        .execute_statement(&make_request(
+            "ExecuteStatement",
+            json!({"Statement": "INSERT INTO \"T\" VALUE {'pk': 'a'}"}),
+        ))
+        .err()
+        .expect("missing sort key");
+    let dbg = format!("{err:?}");
+    assert!(dbg.contains("ValidationException"), "got {dbg}");
+    assert!(dbg.contains("Missing the key sk"), "got {dbg}");
+}
+
 // ── Batch write with delete ──
 
 #[test]
