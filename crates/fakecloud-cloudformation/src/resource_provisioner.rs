@@ -1176,6 +1176,24 @@ impl ResourceProvisioner {
             "AWS::KMS::Key" => Some(self.update_kms_key(existing, new_def)?),
             "AWS::KMS::ReplicaKey" => Some(self.update_kms_replica_key(existing, new_def)?),
             "AWS::KMS::Alias" => Some(self.update_kms_alias(existing, new_def)?),
+            "AWS::ElasticLoadBalancingV2::LoadBalancer" => {
+                Some(self.update_elbv2_load_balancer(existing, new_def)?)
+            }
+            "AWS::ElasticLoadBalancingV2::TargetGroup" => {
+                Some(self.update_elbv2_target_group(existing, new_def)?)
+            }
+            "AWS::ElasticLoadBalancingV2::Listener" => {
+                Some(self.update_elbv2_listener(existing, new_def)?)
+            }
+            "AWS::ElasticLoadBalancingV2::ListenerRule" => {
+                Some(self.update_elbv2_listener_rule(existing, new_def)?)
+            }
+            "AWS::ElasticLoadBalancingV2::ListenerCertificate" => {
+                Some(self.update_elbv2_listener_certificate(existing, new_def)?)
+            }
+            "AWS::ElasticLoadBalancingV2::TrustStore" => {
+                Some(self.update_elbv2_trust_store(existing, new_def)?)
+            }
             _ => None,
         };
 
@@ -1229,6 +1247,21 @@ impl ResourceProvisioner {
                 self.get_att_ecs_capacity_provider(&resource.physical_id, attribute)
             }
             "AWS::ECR::Repository" => self.get_att_ecr_repository(&resource.physical_id, attribute),
+            "AWS::ElasticLoadBalancingV2::LoadBalancer" => {
+                self.get_att_elbv2_load_balancer(&resource.physical_id, attribute)
+            }
+            "AWS::ElasticLoadBalancingV2::TargetGroup" => {
+                self.get_att_elbv2_target_group(&resource.physical_id, attribute)
+            }
+            "AWS::ElasticLoadBalancingV2::Listener" => {
+                self.get_att_elbv2_listener(&resource.physical_id, attribute)
+            }
+            "AWS::ElasticLoadBalancingV2::ListenerRule" => {
+                self.get_att_elbv2_listener_rule(&resource.physical_id, attribute)
+            }
+            "AWS::ElasticLoadBalancingV2::TrustStore" => {
+                self.get_att_elbv2_trust_store(&resource.physical_id, attribute)
+            }
             _ => None,
         }
     }
@@ -6551,6 +6584,387 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         state.trust_stores.remove(physical_id);
         Ok(())
+    }
+
+    /// In-place update for AWS::ElasticLoadBalancingV2::LoadBalancer. Name,
+    /// scheme, type and subnet topology are immutable in real AWS — CFN
+    /// would replace the resource. We only mutate fields the SetSubnets /
+    /// SetSecurityGroups / SetIpAddressType APIs would touch.
+    fn update_elbv2_load_balancer(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = existing.physical_id.clone();
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let lb = state
+            .load_balancers
+            .get_mut(&arn)
+            .ok_or_else(|| format!("LoadBalancer {arn} no longer exists"))?;
+        if let Some(arr) = props.get("SecurityGroups").and_then(|v| v.as_array()) {
+            lb.security_groups = arr
+                .iter()
+                .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(s) = props.get("IpAddressType").and_then(|v| v.as_str()) {
+            lb.ip_address_type = s.to_string();
+        }
+        if let Some(arr) = props.get("Subnets").and_then(|v| v.as_array()) {
+            let mut zones: Vec<fakecloud_elbv2::AvailabilityZone> = Vec::new();
+            for s in arr {
+                if let Some(subnet_id) = s.as_str() {
+                    zones.push(fakecloud_elbv2::AvailabilityZone {
+                        zone_name: format!("{}a", self.region),
+                        subnet_id: subnet_id.to_string(),
+                        outpost_id: None,
+                        load_balancer_addresses: Vec::new(),
+                        source_nat_ipv6_prefixes: Vec::new(),
+                    });
+                }
+            }
+            lb.availability_zones = zones;
+        }
+        if props.get("Tags").is_some() {
+            lb.tags = parse_elb_tags(props.get("Tags"));
+        }
+        let name = lb.name.clone();
+        let dns_name = lb.dns_name.clone();
+        let canonical = lb.canonical_hosted_zone_id.clone();
+        let lb_full = arn.rsplit("loadbalancer/").next().unwrap_or("").to_string();
+        Ok(ProvisionResult::new(arn.clone())
+            .with("LoadBalancerArn", arn)
+            .with("LoadBalancerFullName", lb_full)
+            .with("LoadBalancerName", name)
+            .with("DNSName", dns_name)
+            .with("CanonicalHostedZoneID", canonical))
+    }
+
+    /// In-place update for AWS::ElasticLoadBalancingV2::TargetGroup. Mirrors
+    /// ModifyTargetGroup: only health-check fields and matcher are mutable.
+    fn update_elbv2_target_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = existing.physical_id.clone();
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let tg = state
+            .target_groups
+            .get_mut(&arn)
+            .ok_or_else(|| format!("TargetGroup {arn} no longer exists"))?;
+        if let Some(s) = props.get("HealthCheckProtocol").and_then(|v| v.as_str()) {
+            tg.health_check_protocol = Some(s.to_string());
+        }
+        if let Some(s) = props.get("HealthCheckPort").and_then(|v| v.as_str()) {
+            tg.health_check_port = Some(s.to_string());
+        }
+        if let Some(b) = props.get("HealthCheckEnabled").and_then(|v| v.as_bool()) {
+            tg.health_check_enabled = b;
+        }
+        if let Some(s) = props.get("HealthCheckPath").and_then(|v| v.as_str()) {
+            tg.health_check_path = Some(s.to_string());
+        }
+        if let Some(n) = props.get("HealthCheckIntervalSeconds").and_then(cfn_as_i64) {
+            tg.health_check_interval_seconds = n as i32;
+        }
+        if let Some(n) = props.get("HealthCheckTimeoutSeconds").and_then(cfn_as_i64) {
+            tg.health_check_timeout_seconds = n as i32;
+        }
+        if let Some(n) = props.get("HealthyThresholdCount").and_then(cfn_as_i64) {
+            tg.healthy_threshold_count = n as i32;
+        }
+        if let Some(n) = props.get("UnhealthyThresholdCount").and_then(cfn_as_i64) {
+            tg.unhealthy_threshold_count = n as i32;
+        }
+        if let Some(matcher) = props.get("Matcher") {
+            tg.matcher_http_code = matcher
+                .get("HttpCode")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            tg.matcher_grpc_code = matcher
+                .get("GrpcCode")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+        if props.get("Tags").is_some() {
+            tg.tags = parse_elb_tags(props.get("Tags"));
+        }
+        let name = tg.name.clone();
+        let tg_full = arn
+            .rsplit("targetgroup/")
+            .next()
+            .map(|s| format!("targetgroup/{s}"))
+            .unwrap_or_default();
+        Ok(ProvisionResult::new(arn.clone())
+            .with("TargetGroupArn", arn)
+            .with("TargetGroupName", name)
+            .with("TargetGroupFullName", tg_full))
+    }
+
+    /// In-place update for AWS::ElasticLoadBalancingV2::Listener. Mirrors
+    /// ModifyListener: port, protocol, default actions, certs, ssl policy.
+    fn update_elbv2_listener(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = existing.physical_id.clone();
+        let new_default_actions = props
+            .get("DefaultActions")
+            .map(|v| parse_elb_actions(Some(v)));
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let listener = state
+            .listeners
+            .get_mut(&arn)
+            .ok_or_else(|| format!("Listener {arn} no longer exists"))?;
+        if let Some(n) = props.get("Port").and_then(cfn_as_i64) {
+            listener.port = Some(n as i32);
+        }
+        if let Some(s) = props.get("Protocol").and_then(|v| v.as_str()) {
+            listener.protocol = Some(s.to_string());
+        }
+        if let Some(s) = props.get("SslPolicy").and_then(|v| v.as_str()) {
+            listener.ssl_policy = Some(s.to_string());
+        }
+        if let Some(actions) = new_default_actions {
+            listener.default_actions = actions;
+        }
+        if props.get("Tags").is_some() {
+            listener.tags = parse_elb_tags(props.get("Tags"));
+        }
+        Ok(ProvisionResult::new(arn.clone()).with("ListenerArn", arn))
+    }
+
+    /// In-place update for AWS::ElasticLoadBalancingV2::ListenerRule. Mirrors
+    /// ModifyRule + SetRulePriorities.
+    fn update_elbv2_listener_rule(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = existing.physical_id.clone();
+        let new_actions = props.get("Actions").map(|v| parse_elb_actions(Some(v)));
+        let new_conditions = props
+            .get("Conditions")
+            .map(|v| parse_elb_rule_conditions(Some(v)));
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let rule = state
+            .rules
+            .get_mut(&arn)
+            .ok_or_else(|| format!("ListenerRule {arn} no longer exists"))?;
+        if let Some(v) = props.get("Priority") {
+            rule.priority = if let Some(s) = v.as_str() {
+                s.to_string()
+            } else if let Some(n) = v.as_i64() {
+                n.to_string()
+            } else {
+                rule.priority.clone()
+            };
+        }
+        if let Some(actions) = new_actions {
+            rule.actions = actions;
+        }
+        if let Some(conditions) = new_conditions {
+            rule.conditions = conditions;
+        }
+        if props.get("Tags").is_some() {
+            rule.tags = parse_elb_tags(props.get("Tags"));
+        }
+        Ok(ProvisionResult::new(arn.clone()).with("RuleArn", arn))
+    }
+
+    /// In-place update for AWS::ElasticLoadBalancingV2::ListenerCertificate.
+    /// CFN treats this as replace-on-cert-list-change in real AWS, but we
+    /// can rebuild the SNI cert set against the same physical id without
+    /// disrupting the listener.
+    fn update_elbv2_listener_certificate(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let listener_arn = props
+            .get("ListenerArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| physical_id.split_once('#').map(|(l, _)| l.to_string()))
+            .ok_or_else(|| "ListenerArn is required".to_string())?;
+        let new_certs: Vec<String> = props
+            .get("Certificates")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| c.get("CertificateArn").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if new_certs.is_empty() {
+            return Err("Certificates must contain at least one CertificateArn".to_string());
+        }
+
+        // Strip the previously-managed certs, then attach the new set.
+        let prev_certs: Vec<String> = physical_id
+            .split_once('#')
+            .map(|(_, list)| list.split(',').map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let listener = state
+            .listeners
+            .get_mut(&listener_arn)
+            .ok_or_else(|| format!("Listener {listener_arn} does not exist"))?;
+        listener
+            .certificates
+            .retain(|c| !prev_certs.iter().any(|p| p == &c.certificate_arn));
+        for arn in &new_certs {
+            listener.certificates.retain(|c| &c.certificate_arn != arn);
+            listener.certificates.push(fakecloud_elbv2::Certificate {
+                certificate_arn: arn.clone(),
+                is_default: false,
+            });
+        }
+        Ok(ProvisionResult::new(format!(
+            "{}#{}",
+            listener_arn,
+            new_certs.join(",")
+        )))
+    }
+
+    /// In-place update for AWS::ElasticLoadBalancingV2::TrustStore. Only the
+    /// CA bundle and tags are mutable; name is immutable in real AWS.
+    fn update_elbv2_trust_store(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = existing.physical_id.clone();
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let ts = state
+            .trust_stores
+            .get_mut(&arn)
+            .ok_or_else(|| format!("TrustStore {arn} no longer exists"))?;
+        let new_bucket = props
+            .get("CaCertificatesBundleS3Bucket")
+            .and_then(|v| v.as_str());
+        let new_key = props
+            .get("CaCertificatesBundleS3Key")
+            .and_then(|v| v.as_str());
+        if let (Some(b), Some(k)) = (new_bucket, new_key) {
+            ts.ca_certificates_bundle = Some(format!("s3://{b}/{k}").into_bytes());
+        }
+        if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
+            ts.tags = arr
+                .iter()
+                .filter_map(|t| {
+                    let k = t.get("Key").and_then(|v| v.as_str())?;
+                    let v = t.get("Value").and_then(|v| v.as_str()).unwrap_or("");
+                    Some(fakecloud_elbv2::Tag {
+                        key: k.to_string(),
+                        value: v.to_string(),
+                    })
+                })
+                .collect();
+        }
+        let name = ts.name.clone();
+        let status = ts.status.clone();
+        Ok(ProvisionResult::new(arn.clone())
+            .with("TrustStoreArn", arn)
+            .with("Name", name)
+            .with("Status", status))
+    }
+
+    /// Live-state GetAtt fallback for AWS::ElasticLoadBalancingV2::LoadBalancer.
+    fn get_att_elbv2_load_balancer(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let lb = state.load_balancers.get(physical_id)?;
+        let lb_full = lb
+            .arn
+            .rsplit("loadbalancer/")
+            .next()
+            .unwrap_or("")
+            .to_string();
+        match attribute {
+            "Arn" | "LoadBalancerArn" => Some(lb.arn.clone()),
+            "DNSName" => Some(lb.dns_name.clone()),
+            "CanonicalHostedZoneID" => Some(lb.canonical_hosted_zone_id.clone()),
+            "LoadBalancerFullName" => Some(lb_full),
+            "LoadBalancerName" => Some(lb.name.clone()),
+            "SecurityGroups" => Some(lb.security_groups.join(",")),
+            _ => None,
+        }
+    }
+
+    /// Live-state GetAtt fallback for AWS::ElasticLoadBalancingV2::TargetGroup.
+    fn get_att_elbv2_target_group(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let tg = state.target_groups.get(physical_id)?;
+        let tg_full = tg
+            .arn
+            .rsplit("targetgroup/")
+            .next()
+            .map(|s| format!("targetgroup/{s}"))
+            .unwrap_or_default();
+        match attribute {
+            "TargetGroupArn" => Some(tg.arn.clone()),
+            "TargetGroupName" => Some(tg.name.clone()),
+            "TargetGroupFullName" => Some(tg_full),
+            "LoadBalancerArns" => Some(tg.load_balancer_arns.join(",")),
+            _ => None,
+        }
+    }
+
+    /// Live-state GetAtt fallback for AWS::ElasticLoadBalancingV2::Listener.
+    fn get_att_elbv2_listener(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let listener = state.listeners.get(physical_id)?;
+        match attribute {
+            "Arn" | "ListenerArn" => Some(listener.arn.clone()),
+            _ => None,
+        }
+    }
+
+    /// Live-state GetAtt fallback for AWS::ElasticLoadBalancingV2::ListenerRule.
+    fn get_att_elbv2_listener_rule(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let rule = state.rules.get(physical_id)?;
+        match attribute {
+            "RuleArn" => Some(rule.arn.clone()),
+            "IsDefault" => Some(rule.is_default.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Live-state GetAtt fallback for AWS::ElasticLoadBalancingV2::TrustStore.
+    fn get_att_elbv2_trust_store(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.elbv2_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let ts = state.trust_stores.get(physical_id)?;
+        match attribute {
+            "TrustStoreArn" => Some(ts.arn.clone()),
+            "Name" => Some(ts.name.clone()),
+            "Status" => Some(ts.status.clone()),
+            "NumberOfCaCertificates" => Some(ts.number_of_ca_certificates.to_string()),
+            "TotalRevokedEntries" => Some(ts.total_revoked_entries.to_string()),
+            _ => None,
+        }
     }
 
     // --- Organizations ---

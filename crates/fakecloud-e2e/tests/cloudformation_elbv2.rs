@@ -308,3 +308,279 @@ async fn cfn_provisions_elbv2_listener_certificate_and_trust_store() {
         "trust store should be deleted",
     );
 }
+
+const UPDATE_TEMPLATE_V1: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Web": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties": {
+        "Name": "cfn-update-web",
+        "Scheme": "internet-facing",
+        "Type": "application",
+        "Subnets": ["subnet-aaa", "subnet-bbb"],
+        "SecurityGroups": ["sg-old"],
+        "IpAddressType": "ipv4"
+      }
+    },
+    "Tg": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "Name": "cfn-update-tg",
+        "Protocol": "HTTP",
+        "Port": 80,
+        "VpcId": "vpc-1234",
+        "TargetType": "ip",
+        "HealthCheckPath": "/v1",
+        "HealthCheckIntervalSeconds": 30
+      }
+    },
+    "Listener": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "LoadBalancerArn": {"Ref": "Web"},
+        "Port": 80,
+        "Protocol": "HTTP",
+        "DefaultActions": [
+          {"Type": "forward", "TargetGroupArn": {"Ref": "Tg"}}
+        ]
+      }
+    },
+    "Rule": {
+      "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+      "Properties": {
+        "ListenerArn": {"Ref": "Listener"},
+        "Priority": 5,
+        "Conditions": [
+          {"Field": "host-header", "Values": ["v1.example.com"]}
+        ],
+        "Actions": [
+          {"Type": "forward", "TargetGroupArn": {"Ref": "Tg"}}
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "LbArn": {"Value": {"Ref": "Web"}},
+    "LbDns": {"Value": {"Fn::GetAtt": ["Web", "DNSName"]}},
+    "LbFullName": {"Value": {"Fn::GetAtt": ["Web", "LoadBalancerFullName"]}},
+    "TgArn": {"Value": {"Ref": "Tg"}},
+    "TgFullName": {"Value": {"Fn::GetAtt": ["Tg", "TargetGroupFullName"]}},
+    "ListenerArn": {"Value": {"Ref": "Listener"}},
+    "RuleArn": {"Value": {"Ref": "Rule"}}
+  }
+}"#;
+
+const UPDATE_TEMPLATE_V2: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Web": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties": {
+        "Name": "cfn-update-web",
+        "Scheme": "internet-facing",
+        "Type": "application",
+        "Subnets": ["subnet-aaa", "subnet-bbb"],
+        "SecurityGroups": ["sg-new-1", "sg-new-2"],
+        "IpAddressType": "dualstack"
+      }
+    },
+    "Tg": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "Name": "cfn-update-tg",
+        "Protocol": "HTTP",
+        "Port": 80,
+        "VpcId": "vpc-1234",
+        "TargetType": "ip",
+        "HealthCheckPath": "/healthz",
+        "HealthCheckIntervalSeconds": 15
+      }
+    },
+    "Listener": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "LoadBalancerArn": {"Ref": "Web"},
+        "Port": 8080,
+        "Protocol": "HTTP",
+        "DefaultActions": [
+          {"Type": "forward", "TargetGroupArn": {"Ref": "Tg"}}
+        ]
+      }
+    },
+    "Rule": {
+      "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+      "Properties": {
+        "ListenerArn": {"Ref": "Listener"},
+        "Priority": 20,
+        "Conditions": [
+          {"Field": "host-header", "Values": ["v2.example.com"]}
+        ],
+        "Actions": [
+          {"Type": "forward", "TargetGroupArn": {"Ref": "Tg"}}
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "LbArn": {"Value": {"Ref": "Web"}},
+    "LbDns": {"Value": {"Fn::GetAtt": ["Web", "DNSName"]}},
+    "LbFullName": {"Value": {"Fn::GetAtt": ["Web", "LoadBalancerFullName"]}},
+    "TgArn": {"Value": {"Ref": "Tg"}},
+    "TgFullName": {"Value": {"Fn::GetAtt": ["Tg", "TargetGroupFullName"]}},
+    "ListenerArn": {"Value": {"Ref": "Listener"}},
+    "RuleArn": {"Value": {"Ref": "Rule"}}
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_updates_propagate_to_elbv2_state() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let elb = server.elbv2_client().await;
+
+    cfn.create_stack()
+        .stack_name("elbv2-update-stack")
+        .template_body(UPDATE_TEMPLATE_V1)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("elbv2-update-stack")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let stack = described.stacks().first().unwrap();
+    assert_eq!(stack.stack_status().unwrap().as_str(), "CREATE_COMPLETE");
+
+    let mut lb_arn = None;
+    let mut listener_arn = None;
+    let mut rule_arn = None;
+    let mut tg_arn = None;
+    let mut lb_dns = None;
+    let mut lb_full = None;
+    let mut tg_full = None;
+    for o in stack.outputs() {
+        match o.output_key() {
+            Some("LbArn") => lb_arn = o.output_value().map(|s| s.to_string()),
+            Some("ListenerArn") => listener_arn = o.output_value().map(|s| s.to_string()),
+            Some("RuleArn") => rule_arn = o.output_value().map(|s| s.to_string()),
+            Some("TgArn") => tg_arn = o.output_value().map(|s| s.to_string()),
+            Some("LbDns") => lb_dns = o.output_value().map(|s| s.to_string()),
+            Some("LbFullName") => lb_full = o.output_value().map(|s| s.to_string()),
+            Some("TgFullName") => tg_full = o.output_value().map(|s| s.to_string()),
+            _ => {}
+        }
+    }
+    let lb_arn = lb_arn.expect("LbArn");
+    let listener_arn = listener_arn.expect("ListenerArn");
+    let rule_arn = rule_arn.expect("RuleArn");
+    let tg_arn = tg_arn.expect("TgArn");
+    let lb_dns = lb_dns.expect("LbDns");
+    let lb_full = lb_full.expect("LbFullName");
+    let tg_full = tg_full.expect("TgFullName");
+    assert!(
+        lb_dns.contains("cfn-update-web"),
+        "DNSName GetAtt: {lb_dns}"
+    );
+    assert!(lb_full.starts_with("app/cfn-update-web/"));
+    assert!(tg_full.starts_with("targetgroup/"));
+
+    cfn.update_stack()
+        .stack_name("elbv2-update-stack")
+        .template_body(UPDATE_TEMPLATE_V2)
+        .send()
+        .await
+        .expect("update_stack");
+
+    let described2 = cfn
+        .describe_stacks()
+        .stack_name("elbv2-update-stack")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let stack2 = described2.stacks().first().unwrap();
+    assert_eq!(stack2.stack_status().unwrap().as_str(), "UPDATE_COMPLETE");
+
+    // Physical ids must be preserved (in-place updates).
+    let mut lb_arn2 = None;
+    let mut listener_arn2 = None;
+    let mut rule_arn2 = None;
+    for o in stack2.outputs() {
+        match o.output_key() {
+            Some("LbArn") => lb_arn2 = o.output_value().map(|s| s.to_string()),
+            Some("ListenerArn") => listener_arn2 = o.output_value().map(|s| s.to_string()),
+            Some("RuleArn") => rule_arn2 = o.output_value().map(|s| s.to_string()),
+            _ => {}
+        }
+    }
+    assert_eq!(lb_arn2.as_deref(), Some(lb_arn.as_str()));
+    assert_eq!(listener_arn2.as_deref(), Some(listener_arn.as_str()));
+    assert_eq!(rule_arn2.as_deref(), Some(rule_arn.as_str()));
+
+    // Verify the changes propagated to live ELBv2 state.
+    let lbs = elb
+        .describe_load_balancers()
+        .load_balancer_arns(&lb_arn)
+        .send()
+        .await
+        .expect("describe_load_balancers");
+    let lb = lbs.load_balancers().first().expect("lb");
+    let sgs: Vec<&str> = lb.security_groups().iter().map(|s| s.as_str()).collect();
+    assert!(sgs.contains(&"sg-new-1"), "sg updated: {sgs:?}");
+    assert!(sgs.contains(&"sg-new-2"), "sg updated: {sgs:?}");
+    assert_eq!(lb.ip_address_type().map(|s| s.as_str()), Some("dualstack"));
+
+    let tgs = elb
+        .describe_target_groups()
+        .target_group_arns(&tg_arn)
+        .send()
+        .await
+        .expect("describe_target_groups");
+    let tg = tgs.target_groups().first().expect("tg");
+    assert_eq!(tg.health_check_path(), Some("/healthz"));
+    assert_eq!(tg.health_check_interval_seconds(), Some(15));
+
+    let listeners = elb
+        .describe_listeners()
+        .listener_arns(&listener_arn)
+        .send()
+        .await
+        .expect("describe_listeners");
+    let listener = listeners.listeners().first().expect("listener");
+    assert_eq!(listener.port(), Some(8080));
+
+    let rules = elb
+        .describe_rules()
+        .rule_arns(&rule_arn)
+        .send()
+        .await
+        .expect("describe_rules");
+    let rule = rules.rules().first().expect("rule");
+    assert_eq!(rule.priority(), Some("20"));
+    let host_values: Vec<&str> = rule
+        .conditions()
+        .iter()
+        .flat_map(|c| c.values())
+        .map(|s| s.as_str())
+        .collect();
+    assert!(
+        host_values.contains(&"v2.example.com"),
+        "rule host updated: {host_values:?}"
+    );
+
+    cfn.delete_stack()
+        .stack_name("elbv2-update-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+
+    let after = elb
+        .describe_load_balancers()
+        .load_balancer_arns(&lb_arn)
+        .send()
+        .await;
+    assert!(after.is_err(), "lb gone after stack deletion");
+}
