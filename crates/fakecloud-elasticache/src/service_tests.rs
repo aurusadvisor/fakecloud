@@ -2120,6 +2120,122 @@ fn decrease_replica_count_rejects_negative() {
 }
 
 #[test]
+fn modify_replication_group_shard_configuration_changes_shard_count() {
+    // Cluster-mode replication group, 2 shards -> 4 shards. Asserts the
+    // server actually mutates `num_node_groups` and rebuilds member_clusters,
+    // not the legacy echo behaviour.
+    let service = service_with_replication_group("shard-rg", 1);
+    {
+        let mut accounts = service.state.write();
+        let g = accounts
+            .default_mut()
+            .replication_groups
+            .get_mut("shard-rg")
+            .unwrap();
+        g.num_node_groups = 2;
+        g.cluster_enabled = true;
+        g.replicas_per_node_group = Some(1);
+    }
+    let req = request(
+        "ModifyReplicationGroupShardConfiguration",
+        &[
+            ("ReplicationGroupId", "shard-rg"),
+            ("NodeGroupCount", "4"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    let resp = service
+        .modify_replication_group_shard_configuration(&req)
+        .unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    // 4 shards * (1+1) = 8 member clusters in the rebuilt list.
+    assert!(body.contains("<ClusterId>shard-rg-008</ClusterId>"));
+    assert!(!body.contains("<ClusterId>shard-rg-009</ClusterId>"));
+    // 4 NodeGroup XML elements.
+    assert_eq!(body.matches("<NodeGroup>").count(), 4);
+}
+
+#[test]
+fn modify_replication_group_shard_configuration_rejects_non_cluster_change() {
+    let service = service_with_replication_group("solo-rg", 1);
+    let req = request(
+        "ModifyReplicationGroupShardConfiguration",
+        &[
+            ("ReplicationGroupId", "solo-rg"),
+            ("NodeGroupCount", "3"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    assert!(
+        service
+            .modify_replication_group_shard_configuration(&req)
+            .is_err(),
+        "non-cluster replication group must reject NodeGroupCount changes"
+    );
+}
+
+#[test]
+fn modify_replication_group_shard_configuration_decrease_requires_remove_or_retain() {
+    let service = service_with_replication_group("dec-rg", 1);
+    {
+        let mut accounts = service.state.write();
+        let g = accounts
+            .default_mut()
+            .replication_groups
+            .get_mut("dec-rg")
+            .unwrap();
+        g.num_node_groups = 3;
+        g.cluster_enabled = true;
+    }
+    let req = request(
+        "ModifyReplicationGroupShardConfiguration",
+        &[
+            ("ReplicationGroupId", "dec-rg"),
+            ("NodeGroupCount", "1"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    assert!(
+        service
+            .modify_replication_group_shard_configuration(&req)
+            .is_err(),
+        "decrease without NodeGroupsToRetain/Remove must fail"
+    );
+}
+
+#[test]
+fn increase_replica_count_supports_replica_configuration() {
+    let service = service_with_replication_group("conf-rg", 1);
+    {
+        let mut accounts = service.state.write();
+        let g = accounts
+            .default_mut()
+            .replication_groups
+            .get_mut("conf-rg")
+            .unwrap();
+        g.num_node_groups = 2;
+        g.cluster_enabled = true;
+        g.replicas_per_node_group = Some(0);
+    }
+    let req = request(
+        "IncreaseReplicaCount",
+        &[
+            ("ReplicationGroupId", "conf-rg"),
+            ("ApplyImmediately", "true"),
+            ("ReplicaConfiguration.ConfigureShard.1.NodeGroupId", "0001"),
+            ("ReplicaConfiguration.ConfigureShard.1.NewReplicaCount", "2"),
+            ("ReplicaConfiguration.ConfigureShard.2.NodeGroupId", "0002"),
+            ("ReplicaConfiguration.ConfigureShard.2.NewReplicaCount", "2"),
+        ],
+    );
+    let resp = service.increase_replica_count(&req).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    // 2 shards × (1 + 2 replicas) = 6 member clusters.
+    assert!(body.contains("<ClusterId>conf-rg-006</ClusterId>"));
+    assert!(!body.contains("<ClusterId>conf-rg-007</ClusterId>"));
+}
+
+#[test]
 fn test_failover_validates_node_group() {
     let service = service_with_replication_group("my-rg", 1);
     let req = request(
