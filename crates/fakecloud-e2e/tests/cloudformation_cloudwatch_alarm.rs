@@ -112,3 +112,94 @@ async fn cfn_provisions_and_deletes_cloudwatch_alarm() {
         "alarm should be gone after stack deletion"
     );
 }
+
+const UPDATE_TEMPLATE_V1: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Alarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "cfn-update-alarm",
+        "Namespace": "AWS/EC2",
+        "MetricName": "CPUUtilization",
+        "Statistic": "Average",
+        "Period": 60,
+        "EvaluationPeriods": 1,
+        "Threshold": 50,
+        "ComparisonOperator": "GreaterThanThreshold"
+      }
+    }
+  }
+}"#;
+
+const UPDATE_TEMPLATE_V2: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Alarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": "cfn-update-alarm",
+        "Namespace": "AWS/EC2",
+        "MetricName": "CPUUtilization",
+        "Statistic": "Average",
+        "Period": 60,
+        "EvaluationPeriods": 3,
+        "Threshold": 90,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_updates_cloudwatch_alarm_in_place() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let cw = server.cloudwatch_client().await;
+
+    cfn.create_stack()
+        .stack_name("alarm-update-stack")
+        .template_body(UPDATE_TEMPLATE_V1)
+        .capabilities(Capability::CapabilityIam)
+        .on_failure(OnFailure::Rollback)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let v1 = cw
+        .describe_alarms()
+        .alarm_names("cfn-update-alarm")
+        .send()
+        .await
+        .expect("describe v1");
+    let alarm_v1 = v1.metric_alarms().first().expect("v1 alarm");
+    assert_eq!(alarm_v1.threshold(), Some(50.0));
+    assert_eq!(alarm_v1.evaluation_periods(), Some(1));
+
+    cfn.update_stack()
+        .stack_name("alarm-update-stack")
+        .template_body(UPDATE_TEMPLATE_V2)
+        .send()
+        .await
+        .expect("update_stack");
+
+    let v2 = cw
+        .describe_alarms()
+        .alarm_names("cfn-update-alarm")
+        .send()
+        .await
+        .expect("describe v2");
+    let alarm_v2 = v2.metric_alarms().first().expect("v2 alarm");
+    assert_eq!(alarm_v2.threshold(), Some(90.0));
+    assert_eq!(alarm_v2.evaluation_periods(), Some(3));
+    assert_eq!(
+        alarm_v2.comparison_operator().map(|c| c.as_str()),
+        Some("GreaterThanOrEqualToThreshold")
+    );
+
+    cfn.delete_stack()
+        .stack_name("alarm-update-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+}

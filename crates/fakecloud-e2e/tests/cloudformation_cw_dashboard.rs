@@ -85,3 +85,76 @@ async fn cfn_provisions_cloudwatch_dashboard() {
         .await;
     assert!(after.is_err(), "dashboard should be gone after delete");
 }
+
+const DASH_V1: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Dash": {
+      "Type": "AWS::CloudWatch::Dashboard",
+      "Properties": {
+        "DashboardName": "cfn-dash-update",
+        "DashboardBody": "{\"widgets\":[{\"type\":\"metric\",\"properties\":{\"metrics\":[[\"AWS/Lambda\",\"Invocations\"]]}}]}"
+      }
+    }
+  }
+}"#;
+
+const DASH_V2: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Dash": {
+      "Type": "AWS::CloudWatch::Dashboard",
+      "Properties": {
+        "DashboardName": "cfn-dash-update",
+        "DashboardBody": "{\"widgets\":[{\"type\":\"metric\",\"properties\":{\"metrics\":[[\"AWS/SQS\",\"NumberOfMessagesSent\"]]}}]}"
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_updates_cloudwatch_dashboard_body() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let cw = aws_sdk_cloudwatch::Client::new(&server.aws_config().await);
+
+    cfn.create_stack()
+        .stack_name("cw-dash-update-stack")
+        .template_body(DASH_V1)
+        .capabilities(Capability::CapabilityIam)
+        .on_failure(OnFailure::Rollback)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let v1 = cw
+        .get_dashboard()
+        .dashboard_name("cfn-dash-update")
+        .send()
+        .await
+        .expect("get v1");
+    assert!(v1.dashboard_body().unwrap().contains("AWS/Lambda"));
+
+    cfn.update_stack()
+        .stack_name("cw-dash-update-stack")
+        .template_body(DASH_V2)
+        .send()
+        .await
+        .expect("update_stack");
+
+    let v2 = cw
+        .get_dashboard()
+        .dashboard_name("cfn-dash-update")
+        .send()
+        .await
+        .expect("get v2");
+    let body_v2 = v2.dashboard_body().unwrap();
+    assert!(body_v2.contains("AWS/SQS"));
+    assert!(!body_v2.contains("AWS/Lambda"));
+
+    cfn.delete_stack()
+        .stack_name("cw-dash-update-stack")
+        .send()
+        .await
+        .expect("delete_stack");
+}
