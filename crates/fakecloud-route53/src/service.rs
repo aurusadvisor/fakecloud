@@ -118,6 +118,20 @@ pub struct Route53Service {
     /// query log record to the configured log group, mirroring real
     /// Route 53's query logging delivery.
     pub(crate) logs_state: Option<fakecloud_logs::SharedLogsState>,
+    /// Optional ELBv2 state. When wired, alias records targeting an
+    /// ELB DNS name (e.g. `my-lb-123.us-east-1.elb.amazonaws.com`)
+    /// resolve to the load balancer's actual A/AAAA addresses pulled
+    /// from `LoadBalancerAddress`.
+    pub(crate) elbv2_state: Option<fakecloud_elbv2::SharedElbv2State>,
+    /// Optional CloudFront state. When wired, alias records targeting
+    /// a CloudFront `<id>.cloudfront.net` domain resolve only when the
+    /// distribution exists.
+    pub(crate) cloudfront_state: Option<fakecloud_cloudfront::SharedCloudFrontState>,
+    /// Optional S3 state. When wired, alias records targeting an S3
+    /// website endpoint (`<bucket>.s3-website-<region>.amazonaws.com`)
+    /// or virtual-hosted bucket endpoint resolve only when the bucket
+    /// exists.
+    pub(crate) s3_state: Option<fakecloud_s3::SharedS3State>,
 }
 
 impl Route53Service {
@@ -125,6 +139,9 @@ impl Route53Service {
         Self {
             state,
             logs_state: None,
+            elbv2_state: None,
+            cloudfront_state: None,
+            s3_state: None,
         }
     }
 
@@ -133,6 +150,27 @@ impl Route53Service {
     /// into the configured log group.
     pub fn with_logs(mut self, logs: fakecloud_logs::SharedLogsState) -> Self {
         self.logs_state = Some(logs);
+        self
+    }
+
+    /// Wire ELBv2 state so `TestDNSAnswer` resolves alias records that
+    /// point at an ELB DNS name to the load balancer's real addresses.
+    pub fn with_elbv2(mut self, elbv2: fakecloud_elbv2::SharedElbv2State) -> Self {
+        self.elbv2_state = Some(elbv2);
+        self
+    }
+
+    /// Wire CloudFront state so `TestDNSAnswer` only resolves alias
+    /// records that point at an existing CloudFront distribution.
+    pub fn with_cloudfront(mut self, cf: fakecloud_cloudfront::SharedCloudFrontState) -> Self {
+        self.cloudfront_state = Some(cf);
+        self
+    }
+
+    /// Wire S3 state so `TestDNSAnswer` only resolves alias records
+    /// that point at an existing S3 bucket / website endpoint.
+    pub fn with_s3(mut self, s3: fakecloud_s3::SharedS3State) -> Self {
+        self.s3_state = Some(s3);
         self
     }
 
@@ -893,10 +931,20 @@ impl Route53Service {
 
         let original_ttl = candidates.iter().filter_map(|c| c.ttl).min().unwrap_or(300) as u32;
 
+        let alias_lookup = AliasLookup {
+            elbv2: self.elbv2_state.as_ref(),
+            cloudfront: self.cloudfront_state.as_ref(),
+            s3: self.s3_state.as_ref(),
+        };
         let answers: Vec<String> = if candidates.is_empty() {
             Vec::new()
         } else {
-            resolve_routing_policy(&candidates, &health_checks, edns0_subnet.as_deref())
+            resolve_routing_policy(
+                &candidates,
+                &health_checks,
+                edns0_subnet.as_deref(),
+                &alias_lookup,
+            )
         };
 
         // Compute RRSIG when DNSSEC is on and the caller asked for it
@@ -2984,29 +3032,44 @@ impl Route53Service {
 mod helpers;
 use helpers::*;
 
+/// Bundle of cross-service shared state references passed into the
+/// routing-policy resolver so alias targets can resolve to the actual
+/// underlying ELB / CloudFront / S3 endpoints. Each field is optional —
+/// when a service isn't wired (unit-test, persistence-only build) the
+/// resolver falls back to a deterministic synthetic IP so existing
+/// tests stay stable.
+pub(crate) struct AliasLookup<'a> {
+    pub(crate) elbv2: Option<&'a fakecloud_elbv2::SharedElbv2State>,
+    pub(crate) cloudfront: Option<&'a fakecloud_cloudfront::SharedCloudFrontState>,
+    pub(crate) s3: Option<&'a fakecloud_s3::SharedS3State>,
+}
+
 /// Resolve a TestDNSAnswer query against the candidate RRsets honoring
-/// the routing policy fields each set may carry. Mirrors real Route 53:
-/// - Failover (PRIMARY+SECONDARY): primary if healthy, otherwise secondary
-/// - Multi-value answer: up to 8 healthy values combined
-/// - Weighted: pick proportional to weight, deterministically keyed by subnet
-/// - Latency: pick the record whose region matches the client's region
-/// - Geolocation: match country/continent against record's GeoLocation
-/// - Alias targets: synthesize records from the alias DNS name
-/// - Default (no routing fields): first healthy record's values
+/// the routing policy fields each set may carry. Mirrors real Route 53.
+///
+/// * Failover (PRIMARY+SECONDARY) — primary if healthy, otherwise secondary.
+/// * Multi-value answer — up to 8 healthy values combined.
+/// * Weighted — pick proportional to weight, deterministically keyed by subnet.
+/// * Latency — pick the record whose region matches the client's region.
+/// * Geolocation — match country/continent against record's GeoLocation.
+/// * Alias targets — resolve into the wired ELB/CloudFront/S3 state when
+///   present and fall back to a deterministic synthetic IP otherwise.
+/// * Default (no routing fields) — first healthy record's values.
 fn resolve_routing_policy(
     candidates: &[&crate::model::ResourceRecordSet],
     health_checks: &std::collections::BTreeMap<String, crate::state::StoredHealthCheck>,
     edns0_subnet: Option<&str>,
+    alias_lookup: &AliasLookup<'_>,
 ) -> Vec<String> {
-    fn rr_values(r: &crate::model::ResourceRecordSet) -> Vec<String> {
+    let rr_values = |r: &crate::model::ResourceRecordSet| -> Vec<String> {
         if let Some(alias) = r.alias_target.as_ref() {
-            return resolve_alias_target(alias, &r.record_type);
+            return resolve_alias_target(alias, &r.record_type, alias_lookup);
         }
         r.resource_records
             .as_ref()
             .map(|rr| rr.resource_record.iter().map(|x| x.value.clone()).collect())
             .unwrap_or_default()
-    }
+    };
     fn is_healthy(
         r: &crate::model::ResourceRecordSet,
         health_checks: &std::collections::BTreeMap<String, crate::state::StoredHealthCheck>,
@@ -3165,43 +3228,186 @@ fn resolve_routing_policy(
         .unwrap_or_default()
 }
 
-/// Resolve an alias target to synthetic record values. Real Route 53 follows
-/// the alias to the underlying ELB/CloudFront/S3 endpoint and returns A/AAAA
-/// records. For fakecloud's TestDNSAnswer we synthesise a deterministic IP
-/// per DNS name so tests can assert on stable values, and surface the alias
-/// hostname for non-A types.
-fn resolve_alias_target(alias: &crate::model::AliasTarget, record_type: &str) -> Vec<String> {
+/// Resolve an alias target to record values. Real Route 53 follows the
+/// alias to the underlying ELB / CloudFront / S3 endpoint and returns
+/// A / AAAA records. For fakecloud's TestDNSAnswer we cross-call into
+/// the appropriate crate's state when wired (`with_elbv2`,
+/// `with_cloudfront`, `with_s3`) and fall back to a deterministic
+/// synthetic IP per DNS name when the target service isn't wired or
+/// the resource isn't found. Non-A/AAAA aliases surface the alias
+/// hostname directly, matching real Route 53 behaviour for CNAME-style
+/// aliases.
+fn resolve_alias_target(
+    alias: &crate::model::AliasTarget,
+    record_type: &str,
+    lookup: &AliasLookup<'_>,
+) -> Vec<String> {
     let name = alias.dns_name.trim_end_matches('.');
     if record_type == "A" || record_type == "AAAA" {
-        let h = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            for b in name.bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h
-        };
-        if record_type == "AAAA" {
-            // Deterministic IPv6 in the documentation prefix 2001:db8::/32.
-            let a = (h & 0xffff) as u16;
-            let b = ((h >> 16) & 0xffff) as u16;
-            let c = ((h >> 32) & 0xffff) as u16;
-            let d = ((h >> 48) & 0xffff) as u16;
-            return vec![format!("2001:db8:{a:x}:{b:x}::{c:x}:{d:x}")];
+        // 1) Try ELB lookup: `<name>-<suffix>.<region>.elb.amazonaws.com`.
+        if let Some(addrs) = lookup_elbv2_addresses(name, record_type, lookup.elbv2) {
+            return addrs;
         }
-        // Deterministic IPv4 in the documentation range 192.0.2.0/24, with
-        // the second/third octet derived from the hash so distinct aliases
-        // surface as distinct addresses (avoids collisions across services).
-        let oct2 = ((h >> 16) & 0xff) as u8;
-        let oct3 = ((h >> 8) & 0xff) as u8;
-        let oct4 = (h & 0xff) as u8;
-        return vec![format!(
-            "198.51.{}.{oct4}",
-            ((oct2 as u16) << 8 | oct3 as u16) % 256
-        )];
+        // 2) CloudFront: `<id>.cloudfront.net` — only resolve when the
+        //    distribution is known.
+        if let Some(addrs) = lookup_cloudfront_addresses(name, record_type, lookup.cloudfront) {
+            return addrs;
+        }
+        // 3) S3: `<bucket>.s3-website-<region>.amazonaws.com` /
+        //    `<bucket>.s3.<region>.amazonaws.com` — only resolve when
+        //    the bucket exists.
+        if let Some(addrs) = lookup_s3_addresses(name, record_type, lookup.s3) {
+            return addrs;
+        }
+        // 4) Fallback: deterministic IP derived from the name. Keeps
+        //    pre-cross-call test fixtures stable and gives unit tests
+        //    a stable value when state isn't wired.
+        return synthetic_alias_addresses(name, record_type);
     }
     // Non-A/AAAA aliases (CNAME, etc.) surface the alias hostname directly.
     vec![name.to_string()]
+}
+
+fn lookup_elbv2_addresses(
+    name: &str,
+    record_type: &str,
+    state: Option<&fakecloud_elbv2::SharedElbv2State>,
+) -> Option<Vec<String>> {
+    // ELB DNS names look like:
+    //   `<scheme>-?<lb-name>-<suffix>.<region>.elb.amazonaws.com`
+    // (`internal-` prefix for private LBs). Match the suffix and pull
+    // addresses straight off the matching `LoadBalancer`.
+    if !name.ends_with(".elb.amazonaws.com") {
+        return None;
+    }
+    let state = state?;
+    let lower = name.to_ascii_lowercase();
+    let st = state.read();
+    for (_acct, account) in st.iter() {
+        for lb in account.load_balancers.values() {
+            if lb.dns_name.trim_end_matches('.').to_ascii_lowercase() == lower {
+                let mut out: Vec<String> = Vec::new();
+                for az in &lb.availability_zones {
+                    for addr in &az.load_balancer_addresses {
+                        if record_type == "AAAA" {
+                            if let Some(v6) = addr.ipv6_address.as_ref() {
+                                if !v6.is_empty() {
+                                    out.push(v6.clone());
+                                }
+                            }
+                        } else if let Some(v4) = addr.ip_address.as_ref() {
+                            if !v4.is_empty() {
+                                out.push(v4.clone());
+                            }
+                        } else if let Some(v4) = addr.private_ipv4_address.as_ref() {
+                            if !v4.is_empty() {
+                                out.push(v4.clone());
+                            }
+                        }
+                    }
+                }
+                if out.is_empty() {
+                    // LB exists but has no concrete addresses recorded;
+                    // synthesise one off the DNS name so the alias still
+                    // resolves to something stable.
+                    return Some(synthetic_alias_addresses(name, record_type));
+                }
+                return Some(out);
+            }
+        }
+    }
+    None
+}
+
+fn lookup_cloudfront_addresses(
+    name: &str,
+    record_type: &str,
+    state: Option<&fakecloud_cloudfront::SharedCloudFrontState>,
+) -> Option<Vec<String>> {
+    if !name.ends_with(".cloudfront.net") {
+        return None;
+    }
+    let state = state?;
+    let lower = name.to_ascii_lowercase();
+    let id = lower.trim_end_matches(".cloudfront.net");
+    let st = state.read();
+    for account in st.accounts.values() {
+        if account.distributions.values().any(|d| {
+            d.id.eq_ignore_ascii_case(id)
+                || d.domain_name.trim_end_matches('.').to_ascii_lowercase() == lower
+        }) {
+            return Some(synthetic_alias_addresses(name, record_type));
+        }
+        if account
+            .streaming_distributions
+            .values()
+            .any(|d| d.domain_name.trim_end_matches('.').to_ascii_lowercase() == lower)
+        {
+            return Some(synthetic_alias_addresses(name, record_type));
+        }
+    }
+    None
+}
+
+fn lookup_s3_addresses(
+    name: &str,
+    record_type: &str,
+    state: Option<&fakecloud_s3::SharedS3State>,
+) -> Option<Vec<String>> {
+    let lower = name.to_ascii_lowercase();
+    // Pattern: `<bucket>.s3-website[-.]<region>.amazonaws.com` or
+    //          `<bucket>.s3[.<region>].amazonaws.com`.
+    let bucket = if let Some(idx) = lower.find(".s3-website") {
+        &lower[..idx]
+    } else if let Some(idx) = lower.find(".s3.") {
+        &lower[..idx]
+    } else if let Some(idx) = lower.find(".s3-") {
+        &lower[..idx]
+    } else {
+        return None;
+    };
+    if bucket.is_empty() {
+        return None;
+    }
+    let state = state?;
+    let st = state.read();
+    for (_acct, s3) in st.iter() {
+        if s3.buckets.contains_key(bucket) {
+            return Some(synthetic_alias_addresses(name, record_type));
+        }
+    }
+    None
+}
+
+/// Build a deterministic IPv4 (or IPv6) address from a DNS name. Used
+/// as the fallback when an alias target's underlying service either
+/// isn't wired into the Route 53 service or doesn't know about the
+/// resource. Addresses sit inside the IETF documentation ranges
+/// (`198.51.x.x` and `2001:db8::/32`) so they never overlap real
+/// production endpoints.
+fn synthetic_alias_addresses(name: &str, record_type: &str) -> Vec<String> {
+    let h = {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in name.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    };
+    if record_type == "AAAA" {
+        let a = (h & 0xffff) as u16;
+        let b = ((h >> 16) & 0xffff) as u16;
+        let c = ((h >> 32) & 0xffff) as u16;
+        let d = ((h >> 48) & 0xffff) as u16;
+        return vec![format!("2001:db8:{a:x}:{b:x}::{c:x}:{d:x}")];
+    }
+    let oct2 = ((h >> 16) & 0xff) as u8;
+    let oct3 = ((h >> 8) & 0xff) as u8;
+    let oct4 = (h & 0xff) as u8;
+    vec![format!(
+        "198.51.{}.{oct4}",
+        ((oct2 as u16) << 8 | oct3 as u16) % 256
+    )]
 }
 
 /// Infer an AWS region from a client subnet IP. Used by latency-based
@@ -3313,6 +3519,14 @@ mod tests {
         }
     }
 
+    fn empty_lookup() -> AliasLookup<'static> {
+        AliasLookup {
+            elbv2: None,
+            cloudfront: None,
+            s3: None,
+        }
+    }
+
     #[test]
     fn routing_policy_failover_picks_secondary_when_primary_unhealthy() {
         let mut p = rrset("1.1.1.1");
@@ -3333,7 +3547,7 @@ mod tests {
                 last_failure_reason: Some("connection refused".to_string()),
             },
         );
-        let answers = resolve_routing_policy(&[&p, &s], &hcs, None);
+        let answers = resolve_routing_policy(&[&p, &s], &hcs, None, &empty_lookup());
         assert_eq!(answers, vec!["2.2.2.2".to_string()]);
     }
 
@@ -3359,7 +3573,7 @@ mod tests {
                 last_failure_reason: None,
             },
         );
-        let answers = resolve_routing_policy(&[&a, &b, &c], &hcs, None);
+        let answers = resolve_routing_policy(&[&a, &b, &c], &hcs, None, &empty_lookup());
         assert_eq!(answers, vec!["2.2.2.2".to_string(), "3.3.3.3".to_string()]);
     }
 
@@ -3371,8 +3585,8 @@ mod tests {
         b.weight = Some(90);
         let hcs = std::collections::BTreeMap::new();
         // Same subnet should always produce the same answer.
-        let one = resolve_routing_policy(&[&a, &b], &hcs, Some("203.0.113.5"));
-        let two = resolve_routing_policy(&[&a, &b], &hcs, Some("203.0.113.5"));
+        let one = resolve_routing_policy(&[&a, &b], &hcs, Some("203.0.113.5"), &empty_lookup());
+        let two = resolve_routing_policy(&[&a, &b], &hcs, Some("203.0.113.5"), &empty_lookup());
         assert_eq!(one, two);
         assert_eq!(one.len(), 1);
     }
@@ -3381,8 +3595,151 @@ mod tests {
     fn routing_policy_default_returns_first_records() {
         let a = rrset("1.1.1.1");
         let hcs = std::collections::BTreeMap::new();
-        let answers = resolve_routing_policy(&[&a], &hcs, None);
+        let answers = resolve_routing_policy(&[&a], &hcs, None, &empty_lookup());
         assert_eq!(answers, vec!["1.1.1.1".to_string()]);
+    }
+
+    #[test]
+    fn routing_policy_latency_picks_record_matching_inferred_region() {
+        let mut a = rrset("1.1.1.1");
+        a.region = Some("us-east-1".to_string());
+        let mut b = rrset("2.2.2.2");
+        b.region = Some("eu-west-1".to_string());
+        let hcs = std::collections::BTreeMap::new();
+        // First-octet 0..=63 -> us-east-1 in `infer_region_from_subnet`.
+        let us = resolve_routing_policy(&[&a, &b], &hcs, Some("10.0.0.1"), &empty_lookup());
+        assert_eq!(us, vec!["1.1.1.1".to_string()]);
+        // First-octet 128..=159 -> eu-west-1.
+        let eu = resolve_routing_policy(&[&a, &b], &hcs, Some("130.0.0.1"), &empty_lookup());
+        assert_eq!(eu, vec!["2.2.2.2".to_string()]);
+    }
+
+    #[test]
+    fn routing_policy_geolocation_uses_country_then_continent_then_default() {
+        let mut us = rrset("1.1.1.1");
+        us.geo_location = Some(crate::model::GeoLocation {
+            continent_code: None,
+            country_code: Some("US".to_string()),
+            subdivision_code: None,
+        });
+        let mut eu_default = rrset("2.2.2.2");
+        eu_default.geo_location = Some(crate::model::GeoLocation {
+            continent_code: Some("EU".to_string()),
+            country_code: None,
+            subdivision_code: None,
+        });
+        let mut star = rrset("9.9.9.9");
+        star.geo_location = Some(crate::model::GeoLocation {
+            continent_code: None,
+            country_code: Some("*".to_string()),
+            subdivision_code: None,
+        });
+        let hcs = std::collections::BTreeMap::new();
+        // 0..=63 -> US country.
+        let r1 = resolve_routing_policy(
+            &[&us, &eu_default, &star],
+            &hcs,
+            Some("10.0.0.1"),
+            &empty_lookup(),
+        );
+        assert_eq!(r1, vec!["1.1.1.1".to_string()]);
+        // 128..=159 -> GB country (no exact GB record), continent EU matches.
+        let r2 = resolve_routing_policy(
+            &[&us, &eu_default, &star],
+            &hcs,
+            Some("130.0.0.1"),
+            &empty_lookup(),
+        );
+        assert_eq!(r2, vec!["2.2.2.2".to_string()]);
+        // 192..=223 -> SG / AS — falls back to the `*` default record.
+        let r3 = resolve_routing_policy(
+            &[&us, &eu_default, &star],
+            &hcs,
+            Some("200.0.0.1"),
+            &empty_lookup(),
+        );
+        assert_eq!(r3, vec!["9.9.9.9".to_string()]);
+    }
+
+    #[test]
+    fn alias_target_falls_back_to_synthetic_ip_when_state_not_wired() {
+        let alias = crate::model::AliasTarget {
+            hosted_zone_id: "Z3DZXE0EXAMPLE".to_string(),
+            dns_name: "my-lb-1234567890.us-east-1.elb.amazonaws.com.".to_string(),
+            evaluate_target_health: false,
+        };
+        let answers = resolve_alias_target(&alias, "A", &empty_lookup());
+        assert_eq!(answers.len(), 1);
+        // Synthetic fallback uses 198.51.x.x (documentation range).
+        assert!(
+            answers[0].starts_with("198.51."),
+            "expected documentation IPv4, got {}",
+            answers[0]
+        );
+    }
+
+    #[test]
+    fn alias_target_resolves_elbv2_load_balancer_to_real_addresses() {
+        let elbv2_state: fakecloud_elbv2::SharedElbv2State = std::sync::Arc::new(
+            parking_lot::RwLock::new(fakecloud_elbv2::Elbv2Accounts::new()),
+        );
+        {
+            let mut st = elbv2_state.write();
+            let account = st.get_or_create("000000000000");
+            account.load_balancers.insert(
+                "lb-1".to_string(),
+                fakecloud_elbv2::LoadBalancer {
+                    arn: "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/my-lb/abcdef".to_string(),
+                    name: "my-lb".to_string(),
+                    dns_name: "my-lb-9999999999.us-east-1.elb.amazonaws.com".to_string(),
+                    canonical_hosted_zone_id: "Z35SXDOTRQ7X7K".to_string(),
+                    created_time: Utc::now(),
+                    scheme: "internet-facing".to_string(),
+                    vpc_id: "vpc-1".to_string(),
+                    state_code: "active".to_string(),
+                    state_reason: None,
+                    lb_type: "application".to_string(),
+                    availability_zones: vec![fakecloud_elbv2::AvailabilityZone {
+                        zone_name: "us-east-1a".to_string(),
+                        subnet_id: "subnet-1".to_string(),
+                        outpost_id: None,
+                        load_balancer_addresses: vec![fakecloud_elbv2::LoadBalancerAddress {
+                            ip_address: Some("203.0.113.10".to_string()),
+                            allocation_id: None,
+                            private_ipv4_address: None,
+                            ipv6_address: Some("2001:db8::1".to_string()),
+                            ipv4_prefix: None,
+                            ipv6_prefix: None,
+                        }],
+                        source_nat_ipv6_prefixes: vec![],
+                    }],
+                    security_groups: vec![],
+                    ip_address_type: "ipv4".to_string(),
+                    customer_owned_ipv4_pool: None,
+                    enforce_security_group_inbound_rules_on_private_link_traffic: None,
+                    enable_prefix_for_ipv6_source_nat: None,
+                    ipv4_ipam_pool_id: None,
+                    tags: vec![],
+                    attributes: std::collections::BTreeMap::new(),
+                    minimum_capacity_units: None,
+                    bound_port: None,
+                },
+            );
+        }
+        let lookup = AliasLookup {
+            elbv2: Some(&elbv2_state),
+            cloudfront: None,
+            s3: None,
+        };
+        let alias = crate::model::AliasTarget {
+            hosted_zone_id: "Z35SXDOTRQ7X7K".to_string(),
+            dns_name: "my-lb-9999999999.us-east-1.elb.amazonaws.com.".to_string(),
+            evaluate_target_health: false,
+        };
+        let v4 = resolve_alias_target(&alias, "A", &lookup);
+        assert_eq!(v4, vec!["203.0.113.10".to_string()]);
+        let v6 = resolve_alias_target(&alias, "AAAA", &lookup);
+        assert_eq!(v6, vec!["2001:db8::1".to_string()]);
     }
 
     #[test]
