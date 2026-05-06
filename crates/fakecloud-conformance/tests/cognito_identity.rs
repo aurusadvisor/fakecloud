@@ -670,7 +670,7 @@ async fn cognito_identity_unlink_identity() {
         .unwrap();
 }
 
-#[test_action("cognito-identity", "LinkIdentity", checksum = "00000000")]
+#[test_action("cognito-identity", "LinkIdentity", checksum = "17e06289")]
 #[tokio::test]
 async fn cognito_identity_link_identity() {
     let server = TestServer::start().await;
