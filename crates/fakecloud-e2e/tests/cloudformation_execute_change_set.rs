@@ -212,3 +212,123 @@ async fn execute_change_set_modify_only() {
         Some("UPDATE_COMPLETE".to_string()),
     );
 }
+
+#[tokio::test]
+async fn execute_change_set_emits_stack_events_and_lists_resources() {
+    let server = TestServer::start().await;
+    let cf = server.cloudformation_client().await;
+
+    // Stack starts with one queue.
+    let template_v1 = r#"{
+        "Resources": {
+            "QueueOne": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"QueueName": "cs-events-q1"}
+            }
+        }
+    }"#;
+    cf.create_stack()
+        .stack_name("cs-events-stack")
+        .template_body(template_v1)
+        .send()
+        .await
+        .unwrap();
+
+    // Change set adds a second queue (preserves the first).
+    let template_v2 = r#"{
+        "Resources": {
+            "QueueOne": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"QueueName": "cs-events-q1"}
+            },
+            "QueueTwo": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"QueueName": "cs-events-q2"}
+            }
+        }
+    }"#;
+    let cs = cf
+        .create_change_set()
+        .stack_name("cs-events-stack")
+        .change_set_name("add-q2")
+        .template_body(template_v2)
+        .send()
+        .await
+        .unwrap();
+    let cs_id = cs.id().unwrap().to_string();
+
+    cf.execute_change_set()
+        .change_set_name(&cs_id)
+        .send()
+        .await
+        .unwrap();
+
+    // Stack now reports UPDATE_COMPLETE.
+    let stacks = cf
+        .describe_stacks()
+        .stack_name("cs-events-stack")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        stacks.stacks()[0]
+            .stack_status()
+            .map(|s| s.as_str().to_string()),
+        Some("UPDATE_COMPLETE".to_string()),
+    );
+
+    // ListStackResources should contain both logical IDs.
+    let listed = cf
+        .list_stack_resources()
+        .stack_name("cs-events-stack")
+        .send()
+        .await
+        .unwrap();
+    let ids: Vec<String> = listed
+        .stack_resource_summaries()
+        .iter()
+        .map(|r| r.logical_resource_id().unwrap_or_default().to_string())
+        .collect();
+    assert!(ids.contains(&"QueueOne".to_string()), "ids={ids:?}");
+    assert!(ids.contains(&"QueueTwo".to_string()), "ids={ids:?}");
+
+    // DescribeStackEvents should reflect the lifecycle of the change-set
+    // execution: an UPDATE_IN_PROGRESS / UPDATE_COMPLETE pair on the stack
+    // itself plus a CREATE_IN_PROGRESS / CREATE_COMPLETE pair for the new
+    // resource (`QueueTwo`). The resource that already existed
+    // (`QueueOne`) does not emit new events because there's nothing to
+    // update.
+    let events = cf
+        .describe_stack_events()
+        .stack_name("cs-events-stack")
+        .send()
+        .await
+        .unwrap();
+    let rows: Vec<(String, String)> = events
+        .stack_events()
+        .iter()
+        .map(|e| {
+            (
+                e.logical_resource_id().unwrap_or_default().to_string(),
+                e.resource_status()
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert!(
+        rows.iter()
+            .any(|(l, s)| l == "QueueTwo" && s == "CREATE_COMPLETE"),
+        "expected CREATE_COMPLETE for QueueTwo, got {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|(l, s)| l == "cs-events-stack" && s == "UPDATE_COMPLETE"),
+        "expected stack UPDATE_COMPLETE, got {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|(l, s)| l == "cs-events-stack" && s == "UPDATE_IN_PROGRESS"),
+        "expected stack UPDATE_IN_PROGRESS, got {rows:?}"
+    );
+}

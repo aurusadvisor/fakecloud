@@ -1004,51 +1004,92 @@ impl CloudFormationService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let stack = state
-            .stacks
-            .values_mut()
-            .find(|s| {
-                (s.name == input.stack_name || s.stack_id == input.stack_name)
-                    && s.status != "DELETE_COMPLETE"
-            })
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationError",
-                    format!("Stack [{}] does not exist", input.stack_name),
-                )
-            })?;
+        let (update_result, stack_id, stack_name_owned, resources_snapshot, notification_arns) = {
+            let stack = state
+                .stacks
+                .values_mut()
+                .find(|s| {
+                    (s.name == input.stack_name || s.stack_id == input.stack_name)
+                        && s.status != "DELETE_COMPLETE"
+                })
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationError",
+                        format!("Stack [{}] does not exist", input.stack_name),
+                    )
+                })?;
 
-        let update_result = apply_resource_updates(
-            stack,
-            &parsed.resources,
-            &input.template_body,
-            &input.parameters,
-            &provisioner,
-        );
+            stack.status = "UPDATE_IN_PROGRESS".to_string();
+            let update_result = apply_resource_updates(
+                stack,
+                &parsed.resources,
+                &input.template_body,
+                &input.parameters,
+                &provisioner,
+            );
 
-        let stack_id = stack.stack_id.clone();
-        stack.template = input.template_body.clone();
-        stack.status = if update_result.is_err() {
-            "UPDATE_FAILED".to_string()
-        } else {
-            "UPDATE_COMPLETE".to_string()
+            let stack_id = stack.stack_id.clone();
+            let stack_name_owned = stack.name.clone();
+            stack.template = input.template_body.clone();
+            stack.status = if update_result.is_err() {
+                "UPDATE_ROLLBACK_COMPLETE".to_string()
+            } else {
+                "UPDATE_COMPLETE".to_string()
+            };
+            stack.parameters = input.parameters.clone();
+            if !input.tags.is_empty() {
+                stack.tags = input.tags;
+            }
+            stack.updated_at = Some(Utc::now());
+            stack.description = parsed.description;
+            if !input.notification_arns.is_empty() {
+                stack.notification_arns = input.notification_arns.clone();
+            }
+            if update_result.is_ok() {
+                stack.outputs.clear();
+            }
+            (
+                update_result,
+                stack_id,
+                stack_name_owned,
+                stack.resources.clone(),
+                stack.notification_arns.clone(),
+            )
         };
-        stack.parameters = input.parameters.clone();
-        if !input.tags.is_empty() {
-            stack.tags = input.tags;
-        }
-        stack.updated_at = Some(Utc::now());
-        stack.description = parsed.description;
-        if !input.notification_arns.is_empty() {
-            stack.notification_arns = input.notification_arns.clone();
-        }
-        if update_result.is_ok() {
-            stack.outputs.clear();
-        }
-        let resources_snapshot = stack.resources.clone();
-        let notification_arns = stack.notification_arns.clone();
-        let stack_name_for_notif = stack.name.clone();
+
+        // Emit lifecycle events (now that the &mut Stack borrow is dropped).
+        record_stack_status_event(
+            state,
+            &stack_id,
+            &stack_name_owned,
+            "AWS::CloudFormation::Stack",
+            "UPDATE_IN_PROGRESS",
+        );
+        let update_result = match update_result {
+            Ok(changes) => {
+                record_stack_events(state, &stack_id, &stack_name_owned, &changes);
+                record_stack_status_event(
+                    state,
+                    &stack_id,
+                    &stack_name_owned,
+                    "AWS::CloudFormation::Stack",
+                    "UPDATE_COMPLETE",
+                );
+                Ok(())
+            }
+            Err(e) => {
+                record_stack_status_event(
+                    state,
+                    &stack_id,
+                    &stack_name_owned,
+                    "AWS::CloudFormation::Stack",
+                    "UPDATE_ROLLBACK_COMPLETE",
+                );
+                Err(e)
+            }
+        };
+        let stack_name_for_notif = stack_name_owned.clone();
 
         if let Err(error_msg) = update_result {
             drop(accounts);
@@ -1328,15 +1369,53 @@ impl UpdateStackInput {
     }
 }
 
-/// Apply resource updates: delete removed resources, create new ones.
-/// Returns Err(msg) if any resource operation fails.
+/// One row of structured diff returned by `apply_resource_updates`. Used
+/// by `ExecuteChangeSet` to emit `StackEvent` rows so `DescribeStackEvents`
+/// reflects the resources actually created / updated / deleted.
+#[derive(Debug, Clone)]
+pub(crate) struct ResourceChange {
+    pub action: ResourceChangeAction,
+    pub logical_id: String,
+    pub physical_id: String,
+    pub resource_type: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResourceChangeAction {
+    Create,
+    Update,
+    Delete,
+}
+
+impl ResourceChangeAction {
+    pub fn status_in_progress(self) -> &'static str {
+        match self {
+            Self::Create => "CREATE_IN_PROGRESS",
+            Self::Update => "UPDATE_IN_PROGRESS",
+            Self::Delete => "DELETE_IN_PROGRESS",
+        }
+    }
+    pub fn status_complete(self) -> &'static str {
+        match self {
+            Self::Create => "CREATE_COMPLETE",
+            Self::Update => "UPDATE_COMPLETE",
+            Self::Delete => "DELETE_COMPLETE",
+        }
+    }
+}
+
+/// Apply resource updates: delete removed resources, create new ones, and
+/// in-place update resources whose properties changed. Returns the list of
+/// changes applied (for event emission) on success or `Err(msg)` if any
+/// resource operation fails.
 pub(crate) fn apply_resource_updates(
     stack: &mut crate::state::Stack,
     new_resource_defs: &[template::ResourceDefinition],
     template_body: &str,
     parameters: &BTreeMap<String, String>,
     provisioner: &crate::resource_provisioner::ResourceProvisioner,
-) -> Result<(), String> {
+) -> Result<Vec<ResourceChange>, String> {
+    let mut changes: Vec<ResourceChange> = Vec::new();
     let old_logical_ids: std::collections::HashSet<String> = stack
         .resources
         .iter()
@@ -1356,6 +1435,12 @@ pub(crate) fn apply_resource_updates(
         .collect();
     for resource in &to_remove {
         let _ = provisioner.delete_resource(resource);
+        changes.push(ResourceChange {
+            action: ResourceChangeAction::Delete,
+            logical_id: resource.logical_id.clone(),
+            physical_id: resource.physical_id.clone(),
+            resource_type: resource.resource_type.clone(),
+        });
     }
     stack
         .resources
@@ -1392,6 +1477,12 @@ pub(crate) fn apply_resource_updates(
         if !old_logical_ids.contains(&resource_def.logical_id) {
             match provisioner.create_resource(&resolved_def) {
                 Ok(stack_resource) => {
+                    changes.push(ResourceChange {
+                        action: ResourceChangeAction::Create,
+                        logical_id: stack_resource.logical_id.clone(),
+                        physical_id: stack_resource.physical_id.clone(),
+                        resource_type: stack_resource.resource_type.clone(),
+                    });
                     physical_ids.insert(
                         stack_resource.logical_id.clone(),
                         stack_resource.physical_id.clone(),
@@ -1427,6 +1518,12 @@ pub(crate) fn apply_resource_updates(
             if let Some(existing) = existing {
                 match provisioner.update_resource(&existing, &resolved_def) {
                     Ok(Some(updated)) => {
+                        changes.push(ResourceChange {
+                            action: ResourceChangeAction::Update,
+                            logical_id: updated.logical_id.clone(),
+                            physical_id: updated.physical_id.clone(),
+                            resource_type: updated.resource_type.clone(),
+                        });
                         physical_ids
                             .insert(updated.logical_id.clone(), updated.physical_id.clone());
                         attributes.insert(updated.logical_id.clone(), updated.attributes.clone());
@@ -1457,7 +1554,97 @@ pub(crate) fn apply_resource_updates(
         }
     }
 
-    Ok(())
+    Ok(changes)
+}
+
+/// Pushes a single `StackEvent` row onto the per-stack event log so
+/// `DescribeStackEvents` returns a chronological history of resource and
+/// stack-level state transitions.
+pub(crate) fn record_event(
+    state: &mut crate::state::CloudFormationState,
+    stack_id: &str,
+    stack_name: &str,
+    logical_id: &str,
+    physical_id: &str,
+    resource_type: &str,
+    status: &str,
+) {
+    use serde_json::json;
+    let event_id = format!(
+        "{}-{:x}",
+        logical_id,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let entry = json!({
+        "EventId": event_id,
+        "StackId": stack_id,
+        "StackName": stack_name,
+        "LogicalResourceId": logical_id,
+        "PhysicalResourceId": physical_id,
+        "ResourceType": resource_type,
+        "ResourceStatus": status,
+        "Timestamp": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    });
+    state
+        .events
+        .entry(stack_id.to_string())
+        .or_default()
+        .push(entry);
+}
+
+/// Emits IN_PROGRESS + COMPLETE event pairs for every resource change
+/// applied during an update. Mirrors the event sequence real CloudFormation
+/// publishes during `ExecuteChangeSet` / `UpdateStack`.
+pub(crate) fn record_stack_events(
+    state: &mut crate::state::CloudFormationState,
+    stack_id: &str,
+    stack_name: &str,
+    changes: &[ResourceChange],
+) {
+    for ch in changes {
+        record_event(
+            state,
+            stack_id,
+            stack_name,
+            &ch.logical_id,
+            &ch.physical_id,
+            &ch.resource_type,
+            ch.action.status_in_progress(),
+        );
+        record_event(
+            state,
+            stack_id,
+            stack_name,
+            &ch.logical_id,
+            &ch.physical_id,
+            &ch.resource_type,
+            ch.action.status_complete(),
+        );
+    }
+}
+
+/// Emits a stack-level lifecycle event (`UPDATE_IN_PROGRESS`,
+/// `UPDATE_COMPLETE`, `UPDATE_ROLLBACK_COMPLETE`, etc.) keyed on the
+/// stack's own `LogicalResourceId == stack_name`, matching real CFN.
+pub(crate) fn record_stack_status_event(
+    state: &mut crate::state::CloudFormationState,
+    stack_id: &str,
+    stack_name: &str,
+    resource_type: &str,
+    status: &str,
+) {
+    record_event(
+        state,
+        stack_id,
+        stack_name,
+        stack_name,
+        stack_id,
+        resource_type,
+        status,
+    );
 }
 
 #[cfg(test)]
@@ -1685,11 +1872,13 @@ mod tests {
         // Should return an error
         assert!(result.is_err());
 
-        // Stack status should be UPDATE_FAILED
+        // Stack status should be UPDATE_ROLLBACK_COMPLETE — matches the
+        // terminal status real CloudFormation lands on after a failed
+        // update attempt that gets rolled back.
         let accounts = svc.state.read();
         let state = accounts.get("123456789012").unwrap();
         let stack = state.stacks.get("test-stack").unwrap();
-        assert_eq!(stack.status, "UPDATE_FAILED");
+        assert_eq!(stack.status, "UPDATE_ROLLBACK_COMPLETE");
     }
 
     #[test]
