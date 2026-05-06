@@ -40,8 +40,9 @@ use fakecloud_cloudfront::{
 };
 use fakecloud_cloudwatch::{AlarmState, Dashboard, MetricAlarm, SharedCloudWatchState};
 use fakecloud_cognito::{
-    default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig, CustomDomainConfig,
-    EmailConfiguration, PasswordPolicy, PoolPolicies, RecoveryOption, SchemaAttribute,
+    default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig,
+    CognitoIdentityProvider, CustomDomainConfig, EmailConfiguration, IdentityPool,
+    IdentityPoolRoleAttachment, PasswordPolicy, PoolPolicies, RecoveryOption, SchemaAttribute,
     SharedCognitoState, SignInPolicy, SmsConfiguration, UserPool, UserPoolClient, UserPoolDomain,
 };
 use fakecloud_core::delivery::DeliveryBus;
@@ -939,6 +940,10 @@ impl ResourceProvisioner {
             "AWS::Cognito::UserPool" => self.create_cognito_user_pool(resource),
             "AWS::Cognito::UserPoolClient" => self.create_cognito_user_pool_client(resource),
             "AWS::Cognito::UserPoolDomain" => self.create_cognito_user_pool_domain(resource),
+            "AWS::Cognito::IdentityPool" => self.create_cognito_identity_pool(resource),
+            "AWS::Cognito::IdentityPoolRoleAttachment" => {
+                self.create_cognito_identity_pool_role_attachment(resource)
+            }
             "AWS::RDS::DBSubnetGroup" => self.create_rds_subnet_group(resource),
             "AWS::RDS::DBParameterGroup" => self.create_rds_parameter_group(resource),
             "AWS::RDS::DBClusterParameterGroup" => {
@@ -1480,6 +1485,12 @@ impl ResourceProvisioner {
             }
             "AWS::Cognito::UserPoolDomain" => {
                 self.delete_cognito_user_pool_domain(&resource.physical_id)
+            }
+            "AWS::Cognito::IdentityPool" => {
+                self.delete_cognito_identity_pool(&resource.physical_id)
+            }
+            "AWS::Cognito::IdentityPoolRoleAttachment" => {
+                self.delete_cognito_identity_pool_role_attachment(&resource.physical_id)
             }
             "AWS::RDS::DBSubnetGroup" => self.delete_rds_subnet_group(&resource.physical_id),
             "AWS::RDS::DBParameterGroup" => self.delete_rds_parameter_group(&resource.physical_id),
@@ -7857,6 +7868,166 @@ impl ResourceProvisioner {
         let mut accounts = self.cognito_state.write();
         let state = accounts.get_or_create(&self.account_id);
         state.domains.remove(physical_id);
+        Ok(())
+    }
+
+    fn create_cognito_identity_pool(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let identity_pool_name = props
+            .get("IdentityPoolName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let allow_unauth = props
+            .get("AllowUnauthenticatedIdentities")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let allow_classic = props
+            .get("AllowClassicFlow")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let developer_provider_name = props
+            .get("DeveloperProviderName")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let cognito_identity_providers = props
+            .get("CognitoIdentityProviders")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        let obj = p.as_object()?;
+                        let provider_name = obj
+                            .get("ProviderName")
+                            .and_then(|v| v.as_str())?
+                            .to_string();
+                        let client_id = obj.get("ClientId").and_then(|v| v.as_str())?.to_string();
+                        let server_side_token_check = obj
+                            .get("ServerSideTokenCheck")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        Some(CognitoIdentityProvider {
+                            provider_name,
+                            client_id,
+                            server_side_token_check,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let open_id_connect_provider_arns =
+            parse_cognito_string_array(props.get("OpenIdConnectProviderARNs"));
+        let saml_provider_arns = parse_cognito_string_array(props.get("SamlProviderARNs"));
+        let supported_login_providers = props
+            .get("SupportedLoginProviders")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let identity_pool_tags = parse_cognito_tags(props.get("IdentityPoolTags"));
+        let cognito_streams = props.get("CognitoStreams").cloned();
+        let push_sync = props.get("PushSync").cloned();
+
+        // Real Cognito identity pool ids look like `<region>:<uuid>`. Match
+        // that shape so SDKs that parse it don't choke.
+        let identity_pool_id = format!("{}:{}", self.region, Uuid::new_v4());
+
+        let pool = IdentityPool {
+            identity_pool_id: identity_pool_id.clone(),
+            identity_pool_name,
+            allow_unauthenticated_identities: allow_unauth,
+            allow_classic_flow: allow_classic,
+            developer_provider_name,
+            cognito_identity_providers,
+            open_id_connect_provider_arns,
+            saml_provider_arns,
+            supported_login_providers,
+            cognito_streams,
+            push_sync,
+            identity_pool_tags,
+            creation_date: Utc::now(),
+        };
+
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.identity_pools.insert(identity_pool_id.clone(), pool);
+
+        Ok(ProvisionResult::new(identity_pool_id.clone()).with("Name", identity_pool_id))
+    }
+
+    fn delete_cognito_identity_pool(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.identity_pools.remove(physical_id);
+        // Cascade: drop role attachments tied to this pool.
+        state
+            .identity_pool_role_attachments
+            .retain(|_, a| a.identity_pool_id != physical_id);
+        Ok(())
+    }
+
+    fn create_cognito_identity_pool_role_attachment(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let identity_pool_id = props
+            .get("IdentityPoolId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "IdentityPoolId is required".to_string())?
+            .to_string();
+
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        if !state.identity_pools.contains_key(&identity_pool_id) {
+            return Err(format!(
+                "Identity pool {identity_pool_id} does not exist yet — retry once it has been provisioned"
+            ));
+        }
+
+        let roles = props
+            .get("Roles")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let role_mappings = props
+            .get("RoleMappings")
+            .and_then(|v| v.as_object())
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+
+        let attachment_id = Uuid::new_v4().simple().to_string();
+        let physical_id = format!("{identity_pool_id}:{attachment_id}");
+        let attachment = IdentityPoolRoleAttachment {
+            identity_pool_id: identity_pool_id.clone(),
+            attachment_id,
+            roles,
+            role_mappings,
+        };
+        state
+            .identity_pool_role_attachments
+            .insert(physical_id.clone(), attachment);
+
+        Ok(ProvisionResult::new(physical_id))
+    }
+
+    fn delete_cognito_identity_pool_role_attachment(
+        &self,
+        physical_id: &str,
+    ) -> Result<(), String> {
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        state.identity_pool_role_attachments.remove(physical_id);
         Ok(())
     }
 
