@@ -1251,3 +1251,238 @@ async fn rds_switchover_read_replica_rejects_non_replica() {
         Some("InvalidDBInstanceState")
     );
 }
+
+#[tokio::test]
+async fn rds_modify_db_cluster_persists_fields() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_cluster()
+        .db_cluster_identifier("orders-cluster")
+        .engine("aurora-postgresql")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .modify_db_cluster()
+        .db_cluster_identifier("orders-cluster")
+        .engine_version("16.4")
+        .backup_retention_period(14)
+        .preferred_backup_window("01:00-02:00")
+        .preferred_maintenance_window("sun:03:00-sun:04:00")
+        .deletion_protection(true)
+        .copy_tags_to_snapshot(true)
+        .send()
+        .await
+        .unwrap();
+
+    let described = client
+        .describe_db_clusters()
+        .db_cluster_identifier("orders-cluster")
+        .send()
+        .await
+        .unwrap();
+    let cluster = described.db_clusters().first().expect("cluster present");
+    assert_eq!(cluster.engine_version(), Some("16.4"));
+    assert_eq!(cluster.backup_retention_period(), Some(14));
+    assert_eq!(cluster.preferred_backup_window(), Some("01:00-02:00"));
+    assert_eq!(
+        cluster.preferred_maintenance_window(),
+        Some("sun:03:00-sun:04:00")
+    );
+}
+
+#[tokio::test]
+async fn rds_stop_then_start_db_cluster_transitions_status() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_cluster()
+        .db_cluster_identifier("flow-cluster")
+        .engine("aurora-postgresql")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .stop_db_cluster()
+        .db_cluster_identifier("flow-cluster")
+        .send()
+        .await
+        .unwrap();
+    let stopped = client
+        .describe_db_clusters()
+        .db_cluster_identifier("flow-cluster")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        stopped.db_clusters().first().and_then(|c| c.status()),
+        Some("stopped")
+    );
+
+    // Stopping again must fail with InvalidDBClusterStateFault.
+    let err = client
+        .stop_db_cluster()
+        .db_cluster_identifier("flow-cluster")
+        .send()
+        .await
+        .expect_err("double stop should be rejected");
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidDBClusterStateFault")
+    );
+
+    client
+        .start_db_cluster()
+        .db_cluster_identifier("flow-cluster")
+        .send()
+        .await
+        .unwrap();
+    let started = client
+        .describe_db_clusters()
+        .db_cluster_identifier("flow-cluster")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        started.db_clusters().first().and_then(|c| c.status()),
+        Some("available")
+    );
+}
+
+#[tokio::test]
+async fn rds_reboot_db_cluster_keeps_available() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_cluster()
+        .db_cluster_identifier("reboot-cluster")
+        .engine("aurora-postgresql")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .reboot_db_cluster()
+        .db_cluster_identifier("reboot-cluster")
+        .send()
+        .await
+        .unwrap();
+
+    let described = client
+        .describe_db_clusters()
+        .db_cluster_identifier("reboot-cluster")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        described.db_clusters().first().and_then(|c| c.status()),
+        Some("available")
+    );
+}
+
+#[tokio::test]
+async fn rds_failover_db_cluster_records_target_writer() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_cluster()
+        .db_cluster_identifier("failover-cluster")
+        .engine("aurora-postgresql")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .send()
+        .await
+        .unwrap();
+
+    // No members tracked: target identifier is accepted verbatim and
+    // surfaced via the DBCluster response. AWS-shape: the writer is
+    // recorded for subsequent failover-aware describes.
+    client
+        .failover_db_cluster()
+        .db_cluster_identifier("failover-cluster")
+        .target_db_instance_identifier("instance-2")
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn rds_backtrack_db_cluster_aurora_mysql_only() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    // Aurora PostgreSQL clusters reject backtrack with InvalidParameterCombination.
+    client
+        .create_db_cluster()
+        .db_cluster_identifier("pg-cluster")
+        .engine("aurora-postgresql")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .backtrack_db_cluster()
+        .db_cluster_identifier("pg-cluster")
+        .backtrack_to(aws_sdk_rds::primitives::DateTime::from_secs(1_745_000_000))
+        .send()
+        .await
+        .expect_err("aurora-postgresql backtrack should be rejected");
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidParameterCombination")
+    );
+
+    // Aurora MySQL accepts backtrack and persists the requested
+    // BacktrackTo timestamp on the cluster.
+    client
+        .create_db_cluster()
+        .db_cluster_identifier("mysql-cluster")
+        .engine("aurora-mysql")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .send()
+        .await
+        .unwrap();
+
+    let target = aws_sdk_rds::primitives::DateTime::from_secs(1_745_000_000);
+    client
+        .backtrack_db_cluster()
+        .db_cluster_identifier("mysql-cluster")
+        .backtrack_to(target)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn rds_modify_db_cluster_unknown_cluster_errors() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    let err = client
+        .modify_db_cluster()
+        .db_cluster_identifier("ghost-cluster")
+        .engine_version("16.4")
+        .send()
+        .await
+        .expect_err("unknown cluster should be rejected");
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("DBClusterNotFoundFault")
+    );
+}

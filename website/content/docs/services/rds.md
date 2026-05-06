@@ -15,7 +15,7 @@ fakecloud implements **163 of 163** RDS operations at 100% Smithy conformance. D
 - **Parameter groups** — DBParameterGroup and DBClusterParameterGroup CRUD, parameter management
 - **Option groups** — CRUD
 - **Subnet groups** — CRUD
-- **DB clusters** — Aurora-style clusters (limited engine support)
+- **DB clusters** — Aurora-style clusters with full lifecycle: ModifyDBCluster (every mutable field on AWS's surface, including ServerlessV2 scaling, log-export updates, VPC SGs, NewDBClusterIdentifier rename), StartDBCluster / StopDBCluster (status transitions with `InvalidDBClusterStateFault` validation), RebootDBCluster, FailoverDBCluster (auto-picks a replica when no target is provided, swaps the writer flag, rejects non-member targets when the cluster tracks members), BacktrackDBCluster (Aurora MySQL only — `InvalidParameterCombination` on Aurora PostgreSQL — records BacktrackTo and the change-record count, append-tracked under DescribeDBClusterBacktracks)
 - **Events** — DescribeEvents, DescribeEventCategories, DescribeEventSubscriptions
 - **Engine discovery** — DescribeDBEngineVersions with real engine metadata
 - **Tagging** — AddTagsToResource, RemoveTagsFromResource
@@ -42,6 +42,12 @@ Lifecycle ops emit events matching the AWS event schema (`source: "aws.rds"`, de
 | `RestoreDBInstanceFromDBSnapshot` | RDS-EVENT-0043 | DB_INSTANCE       | creation              |
 | `CreateDBSnapshot`              | RDS-EVENT-0042  | DB_SNAPSHOT        | creation              |
 | `DeleteDBSnapshot`              | RDS-EVENT-0041  | DB_SNAPSHOT        | deletion              |
+| `ModifyDBCluster`               | RDS-EVENT-0016  | DB_CLUSTER         | configuration change  |
+| `RebootDBCluster`               | RDS-EVENT-0006  | DB_CLUSTER         | notification          |
+| `StartDBCluster`                | RDS-EVENT-0150  | DB_CLUSTER         | notification          |
+| `StopDBCluster`                 | RDS-EVENT-0151  | DB_CLUSTER         | notification          |
+| `FailoverDBCluster`             | RDS-EVENT-0072  | DB_CLUSTER         | failover              |
+| `BacktrackDBCluster`            | RDS-EVENT-0095  | DB_CLUSTER         | notification          |
 
 Match with an EventBridge rule pattern like:
 
