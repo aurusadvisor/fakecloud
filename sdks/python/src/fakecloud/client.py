@@ -8,6 +8,7 @@ import httpx
 
 from fakecloud.types import (
     ApiGatewayV2RequestsResponse,
+    AppAsTickResponse,
     AuthEventsResponse,
     BedrockFaultRule,
     BedrockFaultsResponse,
@@ -35,7 +36,6 @@ from fakecloud.types import (
     ElastiCacheServerlessCachesResponse,
     Elbv2ListenersResponse,
     Elbv2LoadBalancersResponse,
-    AppAsTickResponse,
     Elbv2RulesResponse,
     Elbv2TargetGroupsResponse,
     EventHistoryResponse,
