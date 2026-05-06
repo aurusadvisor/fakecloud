@@ -2111,7 +2111,11 @@ async fn main() {
     registry.register(cloudfront_service.clone());
 
     let route53_service = Arc::new(
-        fakecloud_route53::Route53Service::new(route53_state.clone()).with_logs(logs_state.clone()),
+        fakecloud_route53::Route53Service::new(route53_state.clone())
+            .with_logs(logs_state.clone())
+            .with_elbv2(elbv2_state.clone())
+            .with_cloudfront(cloudfront_state.clone())
+            .with_s3(s3_state.clone()),
     );
     registry.register(route53_service.clone());
 

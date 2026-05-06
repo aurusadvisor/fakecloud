@@ -9,9 +9,12 @@ version.workspace = true
 
 [dependencies]
 fakecloud-aws = { workspace = true }
+fakecloud-cloudfront = { workspace = true }
 fakecloud-core = { workspace = true }
+fakecloud-elbv2 = { workspace = true }
 fakecloud-logs = { workspace = true }
 fakecloud-persistence = { workspace = true }
+fakecloud-s3 = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
