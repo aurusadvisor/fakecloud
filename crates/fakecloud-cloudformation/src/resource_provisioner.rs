@@ -1906,6 +1906,7 @@ impl ResourceProvisioner {
             }
             "AWS::KinesisFirehose::DeliveryStream" => {
                 self.delete_firehose_delivery_stream(&resource.physical_id)
+            }
             "AWS::Glue::Database" => self.delete_glue_database(&resource.physical_id),
             "AWS::Glue::Table" => self.delete_glue_table(&resource.physical_id),
             "AWS::Glue::Partition" => {
@@ -18366,6 +18367,7 @@ mod tests {
             )),
             firehose_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_firehose::FirehoseAccounts::new(),
+            )),
             glue_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_glue::GlueAccounts::new(),
             )),
