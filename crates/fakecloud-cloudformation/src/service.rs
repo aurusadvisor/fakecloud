@@ -181,6 +181,7 @@ pub struct CloudFormationDeps {
     pub application_autoscaling:
         fakecloud_application_autoscaling::SharedApplicationAutoScalingState,
     pub athena: fakecloud_athena::SharedAthenaState,
+    pub firehose: fakecloud_firehose::SharedFirehoseState,
     pub delivery: Arc<DeliveryBus>,
 }
 
@@ -266,6 +267,7 @@ impl CloudFormationService {
             ses_state: self.deps.ses.clone(),
             app_autoscaling_state: self.deps.application_autoscaling.clone(),
             athena_state: self.deps.athena.clone(),
+            firehose_state: self.deps.firehose.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1828,6 +1830,9 @@ mod tests {
             )),
             athena: Arc::new(parking_lot::RwLock::new(
                 fakecloud_athena::AthenaAccounts::new(),
+            )),
+            firehose: Arc::new(parking_lot::RwLock::new(
+                fakecloud_firehose::FirehoseAccounts::new(),
             )),
             delivery: Arc::new(DeliveryBus::new()),
         };

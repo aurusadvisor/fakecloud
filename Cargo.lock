@@ -3011,6 +3011,7 @@ dependencies = [
  "fakecloud-elasticache",
  "fakecloud-elbv2",
  "fakecloud-eventbridge",
+ "fakecloud-firehose",
  "fakecloud-iam",
  "fakecloud-kinesis",
  "fakecloud-kms",

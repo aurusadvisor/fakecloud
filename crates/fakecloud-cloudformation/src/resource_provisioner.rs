@@ -72,6 +72,7 @@ use fakecloud_elbv2::{
 use fakecloud_eventbridge::{
     ApiDestination, Archive, Connection, Endpoint, EventBus, EventRule, SharedEventBridgeState,
 };
+use fakecloud_firehose::state::{DeliveryStream, S3Destination};
 use fakecloud_iam::{
     IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy, IamRole, IamUser, OidcProvider,
     PolicyVersion, SamlProvider, SharedIamState, Tag, VirtualMfaDevice,
@@ -854,6 +855,7 @@ pub struct ResourceProvisioner {
     pub ses_state: SharedSesState,
     pub app_autoscaling_state: AppasState,
     pub athena_state: SharedAthenaState,
+    pub firehose_state: fakecloud_firehose::SharedFirehoseState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -1066,6 +1068,9 @@ impl ResourceProvisioner {
             "AWS::Athena::NamedQuery" => self.create_athena_named_query(resource),
             "AWS::Athena::WorkGroup" => self.create_athena_work_group(resource),
             "AWS::Athena::PreparedStatement" => self.create_athena_prepared_statement(resource),
+            "AWS::KinesisFirehose::DeliveryStream" => {
+                self.create_firehose_delivery_stream(resource)
+            }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -1894,6 +1899,9 @@ impl ResourceProvisioner {
             "AWS::Athena::WorkGroup" => self.delete_athena_work_group(&resource.physical_id),
             "AWS::Athena::PreparedStatement" => {
                 self.delete_athena_prepared_statement(&resource.physical_id, &resource.attributes)
+            }
+            "AWS::KinesisFirehose::DeliveryStream" => {
+                self.delete_firehose_delivery_stream(&resource.physical_id)
             }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
@@ -8580,6 +8588,83 @@ impl ResourceProvisioner {
         let mut state = self.app_autoscaling_state.write();
         let account = state.accounts.entry(self.account_id.clone()).or_default();
         account.scaling_policies.remove(&key);
+        Ok(())
+    }
+
+    // --- Firehose ---
+
+    fn create_firehose_delivery_stream(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("DeliveryStreamName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+
+        let arn = format!(
+            "arn:aws:firehose:{}:{}:deliverystream/{}",
+            self.region, self.account_id, name
+        );
+        let stream_type = props
+            .get("DeliveryStreamType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("DirectPut")
+            .to_string();
+
+        let mut destination = None;
+        if let Some(s3) = props.get("S3DestinationConfiguration") {
+            destination = Some(parse_firehose_s3_destination(s3)?);
+        } else if let Some(s3) = props.get("ExtendedS3DestinationConfiguration") {
+            destination = Some(parse_firehose_s3_destination(s3)?);
+        }
+
+        let mut tags = BTreeMap::new();
+        if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
+            for tag in arr {
+                if let (Some(k), Some(v)) = (
+                    tag.get("Key").and_then(|v| v.as_str()),
+                    tag.get("Value").and_then(|v| v.as_str()),
+                ) {
+                    tags.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+
+        let stream = DeliveryStream {
+            name: name.clone(),
+            arn: arn.clone(),
+            status: "ACTIVE".to_string(),
+            stream_type: stream_type.clone(),
+            created_at: Utc::now(),
+            last_update: Utc::now(),
+            version_id: "1".to_string(),
+            destination,
+            tags,
+        };
+
+        let mut state = self.firehose_state.write();
+        let account = state.get_or_create(&self.account_id, &self.region);
+        account
+            .streams_mut(&self.region)
+            .insert(name.clone(), stream);
+
+        let mut attributes = BTreeMap::new();
+        attributes.insert("Arn".to_string(), arn.clone());
+        attributes.insert("DeliveryStreamName".to_string(), name.clone());
+
+        Ok(ProvisionResult {
+            physical_id: name,
+            attributes,
+        })
+    }
+
+    fn delete_firehose_delivery_stream(&self, physical_id: &str) -> Result<(), String> {
+        let mut state = self.firehose_state.write();
+        let account = state.get_or_create(&self.account_id, &self.region);
+        account.streams_mut(&self.region).remove(physical_id);
         Ok(())
     }
 
@@ -17879,6 +17964,48 @@ fn parse_cognito_account_recovery(
     })
 }
 
+fn parse_firehose_s3_destination(value: &serde_json::Value) -> Result<S3Destination, String> {
+    let role_arn = value
+        .get("RoleARN")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let bucket_arn = value
+        .get("BucketARN")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let prefix = value
+        .get("Prefix")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let error_output_prefix = value
+        .get("ErrorOutputPrefix")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut buffering_size_mb = None;
+    let mut buffering_interval_seconds = None;
+    if let Some(hints) = value.get("BufferingHints") {
+        buffering_size_mb = hints.get("SizeInMBs").and_then(|v| v.as_i64());
+        buffering_interval_seconds = hints.get("IntervalInSeconds").and_then(|v| v.as_i64());
+    }
+    let compression_format = value
+        .get("CompressionFormat")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(S3Destination {
+        destination_id: "destination-1".to_string(),
+        role_arn,
+        bucket_arn,
+        prefix,
+        error_output_prefix,
+        buffering_size_mb,
+        buffering_interval_seconds,
+        compression_format,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -17993,6 +18120,9 @@ mod tests {
             )),
             athena_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_athena::AthenaAccounts::new(),
+            )),
+            firehose_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_firehose::FirehoseAccounts::new(),
             )),
             delivery: Arc::new(DeliveryBus::new()),
             account_id: "123456789012".to_string(),

@@ -789,6 +789,7 @@ async fn main() {
             ses: ses_state.clone(),
             application_autoscaling: app_autoscaling_state.clone(),
             athena: athena_state.clone(),
+            firehose: firehose_state.clone(),
             delivery: delivery_for_cf,
         },
     );
