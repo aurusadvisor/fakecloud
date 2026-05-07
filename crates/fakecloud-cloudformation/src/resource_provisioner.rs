@@ -8619,14 +8619,13 @@ impl ResourceProvisioner {
         if has_s3 && has_extended_s3 {
             return Err("Only one of S3DestinationConfiguration or ExtendedS3DestinationConfiguration may be set".to_string());
         }
-        let mut destination = None;
-        if let Some(s3) = props.get("S3DestinationConfiguration") {
-            destination = Some(parse_firehose_s3_destination(s3)?);
+        let destination = Some(if let Some(s3) = props.get("S3DestinationConfiguration") {
+            parse_firehose_s3_destination(s3)?
         } else if let Some(s3) = props.get("ExtendedS3DestinationConfiguration") {
-            destination = Some(parse_firehose_s3_destination(s3)?);
+            parse_firehose_s3_destination(s3)?
         } else {
             return Err("Delivery stream requires a destination configuration".to_string());
-        }
+        });
 
         let mut tags = BTreeMap::new();
         if let Some(arr) = props.get("Tags").and_then(|v| v.as_array()) {
