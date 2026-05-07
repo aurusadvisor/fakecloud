@@ -10,10 +10,11 @@
 //! IDs so SDK callers can chain operations (e.g., `CreateChangeSet`
 //! -> `DescribeChangeSet` -> `ExecuteChangeSet`).
 
+use bytes::Bytes;
 use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use fakecloud_aws::arn::Arn;
 use fakecloud_aws::xml::xml_escape;
@@ -93,7 +94,118 @@ fn missing(name: &str) -> AwsServiceError {
     )
 }
 
+/// Extract a list of member values from query-style params.
+/// AWS list params are encoded as `Prefix.member.N=Value`.
+fn extract_member_list(params: &BTreeMap<String, String>, prefix: &str) -> Vec<String> {
+    let mut items: Vec<(usize, String)> = Vec::new();
+    for (k, v) in params {
+        let pat = format!("{prefix}.member.");
+        if let Some(rest) = k.strip_prefix(&pat) {
+            if let Ok(idx) = rest.parse::<usize>() {
+                items.push((idx, v.clone()));
+            }
+        }
+    }
+    items.sort_by_key(|(i, _)| *i);
+    items.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Extract parameter overrides from query-style params.
+/// AWS encodes them as `ParameterOverrides.member.N.ParameterKey=K&ParameterOverrides.member.N.ParameterValue=V`.
+fn extract_parameter_overrides(params: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut result: BTreeMap<usize, (Option<String>, Option<String>)> = BTreeMap::new();
+    for (k, v) in params {
+        let prefix = "ParameterOverrides.member.";
+        if let Some(rest) = k.strip_prefix(prefix) {
+            // rest is like "1.ParameterKey" or "1.ParameterValue"
+            if let Some(dot_pos) = rest.find('.') {
+                if let Ok(idx) = rest[..dot_pos].parse::<usize>() {
+                    let suffix = &rest[dot_pos + 1..];
+                    let entry = result.entry(idx).or_insert((None, None));
+                    if suffix == "ParameterKey" {
+                        entry.0 = Some(v.clone());
+                    } else if suffix == "ParameterValue" {
+                        entry.1 = Some(v.clone());
+                    }
+                }
+            }
+        }
+    }
+    result
+        .into_values()
+        .filter_map(|(k, v)| match (k, v) {
+            (Some(key), Some(val)) => Some((key, val)),
+            _ => None,
+        })
+        .collect()
+}
+
 impl CloudFormationService {
+    /// Create or update a stack instance for a StackSet in a target account/region.
+    fn provision_stack_instance(
+        &self,
+        stack_set_name: &str,
+        target_account: &str,
+        target_region: &str,
+        template_body: &str,
+        parameter_overrides: &BTreeMap<String, String>,
+        tags: &BTreeMap<String, String>,
+    ) -> Result<String, AwsServiceError> {
+        let stack_name = format!("{stack_set_name}-{target_account}-{target_region}");
+
+        // Build query params for CreateStack
+        let mut create_params: HashMap<String, String> = HashMap::new();
+        create_params.insert("StackName".to_string(), stack_name.clone());
+        create_params.insert("TemplateBody".to_string(), template_body.to_string());
+
+        for (k, v) in parameter_overrides {
+            create_params.insert(format!("Parameters.member.{k}.ParameterKey"), k.clone());
+            create_params.insert(format!("Parameters.member.{k}.ParameterValue"), v.clone());
+        }
+
+        for (k, v) in tags {
+            create_params.insert(format!("Tags.member.{k}.Key"), k.clone());
+            create_params.insert(format!("Tags.member.{k}.Value"), v.clone());
+        }
+
+        let synthetic_req = AwsRequest {
+            service: "cloudformation".to_string(),
+            action: "CreateStack".to_string(),
+            region: target_region.to_string(),
+            account_id: target_account.to_string(),
+            request_id: rand_id(),
+            headers: http::HeaderMap::new(),
+            query_params: create_params,
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        };
+
+        let resp = self.create_stack(&synthetic_req)?;
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap_or("");
+
+        // Extract StackId from response XML
+        let stack_id = body
+            .split("<StackId>")
+            .nth(1)
+            .and_then(|s| s.split("</StackId>").next())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                format!(
+                    "arn:aws:cloudformation:{target_region}:{target_account}:stack/{stack_name}/{}",
+                    rand_id()
+                )
+            });
+
+        Ok(stack_id)
+    }
+
     pub(crate) fn handle_extra_action(
         &self,
         req: &AwsRequest,
@@ -688,22 +800,192 @@ impl CloudFormationService {
 
             // ── Stack instances ──
             "CreateStackInstances" => {
+                let stack_set_name = params.get("StackSetName").ok_or_else(|| missing("StackSetName"))?.clone();
+                let accounts_list = extract_member_list(&params, "Accounts");
+                let regions_list = extract_member_list(&params, "Regions");
+                let parameter_overrides = extract_parameter_overrides(&params);
                 let op_id = rand_id();
+
+                // Read the StackSet template
+                let stack_set_template = {
+                    let accounts_state = self.state.read();
+                    let state = accounts_state.get(&aid);
+                    state
+                        .and_then(|s| s.extras.get("stack_sets"))
+                        .and_then(|m| m.get(&stack_set_name))
+                        .and_then(|v| v["TemplateBody"].as_str().map(|s| s.to_string()))
+                        .unwrap_or_default()
+                };
+
+                let mut instance_records: Vec<Value> = Vec::new();
+                for target_account in &accounts_list {
+                    for target_region in &regions_list {
+                        let stack_name = format!("{stack_set_name}-{target_account}-{target_region}");
+                        if let Ok(stack_id) = self.provision_stack_instance(
+                            &stack_set_name,
+                            target_account,
+                            target_region,
+                            &stack_set_template,
+                            &parameter_overrides,
+                            &BTreeMap::new(),
+                        ) {
+                            let record = json!({
+                                "Account": target_account,
+                                "Region": target_region,
+                                "StackId": stack_id,
+                                "StackName": stack_name,
+                                "Status": "CURRENT",
+                                "DriftStatus": "NOT_CHECKED",
+                            });
+                            instance_records.push(record.clone());
+                            let mut accounts_state = self.state.write();
+                            let state = accounts_state.get_or_create(&aid);
+                            let key = format!("{stack_set_name}:{target_account}:{target_region}");
+                            store(&mut state.extras, "stack_instances").insert(key, record);
+                        }
+                    }
+                }
+
                 Ok(xml_response("CreateStackInstances", format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)), &rid))
             }
             "UpdateStackInstances" => {
+                let stack_set_name = params.get("StackSetName").ok_or_else(|| missing("StackSetName"))?.clone();
+                let accounts_list = extract_member_list(&params, "Accounts");
+                let regions_list = extract_member_list(&params, "Regions");
+                let parameter_overrides = extract_parameter_overrides(&params);
                 let op_id = rand_id();
+
+                let stack_set_template = {
+                    let accounts_state = self.state.read();
+                    let state = accounts_state.get(&aid);
+                    state
+                        .and_then(|s| s.extras.get("stack_sets"))
+                        .and_then(|m| m.get(&stack_set_name))
+                        .and_then(|v| v["TemplateBody"].as_str().map(|s| s.to_string()))
+                        .unwrap_or_default()
+                };
+
+                for target_account in &accounts_list {
+                    for target_region in &regions_list {
+                        if let Ok(stack_id) = self.provision_stack_instance(
+                            &stack_set_name,
+                            target_account,
+                            target_region,
+                            &stack_set_template,
+                            &parameter_overrides,
+                            &BTreeMap::new(),
+                        ) {
+                            let stack_name = format!("{stack_set_name}-{target_account}-{target_region}");
+                            let record = json!({
+                                "Account": target_account,
+                                "Region": target_region,
+                                "StackId": stack_id,
+                                "StackName": stack_name,
+                                "Status": "CURRENT",
+                                "DriftStatus": "NOT_CHECKED",
+                            });
+                            let mut accounts_state = self.state.write();
+                            let state = accounts_state.get_or_create(&aid);
+                            let key = format!("{stack_set_name}:{target_account}:{target_region}");
+                            store(&mut state.extras, "stack_instances").insert(key, record);
+                        }
+                    }
+                }
+
                 Ok(xml_response("UpdateStackInstances", format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)), &rid))
             }
             "DeleteStackInstances" => {
+                let stack_set_name = params.get("StackSetName").ok_or_else(|| missing("StackSetName"))?.clone();
+                let accounts_list = extract_member_list(&params, "Accounts");
+                let regions_list = extract_member_list(&params, "Regions");
                 let op_id = rand_id();
+
+                for target_account in &accounts_list {
+                    for target_region in &regions_list {
+                        let mut accounts_state = self.state.write();
+                        let state = accounts_state.get_or_create(&aid);
+                        let key = format!("{stack_set_name}:{target_account}:{target_region}");
+                        if let Some(m) = state.extras.get_mut("stack_instances") {
+                            m.remove(&key);
+                        }
+                    }
+                }
+
                 Ok(xml_response("DeleteStackInstances", format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)), &rid))
             }
             "DescribeStackInstance" => {
-                let inner = "    <StackInstance>\n      <Status>CURRENT</Status>\n    </StackInstance>".to_string();
+                let stack_set_name = params.get("StackSetName").ok_or_else(|| missing("StackSetName"))?.clone();
+                let account = params.get("StackInstanceAccount").cloned().unwrap_or_default();
+                let region = params.get("StackInstanceRegion").cloned().unwrap_or_default();
+                let key = format!("{stack_set_name}:{account}:{region}");
+
+                let accounts_state = self.state.read();
+                let state = accounts_state.get(&aid);
+                let record = state
+                    .and_then(|s| s.extras.get("stack_instances"))
+                    .and_then(|m| m.get(&key))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({
+                            "Account": account,
+                            "Region": region,
+                            "StackId": format!("arn:aws:cloudformation:{region}:{account}:stack/{stack_set_name}-{account}-{region}/{}", rand_id()),
+                            "StackName": format!("{stack_set_name}-{account}-{region}"),
+                            "Status": "CURRENT",
+                            "DriftStatus": "NOT_CHECKED",
+                        })
+                    });
+
+                let inner = format!(
+                    "    <StackInstance>\n      <Account>{}</Account>\n      <Region>{}</Region>\n      <StackId>{}</StackId>\n      <StackName>{}</StackName>\n      <Status>{}</Status>\n      <DriftStatus>{}</DriftStatus>\n    </StackInstance>",
+                    xml_escape(record["Account"].as_str().unwrap_or("")),
+                    xml_escape(record["Region"].as_str().unwrap_or("")),
+                    xml_escape(record["StackId"].as_str().unwrap_or("")),
+                    xml_escape(record["StackName"].as_str().unwrap_or("")),
+                    xml_escape(record["Status"].as_str().unwrap_or("CURRENT")),
+                    xml_escape(record["DriftStatus"].as_str().unwrap_or("NOT_CHECKED")),
+                );
                 Ok(xml_response("DescribeStackInstance", inner, &rid))
             }
-            "ListStackInstances" => Ok(xml_response("ListStackInstances", "    <Summaries/>".to_string(), &rid)),
+            "ListStackInstances" => {
+                let stack_set_name = params.get("StackSetName").cloned();
+                let accounts_state = self.state.read();
+                let items: Vec<Value> = accounts_state
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("stack_instances"))
+                    .map(|m| {
+                        m.values()
+                            .filter(|v| {
+                                stack_set_name.as_ref().is_none_or(|name| {
+                                    v["StackName"]
+                                        .as_str()
+                                        .map(|n| n.starts_with(name.as_str()))
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let inner = if items.is_empty() {
+                    "    <Summaries/>".to_string()
+                } else {
+                    format!(
+                        "    <Summaries>\n{}\n    </Summaries>",
+                        members_xml(&items, |v| format!(
+                            "        <Account>{}</Account>\n        <Region>{}</Region>\n        <StackId>{}</StackId>\n        <StackName>{}</StackName>\n        <Status>{}</Status>\n        <DriftStatus>{}</DriftStatus>",
+                            xml_escape(v["Account"].as_str().unwrap_or("")),
+                            xml_escape(v["Region"].as_str().unwrap_or("")),
+                            xml_escape(v["StackId"].as_str().unwrap_or("")),
+                            xml_escape(v["StackName"].as_str().unwrap_or("")),
+                            xml_escape(v["Status"].as_str().unwrap_or("CURRENT")),
+                            xml_escape(v["DriftStatus"].as_str().unwrap_or("NOT_CHECKED")),
+                        )),
+                    )
+                };
+                Ok(xml_response("ListStackInstances", inner, &rid))
+            }
             "ListStackInstanceResourceDrifts" => Ok(xml_response("ListStackInstanceResourceDrifts", "    <Summaries/>".to_string(), &rid)),
 
             // ── Stack refactors ──
@@ -1288,12 +1570,33 @@ mod tests {
         ok("ListStackSetAutoDeploymentTargets", &[]);
         ok("StopStackSetOperation", &[]);
         ok("ImportStacksToStackSet", &[]);
-        ok("DeleteStackSet", &[("StackSetName", "ss")]);
-        ok("CreateStackInstances", &[]);
-        ok("UpdateStackInstances", &[]);
-        ok("DeleteStackInstances", &[]);
-        ok("DescribeStackInstance", &[]);
+        ok(
+            "CreateStackInstances",
+            &[
+                ("StackSetName", "ss"),
+                ("Accounts.member.1", "000000000000"),
+                ("Regions.member.1", "us-east-1"),
+            ],
+        );
+        ok(
+            "UpdateStackInstances",
+            &[
+                ("StackSetName", "ss"),
+                ("Accounts.member.1", "000000000000"),
+                ("Regions.member.1", "us-east-1"),
+            ],
+        );
+        ok("DescribeStackInstance", &[("StackSetName", "ss")]);
         ok("ListStackInstances", &[]);
+        ok(
+            "DeleteStackInstances",
+            &[
+                ("StackSetName", "ss"),
+                ("Accounts.member.1", "000000000000"),
+                ("Regions.member.1", "us-east-1"),
+            ],
+        );
+        ok("DeleteStackSet", &[("StackSetName", "ss")]);
         ok("ListStackInstanceResourceDrifts", &[]);
         ok("CreateStackRefactor", &[]);
         ok("DescribeStackRefactor", &[("StackRefactorId", "r")]);

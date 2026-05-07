@@ -43,6 +43,7 @@ fakecloud-application-autoscaling = { workspace = true }
 fakecloud-athena = { workspace = true }
 fakecloud-firehose = { workspace = true }
 fakecloud-glue = { workspace = true }
+bytes = { workspace = true }
 rcgen = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

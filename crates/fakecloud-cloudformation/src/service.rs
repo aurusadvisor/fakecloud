@@ -564,7 +564,7 @@ impl CloudFormationService {
         Ok(())
     }
 
-    fn create_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    pub(crate) fn create_stack(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let params = Self::get_all_params(req);
 
         let stack_name = params.get("StackName").ok_or_else(|| {
