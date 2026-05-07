@@ -17548,7 +17548,11 @@ impl ResourceProvisioner {
         }
         let key = values
             .iter()
-            .map(|v| v.replace('%', "%25").replace('|', "%7C").replace('/', "%2F"))
+            .map(|v| {
+                v.replace('%', "%25")
+                    .replace('|', "%7C")
+                    .replace('/', "%2F")
+            })
             .collect::<Vec<_>>()
             .join("/");
 
