@@ -1277,6 +1277,83 @@ impl ResourceProvisioner {
             "AWS::ElasticLoadBalancingV2::TrustStore" => {
                 self.get_att_elbv2_trust_store(&resource.physical_id, attribute)
             }
+            "AWS::WAFv2::WebACL" => self.get_att_wafv2_web_acl(&resource.physical_id, attribute),
+            "AWS::WAFv2::IPSet" => self.get_att_wafv2_ip_set(&resource.physical_id, attribute),
+            "AWS::WAFv2::RegexPatternSet" => {
+                self.get_att_wafv2_regex_pattern_set(&resource.physical_id, attribute)
+            }
+            "AWS::WAFv2::RuleGroup" => {
+                self.get_att_wafv2_rule_group(&resource.physical_id, attribute)
+            }
+            _ => None,
+        }
+    }
+
+    fn get_att_wafv2_web_acl(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.wafv2_state.write();
+        let state = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let acl = state.web_acls.values().find(|a| a.arn == physical_id)?;
+        match attribute {
+            "Arn" => Some(acl.arn.clone()),
+            "Id" => Some(acl.id.clone()),
+            "Name" => Some(acl.name.clone()),
+            "LabelNamespace" => Some(acl.label_namespace.clone()),
+            "Capacity" => Some(acl.capacity.to_string()),
+            _ => None,
+        }
+    }
+
+    fn get_att_wafv2_ip_set(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.wafv2_state.write();
+        let state = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let ip_set = state.ip_sets.values().find(|i| i.arn == physical_id)?;
+        match attribute {
+            "Arn" => Some(ip_set.arn.clone()),
+            "Id" => Some(ip_set.id.clone()),
+            "Name" => Some(ip_set.name.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_wafv2_regex_pattern_set(
+        &self,
+        physical_id: &str,
+        attribute: &str,
+    ) -> Option<String> {
+        let mut accounts = self.wafv2_state.write();
+        let state = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let set = state
+            .regex_pattern_sets
+            .values()
+            .find(|r| r.arn == physical_id)?;
+        match attribute {
+            "Arn" => Some(set.arn.clone()),
+            "Id" => Some(set.id.clone()),
+            "Name" => Some(set.name.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_wafv2_rule_group(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.wafv2_state.write();
+        let state = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let rg = state.rule_groups.values().find(|r| r.arn == physical_id)?;
+        match attribute {
+            "Arn" => Some(rg.arn.clone()),
+            "Id" => Some(rg.id.clone()),
+            "Name" => Some(rg.name.clone()),
             _ => None,
         }
     }
@@ -18225,5 +18302,168 @@ mod tests {
         let arn = prov.get_att(&sr, "Arn").expect("Arn should resolve");
         assert!(arn.starts_with("arn:aws:secretsmanager:"));
         assert!(arn.ends_with(":secret:my-secret"));
+    }
+
+    #[test]
+    fn wafv2_web_acl_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::WAFv2::WebACL",
+            "MyAcl",
+            serde_json::json!({
+                "Name": "my-acl",
+                "Scope": "REGIONAL",
+                "DefaultAction": {"Allow": {}},
+                "Rules": [{"Name": "rule1", "Priority": 1, "Statement": {}, "VisibilityConfig": {}}],
+                "VisibilityConfig": {"SampledRequestsEnabled": true, "CloudWatchMetricsEnabled": true, "MetricName": "my-acl-metric"},
+                "Capacity": 100,
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert!(sr.physical_id.starts_with("arn:aws:wafv2:"));
+        assert_eq!(prov.get_att(&sr, "Arn"), Some(sr.physical_id.clone()));
+        assert_eq!(prov.get_att(&sr, "Name"), Some("my-acl".to_string()));
+        assert!(prov.get_att(&sr, "Id").is_some());
+        assert_eq!(prov.get_att(&sr, "Capacity"), Some("100".to_string()));
+
+        prov.delete_resource(&sr.clone()).unwrap();
+        // Verify live-state fallback returns None by using a fresh resource
+        // with empty attributes (captured attrs would still win).
+        let fresh = StackResource {
+            logical_id: "MyAcl".to_string(),
+            physical_id: sr.physical_id.clone(),
+            resource_type: "AWS::WAFv2::WebACL".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: BTreeMap::new(),
+        };
+        assert_eq!(prov.get_att(&fresh, "Arn"), None);
+    }
+
+    #[test]
+    fn wafv2_ip_set_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::WAFv2::IPSet",
+            "MyIpSet",
+            serde_json::json!({
+                "Name": "my-ipset",
+                "Scope": "REGIONAL",
+                "IPAddressVersion": "IPV4",
+                "Addresses": ["10.0.0.0/8"],
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert!(sr.physical_id.starts_with("arn:aws:wafv2:"));
+        assert_eq!(prov.get_att(&sr, "Arn"), Some(sr.physical_id.clone()));
+        assert_eq!(prov.get_att(&sr, "Name"), Some("my-ipset".to_string()));
+
+        prov.delete_resource(&sr.clone()).unwrap();
+        let fresh = StackResource {
+            logical_id: "MyIpSet".to_string(),
+            physical_id: sr.physical_id.clone(),
+            resource_type: "AWS::WAFv2::IPSet".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: BTreeMap::new(),
+        };
+        assert_eq!(prov.get_att(&fresh, "Arn"), None);
+    }
+
+    #[test]
+    fn wafv2_regex_pattern_set_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::WAFv2::RegexPatternSet",
+            "MyRegexSet",
+            serde_json::json!({
+                "Name": "my-regex",
+                "Scope": "REGIONAL",
+                "RegularExpressions": [{"RegexString": "^test"}],
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert!(sr.physical_id.starts_with("arn:aws:wafv2:"));
+        assert_eq!(prov.get_att(&sr, "Arn"), Some(sr.physical_id.clone()));
+        assert_eq!(prov.get_att(&sr, "Name"), Some("my-regex".to_string()));
+
+        prov.delete_resource(&sr.clone()).unwrap();
+        let fresh = StackResource {
+            logical_id: "MyRegexSet".to_string(),
+            physical_id: sr.physical_id.clone(),
+            resource_type: "AWS::WAFv2::RegexPatternSet".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: BTreeMap::new(),
+        };
+        assert_eq!(prov.get_att(&fresh, "Arn"), None);
+    }
+
+    #[test]
+    fn wafv2_rule_group_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::WAFv2::RuleGroup",
+            "MyRuleGroup",
+            serde_json::json!({
+                "Name": "my-rg",
+                "Scope": "REGIONAL",
+                "Capacity": 50,
+                "Rules": [{"Name": "r1", "Priority": 1, "Statement": {}, "VisibilityConfig": {}}],
+                "VisibilityConfig": {"SampledRequestsEnabled": true, "CloudWatchMetricsEnabled": true, "MetricName": "rg-metric"},
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert!(sr.physical_id.starts_with("arn:aws:wafv2:"));
+        assert_eq!(prov.get_att(&sr, "Arn"), Some(sr.physical_id.clone()));
+        assert_eq!(prov.get_att(&sr, "Name"), Some("my-rg".to_string()));
+
+        prov.delete_resource(&sr.clone()).unwrap();
+        let fresh = StackResource {
+            logical_id: "MyRuleGroup".to_string(),
+            physical_id: sr.physical_id.clone(),
+            resource_type: "AWS::WAFv2::RuleGroup".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: BTreeMap::new(),
+        };
+        assert_eq!(prov.get_att(&fresh, "Arn"), None);
+    }
+
+    #[test]
+    fn wafv2_logging_configuration_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::WAFv2::LoggingConfiguration",
+            "MyLogConfig",
+            serde_json::json!({
+                "ResourceArn": "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/test/abc",
+                "LogDestinationConfigs": ["arn:aws:logs:us-east-1:123456789012:log-group:/aws/waf"],
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(
+            sr.physical_id,
+            "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/test/abc"
+        );
+
+        prov.delete_resource(&sr.clone()).unwrap();
+    }
+
+    #[test]
+    fn wafv2_web_acl_association_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::WAFv2::WebACLAssociation",
+            "MyAssoc",
+            serde_json::json!({
+                "ResourceArn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188",
+                "WebACLArn": "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/my-acl/abc",
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188");
+
+        prov.delete_resource(&sr.clone()).unwrap();
     }
 }
