@@ -788,6 +788,7 @@ async fn main() {
             apigatewayv2: apigatewayv2_state.clone(),
             ses: ses_state.clone(),
             application_autoscaling: app_autoscaling_state.clone(),
+            athena: athena_state.clone(),
             delivery: delivery_for_cf,
         },
     );

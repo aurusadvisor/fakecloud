@@ -1208,6 +1208,9 @@ mod tests {
             application_autoscaling: Arc::new(parking_lot::RwLock::new(
                 fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
             )),
+            athena: Arc::new(parking_lot::RwLock::new(
+                fakecloud_athena::AthenaAccounts::new(),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }

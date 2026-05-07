@@ -24,6 +24,7 @@ use fakecloud_application_autoscaling::{
     ScalableTarget as AppasScalableTarget, ScalingPolicy as AppasScalingPolicy,
     SharedApplicationAutoScalingState as AppasState, SuspendedState as AppasSuspendedState,
 };
+use fakecloud_athena::{DataCatalog, NamedQuery, PreparedStatement, SharedAthenaState, WorkGroup};
 use fakecloud_cloudfront::{
     functions::{
         CloudFrontOriginAccessIdentityConfig, FunctionConfig, KeyGroupConfig, KeyGroupItems,
@@ -852,6 +853,7 @@ pub struct ResourceProvisioner {
     pub apigatewayv2_state: SharedApiGatewayV2State,
     pub ses_state: SharedSesState,
     pub app_autoscaling_state: AppasState,
+    pub athena_state: SharedAthenaState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -1060,6 +1062,10 @@ impl ResourceProvisioner {
             "AWS::ApplicationAutoScaling::ScalingPolicy" => {
                 self.create_application_autoscaling_scaling_policy(resource)
             }
+            "AWS::Athena::DataCatalog" => self.create_athena_data_catalog(resource),
+            "AWS::Athena::NamedQuery" => self.create_athena_named_query(resource),
+            "AWS::Athena::WorkGroup" => self.create_athena_work_group(resource),
+            "AWS::Athena::PreparedStatement" => self.create_athena_prepared_statement(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -1300,6 +1306,18 @@ impl ResourceProvisioner {
             }
             "AWS::SES::ReceiptRuleSet" => {
                 self.get_att_ses_receipt_rule_set(&resource.physical_id, attribute)
+            }
+            "AWS::Athena::DataCatalog" => {
+                self.get_att_athena_data_catalog(&resource.physical_id, attribute)
+            }
+            "AWS::Athena::NamedQuery" => {
+                self.get_att_athena_named_query(&resource.physical_id, attribute)
+            }
+            "AWS::Athena::WorkGroup" => {
+                self.get_att_athena_work_group(&resource.physical_id, attribute)
+            }
+            "AWS::Athena::PreparedStatement" => {
+                self.get_att_athena_prepared_statement(&resource.physical_id, attribute)
             }
             _ => None,
         }
@@ -1871,6 +1889,12 @@ impl ResourceProvisioner {
                     &resource.physical_id,
                     &resource.attributes,
                 ),
+            "AWS::Athena::DataCatalog" => self.delete_athena_data_catalog(&resource.physical_id),
+            "AWS::Athena::NamedQuery" => self.delete_athena_named_query(&resource.physical_id),
+            "AWS::Athena::WorkGroup" => self.delete_athena_work_group(&resource.physical_id),
+            "AWS::Athena::PreparedStatement" => {
+                self.delete_athena_prepared_statement(&resource.physical_id, &resource.attributes)
+            }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
             }
@@ -16985,6 +17009,366 @@ impl ResourceProvisioner {
         secret.last_changed_at = now;
         Ok(ProvisionResult::new(secret_arn.clone()).with("SecretArn", secret_arn))
     }
+
+    // --- Athena ---
+
+    fn create_athena_work_group(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let configuration = props.get("Configuration").cloned();
+        let state_str = props
+            .get("State")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ENABLED");
+        let tags = Self::parse_athena_tags(props.get("Tags"));
+
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        account.ensure_initialized();
+        if account.work_groups.contains_key(&name) {
+            return Err(format!("WorkGroup {name} already exists"));
+        }
+        let wg = WorkGroup {
+            name: name.clone(),
+            state: state_str.to_string(),
+            description,
+            configuration,
+            creation_time: Utc::now(),
+            engine_version: Some("AUTO".to_string()),
+        };
+        let arn = format!(
+            "arn:aws:athena:{}:{}:workgroup/{}",
+            self.region, self.account_id, name
+        );
+        account.work_groups.insert(name.clone(), wg);
+        if !tags.is_empty() {
+            account.tags.insert(arn.clone(), tags);
+        }
+        Ok(ProvisionResult::new(name.clone())
+            .with("Arn", arn)
+            .with("Name", name))
+    }
+
+    fn delete_athena_work_group(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        account.work_groups.remove(physical_id);
+        Ok(())
+    }
+
+    fn get_att_athena_work_group(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let wg = account.work_groups.get(physical_id)?;
+        match attribute {
+            "Arn" => Some(format!(
+                "arn:aws:athena:{}:{}:workgroup/{}",
+                self.region, self.account_id, wg.name
+            )),
+            "Name" => Some(wg.name.clone()),
+            _ => None,
+        }
+    }
+
+    fn create_athena_data_catalog(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let cat_type = props
+            .get("Type")
+            .and_then(|v| v.as_str())
+            .ok_or("Type is required")?
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let parameters = props
+            .get("Parameters")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let connection_type = props
+            .get("ConnectionType")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let tags = Self::parse_athena_tags(props.get("Tags"));
+
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        account.ensure_initialized();
+        if account.data_catalogs.contains_key(&name) {
+            return Err(format!("DataCatalog {name} already exists"));
+        }
+        let cat = DataCatalog {
+            name: name.clone(),
+            description,
+            cat_type,
+            parameters,
+            status: "CREATE_COMPLETE".to_string(),
+            connection_type,
+            error: None,
+        };
+        let arn = format!(
+            "arn:aws:athena:{}:{}:datacatalog/{}",
+            self.region, self.account_id, name
+        );
+        account.data_catalogs.insert(name.clone(), cat);
+        if !tags.is_empty() {
+            account.tags.insert(arn.clone(), tags);
+        }
+        Ok(ProvisionResult::new(name.clone())
+            .with("Arn", arn)
+            .with("Name", name))
+    }
+
+    fn delete_athena_data_catalog(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        account.data_catalogs.remove(physical_id);
+        Ok(())
+    }
+
+    fn get_att_athena_data_catalog(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let cat = account.data_catalogs.get(physical_id)?;
+        match attribute {
+            "Arn" => Some(format!(
+                "arn:aws:athena:{}:{}:datacatalog/{}",
+                self.region, self.account_id, cat.name
+            )),
+            "Name" => Some(cat.name.clone()),
+            _ => None,
+        }
+    }
+
+    fn create_athena_named_query(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let database = props
+            .get("Database")
+            .and_then(|v| v.as_str())
+            .ok_or("Database is required")?
+            .to_string();
+        let query_string = props
+            .get("QueryString")
+            .and_then(|v| v.as_str())
+            .ok_or("QueryString is required")?
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let work_group = props
+            .get("WorkGroup")
+            .and_then(|v| v.as_str())
+            .unwrap_or("primary")
+            .to_string();
+
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        account.ensure_initialized();
+        if !account.work_groups.contains_key(&work_group) {
+            return Err(format!("Workgroup {work_group} not found"));
+        }
+        let id = Uuid::new_v4().to_string();
+        let nq = NamedQuery {
+            named_query_id: id.clone(),
+            name,
+            description,
+            database,
+            query_string,
+            work_group,
+        };
+        account.named_queries.insert(id.clone(), nq);
+        Ok(ProvisionResult::new(id.clone()).with("NamedQueryId", id))
+    }
+
+    fn delete_athena_named_query(&self, physical_id: &str) -> Result<(), String> {
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        account.named_queries.remove(physical_id);
+        Ok(())
+    }
+
+    fn get_att_athena_named_query(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let nq = account.named_queries.get(physical_id)?;
+        match attribute {
+            "NamedQueryId" => Some(nq.named_query_id.clone()),
+            _ => None,
+        }
+    }
+
+    fn create_athena_prepared_statement(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let statement_name = props
+            .get("StatementName")
+            .and_then(|v| v.as_str())
+            .ok_or("StatementName is required")?
+            .to_string();
+        let work_group_name = props
+            .get("WorkGroupName")
+            .and_then(|v| v.as_str())
+            .ok_or("WorkGroupName is required")?
+            .to_string();
+        let query_statement = props
+            .get("QueryStatement")
+            .and_then(|v| v.as_str())
+            .ok_or("QueryStatement is required")?
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        account.ensure_initialized();
+        if !account.work_groups.contains_key(&work_group_name) {
+            return Err(format!("Workgroup {work_group_name} not found"));
+        }
+        let key = (work_group_name.clone(), statement_name.clone());
+        if account.prepared_statements.contains_key(&key) {
+            return Err(format!(
+                "PreparedStatement {statement_name} already exists in {work_group_name}"
+            ));
+        }
+        let ps = PreparedStatement {
+            statement_name: statement_name.clone(),
+            work_group_name: work_group_name.clone(),
+            query_statement,
+            description,
+            last_modified_time: Utc::now(),
+        };
+        let physical_id = format!("{work_group_name}|{statement_name}");
+        account.prepared_statements.insert(key, ps);
+        Ok(ProvisionResult::new(physical_id))
+    }
+
+    fn delete_athena_prepared_statement(
+        &self,
+        physical_id: &str,
+        _attrs: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let parts: Vec<&str> = physical_id.split('|').collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "Invalid PreparedStatement physical id: {physical_id}"
+            ));
+        }
+        let key = (parts[0].to_string(), parts[1].to_string());
+        account.prepared_statements.remove(&key);
+        Ok(())
+    }
+
+    fn get_att_athena_prepared_statement(
+        &self,
+        physical_id: &str,
+        attribute: &str,
+    ) -> Option<String> {
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let parts: Vec<&str> = physical_id.split('|').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let ps = account
+            .prepared_statements
+            .get(&(parts[0].to_string(), parts[1].to_string()))?;
+        match attribute {
+            "StatementName" => Some(ps.statement_name.clone()),
+            "WorkGroupName" => Some(ps.work_group_name.clone()),
+            _ => None,
+        }
+    }
+
+    fn parse_athena_tags(value: Option<&serde_json::Value>) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        let Some(arr) = value.and_then(|v| v.as_array()) else {
+            return out;
+        };
+        for tag in arr {
+            if let (Some(k), Some(v)) = (
+                tag.get("Key").and_then(|v| v.as_str()),
+                tag.get("Value").and_then(|v| v.as_str()),
+            ) {
+                out.insert(k.to_string(), v.to_string());
+            }
+        }
+        out
+    }
 }
 
 /// Implements the CloudFormation `GenerateSecretString` shape on
@@ -17606,6 +17990,9 @@ mod tests {
             )),
             app_autoscaling_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
+            )),
+            athena_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_athena::AthenaAccounts::new(),
             )),
             delivery: Arc::new(DeliveryBus::new()),
             account_id: "123456789012".to_string(),
@@ -18772,6 +19159,107 @@ mod tests {
         );
         let sr = prov.create_resource(&res).unwrap();
         assert_eq!(sr.physical_id, "vdm-MyVdm");
+
+        prov.delete_resource(&sr.clone()).unwrap();
+    }
+
+    #[test]
+    fn athena_work_group_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::Athena::WorkGroup",
+            "MyWg",
+            serde_json::json!({
+                "Name": "my-wg",
+                "Description": "test wg",
+                "Configuration": {"EnforceWorkGroupConfiguration": true},
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "my-wg");
+        assert_eq!(sr.attributes.get("Name"), Some(&"my-wg".to_string()));
+        assert!(sr
+            .attributes
+            .get("Arn")
+            .unwrap()
+            .contains("workgroup/my-wg"));
+
+        assert_eq!(
+            prov.get_att(
+                &StackResource {
+                    resource_type: "AWS::Athena::WorkGroup".to_string(),
+                    physical_id: sr.physical_id.clone(),
+                    logical_id: "MyWg".to_string(),
+                    status: "CREATE_COMPLETE".to_string(),
+                    service_token: None,
+                    attributes: BTreeMap::new(),
+                },
+                "Name",
+            ),
+            Some("my-wg".to_string()),
+        );
+
+        prov.delete_resource(&sr.clone()).unwrap();
+    }
+
+    #[test]
+    fn athena_data_catalog_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::Athena::DataCatalog",
+            "MyCatalog",
+            serde_json::json!({
+                "Name": "my-catalog",
+                "Type": "GLUE",
+                "Description": "test catalog",
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "my-catalog");
+        assert_eq!(sr.attributes.get("Name"), Some(&"my-catalog".to_string()));
+        assert!(sr
+            .attributes
+            .get("Arn")
+            .unwrap()
+            .contains("datacatalog/my-catalog"));
+
+        prov.delete_resource(&sr.clone()).unwrap();
+    }
+
+    #[test]
+    fn athena_named_query_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::Athena::NamedQuery",
+            "MyQuery",
+            serde_json::json!({
+                "Name": "my-query",
+                "Database": "mydb",
+                "QueryString": "SELECT 1",
+                "WorkGroup": "primary",
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert!(!sr.physical_id.is_empty());
+        assert_eq!(sr.attributes.get("NamedQueryId"), Some(&sr.physical_id));
+
+        prov.delete_resource(&sr.clone()).unwrap();
+    }
+
+    #[test]
+    fn athena_prepared_statement_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::Athena::PreparedStatement",
+            "MyPs",
+            serde_json::json!({
+                "StatementName": "my-ps",
+                "WorkGroupName": "primary",
+                "QueryStatement": "SELECT 1",
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "primary|my-ps");
 
         prov.delete_resource(&sr.clone()).unwrap();
     }
