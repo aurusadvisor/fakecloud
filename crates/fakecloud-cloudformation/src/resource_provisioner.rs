@@ -8614,11 +8614,18 @@ impl ResourceProvisioner {
             .unwrap_or("DirectPut")
             .to_string();
 
+        let has_s3 = props.get("S3DestinationConfiguration").is_some();
+        let has_extended_s3 = props.get("ExtendedS3DestinationConfiguration").is_some();
+        if has_s3 && has_extended_s3 {
+            return Err("Only one of S3DestinationConfiguration or ExtendedS3DestinationConfiguration may be set".to_string());
+        }
         let mut destination = None;
         if let Some(s3) = props.get("S3DestinationConfiguration") {
             destination = Some(parse_firehose_s3_destination(s3)?);
         } else if let Some(s3) = props.get("ExtendedS3DestinationConfiguration") {
             destination = Some(parse_firehose_s3_destination(s3)?);
+        } else if stream_type != "DirectPut" {
+            return Err("Delivery stream requires a destination configuration".to_string());
         }
 
         let mut tags = BTreeMap::new();
@@ -17968,12 +17975,12 @@ fn parse_firehose_s3_destination(value: &serde_json::Value) -> Result<S3Destinat
     let role_arn = value
         .get("RoleARN")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
+        .ok_or("S3 destination requires RoleARN")?
         .to_string();
     let bucket_arn = value
         .get("BucketARN")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
+        .ok_or("S3 destination requires BucketARN")?
         .to_string();
     let prefix = value
         .get("Prefix")
