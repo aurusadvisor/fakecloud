@@ -20,6 +20,7 @@ use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::CloudFormationService;
+use crate::state::StackResource;
 use crate::template;
 
 const NS: &str = "http://cloudformation.amazonaws.com/doc/2010-05-15/";
@@ -106,8 +107,14 @@ impl CloudFormationService {
         match action.as_str() {
             // ── Change sets ──
             "CreateChangeSet" => {
-                let stack_name = params.get("StackName").ok_or_else(|| missing("StackName"))?.clone();
-                let cs_name = params.get("ChangeSetName").ok_or_else(|| missing("ChangeSetName"))?.clone();
+                let stack_name = params
+                    .get("StackName")
+                    .ok_or_else(|| missing("StackName"))?
+                    .clone();
+                let cs_name = params
+                    .get("ChangeSetName")
+                    .ok_or_else(|| missing("ChangeSetName"))?
+                    .clone();
                 let template_body = params.get("TemplateBody").cloned().unwrap_or_default();
 
                 let cs_params = CloudFormationService::extract_parameters(&params);
@@ -160,15 +167,14 @@ impl CloudFormationService {
                 // only exercise the route still see success.
                 let mut changes: Vec<Value> = Vec::new();
                 if !template_body.trim().is_empty() {
-                    let parsed = template::parse_template(&template_body, &full_params).map_err(
-                        |e| {
+                    let parsed =
+                        template::parse_template(&template_body, &full_params).map_err(|e| {
                             AwsServiceError::aws_error(
                                 StatusCode::BAD_REQUEST,
                                 "ValidationError",
                                 e,
                             )
-                        },
-                    )?;
+                        })?;
 
                     let existing_resources = stack_lookup
                         .as_ref()
@@ -275,7 +281,10 @@ impl CloudFormationService {
                 ))
             }
             "DescribeChangeSet" => {
-                let cs = params.get("ChangeSetName").ok_or_else(|| missing("ChangeSetName"))?.clone();
+                let cs = params
+                    .get("ChangeSetName")
+                    .ok_or_else(|| missing("ChangeSetName"))?
+                    .clone();
                 let stack_filter = params.get("StackName").cloned();
                 let accounts = self.state.read();
                 let entry = accounts.get(&aid)
@@ -352,11 +361,16 @@ impl CloudFormationService {
                 &rid,
             )),
             "DeleteChangeSet" => {
-                let cs = params.get("ChangeSetName").ok_or_else(|| missing("ChangeSetName"))?.clone();
+                let cs = params
+                    .get("ChangeSetName")
+                    .ok_or_else(|| missing("ChangeSetName"))?
+                    .clone();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
                 if let Some(m) = state.extras.get_mut("change_sets") {
-                    m.retain(|_, v| v["Id"].as_str() != Some(&cs) && v["ChangeSetName"].as_str() != Some(&cs));
+                    m.retain(|_, v| {
+                        v["Id"].as_str() != Some(&cs) && v["ChangeSetName"].as_str() != Some(&cs)
+                    });
                 }
                 Ok(xml_response("DeleteChangeSet", String::new(), &rid))
             }
@@ -500,9 +514,7 @@ impl CloudFormationService {
                     let stack = state
                         .stacks
                         .values_mut()
-                        .find(|st| {
-                            st.stack_id == found_stack_id && st.status != "DELETE_COMPLETE"
-                        })
+                        .find(|st| st.stack_id == found_stack_id && st.status != "DELETE_COMPLETE")
                         .ok_or_else(|| {
                             AwsServiceError::aws_error(
                                 StatusCode::BAD_REQUEST,
@@ -592,25 +604,31 @@ impl CloudFormationService {
             }
             "ListChangeSets" => {
                 let accounts = self.state.read();
-                let items: Vec<Value> = accounts.get(&aid)
+                let items: Vec<Value> = accounts
+                    .get(&aid)
                     .and_then(|s| s.extras.get("change_sets"))
                     .map(|m| m.values().cloned().collect())
                     .unwrap_or_default();
                 let inner = format!(
                     "    <Summaries>\n{}\n    </Summaries>",
-                    members_xml(&items, |v| format!(
+                    members_xml(&items, |v| {
+                        format!(
                         "        <ChangeSetId>{}</ChangeSetId>\n        <ChangeSetName>{}</ChangeSetName>\n        <Status>{}</Status>",
                         xml_escape(v["Id"].as_str().unwrap_or("")),
                         xml_escape(v["ChangeSetName"].as_str().unwrap_or("")),
                         xml_escape(v["Status"].as_str().unwrap_or("CREATE_COMPLETE")),
-                    )),
+                    )
+                    }),
                 );
                 Ok(xml_response("ListChangeSets", inner, &rid))
             }
 
             // ── Stack sets ──
             "CreateStackSet" => {
-                let name = params.get("StackSetName").ok_or_else(|| missing("StackSetName"))?.clone();
+                let name = params
+                    .get("StackSetName")
+                    .ok_or_else(|| missing("StackSetName"))?
+                    .clone();
                 let id = format!("{name}:{}", rand_id());
                 let entry = json!({
                     "StackSetId": id,
@@ -621,12 +639,20 @@ impl CloudFormationService {
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "stack_sets").insert(name.clone(), entry);
-                Ok(xml_response("CreateStackSet", format!("    <StackSetId>{}</StackSetId>", xml_escape(&id)), &rid))
+                Ok(xml_response(
+                    "CreateStackSet",
+                    format!("    <StackSetId>{}</StackSetId>", xml_escape(&id)),
+                    &rid,
+                ))
             }
             "DescribeStackSet" => {
-                let name = params.get("StackSetName").ok_or_else(|| missing("StackSetName"))?.clone();
+                let name = params
+                    .get("StackSetName")
+                    .ok_or_else(|| missing("StackSetName"))?
+                    .clone();
                 let accounts = self.state.read();
-                let entry = accounts.get(&aid)
+                let entry = accounts
+                    .get(&aid)
                     .and_then(|s| s.extras.get("stack_sets"))
                     .and_then(|m| m.get(&name))
                     .cloned()
@@ -641,27 +667,37 @@ impl CloudFormationService {
             }
             "ListStackSets" => {
                 let accounts = self.state.read();
-                let items: Vec<Value> = accounts.get(&aid)
+                let items: Vec<Value> = accounts
+                    .get(&aid)
                     .and_then(|s| s.extras.get("stack_sets"))
                     .map(|m| m.values().cloned().collect())
                     .unwrap_or_default();
                 let inner = format!(
                     "    <Summaries>\n{}\n    </Summaries>",
-                    members_xml(&items, |v| format!(
+                    members_xml(&items, |v| {
+                        format!(
                         "        <StackSetName>{}</StackSetName>\n        <StackSetId>{}</StackSetId>\n        <Status>{}</Status>",
                         xml_escape(v["StackSetName"].as_str().unwrap_or("")),
                         xml_escape(v["StackSetId"].as_str().unwrap_or("")),
                         xml_escape(v["Status"].as_str().unwrap_or("ACTIVE")),
-                    )),
+                    )
+                    }),
                 );
                 Ok(xml_response("ListStackSets", inner, &rid))
             }
             "UpdateStackSet" => {
                 let op_id = rand_id();
-                Ok(xml_response("UpdateStackSet", format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)), &rid))
+                Ok(xml_response(
+                    "UpdateStackSet",
+                    format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)),
+                    &rid,
+                ))
             }
             "DeleteStackSet" => {
-                let name = params.get("StackSetName").ok_or_else(|| missing("StackSetName"))?.clone();
+                let name = params
+                    .get("StackSetName")
+                    .ok_or_else(|| missing("StackSetName"))?
+                    .clone();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
                 if let Some(m) = state.extras.get_mut("stack_sets") {
@@ -677,34 +713,74 @@ impl CloudFormationService {
                 );
                 Ok(xml_response("DescribeStackSetOperation", inner, &rid))
             }
-            "ListStackSetOperations" => Ok(xml_response("ListStackSetOperations", "    <Summaries/>".to_string(), &rid)),
-            "ListStackSetOperationResults" => Ok(xml_response("ListStackSetOperationResults", "    <Summaries/>".to_string(), &rid)),
-            "ListStackSetAutoDeploymentTargets" => Ok(xml_response("ListStackSetAutoDeploymentTargets", "    <Summaries/>".to_string(), &rid)),
-            "StopStackSetOperation" => Ok(xml_response("StopStackSetOperation", String::new(), &rid)),
+            "ListStackSetOperations" => Ok(xml_response(
+                "ListStackSetOperations",
+                "    <Summaries/>".to_string(),
+                &rid,
+            )),
+            "ListStackSetOperationResults" => Ok(xml_response(
+                "ListStackSetOperationResults",
+                "    <Summaries/>".to_string(),
+                &rid,
+            )),
+            "ListStackSetAutoDeploymentTargets" => Ok(xml_response(
+                "ListStackSetAutoDeploymentTargets",
+                "    <Summaries/>".to_string(),
+                &rid,
+            )),
+            "StopStackSetOperation" => {
+                Ok(xml_response("StopStackSetOperation", String::new(), &rid))
+            }
             "ImportStacksToStackSet" => {
                 let op_id = rand_id();
-                Ok(xml_response("ImportStacksToStackSet", format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)), &rid))
+                Ok(xml_response(
+                    "ImportStacksToStackSet",
+                    format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)),
+                    &rid,
+                ))
             }
 
             // ── Stack instances ──
             "CreateStackInstances" => {
                 let op_id = rand_id();
-                Ok(xml_response("CreateStackInstances", format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)), &rid))
+                Ok(xml_response(
+                    "CreateStackInstances",
+                    format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)),
+                    &rid,
+                ))
             }
             "UpdateStackInstances" => {
                 let op_id = rand_id();
-                Ok(xml_response("UpdateStackInstances", format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)), &rid))
+                Ok(xml_response(
+                    "UpdateStackInstances",
+                    format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)),
+                    &rid,
+                ))
             }
             "DeleteStackInstances" => {
                 let op_id = rand_id();
-                Ok(xml_response("DeleteStackInstances", format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)), &rid))
+                Ok(xml_response(
+                    "DeleteStackInstances",
+                    format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)),
+                    &rid,
+                ))
             }
             "DescribeStackInstance" => {
-                let inner = "    <StackInstance>\n      <Status>CURRENT</Status>\n    </StackInstance>".to_string();
+                let inner =
+                    "    <StackInstance>\n      <Status>CURRENT</Status>\n    </StackInstance>"
+                        .to_string();
                 Ok(xml_response("DescribeStackInstance", inner, &rid))
             }
-            "ListStackInstances" => Ok(xml_response("ListStackInstances", "    <Summaries/>".to_string(), &rid)),
-            "ListStackInstanceResourceDrifts" => Ok(xml_response("ListStackInstanceResourceDrifts", "    <Summaries/>".to_string(), &rid)),
+            "ListStackInstances" => Ok(xml_response(
+                "ListStackInstances",
+                "    <Summaries/>".to_string(),
+                &rid,
+            )),
+            "ListStackInstanceResourceDrifts" => Ok(xml_response(
+                "ListStackInstanceResourceDrifts",
+                "    <Summaries/>".to_string(),
+                &rid,
+            )),
 
             // ── Stack refactors ──
             "CreateStackRefactor" => {
@@ -713,10 +789,17 @@ impl CloudFormationService {
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "refactors").insert(id.clone(), entry);
-                Ok(xml_response("CreateStackRefactor", format!("    <StackRefactorId>{}</StackRefactorId>", xml_escape(&id)), &rid))
+                Ok(xml_response(
+                    "CreateStackRefactor",
+                    format!("    <StackRefactorId>{}</StackRefactorId>", xml_escape(&id)),
+                    &rid,
+                ))
             }
             "DescribeStackRefactor" => {
-                let id = params.get("StackRefactorId").ok_or_else(|| missing("StackRefactorId"))?.clone();
+                let id = params
+                    .get("StackRefactorId")
+                    .ok_or_else(|| missing("StackRefactorId"))?
+                    .clone();
                 let inner = format!(
                     "    <StackRefactorId>{}</StackRefactorId>\n    <Status>CREATE_COMPLETE</Status>",
                     xml_escape(&id),
@@ -724,8 +807,16 @@ impl CloudFormationService {
                 Ok(xml_response("DescribeStackRefactor", inner, &rid))
             }
             "ExecuteStackRefactor" => Ok(xml_response("ExecuteStackRefactor", String::new(), &rid)),
-            "ListStackRefactors" => Ok(xml_response("ListStackRefactors", "    <StackRefactorSummaries/>".to_string(), &rid)),
-            "ListStackRefactorActions" => Ok(xml_response("ListStackRefactorActions", "    <StackRefactorActions/>".to_string(), &rid)),
+            "ListStackRefactors" => Ok(xml_response(
+                "ListStackRefactors",
+                "    <StackRefactorSummaries/>".to_string(),
+                &rid,
+            )),
+            "ListStackRefactorActions" => Ok(xml_response(
+                "ListStackRefactorActions",
+                "    <StackRefactorActions/>".to_string(),
+                &rid,
+            )),
 
             // ── Types / extensions ──
             "ActivateType" => {
@@ -736,18 +827,17 @@ impl CloudFormationService {
                     &format!("type/resource/{}", rand_id()),
                 )
                 .to_string();
-                Ok(xml_response("ActivateType", format!("    <Arn>{}</Arn>", xml_escape(&arn)), &rid))
+                Ok(xml_response(
+                    "ActivateType",
+                    format!("    <Arn>{}</Arn>", xml_escape(&arn)),
+                    &rid,
+                ))
             }
             "DeactivateType" => Ok(xml_response("DeactivateType", String::new(), &rid)),
             "DescribeType" => {
                 let arn = params.get("Arn").cloned().unwrap_or_else(|| {
-                    Arn::new(
-                        "cloudformation",
-                        "us-east-1",
-                        &aid,
-                        "type/resource/Default",
-                    )
-                    .to_string()
+                    Arn::new("cloudformation", "us-east-1", &aid, "type/resource/Default")
+                        .to_string()
                 });
                 let inner = format!(
                     "    <Arn>{}</Arn>\n    <Type>RESOURCE</Type>\n    <TypeName>AWS::Custom::Type</TypeName>",
@@ -765,12 +855,31 @@ impl CloudFormationService {
             }
             "RegisterType" => {
                 let token = rand_id();
-                Ok(xml_response("RegisterType", format!("    <RegistrationToken>{}</RegistrationToken>", xml_escape(&token)), &rid))
+                Ok(xml_response(
+                    "RegisterType",
+                    format!(
+                        "    <RegistrationToken>{}</RegistrationToken>",
+                        xml_escape(&token)
+                    ),
+                    &rid,
+                ))
             }
             "DeregisterType" => Ok(xml_response("DeregisterType", String::new(), &rid)),
-            "ListTypes" => Ok(xml_response("ListTypes", "    <TypeSummaries/>".to_string(), &rid)),
-            "ListTypeRegistrations" => Ok(xml_response("ListTypeRegistrations", "    <RegistrationTokenList/>".to_string(), &rid)),
-            "ListTypeVersions" => Ok(xml_response("ListTypeVersions", "    <TypeVersionSummaries/>".to_string(), &rid)),
+            "ListTypes" => Ok(xml_response(
+                "ListTypes",
+                "    <TypeSummaries/>".to_string(),
+                &rid,
+            )),
+            "ListTypeRegistrations" => Ok(xml_response(
+                "ListTypeRegistrations",
+                "    <RegistrationTokenList/>".to_string(),
+                &rid,
+            )),
+            "ListTypeVersions" => Ok(xml_response(
+                "ListTypeVersions",
+                "    <TypeVersionSummaries/>".to_string(),
+                &rid,
+            )),
             "BatchDescribeTypeConfigurations" => Ok(xml_response(
                 "BatchDescribeTypeConfigurations",
                 "    <Errors/>\n    <TypeConfigurations/>".to_string(),
@@ -784,9 +893,18 @@ impl CloudFormationService {
                     &format!("type-config/{}", rand_id()),
                 )
                 .to_string();
-                Ok(xml_response("SetTypeConfiguration", format!("    <ConfigurationArn>{}</ConfigurationArn>", xml_escape(&arn)), &rid))
+                Ok(xml_response(
+                    "SetTypeConfiguration",
+                    format!(
+                        "    <ConfigurationArn>{}</ConfigurationArn>",
+                        xml_escape(&arn)
+                    ),
+                    &rid,
+                ))
             }
-            "SetTypeDefaultVersion" => Ok(xml_response("SetTypeDefaultVersion", String::new(), &rid)),
+            "SetTypeDefaultVersion" => {
+                Ok(xml_response("SetTypeDefaultVersion", String::new(), &rid))
+            }
             "TestType" => {
                 let arn = Arn::new(
                     "cloudformation",
@@ -795,7 +913,11 @@ impl CloudFormationService {
                     &format!("type/resource/{}", rand_id()),
                 )
                 .to_string();
-                Ok(xml_response("TestType", format!("    <TypeVersionArn>{}</TypeVersionArn>", xml_escape(&arn)), &rid))
+                Ok(xml_response(
+                    "TestType",
+                    format!("    <TypeVersionArn>{}</TypeVersionArn>", xml_escape(&arn)),
+                    &rid,
+                ))
             }
             "PublishType" => {
                 let arn = Arn::new(
@@ -805,14 +927,25 @@ impl CloudFormationService {
                     &format!("type/resource/{}", rand_id()),
                 )
                 .to_string();
-                Ok(xml_response("PublishType", format!("    <PublicTypeArn>{}</PublicTypeArn>", xml_escape(&arn)), &rid))
+                Ok(xml_response(
+                    "PublishType",
+                    format!("    <PublicTypeArn>{}</PublicTypeArn>", xml_escape(&arn)),
+                    &rid,
+                ))
             }
             "RegisterPublisher" => {
                 let id = rand_id();
-                Ok(xml_response("RegisterPublisher", format!("    <PublisherId>{}</PublisherId>", xml_escape(&id)), &rid))
+                Ok(xml_response(
+                    "RegisterPublisher",
+                    format!("    <PublisherId>{}</PublisherId>", xml_escape(&id)),
+                    &rid,
+                ))
             }
             "DescribePublisher" => {
-                let id = params.get("PublisherId").cloned().unwrap_or_else(|| "default-publisher".to_string());
+                let id = params
+                    .get("PublisherId")
+                    .cloned()
+                    .unwrap_or_else(|| "default-publisher".to_string());
                 let inner = format!(
                     "    <PublisherId>{}</PublisherId>\n    <PublisherStatus>VERIFIED</PublisherStatus>\n    <IdentityProvider>AWS_Marketplace</IdentityProvider>",
                     xml_escape(&id),
@@ -822,7 +955,10 @@ impl CloudFormationService {
 
             // ── Generated templates ──
             "CreateGeneratedTemplate" => {
-                let name = params.get("GeneratedTemplateName").ok_or_else(|| missing("GeneratedTemplateName"))?.clone();
+                let name = params
+                    .get("GeneratedTemplateName")
+                    .ok_or_else(|| missing("GeneratedTemplateName"))?
+                    .clone();
                 let id = Arn::new(
                     "cloudformation",
                     "us-east-1",
@@ -834,10 +970,20 @@ impl CloudFormationService {
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "generated_templates").insert(name.clone(), entry);
-                Ok(xml_response("CreateGeneratedTemplate", format!("    <GeneratedTemplateId>{}</GeneratedTemplateId>", xml_escape(&id)), &rid))
+                Ok(xml_response(
+                    "CreateGeneratedTemplate",
+                    format!(
+                        "    <GeneratedTemplateId>{}</GeneratedTemplateId>",
+                        xml_escape(&id)
+                    ),
+                    &rid,
+                ))
             }
             "UpdateGeneratedTemplate" => {
-                let name = params.get("GeneratedTemplateName").ok_or_else(|| missing("GeneratedTemplateName"))?.clone();
+                let name = params
+                    .get("GeneratedTemplateName")
+                    .ok_or_else(|| missing("GeneratedTemplateName"))?
+                    .clone();
                 let id = Arn::new(
                     "cloudformation",
                     "us-east-1",
@@ -845,10 +991,20 @@ impl CloudFormationService {
                     &format!("generatedtemplate/{name}"),
                 )
                 .to_string();
-                Ok(xml_response("UpdateGeneratedTemplate", format!("    <GeneratedTemplateId>{}</GeneratedTemplateId>", xml_escape(&id)), &rid))
+                Ok(xml_response(
+                    "UpdateGeneratedTemplate",
+                    format!(
+                        "    <GeneratedTemplateId>{}</GeneratedTemplateId>",
+                        xml_escape(&id)
+                    ),
+                    &rid,
+                ))
             }
             "DescribeGeneratedTemplate" => {
-                let name = params.get("GeneratedTemplateName").ok_or_else(|| missing("GeneratedTemplateName"))?.clone();
+                let name = params
+                    .get("GeneratedTemplateName")
+                    .ok_or_else(|| missing("GeneratedTemplateName"))?
+                    .clone();
                 let inner = format!(
                     "    <GeneratedTemplateId>arn:aws:cloudformation:us-east-1:{}:generatedtemplate/{}</GeneratedTemplateId>\n    <GeneratedTemplateName>{}</GeneratedTemplateName>\n    <Status>COMPLETE</Status>",
                     xml_escape(&aid),
@@ -857,9 +1013,16 @@ impl CloudFormationService {
                 );
                 Ok(xml_response("DescribeGeneratedTemplate", inner, &rid))
             }
-            "GetGeneratedTemplate" => Ok(xml_response("GetGeneratedTemplate", "    <Status>COMPLETE</Status>\n    <TemplateBody>{}</TemplateBody>".to_string(), &rid)),
+            "GetGeneratedTemplate" => Ok(xml_response(
+                "GetGeneratedTemplate",
+                "    <Status>COMPLETE</Status>\n    <TemplateBody>{}</TemplateBody>".to_string(),
+                &rid,
+            )),
             "DeleteGeneratedTemplate" => {
-                let name = params.get("GeneratedTemplateName").ok_or_else(|| missing("GeneratedTemplateName"))?.clone();
+                let name = params
+                    .get("GeneratedTemplateName")
+                    .ok_or_else(|| missing("GeneratedTemplateName"))?
+                    .clone();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
                 if let Some(m) = state.extras.get_mut("generated_templates") {
@@ -867,7 +1030,11 @@ impl CloudFormationService {
                 }
                 Ok(xml_response("DeleteGeneratedTemplate", String::new(), &rid))
             }
-            "ListGeneratedTemplates" => Ok(xml_response("ListGeneratedTemplates", "    <Summaries/>".to_string(), &rid)),
+            "ListGeneratedTemplates" => Ok(xml_response(
+                "ListGeneratedTemplates",
+                "    <Summaries/>".to_string(),
+                &rid,
+            )),
 
             // ── Resource scans ──
             "StartResourceScan" => {
@@ -878,7 +1045,11 @@ impl CloudFormationService {
                     &format!("resourceScan/{}", rand_id()),
                 )
                 .to_string();
-                Ok(xml_response("StartResourceScan", format!("    <ResourceScanId>{}</ResourceScanId>", xml_escape(&id)), &rid))
+                Ok(xml_response(
+                    "StartResourceScan",
+                    format!("    <ResourceScanId>{}</ResourceScanId>", xml_escape(&id)),
+                    &rid,
+                ))
             }
             "DescribeResourceScan" => {
                 let id = params.get("ResourceScanId").cloned().unwrap_or_default();
@@ -888,42 +1059,349 @@ impl CloudFormationService {
                 );
                 Ok(xml_response("DescribeResourceScan", inner, &rid))
             }
-            "ListResourceScans" => Ok(xml_response("ListResourceScans", "    <ResourceScanSummaries/>".to_string(), &rid)),
-            "ListResourceScanResources" => Ok(xml_response("ListResourceScanResources", "    <Resources/>".to_string(), &rid)),
-            "ListResourceScanRelatedResources" => Ok(xml_response("ListResourceScanRelatedResources", "    <RelatedResources/>".to_string(), &rid)),
+            "ListResourceScans" => Ok(xml_response(
+                "ListResourceScans",
+                "    <ResourceScanSummaries/>".to_string(),
+                &rid,
+            )),
+            "ListResourceScanResources" => Ok(xml_response(
+                "ListResourceScanResources",
+                "    <Resources/>".to_string(),
+                &rid,
+            )),
+            "ListResourceScanRelatedResources" => Ok(xml_response(
+                "ListResourceScanRelatedResources",
+                "    <RelatedResources/>".to_string(),
+                &rid,
+            )),
 
             // ── Drift detection ──
             "DetectStackDrift" => {
+                let stack_name = params
+                    .get("StackName")
+                    .ok_or_else(|| missing("StackName"))?
+                    .clone();
                 let id = rand_id();
-                Ok(xml_response("DetectStackDrift", format!("    <StackDriftDetectionId>{}</StackDriftDetectionId>", xml_escape(&id)), &rid))
+
+                let resources: Vec<StackResource> = {
+                    let accounts = self.state.read();
+                    let stack = accounts.get(&aid).and_then(|s| {
+                        s.stacks.values().find(|st| {
+                            (st.name == stack_name || st.stack_id == stack_name)
+                                && st.status != "DELETE_COMPLETE"
+                        })
+                    });
+                    stack.map(|s| s.resources.clone()).unwrap_or_default()
+                };
+
+                let mut drifted_resources: Vec<Value> = Vec::new();
+
+                for resource in &resources {
+                    let exists = match resource.resource_type.as_str() {
+                        "AWS::SQS::Queue" => self
+                            .deps
+                            .sqs
+                            .read()
+                            .get(&aid)
+                            .map(|s| s.queues.contains_key(&resource.physical_id))
+                            .unwrap_or(false),
+                        "AWS::SNS::Topic" => self
+                            .deps
+                            .sns
+                            .read()
+                            .get(&aid)
+                            .map(|s| s.topics.contains_key(&resource.physical_id))
+                            .unwrap_or(false),
+                        "AWS::S3::Bucket" => self
+                            .deps
+                            .s3
+                            .read()
+                            .get(&aid)
+                            .map(|s| s.buckets.contains_key(&resource.physical_id))
+                            .unwrap_or(false),
+                        "AWS::Lambda::Function" => self
+                            .deps
+                            .lambda
+                            .read()
+                            .get(&aid)
+                            .map(|s| s.functions.contains_key(&resource.physical_id))
+                            .unwrap_or(false),
+                        "AWS::IAM::Role" => self
+                            .deps
+                            .iam
+                            .read()
+                            .get(&aid)
+                            .map(|s| s.roles.contains_key(&resource.physical_id))
+                            .unwrap_or(false),
+                        "AWS::DynamoDB::Table" => self
+                            .deps
+                            .dynamodb
+                            .read()
+                            .get(&aid)
+                            .map(|s| s.tables.values().any(|t| t.arn == resource.physical_id))
+                            .unwrap_or(false),
+                        "AWS::KMS::Key" => self
+                            .deps
+                            .kms
+                            .read()
+                            .get(&aid)
+                            .map(|s| s.keys.contains_key(&resource.physical_id))
+                            .unwrap_or(false),
+                        "AWS::SecretsManager::Secret" => self
+                            .deps
+                            .secretsmanager
+                            .read()
+                            .get(&aid)
+                            .map(|s| s.secrets.contains_key(&resource.physical_id))
+                            .unwrap_or(false),
+                        _ => true, // NOT_CHECKED — assume exists
+                    };
+                    if !exists {
+                        drifted_resources.push(json!({
+                            "LogicalResourceId": resource.logical_id,
+                            "PhysicalResourceId": resource.physical_id,
+                            "ResourceType": resource.resource_type,
+                            "StackResourceDriftStatus": "DELETED",
+                            "PropertyDifferences": [],
+                        }));
+                    }
+                }
+
+                let stack_drift_status = if drifted_resources.is_empty() {
+                    "IN_SYNC"
+                } else {
+                    "DRIFTED"
+                };
+
+                let record = json!({
+                    "StackDriftDetectionId": id,
+                    "StackName": stack_name,
+                    "StackDriftStatus": stack_drift_status,
+                    "DetectionStatus": "DETECTION_COMPLETE",
+                    "DriftedResources": drifted_resources,
+                });
+
+                {
+                    let mut accounts = self.state.write();
+                    let state = accounts.get_or_create(&aid);
+                    store(&mut state.extras, "drift_detection").insert(id.clone(), record);
+                }
+
+                Ok(xml_response(
+                    "DetectStackDrift",
+                    format!(
+                        "    <StackDriftDetectionId>{}</StackDriftDetectionId>",
+                        xml_escape(&id)
+                    ),
+                    &rid,
+                ))
             }
-            "DetectStackResourceDrift" => Ok(xml_response(
-                "DetectStackResourceDrift",
-                "    <StackResourceDrift>\n      <StackResourceDriftStatus>IN_SYNC</StackResourceDriftStatus>\n    </StackResourceDrift>".to_string(),
-                &rid,
-            )),
+            "DetectStackResourceDrift" => {
+                let stack_name = params
+                    .get("StackName")
+                    .ok_or_else(|| missing("StackName"))?
+                    .clone();
+                let logical = params
+                    .get("LogicalResourceId")
+                    .ok_or_else(|| missing("LogicalResourceId"))?
+                    .clone();
+                let accounts = self.state.read();
+                let resource_drift = accounts
+                    .get(&aid)
+                    .and_then(|s| {
+                        s.stacks.values().find(|st| {
+                            (st.name == stack_name || st.stack_id == stack_name)
+                                && st.status != "DELETE_COMPLETE"
+                        })
+                    })
+                    .and_then(|stack| stack.resources.iter().find(|r| r.logical_id == logical))
+                    .map(|resource| {
+                        let exists = match resource.resource_type.as_str() {
+                            "AWS::SQS::Queue" => self
+                                .deps
+                                .sqs
+                                .read()
+                                .get(&aid)
+                                .map(|s| s.queues.contains_key(&resource.physical_id))
+                                .unwrap_or(false),
+                            "AWS::SNS::Topic" => self
+                                .deps
+                                .sns
+                                .read()
+                                .get(&aid)
+                                .map(|s| s.topics.contains_key(&resource.physical_id))
+                                .unwrap_or(false),
+                            "AWS::S3::Bucket" => self
+                                .deps
+                                .s3
+                                .read()
+                                .get(&aid)
+                                .map(|s| s.buckets.contains_key(&resource.physical_id))
+                                .unwrap_or(false),
+                            "AWS::Lambda::Function" => self
+                                .deps
+                                .lambda
+                                .read()
+                                .get(&aid)
+                                .map(|s| s.functions.contains_key(&resource.physical_id))
+                                .unwrap_or(false),
+                            "AWS::IAM::Role" => self
+                                .deps
+                                .iam
+                                .read()
+                                .get(&aid)
+                                .map(|s| s.roles.contains_key(&resource.physical_id))
+                                .unwrap_or(false),
+                            "AWS::DynamoDB::Table" => self
+                                .deps
+                                .dynamodb
+                                .read()
+                                .get(&aid)
+                                .map(|s| s.tables.values().any(|t| t.arn == resource.physical_id))
+                                .unwrap_or(false),
+                            "AWS::KMS::Key" => self
+                                .deps
+                                .kms
+                                .read()
+                                .get(&aid)
+                                .map(|s| s.keys.contains_key(&resource.physical_id))
+                                .unwrap_or(false),
+                            "AWS::SecretsManager::Secret" => self
+                                .deps
+                                .secretsmanager
+                                .read()
+                                .get(&aid)
+                                .map(|s| s.secrets.contains_key(&resource.physical_id))
+                                .unwrap_or(false),
+                            _ => true,
+                        };
+                        if exists {
+                            "IN_SYNC"
+                        } else {
+                            "DELETED"
+                        }
+                    })
+                    .unwrap_or("NOT_CHECKED");
+
+                let inner = format!(
+                    "    <StackResourceDrift>\n      <LogicalResourceId>{}</LogicalResourceId>\n      <StackResourceDriftStatus>{}</StackResourceDriftStatus>\n    </StackResourceDrift>",
+                    xml_escape(&logical),
+                    xml_escape(resource_drift),
+                );
+                Ok(xml_response("DetectStackResourceDrift", inner, &rid))
+            }
             "DetectStackSetDrift" => {
                 let op_id = rand_id();
-                Ok(xml_response("DetectStackSetDrift", format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)), &rid))
+                Ok(xml_response(
+                    "DetectStackSetDrift",
+                    format!("    <OperationId>{}</OperationId>", xml_escape(&op_id)),
+                    &rid,
+                ))
             }
             "DescribeStackDriftDetectionStatus" => {
-                let id = params.get("StackDriftDetectionId").cloned().unwrap_or_default();
-                let inner = format!(
-                    "    <StackDriftDetectionId>{}</StackDriftDetectionId>\n    <DetectionStatus>DETECTION_COMPLETE</DetectionStatus>\n    <StackDriftStatus>IN_SYNC</StackDriftStatus>",
-                    xml_escape(&id),
-                );
-                Ok(xml_response("DescribeStackDriftDetectionStatus", inner, &rid))
-            }
-            "DescribeStackResourceDrifts" => Ok(xml_response("DescribeStackResourceDrifts", "    <StackResourceDrifts/>".to_string(), &rid)),
-            "DescribeStackResource" => {
-                let stack_name = params.get("StackName").ok_or_else(|| missing("StackName"))?.clone();
-                let logical = params.get("LogicalResourceId").ok_or_else(|| missing("LogicalResourceId"))?.clone();
+                let id = params
+                    .get("StackDriftDetectionId")
+                    .ok_or_else(|| missing("StackDriftDetectionId"))?
+                    .clone();
                 let accounts = self.state.read();
-                let detail = accounts.get(&aid)
+                let record = accounts
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("drift_detection"))
+                    .and_then(|m| m.get(&id))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({
+                            "StackDriftDetectionId": id,
+                            "StackDriftStatus": "IN_SYNC",
+                            "DetectionStatus": "DETECTION_COMPLETE",
+                        })
+                    });
+
+                let inner = format!(
+                    "    <StackDriftDetectionId>{}</StackDriftDetectionId>\n    <DetectionStatus>{}</DetectionStatus>\n    <StackDriftStatus>{}</StackDriftStatus>",
+                    xml_escape(record["StackDriftDetectionId"].as_str().unwrap_or("")),
+                    xml_escape(record["DetectionStatus"].as_str().unwrap_or("DETECTION_COMPLETE")),
+                    xml_escape(record["StackDriftStatus"].as_str().unwrap_or("IN_SYNC")),
+                );
+                Ok(xml_response(
+                    "DescribeStackDriftDetectionStatus",
+                    inner,
+                    &rid,
+                ))
+            }
+            "DescribeStackResourceDrifts" => {
+                let stack_name = params.get("StackName").cloned().unwrap_or_default();
+                let accounts = self.state.read();
+                let drifted: Vec<Value> = accounts
+                    .get(&aid)
+                    .and_then(|s| {
+                        let found = s
+                            .stacks
+                            .values()
+                            .find(|st| {
+                                (st.name == stack_name || st.stack_id == stack_name)
+                                    && st.status != "DELETE_COMPLETE"
+                            })
+                            .is_some();
+                        if !found {
+                            return None;
+                        }
+                        s.extras
+                            .get("drift_detection")
+                            .and_then(|m| {
+                                m.values()
+                                    .find(|v| v["StackName"].as_str() == Some(stack_name.as_str()))
+                            })
+                            .and_then(|v| v["DriftedResources"].as_array().cloned())
+                    })
+                    .unwrap_or_default();
+
+                let inner = if drifted.is_empty() {
+                    "    <StackResourceDrifts/>".to_string()
+                } else {
+                    format!(
+                        "    <StackResourceDrifts>\n{}\n    </StackResourceDrifts>",
+                        members_xml(&drifted, |v| {
+                            format!(
+                            "        <StackResourceDrift>\n          <LogicalResourceId>{}</LogicalResourceId>\n          <PhysicalResourceId>{}</PhysicalResourceId>\n          <ResourceType>{}</ResourceType>\n          <StackResourceDriftStatus>{}</StackResourceDriftStatus>\n        </StackResourceDrift>",
+                            xml_escape(v["LogicalResourceId"].as_str().unwrap_or("")),
+                            xml_escape(v["PhysicalResourceId"].as_str().unwrap_or("")),
+                            xml_escape(v["ResourceType"].as_str().unwrap_or("")),
+                            xml_escape(v["StackResourceDriftStatus"].as_str().unwrap_or("IN_SYNC")),
+                        )
+                        }),
+                    )
+                };
+                Ok(xml_response("DescribeStackResourceDrifts", inner, &rid))
+            }
+            "DescribeStackResource" => {
+                let stack_name = params
+                    .get("StackName")
+                    .ok_or_else(|| missing("StackName"))?
+                    .clone();
+                let logical = params
+                    .get("LogicalResourceId")
+                    .ok_or_else(|| missing("LogicalResourceId"))?
+                    .clone();
+                let accounts = self.state.read();
+                let detail = accounts
+                    .get(&aid)
                     .and_then(|s| s.stacks.get(&stack_name))
                     .and_then(|s| s.resources.iter().find(|r| r.logical_id == logical))
-                    .map(|r| (r.physical_id.clone(), r.resource_type.clone(), r.status.clone()))
-                    .unwrap_or_else(|| ("pid".to_string(), "AWS::Custom".to_string(), "CREATE_COMPLETE".to_string()));
+                    .map(|r| {
+                        (
+                            r.physical_id.clone(),
+                            r.resource_type.clone(),
+                            r.status.clone(),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            "pid".to_string(),
+                            "AWS::Custom".to_string(),
+                            "CREATE_COMPLETE".to_string(),
+                        )
+                    });
                 let inner = format!(
                     "    <StackResourceDetail>\n      <StackName>{}</StackName>\n      <LogicalResourceId>{}</LogicalResourceId>\n      <PhysicalResourceId>{}</PhysicalResourceId>\n      <ResourceType>{}</ResourceType>\n      <ResourceStatus>{}</ResourceStatus>\n      <LastUpdatedTimestamp>{}</LastUpdatedTimestamp>\n    </StackResourceDetail>",
                     xml_escape(&stack_name),
@@ -970,7 +1448,8 @@ impl CloudFormationService {
                 } else {
                     format!(
                         "    <StackEvents>\n{}\n    </StackEvents>",
-                        members_xml(&events, |v| format!(
+                        members_xml(&events, |v| {
+                            format!(
                             "        <EventId>{}</EventId>\n        <StackId>{}</StackId>\n        <StackName>{}</StackName>\n        <LogicalResourceId>{}</LogicalResourceId>\n        <PhysicalResourceId>{}</PhysicalResourceId>\n        <ResourceType>{}</ResourceType>\n        <ResourceStatus>{}</ResourceStatus>\n        <Timestamp>{}</Timestamp>",
                             xml_escape(v["EventId"].as_str().unwrap_or("")),
                             xml_escape(v["StackId"].as_str().unwrap_or("")),
@@ -980,12 +1459,17 @@ impl CloudFormationService {
                             xml_escape(v["ResourceType"].as_str().unwrap_or("")),
                             xml_escape(v["ResourceStatus"].as_str().unwrap_or("")),
                             xml_escape(v["Timestamp"].as_str().unwrap_or("")),
-                        )),
+                        )
+                        }),
                     )
                 };
                 Ok(xml_response("DescribeStackEvents", inner, &rid))
             }
-            "DescribeEvents" => Ok(xml_response("DescribeEvents", "    <Events/>".to_string(), &rid)),
+            "DescribeEvents" => Ok(xml_response(
+                "DescribeEvents",
+                "    <Events/>".to_string(),
+                &rid,
+            )),
 
             // ── Hooks ──
             "GetHookResult" => Ok(xml_response(
@@ -993,7 +1477,11 @@ impl CloudFormationService {
                 "    <Status>HOOK_COMPLETE_SUCCEEDED</Status>".to_string(),
                 &rid,
             )),
-            "ListHookResults" => Ok(xml_response("ListHookResults", "    <HookResults/>".to_string(), &rid)),
+            "ListHookResults" => Ok(xml_response(
+                "ListHookResults",
+                "    <HookResults/>".to_string(),
+                &rid,
+            )),
             "RecordHandlerProgress" => Ok(xml_response_no_result("RecordHandlerProgress", &rid)),
 
             // ── Imports / exports ──
@@ -1044,17 +1532,26 @@ impl CloudFormationService {
 
             // ── Stack policies ──
             "GetStackPolicy" => {
-                let stack = params.get("StackName").ok_or_else(|| missing("StackName"))?.clone();
+                let stack = params
+                    .get("StackName")
+                    .ok_or_else(|| missing("StackName"))?
+                    .clone();
                 let accounts = self.state.read();
                 let body = accounts.get(&aid)
                     .and_then(|s| s.stack_policies.get(&stack))
                     .cloned()
                     .unwrap_or_else(|| r#"{"Statement":[{"Effect":"Allow","Action":"Update:*","Principal":"*","Resource":"*"}]}"#.to_string());
-                let inner = format!("    <StackPolicyBody>{}</StackPolicyBody>", xml_escape(&body));
+                let inner = format!(
+                    "    <StackPolicyBody>{}</StackPolicyBody>",
+                    xml_escape(&body)
+                );
                 Ok(xml_response("GetStackPolicy", inner, &rid))
             }
             "SetStackPolicy" => {
-                let stack = params.get("StackName").ok_or_else(|| missing("StackName"))?.clone();
+                let stack = params
+                    .get("StackName")
+                    .ok_or_else(|| missing("StackName"))?
+                    .clone();
                 let body = params.get("StackPolicyBody").cloned().unwrap_or_default();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
@@ -1064,17 +1561,29 @@ impl CloudFormationService {
 
             // ── Termination protection ──
             "UpdateTerminationProtection" => {
-                let stack = params.get("StackName").ok_or_else(|| missing("StackName"))?.clone();
-                let enabled = params.get("EnableTerminationProtection")
+                let stack = params
+                    .get("StackName")
+                    .ok_or_else(|| missing("StackName"))?
+                    .clone();
+                let enabled = params
+                    .get("EnableTerminationProtection")
                     .map(|v| v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false);
                 let stack_id = {
                     let mut accounts = self.state.write();
                     let state = accounts.get_or_create(&aid);
                     state.termination_protection.insert(stack.clone(), enabled);
-                    state.stacks.get(&stack).map(|s| s.stack_id.clone()).unwrap_or_else(|| stack.clone())
+                    state
+                        .stacks
+                        .get(&stack)
+                        .map(|s| s.stack_id.clone())
+                        .unwrap_or_else(|| stack.clone())
                 };
-                Ok(xml_response("UpdateTerminationProtection", format!("    <StackId>{}</StackId>", xml_escape(&stack_id)), &rid))
+                Ok(xml_response(
+                    "UpdateTerminationProtection",
+                    format!("    <StackId>{}</StackId>", xml_escape(&stack_id)),
+                    &rid,
+                ))
             }
 
             // ── Account / org / validation / utilities ──
@@ -1085,33 +1594,51 @@ impl CloudFormationService {
         <Name>StackLimit</Name>
         <Value>2000</Value>
       </member>
-    </AccountLimits>"#.to_string(),
+    </AccountLimits>"#
+                    .to_string(),
                 &rid,
             )),
             "ActivateOrganizationsAccess" => {
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
                 state.orgs_access_enabled = true;
-                Ok(xml_response("ActivateOrganizationsAccess", String::new(), &rid))
+                Ok(xml_response(
+                    "ActivateOrganizationsAccess",
+                    String::new(),
+                    &rid,
+                ))
             }
             "DeactivateOrganizationsAccess" => {
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
                 state.orgs_access_enabled = false;
-                Ok(xml_response("DeactivateOrganizationsAccess", String::new(), &rid))
+                Ok(xml_response(
+                    "DeactivateOrganizationsAccess",
+                    String::new(),
+                    &rid,
+                ))
             }
             "DescribeOrganizationsAccess" => {
                 let accounts = self.state.read();
-                let status = if accounts.get(&aid).map(|s| s.orgs_access_enabled).unwrap_or(false) {
+                let status = if accounts
+                    .get(&aid)
+                    .map(|s| s.orgs_access_enabled)
+                    .unwrap_or(false)
+                {
                     "ENABLED"
                 } else {
                     "DISABLED"
                 };
-                Ok(xml_response("DescribeOrganizationsAccess", format!("    <Status>{}</Status>", status), &rid))
+                Ok(xml_response(
+                    "DescribeOrganizationsAccess",
+                    format!("    <Status>{}</Status>", status),
+                    &rid,
+                ))
             }
             "ValidateTemplate" => Ok(xml_response(
                 "ValidateTemplate",
-                "    <Description>Validated</Description>\n    <Capabilities/>\n    <Parameters/>".to_string(),
+                "    <Description>Validated</Description>\n    <Capabilities/>\n    <Parameters/>"
+                    .to_string(),
                 &rid,
             )),
             "EstimateTemplateCost" => Ok(xml_response(
@@ -1125,18 +1652,34 @@ impl CloudFormationService {
                 &rid,
             )),
             "CancelUpdateStack" => Ok(xml_response_no_result("CancelUpdateStack", &rid)),
-            "ContinueUpdateRollback" => Ok(xml_response("ContinueUpdateRollback", String::new(), &rid)),
+            "ContinueUpdateRollback" => {
+                Ok(xml_response("ContinueUpdateRollback", String::new(), &rid))
+            }
             "RollbackStack" => {
-                let stack = params.get("StackName").ok_or_else(|| missing("StackName"))?.clone();
+                let stack = params
+                    .get("StackName")
+                    .ok_or_else(|| missing("StackName"))?
+                    .clone();
                 let stack_id = {
                     let accounts = self.state.read();
-                    accounts.get(&aid).and_then(|s| s.stacks.get(&stack)).map(|s| s.stack_id.clone()).unwrap_or_else(|| stack.clone())
+                    accounts
+                        .get(&aid)
+                        .and_then(|s| s.stacks.get(&stack))
+                        .map(|s| s.stack_id.clone())
+                        .unwrap_or_else(|| stack.clone())
                 };
-                Ok(xml_response("RollbackStack", format!("    <StackId>{}</StackId>", xml_escape(&stack_id)), &rid))
+                Ok(xml_response(
+                    "RollbackStack",
+                    format!("    <StackId>{}</StackId>", xml_escape(&stack_id)),
+                    &rid,
+                ))
             }
             "SignalResource" => Ok(xml_response_no_result("SignalResource", &rid)),
 
-            _ => Err(AwsServiceError::action_not_implemented("cloudformation", &action)),
+            _ => Err(AwsServiceError::action_not_implemented(
+                "cloudformation",
+                &action,
+            )),
         }
     }
 }
@@ -1347,11 +1890,17 @@ mod tests {
         ok("ListResourceScans", &[]);
         ok("ListResourceScanResources", &[]);
         ok("ListResourceScanRelatedResources", &[]);
-        ok("DetectStackDrift", &[]);
-        ok("DetectStackResourceDrift", &[]);
-        ok("DetectStackSetDrift", &[]);
-        ok("DescribeStackDriftDetectionStatus", &[]);
-        ok("DescribeStackResourceDrifts", &[]);
+        ok("DetectStackDrift", &[("StackName", "s")]);
+        ok(
+            "DetectStackResourceDrift",
+            &[("StackName", "s"), ("LogicalResourceId", "L")],
+        );
+        ok("DetectStackSetDrift", &[("StackSetName", "ss")]);
+        ok(
+            "DescribeStackDriftDetectionStatus",
+            &[("StackDriftDetectionId", "id")],
+        );
+        ok("DescribeStackResourceDrifts", &[("StackName", "s")]);
         ok(
             "DescribeStackResource",
             &[("StackName", "s"), ("LogicalResourceId", "L")],

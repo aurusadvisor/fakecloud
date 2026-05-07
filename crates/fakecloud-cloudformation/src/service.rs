@@ -59,7 +59,7 @@ fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
 /// any resource whose `Ref` targets are still unknown just stays pending
 /// for the next pass. When no pass makes progress we report the first
 /// pending failure and rollback.
-fn provision_stack_resources(
+pub(crate) fn provision_stack_resources(
     provisioner: &ResourceProvisioner,
     resource_defs: &[template::ResourceDefinition],
     template_body: &str,
@@ -188,7 +188,7 @@ pub struct CloudFormationDeps {
 
 pub struct CloudFormationService {
     pub(crate) state: SharedCloudFormationState,
-    deps: CloudFormationDeps,
+    pub(crate) deps: CloudFormationDeps,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
 }
@@ -270,6 +270,7 @@ impl CloudFormationService {
             athena_state: self.deps.athena.clone(),
             firehose_state: self.deps.firehose.clone(),
             glue_state: self.deps.glue.clone(),
+            cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -668,7 +669,7 @@ impl CloudFormationService {
             stack_id: stack_id.clone(),
             template: template_body.clone(),
             status: "CREATE_COMPLETE".to_string(),
-            resources,
+            resources: resources.clone(),
             parameters,
             tags,
             created_at: Utc::now(),
@@ -683,6 +684,32 @@ impl CloudFormationService {
             let state = accounts.get_or_create(&req.account_id);
             state.stacks.insert(stack_name.clone(), stack);
             Self::sync_exports_imports(state, &stack_id, stack_name, &outputs, &imported_names);
+
+            // Emit lifecycle events for CreateStack
+            record_stack_status_event(
+                state,
+                &stack_id,
+                stack_name,
+                "AWS::CloudFormation::Stack",
+                "CREATE_IN_PROGRESS",
+            );
+            let changes: Vec<ResourceChange> = resources
+                .iter()
+                .map(|r| ResourceChange {
+                    action: ResourceChangeAction::Create,
+                    logical_id: r.logical_id.clone(),
+                    physical_id: r.physical_id.clone(),
+                    resource_type: r.resource_type.clone(),
+                })
+                .collect();
+            record_stack_events(state, &stack_id, stack_name, &changes);
+            record_stack_status_event(
+                state,
+                &stack_id,
+                stack_name,
+                "AWS::CloudFormation::Stack",
+                "CREATE_COMPLETE",
+            );
         }
 
         Self::send_stack_notification(

@@ -1,5 +1,5 @@
 use base64::Engine;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Internal sentinel emitted whenever a CFN value resolves to
@@ -92,6 +92,7 @@ pub fn parse_template_with_resolution(
     // hand-authored one. Parameters flow in so the items list can be a
     // `Ref` to a CommaDelimitedList parameter.
     let value = expand_for_each(&value, &BTreeMap::new(), parameters)?;
+    let value = expand_sam(&value);
 
     let description = value
         .get("Description")
@@ -567,6 +568,201 @@ fn expand_for_each(
         }
         other => Ok(other.clone()),
     }
+}
+
+/// Expand AWS::Serverless-2016-10-31 SAM resources into native
+/// CloudFormation resources so the provisioner can handle them.
+fn expand_sam(value: &Value) -> Value {
+    let transform = value.get("Transform");
+    let has_sam = match transform {
+        Some(Value::String(s)) => s == "AWS::Serverless-2016-10-31",
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .any(|v| v.as_str() == Some("AWS::Serverless-2016-10-31")),
+        _ => false,
+    };
+    if !has_sam {
+        return value.clone();
+    }
+
+    let mut value = value.clone();
+    let Some(resources) = value.get_mut("Resources") else {
+        return value;
+    };
+    let Some(resources_map) = resources.as_object_mut() else {
+        return value;
+    };
+
+    let mut new_resources = serde_json::Map::new();
+    for (logical_id, resource) in resources_map.iter() {
+        let Some(resource_obj) = resource.as_object() else {
+            new_resources.insert(logical_id.clone(), resource.clone());
+            continue;
+        };
+        let Some(ty) = resource_obj.get("Type").and_then(|v| v.as_str()) else {
+            new_resources.insert(logical_id.clone(), resource.clone());
+            continue;
+        };
+        let properties = resource_obj
+            .get("Properties")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+        match ty {
+            "AWS::Serverless::Function" => {
+                let mut lambda_props = if let Some(p) = properties.as_object() {
+                    p.clone()
+                } else {
+                    serde_json::Map::new()
+                };
+                // Map CodeUri / InlineCode to Code
+                if let Some(code_uri) = lambda_props.get("CodeUri").cloned() {
+                    lambda_props.remove("CodeUri");
+                    let code = if let Some(s) = code_uri.as_str() {
+                        if let Some(stripped) = s.strip_prefix("s3://") {
+                            let parts: Vec<&str> = stripped.splitn(2, '/').collect();
+                            if parts.len() == 2 {
+                                json!({"S3Bucket": parts[0], "S3Key": parts[1]})
+                            } else {
+                                json!({"S3Bucket": "sam", "S3Key": s})
+                            }
+                        } else {
+                            json!({"S3Bucket": "sam", "S3Key": s})
+                        }
+                    } else {
+                        code_uri
+                    };
+                    lambda_props.insert("Code".to_string(), code);
+                } else if let Some(inline) = lambda_props.get("InlineCode").cloned() {
+                    lambda_props.remove("InlineCode");
+                    lambda_props.insert("Code".to_string(), json!({"ZipFile": inline}));
+                }
+                let mut lambda_resource = serde_json::Map::new();
+                lambda_resource.insert("Type".to_string(), json!("AWS::Lambda::Function"));
+                lambda_resource.insert("Properties".to_string(), Value::Object(lambda_props));
+                for (k, v) in resource_obj {
+                    if k != "Type" && k != "Properties" {
+                        lambda_resource.insert(k.clone(), v.clone());
+                    }
+                }
+                new_resources.insert(logical_id.clone(), Value::Object(lambda_resource));
+            }
+            "AWS::Serverless::Api" => {
+                let mut api_props = if let Some(p) = properties.as_object() {
+                    p.clone()
+                } else {
+                    serde_json::Map::new()
+                };
+                if let Some(def) = api_props.get("DefinitionBody").cloned() {
+                    api_props.remove("DefinitionBody");
+                    api_props.insert("Body".to_string(), def);
+                }
+                let mut api_resource = serde_json::Map::new();
+                api_resource.insert("Type".to_string(), json!("AWS::ApiGateway::RestApi"));
+                api_resource.insert("Properties".to_string(), Value::Object(api_props));
+                for (k, v) in resource_obj {
+                    if k != "Type" && k != "Properties" {
+                        api_resource.insert(k.clone(), v.clone());
+                    }
+                }
+                new_resources.insert(logical_id.clone(), Value::Object(api_resource));
+            }
+            "AWS::Serverless::HttpApi" => {
+                let mut httpapi_resource = serde_json::Map::new();
+                httpapi_resource.insert("Type".to_string(), json!("AWS::ApiGatewayV2::Api"));
+                httpapi_resource.insert("Properties".to_string(), properties);
+                for (k, v) in resource_obj {
+                    if k != "Type" && k != "Properties" {
+                        httpapi_resource.insert(k.clone(), v.clone());
+                    }
+                }
+                new_resources.insert(logical_id.clone(), Value::Object(httpapi_resource));
+            }
+            "AWS::Serverless::SimpleTable" => {
+                let mut table_props = if let Some(p) = properties.as_object() {
+                    p.clone()
+                } else {
+                    serde_json::Map::new()
+                };
+                if let Some(pk) = table_props.get("PrimaryKey") {
+                    if let Some(pk_obj) = pk.as_object() {
+                        let name = pk_obj.get("Name").cloned().unwrap_or_else(|| json!("id"));
+                        let ty = match pk_obj.get("Type").and_then(|v| v.as_str()) {
+                            Some("String") => json!("S"),
+                            Some("Number") => json!("N"),
+                            Some("Binary") => json!("B"),
+                            Some(other) => json!(other),
+                            None => json!("S"),
+                        };
+                        table_props.remove("PrimaryKey");
+                        table_props.insert(
+                            "KeySchema".to_string(),
+                            json!([{"AttributeName": name.clone(), "KeyType": "HASH"}]),
+                        );
+                        table_props.insert(
+                            "AttributeDefinitions".to_string(),
+                            json!([{"AttributeName": name, "AttributeType": ty}]),
+                        );
+                    }
+                }
+                if !table_props.contains_key("BillingMode") {
+                    table_props.insert("BillingMode".to_string(), json!("PAY_PER_REQUEST"));
+                }
+                let mut table_resource = serde_json::Map::new();
+                table_resource.insert("Type".to_string(), json!("AWS::DynamoDB::Table"));
+                table_resource.insert("Properties".to_string(), Value::Object(table_props));
+                for (k, v) in resource_obj {
+                    if k != "Type" && k != "Properties" {
+                        table_resource.insert(k.clone(), v.clone());
+                    }
+                }
+                new_resources.insert(logical_id.clone(), Value::Object(table_resource));
+            }
+            "AWS::Serverless::LayerVersion" => {
+                let mut layer_props = if let Some(p) = properties.as_object() {
+                    p.clone()
+                } else {
+                    serde_json::Map::new()
+                };
+                if let Some(uri) = layer_props.get("ContentUri").cloned() {
+                    layer_props.remove("ContentUri");
+                    let content = if let Some(s) = uri.as_str() {
+                        if let Some(stripped) = s.strip_prefix("s3://") {
+                            let parts: Vec<&str> = stripped.splitn(2, '/').collect();
+                            if parts.len() == 2 {
+                                json!({"S3Bucket": parts[0], "S3Key": parts[1]})
+                            } else {
+                                json!({"S3Bucket": "sam", "S3Key": s})
+                            }
+                        } else {
+                            json!({"S3Bucket": "sam", "S3Key": s})
+                        }
+                    } else {
+                        uri
+                    };
+                    layer_props.insert("Content".to_string(), content);
+                }
+                let mut layer_resource = serde_json::Map::new();
+                layer_resource.insert("Type".to_string(), json!("AWS::Lambda::LayerVersion"));
+                layer_resource.insert("Properties".to_string(), Value::Object(layer_props));
+                for (k, v) in resource_obj {
+                    if k != "Type" && k != "Properties" {
+                        layer_resource.insert(k.clone(), v.clone());
+                    }
+                }
+                new_resources.insert(logical_id.clone(), Value::Object(layer_resource));
+            }
+            _ => {
+                new_resources.insert(logical_id.clone(), resource.clone());
+            }
+        }
+    }
+
+    resources_map.clear();
+    for (k, v) in new_resources {
+        resources_map.insert(k, v);
+    }
+    value
 }
 
 /// Resolve the `items` argument of an `Fn::ForEach` macro. Accepts:
