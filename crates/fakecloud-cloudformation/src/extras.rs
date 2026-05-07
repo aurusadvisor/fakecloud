@@ -1211,6 +1211,9 @@ mod tests {
             athena: Arc::new(parking_lot::RwLock::new(
                 fakecloud_athena::AthenaAccounts::new(),
             )),
+            firehose: Arc::new(parking_lot::RwLock::new(
+                fakecloud_firehose::FirehoseAccounts::new(),
+            )),
             glue: Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new())),
             delivery: Arc::new(DeliveryBus::new()),
         }
