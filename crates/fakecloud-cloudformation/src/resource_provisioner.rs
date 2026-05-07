@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::state::SharedCloudFormationState;
 use fakecloud_acm::{
     CertificateOptions as AcmCertificateOptions, DomainValidation as AcmDomainValidation,
     RenewalSummary as AcmRenewalSummary, SharedAcmState, StoredCertificate as AcmStoredCertificate,
@@ -857,6 +858,7 @@ pub struct ResourceProvisioner {
     pub athena_state: SharedAthenaState,
     pub firehose_state: fakecloud_firehose::SharedFirehoseState,
     pub glue_state: fakecloud_glue::SharedGlueState,
+    pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     pub account_id: String,
     pub region: String,
@@ -1073,6 +1075,7 @@ impl ResourceProvisioner {
                 self.create_firehose_delivery_stream(resource)
             }
             "AWS::Glue::Database" => self.create_glue_database(resource),
+            "AWS::CloudFormation::Stack" => self.create_cloudformation_stack(resource),
             "AWS::Glue::Table" => self.create_glue_table(resource),
             "AWS::Glue::Partition" => self.create_glue_partition(resource),
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
@@ -1327,6 +1330,9 @@ impl ResourceProvisioner {
             }
             "AWS::Athena::PreparedStatement" => {
                 self.get_att_athena_prepared_statement(&resource.physical_id, attribute)
+            }
+            "AWS::CloudFormation::Stack" => {
+                self.get_att_cloudformation_stack(&resource.physical_id, attribute)
             }
             _ => None,
         }
@@ -1908,6 +1914,7 @@ impl ResourceProvisioner {
                 self.delete_firehose_delivery_stream(&resource.physical_id)
             }
             "AWS::Glue::Database" => self.delete_glue_database(&resource.physical_id),
+            "AWS::CloudFormation::Stack" => self.delete_cloudformation_stack(&resource.physical_id),
             "AWS::Glue::Table" => self.delete_glue_table(&resource.physical_id),
             "AWS::Glue::Partition" => {
                 self.delete_glue_partition(&resource.physical_id, &resource.attributes)
@@ -17698,6 +17705,315 @@ impl ResourceProvisioner {
         table.partitions.remove(parts[2]);
         Ok(())
     }
+
+    // --- CloudFormation Nested Stack ---
+
+    fn create_cloudformation_stack(
+        &self,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+
+        let template_body = if let Some(body) = props.get("TemplateBody").and_then(|v| v.as_str()) {
+            body.to_string()
+        } else if let Some(url) = props.get("TemplateURL").and_then(|v| v.as_str()) {
+            self.fetch_template_from_url(url)?
+        } else {
+            return Err(
+                "AWS::CloudFormation::Stack requires TemplateURL or TemplateBody".to_string(),
+            );
+        };
+
+        let child_parameters =
+            if let Some(params) = props.get("Parameters").and_then(|v| v.as_object()) {
+                let mut map = BTreeMap::new();
+                for (k, v) in params {
+                    if let Some(s) = v.as_str() {
+                        map.insert(k.clone(), s.to_string());
+                    } else {
+                        map.insert(k.clone(), v.to_string());
+                    }
+                }
+                map
+            } else {
+                BTreeMap::new()
+            };
+
+        let child_tags = if let Some(tags) = props.get("Tags").and_then(|v| v.as_object()) {
+            let mut map = BTreeMap::new();
+            for (k, v) in tags {
+                if let Some(s) = v.as_str() {
+                    map.insert(k.clone(), s.to_string());
+                }
+            }
+            map
+        } else {
+            BTreeMap::new()
+        };
+
+        let parsed = crate::template::parse_template(&template_body, &child_parameters)
+            .map_err(|e| format!("Failed to parse nested template: {e}"))?;
+
+        let child_stack_name = format!(
+            "{}-Nested-{}",
+            resource.logical_id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let child_stack_id = format!(
+            "arn:aws:cloudformation:{}:{}:stack/{}/{}",
+            self.region,
+            self.account_id,
+            child_stack_name,
+            Uuid::new_v4()
+        );
+
+        let child_provisioner = ResourceProvisioner {
+            sqs_state: self.sqs_state.clone(),
+            sns_state: self.sns_state.clone(),
+            ssm_state: self.ssm_state.clone(),
+            iam_state: self.iam_state.clone(),
+            s3_state: self.s3_state.clone(),
+            eventbridge_state: self.eventbridge_state.clone(),
+            dynamodb_state: self.dynamodb_state.clone(),
+            logs_state: self.logs_state.clone(),
+            lambda_state: self.lambda_state.clone(),
+            secretsmanager_state: self.secretsmanager_state.clone(),
+            kinesis_state: self.kinesis_state.clone(),
+            kms_state: self.kms_state.clone(),
+            ecr_state: self.ecr_state.clone(),
+            cloudwatch_state: self.cloudwatch_state.clone(),
+            elbv2_state: self.elbv2_state.clone(),
+            organizations_state: self.organizations_state.clone(),
+            cognito_state: self.cognito_state.clone(),
+            rds_state: self.rds_state.clone(),
+            ecs_state: self.ecs_state.clone(),
+            acm_state: self.acm_state.clone(),
+            elasticache_state: self.elasticache_state.clone(),
+            route53_state: self.route53_state.clone(),
+            cloudfront_state: self.cloudfront_state.clone(),
+            stepfunctions_state: self.stepfunctions_state.clone(),
+            wafv2_state: self.wafv2_state.clone(),
+            apigateway_state: self.apigateway_state.clone(),
+            apigatewayv2_state: self.apigatewayv2_state.clone(),
+            ses_state: self.ses_state.clone(),
+            app_autoscaling_state: self.app_autoscaling_state.clone(),
+            athena_state: self.athena_state.clone(),
+            firehose_state: self.firehose_state.clone(),
+            glue_state: self.glue_state.clone(),
+            cloudformation_state: self.cloudformation_state.clone(),
+            delivery: self.delivery.clone(),
+            account_id: self.account_id.clone(),
+            region: self.region.clone(),
+            stack_id: child_stack_id.clone(),
+        };
+
+        let child_resources = crate::service::provision_stack_resources(
+            &child_provisioner,
+            &parsed.resources,
+            &template_body,
+            &child_parameters,
+        )
+        .map_err(|e| format!("Failed to provision nested stack: {e}"))?;
+
+        let child_outputs = parsed.outputs;
+
+        let stack = crate::state::Stack {
+            name: child_stack_name.clone(),
+            stack_id: child_stack_id.clone(),
+            template: template_body.clone(),
+            status: "CREATE_COMPLETE".to_string(),
+            resources: child_resources.clone(),
+            parameters: child_parameters,
+            tags: child_tags,
+            created_at: Utc::now(),
+            updated_at: None,
+            description: parsed.description,
+            notification_arns: Vec::new(),
+            outputs: child_outputs
+                .iter()
+                .map(|o| crate::state::StackOutput {
+                    key: o.logical_id.clone(),
+                    value: o.value.clone(),
+                    description: o.description.clone(),
+                    export_name: o.export_name.clone(),
+                })
+                .collect(),
+        };
+
+        {
+            let mut accounts = self.cloudformation_state.write();
+            let state = accounts.get_or_create(&self.account_id);
+            state.stacks.insert(child_stack_name.clone(), stack);
+
+            crate::service::record_stack_status_event(
+                state,
+                &child_stack_id,
+                &child_stack_name,
+                "AWS::CloudFormation::Stack",
+                "CREATE_IN_PROGRESS",
+            );
+            let changes: Vec<crate::service::ResourceChange> = child_resources
+                .iter()
+                .map(|r| crate::service::ResourceChange {
+                    action: crate::service::ResourceChangeAction::Create,
+                    logical_id: r.logical_id.clone(),
+                    physical_id: r.physical_id.clone(),
+                    resource_type: r.resource_type.clone(),
+                })
+                .collect();
+            crate::service::record_stack_events(
+                state,
+                &child_stack_id,
+                &child_stack_name,
+                &changes,
+            );
+            crate::service::record_stack_status_event(
+                state,
+                &child_stack_id,
+                &child_stack_name,
+                "AWS::CloudFormation::Stack",
+                "CREATE_COMPLETE",
+            );
+        }
+
+        let mut result = ProvisionResult::new(child_stack_id.clone());
+        for output in &child_outputs {
+            result.attributes.insert(
+                format!("Outputs.{}", output.logical_id),
+                output.value.clone(),
+            );
+        }
+        Ok(result)
+    }
+
+    fn delete_cloudformation_stack(&self, physical_id: &str) -> Result<(), String> {
+        let stack = {
+            let accounts = self.cloudformation_state.read();
+            let state = accounts.get(&self.account_id);
+            state.and_then(|s| {
+                s.stacks
+                    .values()
+                    .find(|st| st.stack_id == physical_id)
+                    .cloned()
+            })
+        };
+
+        if let Some(stack) = stack {
+            let stack_name = stack.name.clone();
+            let stack_id = stack.stack_id.clone();
+
+            for resource in stack.resources.iter().rev() {
+                let _ = self.delete_resource(resource);
+            }
+
+            {
+                let mut accounts = self.cloudformation_state.write();
+                let state = accounts.get_or_create(&self.account_id);
+                state.stacks.remove(&stack_name);
+
+                crate::service::record_stack_status_event(
+                    state,
+                    &stack_id,
+                    &stack_name,
+                    "AWS::CloudFormation::Stack",
+                    "DELETE_IN_PROGRESS",
+                );
+                crate::service::record_stack_status_event(
+                    state,
+                    &stack_id,
+                    &stack_name,
+                    "AWS::CloudFormation::Stack",
+                    "DELETE_COMPLETE",
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_att_cloudformation_stack(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let accounts = self.cloudformation_state.read();
+        let state = accounts.get(&self.account_id)?;
+        let stack = state.stacks.values().find(|s| s.stack_id == physical_id)?;
+
+        if let Some(output_key) = attribute.strip_prefix("Outputs.") {
+            return stack
+                .outputs
+                .iter()
+                .find(|o| o.key == output_key)
+                .map(|o| o.value.clone());
+        }
+
+        match attribute {
+            "Outputs" => Some(
+                serde_json::to_string(
+                    &stack
+                        .outputs
+                        .iter()
+                        .map(|o| (o.key.clone(), o.value.clone()))
+                        .collect::<std::collections::BTreeMap<String, String>>(),
+                )
+                .unwrap_or_default(),
+            ),
+            _ => None,
+        }
+    }
+
+    fn fetch_template_from_url(&self, url: &str) -> Result<String, String> {
+        if let Some(rest) = url.strip_prefix("s3://") {
+            let parts: Vec<&str> = rest.splitn(2, '/').collect();
+            if parts.len() != 2 {
+                return Err("Invalid s3:// URL".to_string());
+            }
+            return self.fetch_s3_template(parts[0], parts[1]);
+        }
+
+        if let Some(rest) = url.strip_prefix("https://s3.amazonaws.com/") {
+            let parts: Vec<&str> = rest.splitn(2, '/').collect();
+            if parts.len() != 2 {
+                return Err("Invalid S3 HTTPS URL".to_string());
+            }
+            return self.fetch_s3_template(parts[0], parts[1]);
+        }
+
+        if let Some(host_rest) = url.strip_prefix("https://") {
+            if let Some(slash_pos) = host_rest.find('/') {
+                let host = &host_rest[..slash_pos];
+                let key = &host_rest[slash_pos + 1..];
+                if let Some(bucket) = host.strip_suffix(".s3.amazonaws.com") {
+                    return self.fetch_s3_template(bucket, key);
+                }
+                if host.contains(".s3.") && host.ends_with(".amazonaws.com") {
+                    let bucket = host.split(".s3.").next().unwrap_or("");
+                    if !bucket.is_empty() {
+                        return self.fetch_s3_template(bucket, key);
+                    }
+                }
+            }
+        }
+
+        Err(format!("Unsupported TemplateURL: {url}"))
+    }
+
+    fn fetch_s3_template(&self, bucket: &str, key: &str) -> Result<String, String> {
+        let mut s3_accounts = self.s3_state.write();
+        let s3_state = s3_accounts.get_or_create(&self.account_id);
+        let bucket_obj = s3_state
+            .buckets
+            .get(bucket)
+            .ok_or_else(|| format!("S3 bucket not found: {bucket}"))?;
+        let obj = bucket_obj
+            .objects
+            .get(key)
+            .ok_or_else(|| format!("S3 object not found: {bucket}/{key}"))?;
+        let bytes = s3_state
+            .read_body(&obj.body)
+            .map_err(|e| format!("Failed to read S3 object body: {e}"))?;
+        String::from_utf8(bytes.to_vec()).map_err(|e| format!("S3 object is not valid UTF-8: {e}"))
+    }
 }
 
 /// Implements the CloudFormation `GenerateSecretString` shape on
@@ -18329,6 +18645,9 @@ mod tests {
             route53_state: Arc::new(RwLock::new(fakecloud_route53::Route53Accounts::new())),
             cloudfront_state: Arc::new(RwLock::new(
                 fakecloud_cloudfront::CloudFrontAccounts::new(),
+            )),
+            cloudformation_state: Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             stepfunctions_state: Arc::new(RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new(
