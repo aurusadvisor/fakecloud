@@ -142,6 +142,31 @@ fn extract_parameter_overrides(params: &BTreeMap<String, String>) -> BTreeMap<St
 
 impl CloudFormationService {
     /// Create or update a stack instance for a StackSet in a target account/region.
+    fn build_stack_instance_params(
+        stack_name: &str,
+        template_body: &str,
+        parameter_overrides: &BTreeMap<String, String>,
+        tags: &BTreeMap<String, String>,
+    ) -> HashMap<String, String> {
+        let mut params: HashMap<String, String> = HashMap::new();
+        params.insert("StackName".to_string(), stack_name.to_string());
+        params.insert("TemplateBody".to_string(), template_body.to_string());
+
+        for (i, (k, v)) in parameter_overrides.iter().enumerate() {
+            let idx = i + 1;
+            params.insert(format!("Parameters.member.{idx}.ParameterKey"), k.clone());
+            params.insert(format!("Parameters.member.{idx}.ParameterValue"), v.clone());
+        }
+
+        for (i, (k, v)) in tags.iter().enumerate() {
+            let idx = i + 1;
+            params.insert(format!("Tags.member.{idx}.Key"), k.clone());
+            params.insert(format!("Tags.member.{idx}.Value"), v.clone());
+        }
+
+        params
+    }
+
     fn provision_stack_instance(
         &self,
         stack_set_name: &str,
@@ -152,21 +177,12 @@ impl CloudFormationService {
         tags: &BTreeMap<String, String>,
     ) -> Result<String, AwsServiceError> {
         let stack_name = format!("{stack_set_name}-{target_account}-{target_region}");
-
-        // Build query params for CreateStack
-        let mut create_params: HashMap<String, String> = HashMap::new();
-        create_params.insert("StackName".to_string(), stack_name.clone());
-        create_params.insert("TemplateBody".to_string(), template_body.to_string());
-
-        for (k, v) in parameter_overrides {
-            create_params.insert(format!("Parameters.member.{k}.ParameterKey"), k.clone());
-            create_params.insert(format!("Parameters.member.{k}.ParameterValue"), v.clone());
-        }
-
-        for (k, v) in tags {
-            create_params.insert(format!("Tags.member.{k}.Key"), k.clone());
-            create_params.insert(format!("Tags.member.{k}.Value"), v.clone());
-        }
+        let create_params = Self::build_stack_instance_params(
+            &stack_name,
+            template_body,
+            parameter_overrides,
+            tags,
+        );
 
         let synthetic_req = AwsRequest {
             service: "cloudformation".to_string(),
@@ -188,6 +204,61 @@ impl CloudFormationService {
         };
 
         let resp = self.create_stack(&synthetic_req)?;
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap_or("");
+
+        // Extract StackId from response XML
+        let stack_id = body
+            .split("<StackId>")
+            .nth(1)
+            .and_then(|s| s.split("</StackId>").next())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                format!(
+                    "arn:aws:cloudformation:{target_region}:{target_account}:stack/{stack_name}/{}",
+                    rand_id()
+                )
+            });
+
+        Ok(stack_id)
+    }
+
+    fn update_stack_instance(
+        &self,
+        stack_set_name: &str,
+        target_account: &str,
+        target_region: &str,
+        template_body: &str,
+        parameter_overrides: &BTreeMap<String, String>,
+        tags: &BTreeMap<String, String>,
+    ) -> Result<String, AwsServiceError> {
+        let stack_name = format!("{stack_set_name}-{target_account}-{target_region}");
+        let update_params = Self::build_stack_instance_params(
+            &stack_name,
+            template_body,
+            parameter_overrides,
+            tags,
+        );
+
+        let synthetic_req = AwsRequest {
+            service: "cloudformation".to_string(),
+            action: "UpdateStack".to_string(),
+            region: target_region.to_string(),
+            account_id: target_account.to_string(),
+            request_id: rand_id(),
+            headers: http::HeaderMap::new(),
+            query_params: update_params,
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        };
+
+        let resp = self.update_stack(&synthetic_req)?;
         let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap_or("");
 
         // Extract StackId from response XML
@@ -867,14 +938,37 @@ impl CloudFormationService {
 
                 for target_account in &accounts_list {
                     for target_region in &regions_list {
-                        if let Ok(stack_id) = self.provision_stack_instance(
-                            &stack_set_name,
-                            target_account,
-                            target_region,
-                            &stack_set_template,
-                            &parameter_overrides,
-                            &BTreeMap::new(),
-                        ) {
+                        let key = format!("{stack_set_name}:{target_account}:{target_region}");
+                        let instance_exists = {
+                            let accounts_state = self.state.read();
+                            accounts_state
+                                .get(&aid)
+                                .and_then(|s| s.extras.get("stack_instances"))
+                                .and_then(|m| m.get(&key))
+                                .is_some()
+                        };
+
+                        let result = if instance_exists {
+                            self.update_stack_instance(
+                                &stack_set_name,
+                                target_account,
+                                target_region,
+                                &stack_set_template,
+                                &parameter_overrides,
+                                &BTreeMap::new(),
+                            )
+                        } else {
+                            self.provision_stack_instance(
+                                &stack_set_name,
+                                target_account,
+                                target_region,
+                                &stack_set_template,
+                                &parameter_overrides,
+                                &BTreeMap::new(),
+                            )
+                        };
+
+                        if let Ok(stack_id) = result {
                             let stack_name = format!("{stack_set_name}-{target_account}-{target_region}");
                             let record = json!({
                                 "Account": target_account,
@@ -886,7 +980,6 @@ impl CloudFormationService {
                             });
                             let mut accounts_state = self.state.write();
                             let state = accounts_state.get_or_create(&aid);
-                            let key = format!("{stack_set_name}:{target_account}:{target_region}");
                             store(&mut state.extras, "stack_instances").insert(key, record);
                         }
                     }
