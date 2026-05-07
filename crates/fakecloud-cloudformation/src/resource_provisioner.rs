@@ -1285,6 +1285,82 @@ impl ResourceProvisioner {
             "AWS::WAFv2::RuleGroup" => {
                 self.get_att_wafv2_rule_group(&resource.physical_id, attribute)
             }
+            "AWS::SES::ConfigurationSet" => {
+                self.get_att_ses_configuration_set(&resource.physical_id, attribute)
+            }
+            "AWS::SES::EmailIdentity" => {
+                self.get_att_ses_email_identity(&resource.physical_id, attribute)
+            }
+            "AWS::SES::Template" => self.get_att_ses_template(&resource.physical_id, attribute),
+            "AWS::SES::ContactList" => {
+                self.get_att_ses_contact_list(&resource.physical_id, attribute)
+            }
+            "AWS::SES::DedicatedIpPool" => {
+                self.get_att_ses_dedicated_ip_pool(&resource.physical_id, attribute)
+            }
+            "AWS::SES::ReceiptRuleSet" => {
+                self.get_att_ses_receipt_rule_set(&resource.physical_id, attribute)
+            }
+            _ => None,
+        }
+    }
+
+    fn get_att_ses_configuration_set(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.ses_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let cs = state.configuration_sets.get(physical_id)?;
+        match attribute {
+            "Name" => Some(cs.name.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_ses_email_identity(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.ses_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let id = state.identities.get(physical_id)?;
+        match attribute {
+            "IdentityName" => Some(id.identity_name.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_ses_template(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.ses_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let tpl = state.templates.get(physical_id)?;
+        match attribute {
+            "TemplateName" => Some(tpl.template_name.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_ses_contact_list(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.ses_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let cl = state.contact_lists.get(physical_id)?;
+        match attribute {
+            "ContactListName" => Some(cl.contact_list_name.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_ses_dedicated_ip_pool(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.ses_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let pool = state.dedicated_ip_pools.get(physical_id)?;
+        match attribute {
+            "PoolName" => Some(pool.pool_name.clone()),
+            _ => None,
+        }
+    }
+
+    fn get_att_ses_receipt_rule_set(&self, physical_id: &str, attribute: &str) -> Option<String> {
+        let mut accounts = self.ses_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let rs = state.receipt_rule_sets.get(physical_id)?;
+        match attribute {
+            "RuleSetName" => Some(rs.name.clone()),
             _ => None,
         }
     }
@@ -18463,6 +18539,239 @@ mod tests {
         );
         let sr = prov.create_resource(&res).unwrap();
         assert_eq!(sr.physical_id, "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188");
+
+        prov.delete_resource(&sr.clone()).unwrap();
+    }
+
+    #[test]
+    fn ses_configuration_set_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::SES::ConfigurationSet",
+            "MyConfigSet",
+            serde_json::json!({
+                "Name": "my-cs",
+                "SendingOptions": {"SendingEnabled": true},
+                "DeliveryOptions": {"TlsPolicy": "REQUIRE"},
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "my-cs");
+        assert_eq!(prov.get_att(&sr, "Name"), Some("my-cs".to_string()));
+
+        prov.delete_resource(&sr.clone()).unwrap();
+        let fresh = StackResource {
+            logical_id: "MyConfigSet".to_string(),
+            physical_id: "my-cs".to_string(),
+            resource_type: "AWS::SES::ConfigurationSet".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: BTreeMap::new(),
+        };
+        assert_eq!(prov.get_att(&fresh, "Name"), None);
+    }
+
+    #[test]
+    fn ses_email_identity_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::SES::EmailIdentity",
+            "MyIdentity",
+            serde_json::json!({"EmailIdentity": "example.com"}),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "example.com");
+        assert_eq!(
+            prov.get_att(&sr, "IdentityName"),
+            Some("example.com".to_string())
+        );
+
+        prov.delete_resource(&sr.clone()).unwrap();
+        let fresh = StackResource {
+            logical_id: "MyIdentity".to_string(),
+            physical_id: "example.com".to_string(),
+            resource_type: "AWS::SES::EmailIdentity".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: BTreeMap::new(),
+        };
+        assert_eq!(prov.get_att(&fresh, "IdentityName"), None);
+    }
+
+    #[test]
+    fn ses_template_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::SES::Template",
+            "MyTemplate",
+            serde_json::json!({
+                "Template": {
+                    "TemplateName": "my-tpl",
+                    "SubjectPart": "Hello",
+                    "HtmlPart": "<h1>Hi</h1>",
+                    "TextPart": "Hi",
+                },
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "my-tpl");
+        assert_eq!(
+            prov.get_att(&sr, "TemplateName"),
+            Some("my-tpl".to_string())
+        );
+
+        prov.delete_resource(&sr.clone()).unwrap();
+        let fresh = StackResource {
+            logical_id: "MyTemplate".to_string(),
+            physical_id: "my-tpl".to_string(),
+            resource_type: "AWS::SES::Template".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: BTreeMap::new(),
+        };
+        assert_eq!(prov.get_att(&fresh, "TemplateName"), None);
+    }
+
+    #[test]
+    fn ses_contact_list_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::SES::ContactList",
+            "MyContactList",
+            serde_json::json!({
+                "ContactListName": "my-cl",
+                "Description": "Test contacts",
+                "Topics": [{"TopicName": "news", "DisplayName": "Newsletter", "Description": "Weekly news"}],
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "my-cl");
+        assert_eq!(
+            prov.get_att(&sr, "ContactListName"),
+            Some("my-cl".to_string())
+        );
+
+        prov.delete_resource(&sr.clone()).unwrap();
+        let fresh = StackResource {
+            logical_id: "MyContactList".to_string(),
+            physical_id: "my-cl".to_string(),
+            resource_type: "AWS::SES::ContactList".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: BTreeMap::new(),
+        };
+        assert_eq!(prov.get_att(&fresh, "ContactListName"), None);
+    }
+
+    #[test]
+    fn ses_dedicated_ip_pool_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::SES::DedicatedIpPool",
+            "MyPool",
+            serde_json::json!({"PoolName": "my-pool", "ScalingMode": "STANDARD"}),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "my-pool");
+        assert_eq!(prov.get_att(&sr, "PoolName"), Some("my-pool".to_string()));
+
+        prov.delete_resource(&sr.clone()).unwrap();
+        let fresh = StackResource {
+            logical_id: "MyPool".to_string(),
+            physical_id: "my-pool".to_string(),
+            resource_type: "AWS::SES::DedicatedIpPool".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: BTreeMap::new(),
+        };
+        assert_eq!(prov.get_att(&fresh, "PoolName"), None);
+    }
+
+    #[test]
+    fn ses_receipt_rule_set_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::SES::ReceiptRuleSet",
+            "MyRuleSet",
+            serde_json::json!({"RuleSetName": "my-rs"}),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "my-rs");
+        assert_eq!(prov.get_att(&sr, "RuleSetName"), Some("my-rs".to_string()));
+
+        prov.delete_resource(&sr.clone()).unwrap();
+        let fresh = StackResource {
+            logical_id: "MyRuleSet".to_string(),
+            physical_id: "my-rs".to_string(),
+            resource_type: "AWS::SES::ReceiptRuleSet".to_string(),
+            status: "CREATE_COMPLETE".to_string(),
+            service_token: None,
+            attributes: BTreeMap::new(),
+        };
+        assert_eq!(prov.get_att(&fresh, "RuleSetName"), None);
+    }
+
+    #[test]
+    fn ses_receipt_rule_lifecycle() {
+        let prov = make_provisioner();
+        let rs = make_resource(
+            "AWS::SES::ReceiptRuleSet",
+            "MyRuleSet",
+            serde_json::json!({"RuleSetName": "my-rs2"}),
+        );
+        prov.create_resource(&rs).unwrap();
+
+        let res = make_resource(
+            "AWS::SES::ReceiptRule",
+            "MyRule",
+            serde_json::json!({
+                "RuleSetName": "my-rs2",
+                "Rule": {
+                    "Name": "rule1",
+                    "Priority": 1,
+                    "Enabled": true,
+                    "Actions": [{"S3Action": {"BucketName": "my-bucket"}}],
+                },
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "my-rs2|rule1");
+
+        prov.delete_resource(&sr.clone()).unwrap();
+    }
+
+    #[test]
+    fn ses_receipt_filter_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::SES::ReceiptFilter",
+            "MyFilter",
+            serde_json::json!({
+                "Filter": {
+                    "Name": "my-filter",
+                    "IpFilter": {"Policy": "Block", "Cidr": "10.0.0.0/8"},
+                },
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "my-filter");
+
+        prov.delete_resource(&sr.clone()).unwrap();
+    }
+
+    #[test]
+    fn ses_vdm_attributes_lifecycle() {
+        let prov = make_provisioner();
+        let res = make_resource(
+            "AWS::SES::VdmAttributes",
+            "MyVdm",
+            serde_json::json!({
+                "DashboardAttributes": {"EngagementMetrics": "ENABLED"},
+                "GuardianAttributes": {"OptimizedSharedDelivery": "ENABLED"},
+            }),
+        );
+        let sr = prov.create_resource(&res).unwrap();
+        assert_eq!(sr.physical_id, "vdm-MyVdm");
 
         prov.delete_resource(&sr.clone()).unwrap();
     }
