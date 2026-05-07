@@ -1205,6 +1205,9 @@ mod tests {
             apigateway: shared::<fakecloud_apigateway::ApiGatewayState>(),
             apigatewayv2: shared::<fakecloud_apigatewayv2::ApiGatewayV2State>(),
             ses: shared::<fakecloud_ses::SesState>(),
+            application_autoscaling: Arc::new(parking_lot::RwLock::new(
+                fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
         }
     }

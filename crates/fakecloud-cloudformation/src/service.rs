@@ -178,6 +178,8 @@ pub struct CloudFormationDeps {
     pub apigateway: fakecloud_apigateway::SharedApiGatewayState,
     pub apigatewayv2: fakecloud_apigatewayv2::SharedApiGatewayV2State,
     pub ses: fakecloud_ses::SharedSesState,
+    pub application_autoscaling:
+        fakecloud_application_autoscaling::SharedApplicationAutoScalingState,
     pub delivery: Arc<DeliveryBus>,
 }
 
@@ -261,6 +263,7 @@ impl CloudFormationService {
             apigateway_state: self.deps.apigateway.clone(),
             apigatewayv2_state: self.deps.apigatewayv2.clone(),
             ses_state: self.deps.ses.clone(),
+            app_autoscaling_state: self.deps.application_autoscaling.clone(),
             delivery: self.deps.delivery.clone(),
             account_id: account_id.to_string(),
             region: region.to_string(),
@@ -1817,6 +1820,9 @@ mod tests {
                     "us-east-1",
                     "",
                 ),
+            )),
+            application_autoscaling: Arc::new(parking_lot::RwLock::new(
+                fakecloud_application_autoscaling::ApplicationAutoScalingAccounts::new(),
             )),
             delivery: Arc::new(DeliveryBus::new()),
         };

@@ -787,6 +787,7 @@ async fn main() {
             apigateway: apigatewayv1_state.clone(),
             apigatewayv2: apigatewayv2_state.clone(),
             ses: ses_state.clone(),
+            application_autoscaling: app_autoscaling_state.clone(),
             delivery: delivery_for_cf,
         },
     );
