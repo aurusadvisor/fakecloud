@@ -17546,7 +17546,11 @@ impl ResourceProvisioner {
         if values.is_empty() {
             return Err("PartitionInput.Values is required".to_string());
         }
-        let key = values.join("\0");
+        let key = values
+            .iter()
+            .map(|v| v.replace('%', "%25").replace('/', "%2F"))
+            .collect::<Vec<_>>()
+            .join("/");
 
         let mut accounts = self.glue_state.write();
         let state = accounts.get_or_create(&self.account_id, &self.region);
