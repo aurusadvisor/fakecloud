@@ -7,5 +7,9 @@ pub mod ticker;
 pub use hooks::{DynamoDbCapacityHook, EcsServiceHook, MetricReader};
 pub use scheduled_executor::ScheduledActionExecutor;
 pub use service::ApplicationAutoScalingService;
-pub use state::{ApplicationAutoScalingAccounts, SharedApplicationAutoScalingState};
+pub use state::{
+    AccountState, Alarm, ApplicationAutoScalingAccounts, NotScaledReason, PolicyKey,
+    ScalableTarget, ScalableTargetAction, ScalingActivity, ScalingPolicy, ScheduledAction,
+    ScheduledKey, SharedApplicationAutoScalingState, SuspendedState, TargetKey,
+};
 pub use ticker::ScalingWatcher;
