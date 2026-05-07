@@ -8624,7 +8624,7 @@ impl ResourceProvisioner {
             destination = Some(parse_firehose_s3_destination(s3)?);
         } else if let Some(s3) = props.get("ExtendedS3DestinationConfiguration") {
             destination = Some(parse_firehose_s3_destination(s3)?);
-        } else if stream_type != "DirectPut" {
+        } else {
             return Err("Delivery stream requires a destination configuration".to_string());
         }
 
