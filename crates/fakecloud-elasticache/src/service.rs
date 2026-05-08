@@ -2368,7 +2368,8 @@ impl ElastiCacheService {
 
         if let Some(ref runtime) = self.runtime {
             let tmp_path = format!(
-                "/tmp/fakecloud-ec-{}-{}.rdb",
+                "/tmp/fakecloud-ec-{}-{}-{}.rdb",
+                request.account_id,
                 snapshot_name,
                 std::process::id()
             );
@@ -2386,6 +2387,16 @@ impl ElastiCacheService {
         {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
+            if state.snapshots.contains_key(&snapshot_name) {
+                if let Some(ref path) = snapshot.rdb_path {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "SnapshotAlreadyExistsFault",
+                    format!("Snapshot {snapshot_name} already exists."),
+                ));
+            }
             state.tags.insert(arn, Vec::new());
             state.snapshots.insert(snapshot_name, snapshot);
         }

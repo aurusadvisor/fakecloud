@@ -106,7 +106,7 @@ impl ElastiCacheRuntime {
         ];
         if let Some(path) = rdb_path {
             args.push("-v".to_string());
-            args.push(format!("{path}:/data/dump.rdb"));
+            args.push(format!("{path}:/data/dump.rdb:ro"));
         }
         args.push(image.to_string());
 
