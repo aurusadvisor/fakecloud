@@ -71,7 +71,7 @@ pub fn detect_service_headers_only(
     if let Some(credential) = query_params.get("X-Amz-Credential") {
         let parts: Vec<&str> = credential.split('/').collect();
         if parts.len() >= 4 {
-            let service = parts[3].to_string();
+            let service = normalize_service_name(parts[3]).to_string();
             if let Some(protocol) = rest_protocol_for(&service) {
                 return Some(DetectedRequest {
                     service,
@@ -162,7 +162,7 @@ pub fn detect_service(
         // Format: AKID/date/region/service/aws4_request
         let parts: Vec<&str> = credential.split('/').collect();
         if parts.len() >= 4 {
-            let service = parts[3].to_string();
+            let service = normalize_service_name(parts[3]).to_string();
             if let Some(protocol) = rest_protocol_for(&service) {
                 return Some(DetectedRequest {
                     service,
@@ -475,7 +475,25 @@ fn infer_service_from_action(action: &str) -> Option<String> {
 fn extract_service_from_auth(headers: &HeaderMap) -> Option<String> {
     let auth = headers.get("authorization")?.to_str().ok()?;
     let info = fakecloud_aws::sigv4::parse_sigv4(auth)?;
-    Some(info.service)
+    Some(normalize_service_name(&info.service).to_string())
+}
+
+/// Map AWS service-name aliases that share path namespace and handlers
+/// to the canonical form used by fakecloud's service registry.
+///
+/// AWS uses `bedrock-runtime` in the SigV4 credential scope of runtime
+/// API calls (`InvokeModel`, `ApplyGuardrail`, etc.) but the REST paths
+/// (e.g. `POST /guardrail/{id}/version/{ver}/apply`) live under the same
+/// `BedrockService` handler that owns the control-plane `bedrock` paths.
+/// Without normalization, `detect_service` returns `None` for
+/// `bedrock-runtime` (not in `REST_JSON_SERVICES`), the central
+/// dispatcher falls back to API Gateway, and `/guardrail/...` 404s with
+/// `NotFoundException: Stage not found: guardrail`. See issue #1232.
+fn normalize_service_name(service: &str) -> &str {
+    match service {
+        "bedrock-runtime" => "bedrock",
+        other => other,
+    }
 }
 
 /// Parse form-encoded body into key-value pairs.
@@ -790,6 +808,69 @@ mod tests {
         let query = HashMap::new();
         let body = Bytes::new();
         assert!(detect_service(&headers, &query, &body).is_none());
+    }
+
+    #[test]
+    fn normalize_service_name_aliases_bedrock_runtime_to_bedrock() {
+        // The bedrock-runtime credential scope shares path namespace with
+        // the bedrock control plane (`POST /guardrail/{id}/version/{ver}/apply`
+        // is implemented under BedrockService). Routing must resolve to
+        // the bedrock service so the existing handlers run. See #1232.
+        assert_eq!(normalize_service_name("bedrock-runtime"), "bedrock");
+    }
+
+    #[test]
+    fn normalize_service_name_passes_through_unaliased_services() {
+        // Every service that isn't on the alias list must round-trip
+        // unchanged — including the canonical bedrock name itself, so a
+        // plain bedrock request takes the same code path it always has.
+        assert_eq!(normalize_service_name("bedrock"), "bedrock");
+        assert_eq!(normalize_service_name("s3"), "s3");
+        assert_eq!(normalize_service_name("lambda"), "lambda");
+        assert_eq!(normalize_service_name(""), "");
+        assert_eq!(
+            normalize_service_name("unknown-future-service"),
+            "unknown-future-service"
+        );
+    }
+
+    #[test]
+    fn detect_service_via_authorization_header_normalizes_bedrock_runtime() {
+        // SigV4 auth header carries `bedrock-runtime` in the credential
+        // scope; dispatcher must route to the bedrock service handler so
+        // `/guardrail/...` lands on `BedrockService` instead of falling
+        // through to API Gateway.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "AWS4-HMAC-SHA256 \
+             Credential=AKID/20240101/us-east-1/bedrock-runtime/aws4_request, \
+             SignedHeaders=host, Signature=abc"
+                .parse()
+                .unwrap(),
+        );
+        let query = HashMap::new();
+        let body = Bytes::new();
+        let detected = detect_service(&headers, &query, &body).unwrap();
+        assert_eq!(detected.service, "bedrock");
+        assert_eq!(detected.protocol, AwsProtocol::RestJson);
+    }
+
+    #[test]
+    fn detect_service_via_sigv4_presigned_credential_normalizes_bedrock_runtime() {
+        // Same alias normalization on the presigned-URL path: a request
+        // signed with bedrock-runtime in the X-Amz-Credential query param
+        // must still resolve to the bedrock service handler.
+        let headers = HeaderMap::new();
+        let mut query = HashMap::new();
+        query.insert(
+            "X-Amz-Credential".to_string(),
+            "AKID/20240101/us-east-1/bedrock-runtime/aws4_request".to_string(),
+        );
+        let body = Bytes::new();
+        let detected = detect_service(&headers, &query, &body).unwrap();
+        assert_eq!(detected.service, "bedrock");
+        assert_eq!(detected.protocol, AwsProtocol::RestJson);
     }
 
     #[test]
