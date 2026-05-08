@@ -539,6 +539,151 @@ fn map_iterates_pass_state_over_items_path() {
     });
 }
 
+#[test]
+fn map_tolerated_failure_percentage_allows_at_threshold() {
+    let state = make_state();
+    let arn = arn_for("map-tolerated-ok");
+    let def = json!({
+        "StartAt": "M",
+        "States": {
+            "M": {
+                "Type": "Map",
+                "ItemsPath": "$.items",
+                "Iterator": {
+                    "StartAt": "Item",
+                    "States": {
+                        "Item": {
+                            "Type": "Choice",
+                            "Choices": [
+                                { "Variable": "$", "NumericEquals": 2, "Next": "FailItem" }
+                            ],
+                            "Default": "Ok"
+                        },
+                        "FailItem": {
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::nothing:here",
+                            "End": true
+                        },
+                        "Ok": { "Type": "Pass", "End": true }
+                    }
+                },
+                "ToleratedFailurePercentage": 50,
+                "End": true
+            }
+        }
+    });
+    drive(&state, &arn, def, Some(r#"{"items":[1,2]}"#));
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+    });
+}
+
+#[test]
+fn map_tolerated_failure_percentage_fails_when_exceeded() {
+    let state = make_state();
+    let arn = arn_for("map-tolerated-fail");
+    let def = json!({
+        "StartAt": "M",
+        "States": {
+            "M": {
+                "Type": "Map",
+                "ItemsPath": "$.items",
+                "Iterator": {
+                    "StartAt": "Item",
+                    "States": {
+                        "Item": {
+                            "Type": "Choice",
+                            "Choices": [
+                                { "Variable": "$", "NumericGreaterThan": 1, "Next": "FailItem" }
+                            ],
+                            "Default": "Ok"
+                        },
+                        "FailItem": {
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::nothing:here",
+                            "End": true
+                        },
+                        "Ok": { "Type": "Pass", "End": true }
+                    }
+                },
+                "ToleratedFailurePercentage": 50,
+                "End": true
+            }
+        }
+    });
+    drive(&state, &arn, def, Some(r#"{"items":[1,2,3]}"#));
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+    });
+}
+
+#[test]
+fn map_max_concurrency_path_reads_from_input() {
+    let state = make_state();
+    let arn = arn_for("map-concurrency");
+    let def = json!({
+        "StartAt": "M",
+        "States": {
+            "M": {
+                "Type": "Map",
+                "ItemsPath": "$.items",
+                "MaxConcurrencyPath": "$.maxConcurrency",
+                "Iterator": {
+                    "StartAt": "Item",
+                    "States": { "Item": { "Type": "Pass", "End": true } }
+                },
+                "End": true
+            }
+        }
+    });
+    drive(
+        &state,
+        &arn,
+        def,
+        Some(r#"{"items":[1,2,3],"maxConcurrency":2}"#),
+    );
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let output: Value = serde_json::from_str(exec.output.as_ref().unwrap()).unwrap();
+        assert_eq!(output, json!([1, 2, 3]));
+    });
+}
+
+#[test]
+fn map_item_batcher_groups_items() {
+    let state = make_state();
+    let arn = arn_for("map-batcher");
+    let def = json!({
+        "StartAt": "M",
+        "States": {
+            "M": {
+                "Type": "Map",
+                "ItemsPath": "$.items",
+                "ItemBatcher": {
+                    "MaxItemsPerBatch": 2,
+                    "BatchInput": { "extra": "data" }
+                },
+                "Iterator": {
+                    "StartAt": "Item",
+                    "States": { "Item": { "Type": "Pass", "End": true } }
+                },
+                "End": true
+            }
+        }
+    });
+    drive(&state, &arn, def, Some(r#"{"items":[1,2,3,4]}"#));
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let output: Value = serde_json::from_str(exec.output.as_ref().unwrap()).unwrap();
+        // Batched into 2 groups of 2 items each
+        assert_eq!(output.as_array().unwrap().len(), 2);
+    });
+}
+
 // ── Task: unsupported resources / delivery == None ───────────────
 
 #[test]

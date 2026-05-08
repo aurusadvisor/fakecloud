@@ -681,6 +681,9 @@ async fn execute_parallel_state(
 }
 
 /// Execute a Map state: iterate over an array and run a sub-state machine per item.
+/// Supports distributed mode: ItemReader (S3), ItemBatcher, ResultWriter (S3),
+/// ToleratedFailurePercentage, and MaxConcurrencyPath.
+#[allow(clippy::too_many_arguments)]
 async fn execute_map_state(
     state_def: &Value,
     input: &Value,
@@ -700,10 +703,36 @@ async fn execute_map_state(
         apply_input_path(input, input_path)
     };
 
-    // Get the items to iterate over
-    let items_path = state_def["ItemsPath"].as_str().unwrap_or("$");
-    let items_value = crate::io_processing::resolve_path(&effective_input, items_path);
-    let items = items_value.as_array().cloned().unwrap_or_default();
+    // Resolve MaxConcurrencyPath if present
+    let max_concurrency = if let Some(path) = state_def["MaxConcurrencyPath"].as_str() {
+        crate::io_processing::resolve_path(&effective_input, path)
+            .as_u64()
+            .unwrap_or(0)
+    } else {
+        state_def["MaxConcurrency"].as_u64().unwrap_or(0)
+    };
+    let effective_concurrency = if max_concurrency == 0 {
+        40
+    } else {
+        max_concurrency as usize
+    };
+
+    // Read items from ItemReader (S3) or ItemsPath
+    let items = if let Some(item_reader) = state_def.get("ItemReader") {
+        read_items_from_s3(item_reader, registry, execution_arn).await?
+    } else {
+        let items_path = state_def["ItemsPath"].as_str().unwrap_or("$");
+        let items_value = crate::io_processing::resolve_path(&effective_input, items_path);
+        items_value.as_array().cloned().unwrap_or_default()
+    };
+
+    // Apply ItemBatcher if present
+    let batch_config = state_def.get("ItemBatcher").cloned();
+    let batched_items = if let Some(ref batcher) = batch_config {
+        apply_item_batcher(&items, batcher, &effective_input)
+    } else {
+        items
+    };
 
     // Get the iterator definition (ItemProcessor or Iterator for backwards compat)
     let iterator_def = state_def
@@ -717,18 +746,17 @@ async fn execute_map_state(
             )
         })?;
 
-    let max_concurrency = state_def["MaxConcurrency"].as_u64().unwrap_or(0);
-    let effective_concurrency = if max_concurrency == 0 {
-        40
-    } else {
-        max_concurrency as usize
-    };
+    let tolerated_failure_percentage = state_def["ToleratedFailurePercentage"]
+        .as_f64()
+        .unwrap_or(0.0);
+    let total_items = batched_items.len() as f64;
+    let mut failure_count = 0usize;
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
 
     // Process all items
     let mut handles = Vec::new();
-    for (index, item) in items.into_iter().enumerate() {
+    for (index, batch_item) in batched_items.into_iter().enumerate() {
         let iter_def = iterator_def.clone();
         let delivery = delivery.clone();
         let ddb = dynamodb_state.clone();
@@ -740,11 +768,11 @@ async fn execute_map_state(
         // Apply ItemSelector if present
         let item_input = if let Some(selector) = state_def.get("ItemSelector") {
             let mut ctx = serde_json::Map::new();
-            ctx.insert("value".to_string(), item.clone());
+            ctx.insert("value".to_string(), batch_item.clone());
             ctx.insert("index".to_string(), json!(index));
             apply_parameters(selector, &Value::Object(ctx), None)
         } else {
-            item
+            batch_item
         };
 
         add_event(
@@ -795,7 +823,11 @@ async fn execute_map_state(
                     0,
                     json!({ "index": index, "error": error }),
                 );
-                return Err((error, cause));
+                failure_count += 1;
+                let failure_percentage = (failure_count as f64 / total_items) * 100.0;
+                if failure_percentage > tolerated_failure_percentage {
+                    return Err((error, cause));
+                }
             }
         }
     }
@@ -803,6 +835,11 @@ async fn execute_map_state(
     // Sort by index to maintain order
     results.sort_by_key(|(i, _)| *i);
     let map_output = Value::Array(results.into_iter().map(|(_, v)| v).collect());
+
+    // Write results to S3 if ResultWriter is configured
+    if let Some(result_writer) = state_def.get("ResultWriter") {
+        write_map_results_to_s3(result_writer, registry, execution_arn, &map_output).await?;
+    }
 
     // Apply ResultSelector if present
     let selected = if let Some(selector) = state_def.get("ResultSelector") {
@@ -826,6 +863,189 @@ async fn execute_map_state(
     };
 
     Ok(output)
+}
+
+/// Read items from S3 for distributed Map mode ItemReader.
+async fn read_items_from_s3(
+    item_reader: &Value,
+    registry: &Option<SharedServiceRegistry>,
+    execution_arn: &str,
+) -> Result<Vec<Value>, (String, String)> {
+    let resource = item_reader["Resource"]
+        .as_str()
+        .unwrap_or("arn:aws:states:::s3:getObject");
+    if !resource.contains("s3:getObject") {
+        return Err((
+            "States.Runtime".to_string(),
+            format!("ItemReader unsupported resource: {resource}"),
+        ));
+    }
+
+    let params = item_reader
+        .get("Parameters")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let bucket = params["Bucket"].as_str().ok_or_else(|| {
+        (
+            "States.Runtime".to_string(),
+            "ItemReader missing Bucket".to_string(),
+        )
+    })?;
+    let key = params["Key"].as_str().ok_or_else(|| {
+        (
+            "States.Runtime".to_string(),
+            "ItemReader missing Key".to_string(),
+        )
+    })?;
+
+    let registry_arc = resolve_registry(registry)?;
+    let account_id = account_from_execution_arn(execution_arn);
+
+    let body = call_sdk_action_raw_bytes(
+        &registry_arc,
+        "s3",
+        "GetObject",
+        &json!({ "Bucket": bucket, "Key": key }),
+        &account_id,
+    )
+    .await?;
+
+    // Parse JSON array from the S3 object body
+    let parsed: Value = serde_json::from_slice(&body).map_err(|e| {
+        (
+            "States.Runtime".to_string(),
+            format!("ItemReader failed to parse S3 object as JSON: {e}"),
+        )
+    })?;
+
+    parsed.as_array().cloned().ok_or_else(|| {
+        (
+            "States.Runtime".to_string(),
+            "ItemReader S3 object is not a JSON array".to_string(),
+        )
+    })
+}
+
+/// Write Map results to S3 for distributed Map mode ResultWriter.
+async fn write_map_results_to_s3(
+    result_writer: &Value,
+    registry: &Option<SharedServiceRegistry>,
+    execution_arn: &str,
+    results: &Value,
+) -> Result<(), (String, String)> {
+    let resource = result_writer["Resource"]
+        .as_str()
+        .unwrap_or("arn:aws:states:::s3:putObject");
+    if !resource.contains("s3:putObject") {
+        return Err((
+            "States.Runtime".to_string(),
+            format!("ResultWriter unsupported resource: {resource}"),
+        ));
+    }
+
+    let params = result_writer
+        .get("Parameters")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let bucket = params["Bucket"].as_str().ok_or_else(|| {
+        (
+            "States.Runtime".to_string(),
+            "ResultWriter missing Bucket".to_string(),
+        )
+    })?;
+    let prefix = params["Prefix"].as_str().unwrap_or("map-results/");
+
+    let registry_arc = resolve_registry(registry)?;
+    let account_id = account_from_execution_arn(execution_arn);
+
+    use bytes::Bytes;
+    let body = Bytes::from(
+        serde_json::to_vec(results).expect("serde_json::Value serialization is infallible"),
+    );
+
+    // Build a raw S3 PutObject request with the JSON body
+    use fakecloud_core::service::AwsRequest;
+    use http::{HeaderMap, Method};
+    let service = registry_arc.get("s3").ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            "S3 service not available for ResultWriter".to_string(),
+        )
+    })?;
+
+    let req = AwsRequest {
+        service: "s3".to_string(),
+        action: "PutObject".to_string(),
+        region: "us-east-1".to_string(),
+        account_id: account_id.to_string(),
+        request_id: uuid::Uuid::new_v4().to_string(),
+        headers: HeaderMap::new(),
+        query_params: std::collections::HashMap::new(),
+        body,
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: vec![bucket.to_string(), format!("{prefix}result.json")],
+        raw_path: format!("/{bucket}/{prefix}result.json"),
+        raw_query: String::new(),
+        method: Method::PUT,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    };
+
+    service.handle(req).await.map_err(|err| {
+        let code = err.code().to_string();
+        let msg = err.message();
+        (
+            format!("S3.{code}"),
+            format!("ResultWriter PutObject failed: {msg}"),
+        )
+    })?;
+
+    Ok(())
+}
+
+/// Apply ItemBatcher configuration to group items into batches.
+fn apply_item_batcher(items: &[Value], batcher: &Value, _effective_input: &Value) -> Vec<Value> {
+    let max_per_batch = batcher["MaxItemsPerBatch"].as_u64().unwrap_or(u64::MAX) as usize;
+    let max_bytes = batcher["MaxInputBytesPerBatch"].as_u64().unwrap_or(0) as usize;
+    let batch_input = batcher.get("BatchInput").cloned();
+
+    let mut batches: Vec<Vec<Value>> = Vec::new();
+    let mut current_batch: Vec<Value> = Vec::new();
+    let mut current_bytes = 0usize;
+
+    for item in items.iter().cloned() {
+        let item_bytes = serde_json::to_vec(&item).unwrap_or_default().len();
+        if !current_batch.is_empty()
+            && (current_batch.len() >= max_per_batch
+                || (max_bytes > 0 && current_bytes + item_bytes > max_bytes))
+        {
+            batches.push(current_batch);
+            current_batch = Vec::new();
+            current_bytes = 0;
+        }
+        current_bytes += item_bytes;
+        current_batch.push(item);
+    }
+    if !current_batch.is_empty() {
+        batches.push(current_batch);
+    }
+
+    batches
+        .into_iter()
+        .enumerate()
+        .map(|(index, batch)| {
+            let mut map = serde_json::Map::new();
+            map.insert("index".to_string(), json!(index));
+            map.insert("items".to_string(), Value::Array(batch));
+            if let Some(Value::Object(ref obj)) = batch_input {
+                for (k, v) in obj {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+            Value::Object(map)
+        })
+        .collect()
 }
 
 /// Invoke a resource (Lambda function or SDK integration).
@@ -1175,6 +1395,72 @@ async fn call_sdk_action(
             format!("aws-sdk integration: failed to parse response JSON: {e}"),
         )
     })
+}
+
+/// Call an SDK action and return raw bytes without JSON parsing.
+/// Used by distributed Map mode to read/write S3 objects.
+async fn call_sdk_action_raw_bytes(
+    registry: &Arc<fakecloud_core::registry::ServiceRegistry>,
+    service_name: &str,
+    action_pascal: &str,
+    input: &Value,
+    account_id: &str,
+) -> Result<bytes::Bytes, (String, String)> {
+    use bytes::Bytes;
+    use fakecloud_core::service::AwsRequest;
+    use http::{HeaderMap, Method};
+
+    let service = registry.get(service_name).ok_or_else(|| {
+        (
+            "States.TaskFailed".to_string(),
+            format!("Unknown aws-sdk service '{service_name}'"),
+        )
+    })?;
+
+    let body_bytes = Bytes::from(
+        serde_json::to_vec(input).expect("serde_json::Value serialization is infallible"),
+    );
+
+    let req = AwsRequest {
+        service: service_name.to_string(),
+        action: action_pascal.to_string(),
+        region: "us-east-1".to_string(),
+        account_id: account_id.to_string(),
+        request_id: uuid::Uuid::new_v4().to_string(),
+        headers: HeaderMap::new(),
+        query_params: std::collections::HashMap::new(),
+        body: body_bytes,
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: vec![],
+        raw_path: "/".to_string(),
+        raw_query: String::new(),
+        method: Method::POST,
+        is_query_protocol: false,
+        access_key_id: None,
+        principal: None,
+    };
+
+    let response = service.handle(req).await.map_err(|err| {
+        let code = err.code().to_string();
+        let msg = err.message();
+        let prefix_service = match service_name {
+            "dynamodb" => "DynamoDb".to_string(),
+            "states" => "Sfn".to_string(),
+            other => camel_to_pascal(other),
+        };
+        (
+            format!("{prefix_service}.{code}"),
+            format!("{action_pascal} failed: {msg}"),
+        )
+    })?;
+
+    match response.body {
+        fakecloud_core::service::ResponseBody::Bytes(b) => Ok(b),
+        fakecloud_core::service::ResponseBody::File { .. } => Err((
+            "States.TaskFailed".to_string(),
+            "aws-sdk integration: file-backed response not supported".to_string(),
+        )),
+    }
 }
 
 /// Cap on `.sync` polling so a stuck downstream task can't hang an
