@@ -3,6 +3,7 @@
 mod helpers;
 
 use aws_sdk_athena::types::{DataCatalogType, QueryExecutionContext, ResultConfiguration, Tag};
+use aws_sdk_glue::types::{DatabaseInput, TableInput};
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
 
@@ -24,6 +25,29 @@ async fn make_data_catalog(server: &TestServer, name: &str) {
         .create_data_catalog()
         .name(name)
         .r#type(DataCatalogType::Lambda)
+        .send()
+        .await
+        .unwrap();
+}
+
+async fn make_glue_database(server: &TestServer, name: &str) {
+    server
+        .glue_client()
+        .await
+        .create_database()
+        .database_input(DatabaseInput::builder().name(name).build().unwrap())
+        .send()
+        .await
+        .unwrap();
+}
+
+async fn make_glue_table(server: &TestServer, db_name: &str, table_name: &str) {
+    server
+        .glue_client()
+        .await
+        .create_table()
+        .database_name(db_name)
+        .table_input(TableInput::builder().name(table_name).build().unwrap())
         .send()
         .await
         .unwrap();
@@ -295,6 +319,7 @@ async fn athena_delete_data_catalog() {
 #[tokio::test]
 async fn athena_get_database() {
     let server = TestServer::start().await;
+    make_glue_database(&server, "default").await;
     server
         .athena_client()
         .await
@@ -324,6 +349,8 @@ async fn athena_list_databases() {
 #[tokio::test]
 async fn athena_get_table_metadata() {
     let server = TestServer::start().await;
+    make_glue_database(&server, "default").await;
+    make_glue_table(&server, "default", "t").await;
     server
         .athena_client()
         .await

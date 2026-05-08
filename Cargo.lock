@@ -3134,6 +3134,7 @@ dependencies = [
  "aws-sdk-elasticache",
  "aws-sdk-elasticloadbalancingv2",
  "aws-sdk-eventbridge",
+ "aws-sdk-glue",
  "aws-sdk-iam",
  "aws-sdk-kinesis",
  "aws-sdk-kms",

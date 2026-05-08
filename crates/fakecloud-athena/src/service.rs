@@ -2490,12 +2490,7 @@ fn match_table_expression(name: &str, expression: &str) -> bool {
     if expression == "*" {
         return true;
     }
-    // Support `*` wildcards inside the expression.
-    let regex_str = expression
-        .replace('.', "\\.")
-        .replace('*', ".*")
-        .replace('?', ".");
-    regex::Regex::new(&format!("^{regex_str}$")).is_ok_and(|re| re.is_match(name))
+    regex::Regex::new(&format!("^{expression}$")).is_ok_and(|re| re.is_match(name))
 }
 
 #[cfg(test)]
