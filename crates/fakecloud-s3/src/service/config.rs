@@ -2489,7 +2489,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-amz-request-route", "route-1".parse().unwrap());
         headers.insert("x-amz-request-token", "token-1".parse().unwrap());
-        headers.insert("x-amz-fwd-header-Content-Type", "text/plain".parse().unwrap());
+        headers.insert(
+            "x-amz-fwd-header-Content-Type",
+            "text/plain".parse().unwrap(),
+        );
         headers.insert("x-amz-meta-custom", "value".parse().unwrap());
 
         let req = make_request(headers, Bytes::from_static(b"hello object lambda"));
