@@ -1978,7 +1978,11 @@ async fn s3_select_object_content() {
         .expression_type(aws_sdk_s3::types::ExpressionType::Sql)
         .input_serialization(
             aws_sdk_s3::types::InputSerialization::builder()
-                .csv(aws_sdk_s3::types::CsvInput::builder().build())
+                .csv(
+                    aws_sdk_s3::types::CsvInput::builder()
+                        .file_header_info(aws_sdk_s3::types::FileHeaderInfo::Use)
+                        .build(),
+                )
                 .build(),
         )
         .output_serialization(
@@ -1993,18 +1997,19 @@ async fn s3_select_object_content() {
     let mut stream = resp.payload;
     let mut records = Vec::new();
     let mut got_end = false;
-    while let Some(event) = stream.recv().await {
+    while let Ok(Some(event)) = stream.recv().await {
         match event {
-            Ok(aws_sdk_s3::types::SelectObjectContentEventStream::Records(rec)) => {
+            aws_sdk_s3::types::SelectObjectContentEventStream::Records(rec) => {
                 if let Some(payload) = rec.payload() {
                     records.extend_from_slice(payload.as_ref());
                 }
             }
-            Ok(aws_sdk_s3::types::SelectObjectContentEventStream::End(_)) => {
+            aws_sdk_s3::types::SelectObjectContentEventStream::Stats(_) => {}
+            aws_sdk_s3::types::SelectObjectContentEventStream::End(_) => {
                 got_end = true;
                 break;
             }
-            _ => {}
+            other => panic!("unexpected SelectObjectContent event: {other:?}"),
         }
     }
     assert!(got_end, "expected End event in SelectObjectContent stream");

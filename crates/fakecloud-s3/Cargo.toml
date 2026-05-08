@@ -35,3 +35,7 @@ toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+aws-smithy-eventstream = "0.60"
+aws-smithy-http = "0.63"
+bytes = { workspace = true }
+bytes-utils = "0.1"

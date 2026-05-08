@@ -12,6 +12,7 @@ use serde::Deserialize;
 // ── XML request shapes ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 #[serde(rename = "SelectObjectContentRequest")]
 pub struct SelectRequest {
     pub Expression: String,
@@ -21,6 +22,7 @@ pub struct SelectRequest {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[allow(non_snake_case, dead_code)]
 pub struct InputSerialization {
     pub CSV: Option<CsvInput>,
     pub JSON: Option<JsonInput>,
@@ -29,6 +31,7 @@ pub struct InputSerialization {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[allow(non_snake_case, dead_code)]
 pub struct CsvInput {
     #[serde(rename = "FileHeaderInfo")]
     pub file_header_info: Option<String>,
@@ -45,18 +48,21 @@ pub struct CsvInput {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[allow(non_snake_case, dead_code)]
 pub struct JsonInput {
     #[serde(rename = "Type")]
     pub json_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[allow(non_snake_case, dead_code)]
 pub struct OutputSerialization {
     pub CSV: Option<CsvOutput>,
     pub JSON: Option<JsonOutput>,
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[allow(non_snake_case, dead_code)]
 pub struct CsvOutput {
     #[serde(rename = "QuoteFields")]
     pub quote_fields: Option<String>,
@@ -71,6 +77,7 @@ pub struct CsvOutput {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[allow(non_snake_case, dead_code)]
 pub struct JsonOutput {
     #[serde(rename = "RecordDelimiter")]
     pub record_delimiter: Option<String>,
@@ -113,19 +120,22 @@ pub fn parse_sql(sql: &str) -> Result<Query, &'static str> {
         return Err("expected SELECT");
     }
 
-    let from_pos = upper.find(" FROM ").ok_or("expected FROM")?;
-    let select_part = sql[7..from_pos].trim();
+    let from_keyword = upper.find(" FROM ").ok_or("expected FROM")?;
+    let from_offset = " FROM ".len();
+    let select_part = sql[7..from_keyword].trim();
 
-    let rest = &sql[from_pos + 6..];
-    let where_pos = rest.to_uppercase().find(" WHERE ");
+    let after_from = &sql[from_keyword + from_offset..];
+    let upper_after = after_from.to_uppercase();
+    let where_keyword = upper_after.find(" WHERE ");
 
-    let (from, where_clause) = match where_pos {
+    let (from, where_clause) = match where_keyword {
         Some(wp) => {
-            let from = rest[..wp].trim().to_string();
-            let where_str = rest[wp + 7..].trim();
+            let from = after_from[..wp].trim().to_string();
+            let after_where = &after_from[wp + 7..];
+            let where_str = after_where.trim();
             (from, Some(parse_where(where_str)?))
         }
-        None => (rest.trim().to_string(), None),
+        None => (after_from.trim().to_string(), None),
     };
 
     let select = if select_part.eq_ignore_ascii_case("*") {
@@ -147,14 +157,12 @@ pub fn parse_sql(sql: &str) -> Result<Query, &'static str> {
 
 fn parse_where(s: &str) -> Result<WhereClause, &'static str> {
     let upper = s.to_uppercase();
-    // LIKE
     if let Some(pos) = upper.find(" LIKE ") {
         let col = s[..pos].trim().to_string();
         let pattern = s[pos + 6..].trim();
         let pat = strip_quotes(pattern).unwrap_or(pattern).to_string();
         return Ok(WhereClause::Like(col, pat));
     }
-    // =
     if let Some(pos) = s.find('=') {
         let col = s[..pos].trim().to_string();
         let val_str = s[pos + 1..].trim();
@@ -178,7 +186,6 @@ fn strip_quotes(s: &str) -> Option<&str> {
 
 // ── CSV parser ──────────────────────────────────────────────────────
 
-/// Parse CSV bytes into an optional header row and data rows.
 pub fn parse_csv(
     input: &[u8],
     has_header: bool,
@@ -206,8 +213,6 @@ pub fn parse_csv(
 
 // ── JSON parser (newline-delimited) ─────────────────────────────────
 
-/// Parse newline-delimited JSON into rows.
-/// Each line must be a JSON object; keys become headers on the first row.
 pub fn parse_json_lines(input: &[u8]) -> (Option<Vec<String>>, Vec<Vec<String>>) {
     let text = String::from_utf8_lossy(input);
     let mut headers: Option<Vec<String>> = None;
@@ -248,13 +253,13 @@ pub fn parse_json_lines(input: &[u8]) -> (Option<Vec<String>>, Vec<Vec<String>>)
 
 // ── Query evaluation ────────────────────────────────────────────────
 
-/// Evaluate a parsed query against parsed rows.
 pub fn evaluate_query(
     query: &Query,
     headers: &Option<Vec<String>>,
     rows: &[Vec<String>],
-) -> Vec<Vec<String>> {
+) -> (Vec<Vec<String>>, Option<Vec<String>>) {
     let mut result = Vec::new();
+    let mut out_headers: Option<Vec<String>> = None;
 
     for row in rows {
         if !matches_where(query.where_clause.as_ref(), headers, row) {
@@ -263,6 +268,9 @@ pub fn evaluate_query(
         let out_row = match &query.select {
             SqlSelect::All => row.clone(),
             SqlSelect::Columns(cols) => {
+                if out_headers.is_none() {
+                    out_headers = Some(cols.clone());
+                }
                 let mut out = Vec::with_capacity(cols.len());
                 for col in cols {
                     if let Some(idx) = header_index(headers, col) {
@@ -277,7 +285,7 @@ pub fn evaluate_query(
         result.push(out_row);
     }
 
-    result
+    (result, out_headers)
 }
 
 fn header_index(headers: &Option<Vec<String>>, col: &str) -> Option<usize> {
@@ -324,7 +332,6 @@ fn col_name(clause: &WhereClause) -> &str {
 
 // ── Output formatters ───────────────────────────────────────────────
 
-/// Format rows as CSV bytes.
 pub fn format_csv(rows: &[Vec<String>], field_delimiter: &str, record_delimiter: &str) -> Vec<u8> {
     let mut out = String::new();
     for row in rows {
@@ -339,7 +346,6 @@ pub fn format_csv(rows: &[Vec<String>], field_delimiter: &str, record_delimiter:
     out.into_bytes()
 }
 
-/// Format rows as newline-delimited JSON bytes.
 pub fn format_json_lines(rows: &[Vec<String>], headers: &Option<Vec<String>>) -> Vec<u8> {
     let mut out = String::new();
     let hdrs = headers.as_ref().cloned().unwrap_or_default();
@@ -411,8 +417,9 @@ mod tests {
         let q = parse_sql("SELECT * FROM s3object").unwrap();
         let hdrs = Some(vec!["a".to_string(), "b".to_string()]);
         let rows = vec![vec!["1".to_string(), "2".to_string()]];
-        let out = evaluate_query(&q, &hdrs, &rows);
+        let (out, out_hdrs) = evaluate_query(&q, &hdrs, &rows);
         assert_eq!(out, vec![vec!["1", "2"]]);
+        assert!(out_hdrs.is_none());
     }
 
     #[test]
@@ -423,7 +430,7 @@ mod tests {
             vec!["1".to_string(), "2".to_string()],
             vec!["3".to_string(), "4".to_string()],
         ];
-        let out = evaluate_query(&q, &hdrs, &rows);
+        let (out, _) = evaluate_query(&q, &hdrs, &rows);
         assert_eq!(out, vec![vec!["1", "2"]]);
     }
 
@@ -432,8 +439,9 @@ mod tests {
         let q = parse_sql("SELECT b FROM s3object").unwrap();
         let hdrs = Some(vec!["a".to_string(), "b".to_string()]);
         let rows = vec![vec!["1".to_string(), "2".to_string()]];
-        let out = evaluate_query(&q, &hdrs, &rows);
+        let (out, out_hdrs) = evaluate_query(&q, &hdrs, &rows);
         assert_eq!(out, vec![vec!["2"]]);
+        assert_eq!(out_hdrs, Some(vec!["b".to_string()]));
     }
 
     #[test]

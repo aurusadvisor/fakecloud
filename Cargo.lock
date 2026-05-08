@@ -3783,8 +3783,11 @@ name = "fakecloud-s3"
 version = "0.13.3"
 dependencies = [
  "async-trait",
+ "aws-smithy-eventstream",
+ "aws-smithy-http 0.63.6",
  "base64 0.22.1",
  "bytes",
+ "bytes-utils",
  "chrono",
  "crc32c",
  "crc32fast",
@@ -3797,6 +3800,7 @@ dependencies = [
  "md-5 0.10.6",
  "parking_lot",
  "percent-encoding",
+ "quick-xml",
  "serde",
  "serde_json",
  "sha1",

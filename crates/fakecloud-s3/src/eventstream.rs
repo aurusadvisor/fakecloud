@@ -5,7 +5,6 @@
 
 const HEADER_TYPE_STRING: u8 = 7;
 
-/// Encode a single eventstream frame.
 pub fn encode_frame(headers: &[(&str, &str)], payload: &[u8]) -> Vec<u8> {
     let headers_bytes = encode_headers(headers);
     let headers_len = headers_bytes.len() as u32;
@@ -46,7 +45,6 @@ fn encode_headers(headers: &[(&str, &str)]) -> Vec<u8> {
     buf
 }
 
-/// `Records` event carrying the query result payload.
 pub fn records_event_frame(payload: &[u8]) -> Vec<u8> {
     encode_frame(
         &[
@@ -58,25 +56,21 @@ pub fn records_event_frame(payload: &[u8]) -> Vec<u8> {
     )
 }
 
-/// `Stats` event with byte counters.
 pub fn stats_event_frame(bytes_scanned: u64, bytes_processed: u64, bytes_returned: u64) -> Vec<u8> {
-    let payload = serde_json::json!({
-        "BytesScanned": bytes_scanned,
-        "BytesProcessed": bytes_processed,
-        "BytesReturned": bytes_returned,
-    });
-    let body = serde_json::to_vec(&payload).expect("static JSON shape never fails to serialize");
+    let payload = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Stats>\n  <BytesScanned>{}</BytesScanned>\n  <BytesProcessed>{}</BytesProcessed>\n  <BytesReturned>{}</BytesReturned>\n</Stats>\n",
+        bytes_scanned, bytes_processed, bytes_returned
+    );
     encode_frame(
         &[
             (":event-type", "Stats"),
-            (":content-type", "application/json"),
+            (":content-type", "application/xml"),
             (":message-type", "event"),
         ],
-        &body,
+        payload.as_bytes(),
     )
 }
 
-/// `End` event signalling the stream is complete.
 pub fn end_event_frame() -> Vec<u8> {
     encode_frame(
         &[
@@ -86,4 +80,87 @@ pub fn end_event_frame() -> Vec<u8> {
         ],
         b"",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_smithy_eventstream::frame::read_message_from;
+    use bytes::Bytes;
+
+    #[test]
+    fn records_frame_decodes_with_sdk() {
+        let frame = records_event_frame(b"hello");
+        let msg = read_message_from(&mut Bytes::from(frame)).unwrap();
+        assert_eq!(msg.payload().as_ref(), b"hello");
+        let headers: Vec<_> = msg
+            .headers()
+            .iter()
+            .map(|h| {
+                (
+                    h.name().as_str().to_string(),
+                    h.value().as_string().unwrap().as_str().to_string(),
+                )
+            })
+            .collect();
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == ":event-type" && v == "Records"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == ":message-type" && v == "event"));
+    }
+
+    #[test]
+    fn stats_frame_decodes_with_sdk() {
+        let frame = stats_event_frame(100, 50, 25);
+        let msg = read_message_from(&mut Bytes::from(frame)).unwrap();
+        let payload = std::str::from_utf8(msg.payload().as_ref()).unwrap();
+        assert!(payload.contains("BytesScanned"));
+        assert!(payload.contains("100"));
+    }
+
+    #[test]
+    fn end_frame_decodes_with_sdk() {
+        let frame = end_event_frame();
+        let msg = read_message_from(&mut Bytes::from(frame)).unwrap();
+        assert!(msg.payload().is_empty());
+        let headers: Vec<_> = msg
+            .headers()
+            .iter()
+            .map(|h| {
+                (
+                    h.name().as_str().to_string(),
+                    h.value().as_string().unwrap().as_str().to_string(),
+                )
+            })
+            .collect();
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == ":event-type" && v == "End"));
+    }
+
+    #[test]
+    fn concatenated_frames_decode_with_sdk_decoder() {
+        let records = records_event_frame(b"hello");
+        let stats = stats_event_frame(100, 50, 25);
+        let end = end_event_frame();
+
+        let mut combined = Vec::new();
+        combined.extend_from_slice(&records);
+        combined.extend_from_slice(&stats);
+        combined.extend_from_slice(&end);
+
+        let mut decoder = aws_smithy_eventstream::frame::MessageFrameDecoder::new();
+        let mut buf = bytes_utils::SegmentedBuf::new();
+        buf.push(Bytes::from(combined));
+
+        let mut count = 0;
+        while let aws_smithy_eventstream::frame::DecodedFrame::Complete(_) =
+            decoder.decode_frame(&mut buf).unwrap()
+        {
+            count += 1;
+        }
+        assert_eq!(count, 3, "Expected 3 decoded frames");
+    }
 }

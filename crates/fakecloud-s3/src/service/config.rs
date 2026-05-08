@@ -2121,7 +2121,7 @@ impl S3Service {
         };
 
         // Evaluate query
-        let result_rows = crate::select::evaluate_query(&query, &headers, &rows);
+        let (result_rows, out_headers) = crate::select::evaluate_query(&query, &headers, &rows);
 
         // Format output
         let output_bytes = if let Some(csv_output) = request.OutputSerialization.CSV {
@@ -2129,7 +2129,7 @@ impl S3Service {
             let rd = csv_output.record_delimiter.as_deref().unwrap_or("\n");
             crate::select::format_csv(&result_rows, fd, rd)
         } else if request.OutputSerialization.JSON.is_some() {
-            crate::select::format_json_lines(&result_rows, &headers)
+            crate::select::format_json_lines(&result_rows, &out_headers)
         } else {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -2153,7 +2153,7 @@ impl S3Service {
 
         Ok(AwsResponse {
             status: StatusCode::OK,
-            content_type: "application/octet-stream".to_string(),
+            content_type: "application/vnd.amazon.eventstream".to_string(),
             body: body.into(),
             headers: HeaderMap::new(),
         })
