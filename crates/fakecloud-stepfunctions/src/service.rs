@@ -504,6 +504,7 @@ impl StepFunctionsService {
         };
 
         state.executions.insert(exec_arn.clone(), execution);
+        let logging_config = sm.logging_configuration.clone();
         drop(accounts);
 
         // Spawn async execution
@@ -522,6 +523,7 @@ impl StepFunctionsService {
                 delivery,
                 dynamodb_state,
                 registry,
+                logging_config,
             )
             .await;
         });
@@ -1300,7 +1302,7 @@ impl StepFunctionsService {
                 "Execution input is not valid JSON.",
             ));
         }
-        let (exec_arn, definition) = {
+        let (exec_arn, definition, logging_config) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
             let sm = state
@@ -1335,7 +1337,11 @@ impl StepFunctionsService {
                 history_events: vec![],
             };
             state.executions.insert(exec_arn.clone(), execution);
-            (exec_arn, sm.definition.clone())
+            (
+                exec_arn,
+                sm.definition.clone(),
+                sm.logging_configuration.clone(),
+            )
         };
 
         interpreter::execute_state_machine(
@@ -1346,6 +1352,7 @@ impl StepFunctionsService {
             self.delivery.clone(),
             self.dynamodb_state.clone(),
             self.registry.clone(),
+            logging_config,
         )
         .await;
 
@@ -1793,6 +1800,7 @@ pub fn start_execution_from_delivery(
     };
 
     st.executions.insert(exec_arn.clone(), execution);
+    let logging_config = sm.logging_configuration.clone();
     drop(accounts);
 
     let shared_state = state.clone();
@@ -1809,6 +1817,7 @@ pub fn start_execution_from_delivery(
             delivery,
             dynamodb_state,
             registry,
+            logging_config,
         )
         .await;
     });

@@ -58,6 +58,7 @@ async fn test_simple_pass_state() {
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -103,6 +104,7 @@ async fn test_pass_chain() {
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -139,6 +141,7 @@ async fn test_succeed_state() {
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -170,6 +173,7 @@ async fn test_fail_state() {
         state.clone(),
         arn.to_string(),
         definition,
+        None,
         None,
         None,
         None,
@@ -210,6 +214,7 @@ async fn test_history_events_recorded() {
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -239,6 +244,7 @@ fn drive(state: &SharedStepFunctionsState, arn: &str, def: Value, input: Option<
         arn.to_string(),
         def.to_string(),
         input.map(|s| s.to_string()),
+        None,
         None,
         None,
         None,
@@ -633,6 +639,7 @@ fn invalid_definition_json_fails_execution() {
         state.clone(),
         arn.clone(),
         "not json{".to_string(),
+        None,
         None,
         None,
         None,

@@ -30,6 +30,9 @@ pub struct DeliveryBus {
     /// Publish CloudWatch metric data points (CloudWatch Logs metric
     /// filters extract these on PutLogEvents).
     cloudwatch_metrics: Option<Arc<dyn CloudwatchDelivery>>,
+    /// Put log events into CloudWatch Logs log groups. Used by Step
+    /// Functions Express execution logging and ECS awslogs driver.
+    cloudwatch_logs: Option<Arc<dyn CloudwatchLogsDelivery>>,
     /// Verify a Cognito-issued JWT against the user pool that issued it.
     /// Used by API Gateway v1's `COGNITO_USER_POOLS` authorizer to
     /// validate signature/expiry/audience and extract claims.
@@ -270,6 +273,20 @@ pub trait CloudwatchDelivery: Send + Sync {
     );
 }
 
+/// Put log events into CloudWatch Logs log groups from outside the
+/// logs crate. Used by Step Functions Express execution logging and
+/// ECS awslogs driver so they can deliver without depending directly
+/// on fakecloud_logs.
+pub trait CloudwatchLogsDelivery: Send + Sync {
+    fn put_log_events(
+        &self,
+        account_id: &str,
+        log_group_name: &str,
+        log_stream_name: &str,
+        events: &[(i64, String)],
+    );
+}
+
 /// Outbound email dispatch used by services that emulate AWS flows that
 /// route through SES (Cognito verification, etc.) without taking a direct
 /// dependency on the SES crate.
@@ -350,6 +367,7 @@ impl DeliveryBus {
             ses_dispatcher: None,
             ecs_task_runner: None,
             cloudwatch_metrics: None,
+            cloudwatch_logs: None,
             cognito_jwt_verifier: None,
         }
     }
@@ -404,6 +422,25 @@ impl DeliveryBus {
                 dimensions,
                 timestamp_ms,
             );
+        }
+    }
+
+    pub fn with_cloudwatch_logs(mut self, sender: Arc<dyn CloudwatchLogsDelivery>) -> Self {
+        self.cloudwatch_logs = Some(sender);
+        self
+    }
+
+    /// Put log events to a CloudWatch Logs log group / stream.
+    /// Silently no-ops when no CloudWatch Logs sender is wired.
+    pub fn put_log_events(
+        &self,
+        account_id: &str,
+        log_group_name: &str,
+        log_stream_name: &str,
+        events: &[(i64, String)],
+    ) {
+        if let Some(ref sender) = self.cloudwatch_logs {
+            sender.put_log_events(account_id, log_group_name, log_stream_name, events);
         }
     }
 
