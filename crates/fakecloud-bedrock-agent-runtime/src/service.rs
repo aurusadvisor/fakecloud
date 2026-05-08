@@ -169,40 +169,71 @@ impl BedrockAgentRuntimeService {
         }
 
         // Flow executions
-        if segs.len() == 2 && segs[0] == "flows" && segs[1] == "executions" && *m == Method::POST {
+        // ListFlowExecutions: GET /flows/{flowIdentifier}/executions
+        if segs.len() == 3 && segs[0] == "flows" && segs[2] == "executions" && *m == Method::GET {
+            params.push(("flowIdentifier".to_string(), segs[1].clone()));
             return Some(("ListFlowExecutions", params));
         }
-        if segs.len() == 3 && segs[0] == "flows" && segs[1] == "executions" && *m == Method::GET {
-            params.push(("executionId".to_string(), segs[2].clone()));
-            return Some(("GetFlowExecution", params));
-        }
-        if segs.len() == 3 && segs[0] == "flows" && segs[1] == "executions" && *m == Method::POST {
-            params.push(("executionId".to_string(), segs[2].clone()));
-            return Some(("StartFlowExecution", params));
-        }
-        if segs.len() == 3 && segs[0] == "flows" && segs[1] == "executions" && *m == Method::DELETE
-        {
-            params.push(("executionId".to_string(), segs[2].clone()));
-            return Some(("StopFlowExecution", params));
-        }
-        if segs.len() == 4
+        // GetFlowExecution: GET /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions/{executionIdentifier}
+        if segs.len() == 6
             && segs[0] == "flows"
-            && segs[1] == "executions"
-            && segs[3] == "events"
-            && *m == Method::POST
-        {
-            params.push(("executionId".to_string(), segs[2].clone()));
-            return Some(("ListFlowExecutionEvents", params));
-        }
-
-        // Execution flow snapshot
-        if segs.len() == 4
-            && segs[0] == "flows"
-            && segs[1] == "executions"
-            && segs[3] == "snapshot"
+            && segs[2] == "aliases"
+            && segs[4] == "executions"
             && *m == Method::GET
         {
-            params.push(("executionId".to_string(), segs[2].clone()));
+            params.push(("flowIdentifier".to_string(), segs[1].clone()));
+            params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
+            params.push(("executionIdentifier".to_string(), segs[5].clone()));
+            return Some(("GetFlowExecution", params));
+        }
+        // StartFlowExecution: POST /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions
+        if segs.len() == 5
+            && segs[0] == "flows"
+            && segs[2] == "aliases"
+            && segs[4] == "executions"
+            && *m == Method::POST
+        {
+            params.push(("flowIdentifier".to_string(), segs[1].clone()));
+            params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
+            return Some(("StartFlowExecution", params));
+        }
+        // StopFlowExecution: POST /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions/{executionIdentifier}/stop
+        if segs.len() == 7
+            && segs[0] == "flows"
+            && segs[2] == "aliases"
+            && segs[4] == "executions"
+            && segs[6] == "stop"
+            && *m == Method::POST
+        {
+            params.push(("flowIdentifier".to_string(), segs[1].clone()));
+            params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
+            params.push(("executionIdentifier".to_string(), segs[5].clone()));
+            return Some(("StopFlowExecution", params));
+        }
+        // ListFlowExecutionEvents: GET /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions/{executionIdentifier}/events
+        if segs.len() == 7
+            && segs[0] == "flows"
+            && segs[2] == "aliases"
+            && segs[4] == "executions"
+            && segs[6] == "events"
+            && *m == Method::GET
+        {
+            params.push(("flowIdentifier".to_string(), segs[1].clone()));
+            params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
+            params.push(("executionIdentifier".to_string(), segs[5].clone()));
+            return Some(("ListFlowExecutionEvents", params));
+        }
+        // GetExecutionFlowSnapshot: GET /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions/{executionIdentifier}/flowsnapshot
+        if segs.len() == 7
+            && segs[0] == "flows"
+            && segs[2] == "aliases"
+            && segs[4] == "executions"
+            && segs[6] == "flowsnapshot"
+            && *m == Method::GET
+        {
+            params.push(("flowIdentifier".to_string(), segs[1].clone()));
+            params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
+            params.push(("executionIdentifier".to_string(), segs[5].clone()));
             return Some(("GetExecutionFlowSnapshot", params));
         }
 
@@ -275,7 +306,7 @@ impl AwsService for BedrockAgentRuntimeService {
 
         let mut body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         if !path_params.is_empty() {
-            if body.is_null() {
+            if !body.is_object() {
                 body = serde_json::Value::Object(serde_json::Map::new());
             }
             for (k, v) in path_params {
@@ -509,7 +540,12 @@ async fn handle_retrieve(
         )
     })?;
 
-    let query = req_str(body, "retrievalQuery").unwrap_or_default();
+    let query = body
+        .get("retrievalQuery")
+        .and_then(|q| q.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
 
     let response = json!({
         "retrievalResults": [
