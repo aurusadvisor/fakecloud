@@ -2205,7 +2205,7 @@ impl S3Service {
 
         let content_type = req
             .headers
-            .get("content-type")
+            .get("x-amz-fwd-header-Content-Type")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
@@ -2489,7 +2489,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-amz-request-route", "route-1".parse().unwrap());
         headers.insert("x-amz-request-token", "token-1".parse().unwrap());
-        headers.insert("content-type", "text/plain".parse().unwrap());
+        headers.insert("x-amz-fwd-header-Content-Type", "text/plain".parse().unwrap());
         headers.insert("x-amz-meta-custom", "value".parse().unwrap());
 
         let req = make_request(headers, Bytes::from_static(b"hello object lambda"));
