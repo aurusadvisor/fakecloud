@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
@@ -15,9 +16,10 @@ enum CacheEngineKind {
     Memcached,
 }
 
+#[derive(Debug, Clone)]
 pub struct ElastiCacheRuntime {
     cli: String,
-    containers: RwLock<HashMap<String, RunningCacheContainer>>,
+    containers: Arc<RwLock<HashMap<String, RunningCacheContainer>>>,
     instance_id: String,
 }
 
@@ -47,7 +49,7 @@ impl ElastiCacheRuntime {
 
         Some(Self {
             cli,
-            containers: RwLock::new(HashMap::new()),
+            containers: Arc::new(RwLock::new(HashMap::new())),
             instance_id: format!("fakecloud-{}", std::process::id()),
         })
     }
@@ -196,6 +198,30 @@ impl ElastiCacheRuntime {
             ));
         }
         Ok(())
+    }
+
+    /// Execute an arbitrary `redis-cli` command inside a tracked container.
+    /// Returns the raw `std::process::Output` so the caller can decide
+    /// whether a non-zero exit is fatal.
+    pub async fn exec_redis(
+        &self,
+        resource_id: &str,
+        redis_args: &[String],
+    ) -> Result<std::process::Output, RuntimeError> {
+        let container_id = {
+            let containers = self.containers.read();
+            containers
+                .get(resource_id)
+                .map(|c| c.container_id.clone())
+                .ok_or(RuntimeError::Unavailable)?
+        };
+        let mut args = vec!["exec".to_string(), container_id, "redis-cli".to_string()];
+        args.extend_from_slice(redis_args);
+        tokio::process::Command::new(&self.cli)
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))
     }
 
     /// Trigger `SAVE` inside a running Redis container and copy the

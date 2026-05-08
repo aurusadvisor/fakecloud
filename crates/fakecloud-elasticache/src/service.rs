@@ -292,7 +292,7 @@ impl AwsService for ElastiCacheService {
             "ListTagsForResource" => self.list_tags_for_resource(&request),
             "ModifyCacheSubnetGroup" => self.modify_cache_subnet_group(&request),
             "ModifyGlobalReplicationGroup" => self.modify_global_replication_group(&request),
-            "ModifyReplicationGroup" => self.modify_replication_group(&request),
+            "ModifyReplicationGroup" => self.modify_replication_group(&request).await,
             "ModifyServerlessCache" => self.modify_serverless_cache(&request),
             "RemoveTagsFromResource" => self.remove_tags_from_resource(&request),
             "TestFailover" => self.test_failover(&request),
@@ -305,7 +305,7 @@ impl AwsService for ElastiCacheService {
             "DescribeCacheSecurityGroups" => self.describe_cache_security_groups(&request),
             "CreateCacheParameterGroup" => self.create_cache_parameter_group(&request),
             "DeleteCacheParameterGroup" => self.delete_cache_parameter_group(&request),
-            "ModifyCacheParameterGroup" => self.modify_cache_parameter_group(&request),
+            "ModifyCacheParameterGroup" => self.modify_cache_parameter_group(&request).await,
             "ResetCacheParameterGroup" => self.reset_cache_parameter_group(&request),
             "DescribeCacheParameters" => self.describe_cache_parameters(&request),
             "ModifyCacheCluster" => self.modify_cache_cluster(&request),
@@ -325,8 +325,8 @@ impl AwsService for ElastiCacheService {
             "RebalanceSlotsInGlobalReplicationGroup" => {
                 self.rebalance_slots_in_global_replication_group(&request)
             }
-            "ModifyUser" => self.modify_user(&request),
-            "ModifyUserGroup" => self.modify_user_group(&request),
+            "ModifyUser" => self.modify_user(&request).await,
+            "ModifyUserGroup" => self.modify_user_group(&request).await,
             "PurchaseReservedCacheNodesOffering" => {
                 self.purchase_reserved_cache_nodes_offering(&request)
             }
@@ -1034,7 +1034,7 @@ impl ElastiCacheService {
             container_id: running.container_id,
             host_port: running.host_port,
             replication_group_id,
-            cache_parameter_group_name,
+            cache_parameter_group_name: cache_parameter_group_name.clone(),
             security_group_ids,
             log_delivery_configurations,
             transit_encryption_enabled,
@@ -1078,6 +1078,10 @@ impl ElastiCacheService {
             if let Some(ref group_id) = cluster.replication_group_id {
                 add_cluster_to_replication_group(state, group_id, &cluster.cache_cluster_id);
             }
+        }
+        if let Some(ref param_group) = cache_parameter_group_name {
+            self.apply_parameters_for_group(&request.account_id, param_group)
+                .await;
         }
 
         Ok(AwsResponse::xml(
@@ -1420,7 +1424,7 @@ impl ElastiCacheService {
             cluster_enabled,
             kms_key_id,
             auth_token_enabled,
-            user_group_ids,
+            user_group_ids: user_group_ids.clone(),
             multi_az_enabled,
             log_delivery_configurations,
             data_tiering,
@@ -1445,7 +1449,7 @@ impl ElastiCacheService {
             cluster_mode,
             data_tiering_enabled,
             notification_topic_status: None,
-            cache_parameter_group_name,
+            cache_parameter_group_name: cache_parameter_group_name.clone(),
             cache_subnet_group_name,
             security_group_ids,
             preferred_maintenance_window,
@@ -1462,6 +1466,14 @@ impl ElastiCacheService {
             if !tags.is_empty() {
                 merge_tags(state.tags.entry(arn).or_default(), &tags);
             }
+        }
+        if !user_group_ids.is_empty() {
+            self.apply_acls_for_replication_group(&request.account_id, &replication_group_id)
+                .await;
+        }
+        if let Some(ref param_group) = cache_parameter_group_name {
+            self.apply_parameters_for_group(&request.account_id, param_group)
+                .await;
         }
 
         Ok(AwsResponse::xml(
@@ -2507,7 +2519,7 @@ impl ElastiCacheService {
         ))
     }
 
-    fn modify_replication_group(
+    async fn modify_replication_group(
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
@@ -2622,151 +2634,161 @@ impl ElastiCacheService {
         let new_notification_topic_status =
             optional_query_param(request, "NotificationTopicStatus");
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
+        let (group, region, rg_id, had_user_group_changes) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
 
-        let group = state
-            .replication_groups
-            .get_mut(&replication_group_id)
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ReplicationGroupNotFoundFault",
-                    format!("ReplicationGroup {replication_group_id} not found."),
-                )
-            })?;
+            let group = state
+                .replication_groups
+                .get_mut(&replication_group_id)
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "ReplicationGroupNotFoundFault",
+                        format!("ReplicationGroup {replication_group_id} not found."),
+                    )
+                })?;
 
-        if let Some(desc) = new_description {
-            group.description = desc;
-        }
-        if let Some(node_type) = new_cache_node_type {
-            group.cache_node_type = node_type;
-        }
-        if let Some(version) = new_engine_version {
-            group.engine_version = version;
-        }
-        if let Some(af) = new_automatic_failover {
-            group.automatic_failover_enabled = af;
-        }
-        if let Some(limit) = new_snapshot_retention_limit {
-            group.snapshot_retention_limit = limit;
-        }
-        if let Some(window) = new_snapshot_window {
-            group.snapshot_window = window;
-        }
-        if let Some(transit) = new_transit_encryption_enabled {
-            group.transit_encryption_enabled = transit;
-        }
-        if let Some(mode) = new_transit_encryption_mode {
-            group.transit_encryption_mode = Some(mode);
-        }
-        if let Some(at_rest) = new_at_rest_encryption_enabled {
-            group.at_rest_encryption_enabled = at_rest;
-        }
-        if let Some(kms) = new_kms_key_id {
-            group.kms_key_id = Some(kms);
-        }
-        if let Some(multi_az) = new_multi_az_enabled {
-            group.multi_az_enabled = multi_az;
-        }
-        if let Some(ip_discovery) = new_ip_discovery {
-            group.ip_discovery = Some(ip_discovery);
-        }
-        if let Some(network_type) = new_network_type {
-            group.network_type = Some(network_type);
-        }
-        if let Some(cluster_mode) = new_cluster_mode {
-            // ClusterMode "enabled"/"compatible" both flip cluster_enabled true;
-            // "disabled" turns it off. Mirrors create_replication_group semantics.
-            let enabled = cluster_mode == "enabled" || cluster_mode == "compatible";
-            group.cluster_enabled = enabled;
-            group.cluster_mode = Some(cluster_mode);
-        }
-        if let Some(window) = new_preferred_maintenance_window {
-            group.preferred_maintenance_window = Some(window);
-        }
-        if let Some(name) = new_cache_parameter_group_name {
-            group.cache_parameter_group_name = Some(name);
-        }
-        if let Some(amvu) = new_auto_minor_version_upgrade {
-            group.auto_minor_version_upgrade = amvu;
-        }
-        if let Some(arn) = new_notification_topic_arn {
-            group.notification_topic_arn = Some(arn);
-        }
-        if let Some(status) = new_notification_topic_status {
-            group.notification_topic_status = Some(status);
-        }
-        if has_log_delivery_input {
-            // AWS replaces the full log-delivery configuration set per call;
-            // disabled entries (Enabled=false) are dropped from state.
-            group.log_delivery_configurations = new_log_delivery_configurations;
-        }
-        if remove_user_groups == Some(true) {
-            group.user_group_ids.clear();
-        }
-        // Add / remove user-group ids on the replication group itself.
-        // Skipped when RemoveUserGroups already cleared the list above only
-        // for removes; adds still apply because AWS lets a single call clear
-        // and then re-attach. Dedup on add to match AWS idempotency.
-        for ug_id in &user_group_ids_to_add {
-            if !group.user_group_ids.contains(ug_id) {
-                group.user_group_ids.push(ug_id.clone());
+            if let Some(desc) = new_description {
+                group.description = desc;
             }
-        }
-        for ug_id in &user_group_ids_to_remove {
-            group.user_group_ids.retain(|id| id != ug_id);
-        }
-        // AuthToken rotation: SET / ROTATE store the new token, DELETE clears
-        // it. Default strategy is SET when AuthToken is supplied without one.
-        match new_auth_token_strategy.as_deref() {
-            Some("DELETE") => {
-                group.auth_token = None;
-                group.auth_token_enabled = false;
+            if let Some(node_type) = new_cache_node_type {
+                group.cache_node_type = node_type;
             }
-            Some("SET") | Some("ROTATE") => {
-                if let Some(token) = new_auth_token {
-                    group.auth_token = Some(token);
-                    group.auth_token_enabled = true;
+            if let Some(version) = new_engine_version {
+                group.engine_version = version;
+            }
+            if let Some(af) = new_automatic_failover {
+                group.automatic_failover_enabled = af;
+            }
+            if let Some(limit) = new_snapshot_retention_limit {
+                group.snapshot_retention_limit = limit;
+            }
+            if let Some(window) = new_snapshot_window {
+                group.snapshot_window = window;
+            }
+            if let Some(transit) = new_transit_encryption_enabled {
+                group.transit_encryption_enabled = transit;
+            }
+            if let Some(mode) = new_transit_encryption_mode {
+                group.transit_encryption_mode = Some(mode);
+            }
+            if let Some(at_rest) = new_at_rest_encryption_enabled {
+                group.at_rest_encryption_enabled = at_rest;
+            }
+            if let Some(kms) = new_kms_key_id {
+                group.kms_key_id = Some(kms);
+            }
+            if let Some(multi_az) = new_multi_az_enabled {
+                group.multi_az_enabled = multi_az;
+            }
+            if let Some(ip_discovery) = new_ip_discovery {
+                group.ip_discovery = Some(ip_discovery);
+            }
+            if let Some(network_type) = new_network_type {
+                group.network_type = Some(network_type);
+            }
+            if let Some(cluster_mode) = new_cluster_mode {
+                // ClusterMode "enabled"/"compatible" both flip cluster_enabled true;
+                // "disabled" turns it off. Mirrors create_replication_group semantics.
+                let enabled = cluster_mode == "enabled" || cluster_mode == "compatible";
+                group.cluster_enabled = enabled;
+                group.cluster_mode = Some(cluster_mode);
+            }
+            if let Some(window) = new_preferred_maintenance_window {
+                group.preferred_maintenance_window = Some(window);
+            }
+            if let Some(name) = new_cache_parameter_group_name {
+                group.cache_parameter_group_name = Some(name);
+            }
+            if let Some(amvu) = new_auto_minor_version_upgrade {
+                group.auto_minor_version_upgrade = amvu;
+            }
+            if let Some(arn) = new_notification_topic_arn {
+                group.notification_topic_arn = Some(arn);
+            }
+            if let Some(status) = new_notification_topic_status {
+                group.notification_topic_status = Some(status);
+            }
+            if has_log_delivery_input {
+                // AWS replaces the full log-delivery configuration set per call;
+                // disabled entries (Enabled=false) are dropped from state.
+                group.log_delivery_configurations = new_log_delivery_configurations;
+            }
+            if remove_user_groups == Some(true) {
+                group.user_group_ids.clear();
+            }
+            // Add / remove user-group ids on the replication group itself.
+            // Skipped when RemoveUserGroups already cleared the list above only
+            // for removes; adds still apply because AWS lets a single call clear
+            // and then re-attach. Dedup on add to match AWS idempotency.
+            for ug_id in &user_group_ids_to_add {
+                if !group.user_group_ids.contains(ug_id) {
+                    group.user_group_ids.push(ug_id.clone());
                 }
             }
-            Some(other) => {
-                return Err(AwsServiceError::aws_error(
+            for ug_id in &user_group_ids_to_remove {
+                group.user_group_ids.retain(|id| id != ug_id);
+            }
+            // AuthToken rotation: SET / ROTATE store the new token, DELETE clears
+            // it. Default strategy is SET when AuthToken is supplied without one.
+            match new_auth_token_strategy.as_deref() {
+                Some("DELETE") => {
+                    group.auth_token = None;
+                    group.auth_token_enabled = false;
+                }
+                Some("SET") | Some("ROTATE") => {
+                    if let Some(token) = new_auth_token {
+                        group.auth_token = Some(token);
+                        group.auth_token_enabled = true;
+                    }
+                }
+                Some(other) => {
+                    return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidParameterValue",
                     format!(
                         "Invalid value for AuthTokenUpdateStrategy: '{other}'. Valid values: SET, ROTATE, DELETE."
                     ),
                 ));
-            }
-            None => {
-                if let Some(token) = new_auth_token {
-                    group.auth_token = Some(token);
-                    group.auth_token_enabled = true;
+                }
+                None => {
+                    if let Some(token) = new_auth_token {
+                        group.auth_token = Some(token);
+                        group.auth_token_enabled = true;
+                    }
                 }
             }
-        }
 
-        // Mirror the membership change onto the user-group side so
-        // DescribeUserGroups reflects which RGs each group covers.
-        for ug_id in &user_group_ids_to_add {
-            if let Some(ug) = state.user_groups.get_mut(ug_id) {
-                if !ug.replication_groups.contains(&replication_group_id) {
-                    ug.replication_groups.push(replication_group_id.clone());
+            // Mirror the membership change onto the user-group side so
+            // DescribeUserGroups reflects which RGs each group covers.
+            for ug_id in &user_group_ids_to_add {
+                if let Some(ug) = state.user_groups.get_mut(ug_id) {
+                    if !ug.replication_groups.contains(&replication_group_id) {
+                        ug.replication_groups.push(replication_group_id.clone());
+                    }
                 }
             }
-        }
-        for ug_id in &user_group_ids_to_remove {
-            if let Some(ug) = state.user_groups.get_mut(ug_id) {
-                ug.replication_groups
-                    .retain(|id| id != &replication_group_id);
+            for ug_id in &user_group_ids_to_remove {
+                if let Some(ug) = state.user_groups.get_mut(ug_id) {
+                    ug.replication_groups
+                        .retain(|id| id != &replication_group_id);
+                }
             }
-        }
 
-        let group = state.replication_groups[&replication_group_id].clone();
-        let region = state.region.clone();
+            let group = state.replication_groups[&replication_group_id].clone();
+            let region = state.region.clone();
+            let rg_id = replication_group_id.clone();
+            let had_user_group_changes = !user_group_ids_to_add.is_empty()
+                || remove_user_groups == Some(true)
+                || !user_group_ids_to_remove.is_empty();
+            (group, region, rg_id, had_user_group_changes)
+        };
         let xml = replication_group_xml(&group, &region);
-
+        if had_user_group_changes {
+            self.apply_acls_for_replication_group(&request.account_id, &rg_id)
+                .await;
+        }
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
@@ -3956,7 +3978,7 @@ impl ElastiCacheService {
         ))
     }
 
-    fn modify_cache_parameter_group(
+    async fn modify_cache_parameter_group(
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
@@ -3967,40 +3989,44 @@ impl ElastiCacheService {
             "ParameterName",
             "ParameterValue",
         );
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
-        if !state
-            .parameter_groups
-            .iter()
-            .any(|g| g.cache_parameter_group_name == name)
         {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "CacheParameterGroupNotFound",
-                format!("CacheParameterGroup {name} not found."),
-            ));
-        }
-        let params = state
-            .parameter_group_parameters
-            .entry(name.clone())
-            .or_default();
-        for (param_name, value) in updates {
-            if let Some(existing) = params.iter_mut().find(|p| p.parameter_name == param_name) {
-                existing.parameter_value = value;
-                existing.source = "user".to_string();
-            } else {
-                params.push(crate::state::CacheParameter {
-                    parameter_name: param_name,
-                    parameter_value: value,
-                    description: String::new(),
-                    source: "user".to_string(),
-                    data_type: "string".to_string(),
-                    allowed_values: String::new(),
-                    is_modifiable: true,
-                    minimum_engine_version: String::new(),
-                });
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            if !state
+                .parameter_groups
+                .iter()
+                .any(|g| g.cache_parameter_group_name == name)
+            {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "CacheParameterGroupNotFound",
+                    format!("CacheParameterGroup {name} not found."),
+                ));
+            }
+            let params = state
+                .parameter_group_parameters
+                .entry(name.clone())
+                .or_default();
+            for (param_name, value) in updates {
+                if let Some(existing) = params.iter_mut().find(|p| p.parameter_name == param_name) {
+                    existing.parameter_value = value;
+                    existing.source = "user".to_string();
+                } else {
+                    params.push(crate::state::CacheParameter {
+                        parameter_name: param_name,
+                        parameter_value: value,
+                        description: String::new(),
+                        source: "user".to_string(),
+                        data_type: "string".to_string(),
+                        allowed_values: String::new(),
+                        is_modifiable: true,
+                        minimum_engine_version: String::new(),
+                    });
+                }
             }
         }
+        self.apply_parameters_for_group(&request.account_id, &name)
+            .await;
         let body = format!(
             "<CacheParameterGroupName>{}</CacheParameterGroupName>",
             xml_escape(&name)
@@ -4405,50 +4431,95 @@ impl ElastiCacheService {
 
     // ── Users / User groups (modify) ──
 
-    fn modify_user(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn modify_user(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let id = required_query_param(request, "UserId")?;
         let access_string = optional_query_param(request, "AccessString");
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
-        let user = state.users.get_mut(&id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "UserNotFound",
-                format!("User {id} not found."),
-            )
-        })?;
-        if let Some(a) = access_string {
-            user.access_string = a;
+        let (xml, affected_rg_ids) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            let user = state.users.get_mut(&id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "UserNotFound",
+                    format!("User {id} not found."),
+                )
+            })?;
+            if let Some(a) = access_string {
+                user.access_string = a;
+            }
+            user.status = "modifying".to_string();
+            let rg_ids: Vec<String> = state
+                .replication_groups
+                .values()
+                .filter(|rg| {
+                    rg.user_group_ids
+                        .iter()
+                        .any(|ug| user.user_group_ids.contains(ug))
+                })
+                .map(|rg| rg.replication_group_id.clone())
+                .collect();
+            (user_xml(user), rg_ids)
+        };
+        for rg_id in affected_rg_ids {
+            self.apply_acls_for_replication_group(&request.account_id, &rg_id)
+                .await;
         }
-        user.status = "modifying".to_string();
-        let xml = user_xml(user);
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml("ModifyUser", ELASTICACHE_NS, &xml, &request.request_id),
         ))
     }
 
-    fn modify_user_group(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn modify_user_group(
+        &self,
+        request: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let id = required_query_param(request, "UserGroupId")?;
         let to_add = collect_indexed_strings(request, "UserIdsToAdd.member");
         let to_remove = collect_indexed_strings(request, "UserIdsToRemove.member");
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
-        let group = state.user_groups.get_mut(&id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "UserGroupNotFoundFault",
-                format!("UserGroup {id} not found."),
-            )
-        })?;
-        for u in to_add {
-            if !group.user_ids.contains(&u) {
-                group.user_ids.push(u);
+        let (xml, affected_rg_ids) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            let group = state.user_groups.get_mut(&id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "UserGroupNotFoundFault",
+                    format!("UserGroup {id} not found."),
+                )
+            })?;
+            for u in &to_add {
+                if !group.user_ids.contains(u) {
+                    group.user_ids.push(u.clone());
+                }
             }
+            group.user_ids.retain(|u| !to_remove.contains(u));
+            group.status = "modifying".to_string();
+            // Keep the reverse mapping on each User in sync so that
+            // ModifyUser can resolve the correct replication groups.
+            for u in &to_add {
+                if let Some(user) = state.users.get_mut(u) {
+                    if !user.user_group_ids.contains(&id) {
+                        user.user_group_ids.push(id.clone());
+                    }
+                }
+            }
+            for u in &to_remove {
+                if let Some(user) = state.users.get_mut(u) {
+                    user.user_group_ids.retain(|ug| ug != &id);
+                }
+            }
+            let rg_ids: Vec<String> = state
+                .replication_groups
+                .values()
+                .filter(|rg| rg.user_group_ids.contains(&id))
+                .map(|rg| rg.replication_group_id.clone())
+                .collect();
+            (user_group_xml(group), rg_ids)
+        };
+        for rg_id in affected_rg_ids {
+            self.apply_acls_for_replication_group(&request.account_id, &rg_id)
+                .await;
         }
-        group.user_ids.retain(|u| !to_remove.contains(u));
-        group.status = "modifying".to_string();
-        let xml = user_group_xml(group);
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml("ModifyUserGroup", ELASTICACHE_NS, &xml, &request.request_id),
@@ -4841,6 +4912,190 @@ impl ElastiCacheService {
                 &request.request_id,
             ),
         ))
+    }
+
+    /// Best-effort ACL application: push every user from every user group
+    /// attached to the replication group into the running Redis container
+    /// via `ACL SETUSER`, and remove any users that are no longer attached.
+    async fn apply_acls_for_replication_group(&self, account_id: &str, rg_id: &str) {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+        let (users, all_known_user_ids) = {
+            let accounts = self.state.read();
+            let state = accounts.get(account_id);
+            let Some(state) = state else { return };
+            let Some(rg) = state.replication_groups.get(rg_id) else {
+                return;
+            };
+            let mut users = Vec::new();
+            let mut all_known_user_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for u in state.users.values() {
+                all_known_user_ids.insert(u.user_id.clone());
+            }
+            for ug_id in &rg.user_group_ids {
+                if let Some(ug) = state.user_groups.get(ug_id) {
+                    for uid in &ug.user_ids {
+                        if let Some(u) = state.users.get(uid) {
+                            users.push(u.clone());
+                        }
+                    }
+                }
+            }
+            (users, all_known_user_ids)
+        };
+
+        // Remove users that are no longer attached to this replication group.
+        // We query the current ACL list from Redis and delete any custom user
+        // (other than "default") that is not in the desired set.
+        let desired: std::collections::HashSet<String> =
+            users.iter().map(|u| u.user_id.clone()).collect();
+        match runtime
+            .exec_redis(rg_id, &["ACL".to_string(), "USERS".to_string()])
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let username = line.trim().trim_matches('"');
+                    if username == "default" || username.is_empty() {
+                        continue;
+                    }
+                    // Only delete users that exist in our fakecloud state but
+                    // are no longer attached to this RG.  This avoids
+                    // accidentally deleting users that belong to another
+                    // service sharing the same Redis container.
+                    if all_known_user_ids.contains(username) && !desired.contains(username) {
+                        let del_args = vec![
+                            "ACL".to_string(),
+                            "DELUSER".to_string(),
+                            username.to_string(),
+                        ];
+                        if let Ok(del_out) = runtime.exec_redis(rg_id, &del_args).await {
+                            if !del_out.status.success() {
+                                tracing::warn!(
+                                    rg_id = %rg_id,
+                                    user_id = %username,
+                                    stderr = %String::from_utf8_lossy(&del_out.stderr),
+                                    "ACL DELUSER failed"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(output) => {
+                tracing::warn!(
+                    rg_id = %rg_id,
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "ACL USERS failed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    rg_id = %rg_id,
+                    %e,
+                    "ACL USERS exec failed"
+                );
+            }
+        }
+
+        for user in &users {
+            let mut args = vec![
+                "ACL".to_string(),
+                "SETUSER".to_string(),
+                user.user_id.clone(),
+                "reset".to_string(),
+            ];
+            args.extend(user.access_string.split_whitespace().map(|s| s.to_string()));
+            match runtime.exec_redis(rg_id, &args).await {
+                Ok(output) if !output.status.success() => {
+                    tracing::warn!(
+                        rg_id = %rg_id,
+                        user_id = %user.user_id,
+                        stderr = %String::from_utf8_lossy(&output.stderr),
+                        "ACL SETUSER failed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        rg_id = %rg_id,
+                        user_id = %user.user_id,
+                        %e,
+                        "ACL SETUSER exec failed"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Best-effort parameter application: run `CONFIG SET` for every
+    /// user-modified parameter on every Redis/Valkey cluster and
+    /// replication group that uses the given parameter group.
+    async fn apply_parameters_for_group(&self, account_id: &str, param_group_name: &str) {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+        let (target_ids, params) = {
+            let accounts = self.state.read();
+            let state = accounts.get(account_id);
+            let Some(state) = state else { return };
+            let mut target_ids = Vec::new();
+            for c in state.cache_clusters.values() {
+                if c.cache_parameter_group_name.as_deref() == Some(param_group_name)
+                    && (c.engine == ENGINE_REDIS || c.engine == ENGINE_VALKEY)
+                {
+                    target_ids.push(c.cache_cluster_id.clone());
+                }
+            }
+            for g in state.replication_groups.values() {
+                if g.cache_parameter_group_name.as_deref() == Some(param_group_name)
+                    && (g.engine == ENGINE_REDIS || g.engine == ENGINE_VALKEY)
+                {
+                    target_ids.push(g.replication_group_id.clone());
+                }
+            }
+            let params = state
+                .parameter_group_parameters
+                .get(param_group_name)
+                .cloned()
+                .unwrap_or_default();
+            (target_ids, params)
+        };
+        for id in target_ids {
+            for param in &params {
+                if !param.is_modifiable {
+                    continue;
+                }
+                let args = vec![
+                    "CONFIG".to_string(),
+                    "SET".to_string(),
+                    param.parameter_name.clone(),
+                    param.parameter_value.clone(),
+                ];
+                match runtime.exec_redis(&id, &args).await {
+                    Ok(output) if !output.status.success() => {
+                        tracing::warn!(
+                            resource_id = %id,
+                            param = %param.parameter_name,
+                            stderr = %String::from_utf8_lossy(&output.stderr),
+                            "CONFIG SET failed"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            resource_id = %id,
+                            param = %param.parameter_name,
+                            %e,
+                            "CONFIG SET exec failed"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
 

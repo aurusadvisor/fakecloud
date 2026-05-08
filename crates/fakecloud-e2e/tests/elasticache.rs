@@ -2744,3 +2744,277 @@ async fn elasticache_decrease_replica_count_per_shard() {
     // 2 shards × (1 primary + 1 replica) = 4 member clusters.
     assert_eq!(group.member_clusters().len(), 4);
 }
+
+#[tokio::test]
+async fn elasticache_memcached_cluster_emits_configuration_endpoint() {
+    if !docker_available() {
+        return;
+    }
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    let create_resp = client
+        .create_cache_cluster()
+        .cache_cluster_id("memc-config")
+        .engine("memcached")
+        .cache_node_type("cache.t3.micro")
+        .send()
+        .await
+        .unwrap();
+
+    let cluster = create_resp.cache_cluster().expect("cache cluster");
+    assert_eq!(cluster.engine(), Some("memcached"));
+    let ep = cluster
+        .configuration_endpoint()
+        .expect("memcached cluster must emit ConfigurationEndpoint");
+    assert!(!ep.address().unwrap_or("").is_empty());
+    assert!(ep.port().unwrap_or(0) > 0);
+}
+
+/// Probe a Redis/Valkey container to check whether it supports the ACL
+/// command set.  Some CI environments ship stripped-down builds that
+/// lack ACL support, so we skip the wire-level assertion rather than
+/// hard-failing.
+async fn redis_acls_supported(addr: &str) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await else {
+        return false;
+    };
+    // Correct RESP array: ACL LIST is two elements, not one.
+    if stream
+        .write_all(b"*2\r\n$3\r\nACL\r\n$4\r\nLIST\r\n")
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let mut buf = vec![0u8; 1024];
+    let Ok(n) = stream.read(&mut buf).await else {
+        return false;
+    };
+    let response = String::from_utf8_lossy(&buf[..n]);
+    !response.contains("unknown command")
+}
+
+/// Probe a Redis/Valkey container to check whether it supports CONFIG
+/// commands including CONFIG SET.  Stripped-down builds may lack CONFIG
+/// support, and some hardened images allow GET but not SET.  The probe uses
+/// `tcp-keepalive` (default 300) rather than `maxmemory-policy` so it does
+/// not mutate the value the test later asserts.
+async fn redis_config_supported(addr: &str) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Step 1: CONFIG SET tcp-keepalive 301 (value different from default 300).
+    let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await else {
+        return false;
+    };
+    if stream
+        .write_all(b"*4\r\n$6\r\nCONFIG\r\n$3\r\nSET\r\n$14\r\ntcp-keepalive\r\n$3\r\n301\r\n")
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let mut buf = vec![0u8; 1024];
+    let Ok(n) = stream.read(&mut buf).await else {
+        return false;
+    };
+    let response = String::from_utf8_lossy(&buf[..n]);
+    if response.contains("unknown command") || response.contains("ERR") {
+        return false;
+    }
+
+    // Step 2: CONFIG GET tcp-keepalive — verify the value actually changed.
+    let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await else {
+        return false;
+    };
+    if stream
+        .write_all(b"*3\r\n$6\r\nCONFIG\r\n$3\r\nGET\r\n$14\r\ntcp-keepalive\r\n")
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let mut buf = vec![0u8; 1024];
+    let Ok(n) = stream.read(&mut buf).await else {
+        return false;
+    };
+    let response = String::from_utf8_lossy(&buf[..n]);
+    let works = response.contains("301");
+
+    // Step 3: restore default so the probe is non-destructive.
+    if works {
+        if let Ok(mut s) = tokio::net::TcpStream::connect(addr).await {
+            let _ = s
+                .write_all(
+                    b"*4\r\n$6\r\nCONFIG\r\n$3\r\nSET\r\n$14\r\ntcp-keepalive\r\n$3\r\n300\r\n",
+                )
+                .await;
+        }
+    }
+    works
+}
+
+#[tokio::test]
+async fn elasticache_modify_user_applies_acl_to_running_redis() {
+    if !docker_available() {
+        return;
+    }
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_user()
+        .user_id("acluser")
+        .user_name("acluser")
+        .engine("redis")
+        .access_string("on ~* +@all")
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .create_user_group()
+        .user_group_id("aclgroup")
+        .engine("redis")
+        .user_ids("acluser")
+        .send()
+        .await
+        .unwrap();
+
+    let rg = client
+        .create_replication_group()
+        .replication_group_id("acl-rg")
+        .replication_group_description("acl test")
+        .user_group_ids("aclgroup")
+        .send()
+        .await
+        .unwrap()
+        .replication_group()
+        .expect("replication group")
+        .clone();
+
+    let port = rg
+        .node_groups()
+        .first()
+        .expect("node group")
+        .primary_endpoint()
+        .expect("primary endpoint")
+        .port()
+        .unwrap_or(0) as u16;
+
+    client
+        .modify_user()
+        .user_id("acluser")
+        .access_string("on ~key* +get")
+        .send()
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let addr = format!("127.0.0.1:{port}");
+    if !redis_acls_supported(&addr).await {
+        // Container runtime lacks ACL support — skip wire-level check.
+        return;
+    }
+
+    let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    stream
+        .write_all(b"*2\r\n$3\r\nACL\r\n$4\r\nLIST\r\n")
+        .await
+        .unwrap();
+    let mut buf = vec![0u8; 1024];
+    let n = stream.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
+    assert!(
+        response.contains("user acluser")
+            && response.contains("~key*")
+            && response.contains("+get"),
+        "ACL not applied: {response}"
+    );
+}
+
+#[tokio::test]
+async fn elasticache_modify_cache_parameter_group_applies_config_set() {
+    if !docker_available() {
+        return;
+    }
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let server = TestServer::start().await;
+    let client = server.elasticache_client().await;
+
+    client
+        .create_cache_parameter_group()
+        .cache_parameter_group_family("redis7")
+        .cache_parameter_group_name("param-test")
+        .description("test params")
+        .send()
+        .await
+        .unwrap();
+
+    let cluster = client
+        .create_cache_cluster()
+        .cache_cluster_id("param-cluster")
+        .cache_parameter_group_name("param-test")
+        .cache_node_type("cache.t3.micro")
+        .send()
+        .await
+        .unwrap()
+        .cache_cluster()
+        .expect("cache cluster")
+        .clone();
+
+    let port = cluster.cache_nodes()[0]
+        .endpoint()
+        .expect("cache node endpoint")
+        .port()
+        .unwrap_or(0) as u16;
+
+    client
+        .modify_cache_parameter_group()
+        .cache_parameter_group_name("param-test")
+        .set_parameter_name_values(Some(vec![
+            aws_sdk_elasticache::types::ParameterNameValue::builder()
+                .parameter_name("maxmemory-policy")
+                .parameter_value("allkeys-lru")
+                .build(),
+        ]))
+        .send()
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let addr = format!("127.0.0.1:{port}");
+    if !redis_config_supported(&addr).await {
+        // Container runtime lacks full CONFIG support — skip wire-level check.
+        return;
+    }
+
+    let mut last_response = String::new();
+    let mut found = false;
+    for _ in 0..10 {
+        let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        stream
+            .write_all(b"*3\r\n$6\r\nCONFIG\r\n$3\r\nGET\r\n$14\r\nmaxmemory-policy\r\n")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        last_response = response.to_string();
+        if response.contains("allkeys-lru") {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(
+        found,
+        "CONFIG SET not applied after retries. Last response: {last_response}"
+    );
+}
