@@ -122,16 +122,25 @@ pub fn parse_sql(sql: &str) -> Result<Query, &'static str> {
 
     let from_keyword = upper.find(" FROM ").ok_or("expected FROM")?;
     let from_offset = " FROM ".len();
-    let select_part = sql[7..from_keyword].trim();
+    let select_part = sql
+        .get(7..from_keyword)
+        .ok_or("invalid SQL encoding")?
+        .trim();
 
-    let after_from = &sql[from_keyword + from_offset..];
+    let after_from = sql
+        .get(from_keyword + from_offset..)
+        .ok_or("invalid SQL encoding")?;
     let upper_after = after_from.to_uppercase();
     let where_keyword = upper_after.find(" WHERE ");
 
     let (from, where_clause) = match where_keyword {
         Some(wp) => {
-            let from = after_from[..wp].trim().to_string();
-            let after_where = &after_from[wp + 7..];
+            let from = after_from
+                .get(..wp)
+                .ok_or("invalid SQL encoding")?
+                .trim()
+                .to_string();
+            let after_where = after_from.get(wp + 7..).ok_or("invalid SQL encoding")?;
             let where_str = after_where.trim();
             (from, Some(parse_where(where_str)?))
         }

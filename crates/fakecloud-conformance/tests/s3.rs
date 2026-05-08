@@ -1997,19 +1997,23 @@ async fn s3_select_object_content() {
     let mut stream = resp.payload;
     let mut records = Vec::new();
     let mut got_end = false;
-    while let Ok(Some(event)) = stream.recv().await {
-        match event {
-            aws_sdk_s3::types::SelectObjectContentEventStream::Records(rec) => {
-                if let Some(payload) = rec.payload() {
-                    records.extend_from_slice(payload.as_ref());
+    loop {
+        match stream.recv().await {
+            Ok(Some(event)) => match event {
+                aws_sdk_s3::types::SelectObjectContentEventStream::Records(rec) => {
+                    if let Some(payload) = rec.payload() {
+                        records.extend_from_slice(payload.as_ref());
+                    }
                 }
-            }
-            aws_sdk_s3::types::SelectObjectContentEventStream::Stats(_) => {}
-            aws_sdk_s3::types::SelectObjectContentEventStream::End(_) => {
-                got_end = true;
-                break;
-            }
-            other => panic!("unexpected SelectObjectContent event: {other:?}"),
+                aws_sdk_s3::types::SelectObjectContentEventStream::Stats(_) => {}
+                aws_sdk_s3::types::SelectObjectContentEventStream::End(_) => {
+                    got_end = true;
+                    break;
+                }
+                other => panic!("unexpected SelectObjectContent event: {other:?}"),
+            },
+            Ok(None) => break,
+            Err(e) => panic!("SelectObjectContent stream error: {e:?}"),
         }
     }
     assert!(got_end, "expected End event in SelectObjectContent stream");

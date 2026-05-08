@@ -2129,7 +2129,8 @@ impl S3Service {
             let rd = csv_output.record_delimiter.as_deref().unwrap_or("\n");
             crate::select::format_csv(&result_rows, fd, rd)
         } else if request.OutputSerialization.JSON.is_some() {
-            crate::select::format_json_lines(&result_rows, &out_headers)
+            let json_headers = out_headers.or(headers);
+            crate::select::format_json_lines(&result_rows, &json_headers)
         } else {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
