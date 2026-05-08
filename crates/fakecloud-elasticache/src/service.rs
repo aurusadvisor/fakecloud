@@ -5006,6 +5006,7 @@ impl ElastiCacheService {
                 "ACL".to_string(),
                 "SETUSER".to_string(),
                 user.user_id.clone(),
+                "reset".to_string(),
             ];
             args.extend(user.access_string.split_whitespace().map(|s| s.to_string()));
             match runtime.exec_redis(rg_id, &args).await {

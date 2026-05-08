@@ -2930,7 +2930,9 @@ async fn elasticache_modify_user_applies_acl_to_running_redis() {
     let n = stream.read(&mut buf).await.unwrap();
     let response = String::from_utf8_lossy(&buf[..n]);
     assert!(
-        response.contains("user acluser on ~key* +get"),
+        response.contains("user acluser")
+            && response.contains("~key*")
+            && response.contains("+get"),
         "ACL not applied: {response}"
     );
 }
