@@ -31,6 +31,7 @@ pub(crate) struct ResetState {
     pub apigatewayv2: fakecloud_apigatewayv2::SharedApiGatewayV2State,
     pub bedrock: fakecloud_bedrock::SharedBedrockState,
     pub bedrock_agent: fakecloud_bedrock_agent::SharedBedrockAgentState,
+    pub bedrock_agent_runtime: fakecloud_bedrock_agent_runtime::SharedBedrockAgentRuntimeState,
     pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
     pub route53: fakecloud_route53::SharedRoute53State,
     pub acm: fakecloud_acm::SharedAcmState,
@@ -161,6 +162,9 @@ impl ResetState {
             }
             "bedrock-agent" => {
                 self.bedrock_agent.write().reset();
+            }
+            "bedrock-agent-runtime" => {
+                self.bedrock_agent_runtime.write().reset();
             }
             "cloudfront" => {
                 *self.cloudfront.write() = fakecloud_cloudfront::CloudFrontAccounts::new();
@@ -367,6 +371,10 @@ impl ResetState {
                 let mut state = self.bedrock_agent.write();
                 state.accounts.remove(account_id);
             }
+            "bedrock-agent-runtime" => {
+                let mut state = self.bedrock_agent_runtime.write();
+                state.accounts.remove(account_id);
+            }
             "cloudfront" => {
                 // CloudFront is a global service in AWS; per-account resets
                 // simply drop that account's distribution / invalidation /
@@ -475,6 +483,7 @@ impl ResetState {
         self.apigatewayv2.write().reset();
         self.bedrock.write().reset();
         self.bedrock_agent.write().reset();
+        self.bedrock_agent_runtime.write().reset();
         *self.cloudfront.write() = fakecloud_cloudfront::CloudFrontAccounts::new();
         *self.route53.write() = fakecloud_route53::Route53Accounts::new();
         *self.acm.write() = fakecloud_acm::AcmAccounts::new();
@@ -825,6 +834,9 @@ mod tests {
             )),
             bedrock_agent: Arc::new(parking_lot::RwLock::new(
                 fakecloud_bedrock_agent::BedrockAgentAccounts::new(),
+            )),
+            bedrock_agent_runtime: Arc::new(parking_lot::RwLock::new(
+                fakecloud_bedrock_agent_runtime::BedrockAgentRuntimeAccounts::new(),
             )),
             cloudfront: Arc::new(parking_lot::RwLock::new(
                 fakecloud_cloudfront::CloudFrontAccounts::new(),

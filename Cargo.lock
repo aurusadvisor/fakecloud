@@ -451,6 +451,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-bedrockagentruntime"
+version = "1.125.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c2c4a870cd06e0daa3eab787a0da73ffa505861a688db665b589da55cfce2a9"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http 0.63.6",
+ "aws-smithy-json 0.62.5",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-bedrockruntime"
 version = "1.129.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2812,6 +2837,7 @@ dependencies = [
  "fakecloud-aws",
  "fakecloud-bedrock",
  "fakecloud-bedrock-agent",
+ "fakecloud-bedrock-agent-runtime",
  "fakecloud-cloudformation",
  "fakecloud-cloudfront",
  "fakecloud-cloudwatch",
@@ -3031,6 +3057,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "fakecloud-bedrock-agent-runtime"
+version = "0.13.3"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "fakecloud-bedrock-agent",
+ "fakecloud-core",
+ "fakecloud-testkit",
+ "http 1.4.0",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "fakecloud-cloudformation"
 version = "0.13.3"
 dependencies = [
@@ -3165,6 +3210,7 @@ dependencies = [
  "aws-sdk-athena",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockagent",
+ "aws-sdk-bedrockagentruntime",
  "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",
  "aws-sdk-cloudfront",
@@ -3950,6 +3996,7 @@ dependencies = [
  "aws-sdk-athena",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockagent",
+ "aws-sdk-bedrockagentruntime",
  "aws-sdk-bedrockruntime",
  "aws-sdk-cloudformation",
  "aws-sdk-cloudfront",

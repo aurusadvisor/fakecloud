@@ -371,7 +371,11 @@ mod tests {
     fn get_response_text_returns_default_without_override() {
         let s = shared();
         let out = get_response_text(&s, &req(), "anthropic.claude", b"{}");
-        assert_eq!(out, default_stream_text());
+        if crate::prompt::echo_enabled() {
+            assert_eq!(out, "(empty prompt)");
+        } else {
+            assert_eq!(out, default_stream_text());
+        }
     }
 
     fn install_rule(state: &crate::state::SharedBedrockState, model: &str, response: &str) {
