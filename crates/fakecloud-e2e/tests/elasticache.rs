@@ -2780,7 +2780,12 @@ async fn redis_acls_supported(addr: &str) -> bool {
     let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await else {
         return false;
     };
-    if stream.write_all(b"*1\r\n$8\r\nACL LIST\r\n").await.is_err() {
+    // Correct RESP array: ACL LIST is two elements, not one.
+    if stream
+        .write_all(b"*2\r\n$3\r\nACL\r\n$4\r\nLIST\r\n")
+        .await
+        .is_err()
+    {
         return false;
     }
     let mut buf = vec![0u8; 1024];
@@ -2792,9 +2797,32 @@ async fn redis_acls_supported(addr: &str) -> bool {
 }
 
 /// Probe a Redis/Valkey container to check whether it supports CONFIG
-/// commands.  Stripped-down builds may lack CONFIG support.
+/// commands including CONFIG SET.  Stripped-down builds may lack CONFIG
+/// support, and some hardened images allow GET but not SET.
 async fn redis_config_supported(addr: &str) -> bool {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await else {
+        return false;
+    };
+    // Try CONFIG SET with a harmless parameter to verify full support.
+    if stream
+        .write_all(
+            b"*4\r\n$6\r\nCONFIG\r\n$3\r\nSET\r\n$14\r\nmaxmemory-policy\r\n$10\r\nnoeviction\r\n",
+        )
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let mut buf = vec![0u8; 1024];
+    let Ok(n) = stream.read(&mut buf).await else {
+        return false;
+    };
+    let response = String::from_utf8_lossy(&buf[..n]);
+    if response.contains("unknown command") || response.contains("ERR") {
+        return false;
+    }
+    // Verify the change stuck.
     let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await else {
         return false;
     };
@@ -2810,7 +2838,7 @@ async fn redis_config_supported(addr: &str) -> bool {
         return false;
     };
     let response = String::from_utf8_lossy(&buf[..n]);
-    !response.contains("unknown command")
+    response.contains("noeviction")
 }
 
 #[tokio::test]
@@ -2880,7 +2908,10 @@ async fn elasticache_modify_user_applies_acl_to_running_redis() {
     }
 
     let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
-    stream.write_all(b"*1\r\n$8\r\nACL LIST\r\n").await.unwrap();
+    stream
+        .write_all(b"*2\r\n$3\r\nACL\r\n$4\r\nLIST\r\n")
+        .await
+        .unwrap();
     let mut buf = vec![0u8; 1024];
     let n = stream.read(&mut buf).await.unwrap();
     let response = String::from_utf8_lossy(&buf[..n]);
@@ -2944,10 +2975,11 @@ async fn elasticache_modify_cache_parameter_group_applies_config_set() {
 
     let addr = format!("127.0.0.1:{port}");
     if !redis_config_supported(&addr).await {
-        // Container runtime lacks CONFIG support — skip wire-level check.
+        // Container runtime lacks full CONFIG support — skip wire-level check.
         return;
     }
 
+    let mut last_response = String::new();
     let mut found = false;
     for _ in 0..10 {
         let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
@@ -2958,11 +2990,15 @@ async fn elasticache_modify_cache_parameter_group_applies_config_set() {
         let mut buf = vec![0u8; 1024];
         let n = stream.read(&mut buf).await.unwrap();
         let response = String::from_utf8_lossy(&buf[..n]);
+        last_response = response.to_string();
         if response.contains("allkeys-lru") {
             found = true;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    assert!(found, "CONFIG SET not applied after retries");
+    assert!(
+        found,
+        "CONFIG SET not applied after retries. Last response: {last_response}"
+    );
 }

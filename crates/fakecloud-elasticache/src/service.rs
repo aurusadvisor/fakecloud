@@ -4487,13 +4487,27 @@ impl ElastiCacheService {
                     format!("UserGroup {id} not found."),
                 )
             })?;
-            for u in to_add {
-                if !group.user_ids.contains(&u) {
-                    group.user_ids.push(u);
+            for u in &to_add {
+                if !group.user_ids.contains(u) {
+                    group.user_ids.push(u.clone());
                 }
             }
             group.user_ids.retain(|u| !to_remove.contains(u));
             group.status = "modifying".to_string();
+            // Keep the reverse mapping on each User in sync so that
+            // ModifyUser can resolve the correct replication groups.
+            for u in &to_add {
+                if let Some(user) = state.users.get_mut(u) {
+                    if !user.user_group_ids.contains(&id) {
+                        user.user_group_ids.push(id.clone());
+                    }
+                }
+            }
+            for u in &to_remove {
+                if let Some(user) = state.users.get_mut(u) {
+                    user.user_group_ids.retain(|ug| ug != &id);
+                }
+            }
             let rg_ids: Vec<String> = state
                 .replication_groups
                 .values()
@@ -4902,12 +4916,12 @@ impl ElastiCacheService {
 
     /// Best-effort ACL application: push every user from every user group
     /// attached to the replication group into the running Redis container
-    /// via `ACL SETUSER`.
+    /// via `ACL SETUSER`, and remove any users that are no longer attached.
     async fn apply_acls_for_replication_group(&self, account_id: &str, rg_id: &str) {
         let Some(runtime) = self.runtime.as_ref() else {
             return;
         };
-        let users = {
+        let (users, all_known_user_ids) = {
             let accounts = self.state.read();
             let state = accounts.get(account_id);
             let Some(state) = state else { return };
@@ -4915,6 +4929,11 @@ impl ElastiCacheService {
                 return;
             };
             let mut users = Vec::new();
+            let mut all_known_user_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for u in state.users.values() {
+                all_known_user_ids.insert(u.user_id.clone());
+            }
             for ug_id in &rg.user_group_ids {
                 if let Some(ug) = state.user_groups.get(ug_id) {
                     for uid in &ug.user_ids {
@@ -4924,8 +4943,64 @@ impl ElastiCacheService {
                     }
                 }
             }
-            users
+            (users, all_known_user_ids)
         };
+
+        // Remove users that are no longer attached to this replication group.
+        // We query the current ACL list from Redis and delete any custom user
+        // (other than "default") that is not in the desired set.
+        let desired: std::collections::HashSet<String> =
+            users.iter().map(|u| u.user_id.clone()).collect();
+        match runtime
+            .exec_redis(rg_id, &["ACL".to_string(), "USERS".to_string()])
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let username = line.trim().trim_matches('"');
+                    if username == "default" || username.is_empty() {
+                        continue;
+                    }
+                    // Only delete users that exist in our fakecloud state but
+                    // are no longer attached to this RG.  This avoids
+                    // accidentally deleting users that belong to another
+                    // service sharing the same Redis container.
+                    if all_known_user_ids.contains(username) && !desired.contains(username) {
+                        let del_args = vec![
+                            "ACL".to_string(),
+                            "DELUSER".to_string(),
+                            username.to_string(),
+                        ];
+                        if let Ok(del_out) = runtime.exec_redis(rg_id, &del_args).await {
+                            if !del_out.status.success() {
+                                tracing::warn!(
+                                    rg_id = %rg_id,
+                                    user_id = %username,
+                                    stderr = %String::from_utf8_lossy(&del_out.stderr),
+                                    "ACL DELUSER failed"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(output) => {
+                tracing::warn!(
+                    rg_id = %rg_id,
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "ACL USERS failed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    rg_id = %rg_id,
+                    %e,
+                    "ACL USERS exec failed"
+                );
+            }
+        }
+
         for user in &users {
             let mut args = vec![
                 "ACL".to_string(),
