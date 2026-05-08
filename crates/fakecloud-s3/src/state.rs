@@ -198,12 +198,29 @@ pub struct S3NotificationEvent {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Stored response from a Lambda function invoked via S3 Object Lambda.
+/// Keyed by `request_token` in [`S3State::object_lambda_responses`].
+#[derive(Debug, Clone)]
+pub struct ObjectLambdaResponse {
+    pub route: String,
+    pub token: String,
+    pub body: Vec<u8>,
+    pub content_type: Option<String>,
+    pub fwd_status: Option<u16>,
+    pub fwd_error_message: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+    pub encryption: Option<String>,
+    pub kms_key_id: Option<String>,
+}
+
 pub struct S3State {
     pub account_id: String,
     pub region: String,
     pub buckets: BTreeMap<String, S3Bucket>,
     pub notification_events: Vec<S3NotificationEvent>,
     pub body_cache: Option<Arc<BodyCache>>,
+    /// Object Lambda responses keyed by request token.
+    pub object_lambda_responses: BTreeMap<String, ObjectLambdaResponse>,
 }
 
 impl S3State {
@@ -214,6 +231,7 @@ impl S3State {
             buckets: BTreeMap::new(),
             notification_events: Vec::new(),
             body_cache: None,
+            object_lambda_responses: BTreeMap::new(),
         }
     }
 
@@ -224,6 +242,7 @@ impl S3State {
     pub fn reset(&mut self) {
         self.buckets.clear();
         self.notification_events.clear();
+        self.object_lambda_responses.clear();
     }
 
     /// Read the full body referenced by a [`BodyRef`], consulting the
