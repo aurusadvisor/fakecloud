@@ -253,7 +253,7 @@ impl AwsService for ElastiCacheService {
             "CreateReplicationGroup" => self.create_replication_group(&request).await,
             "CreateServerlessCache" => self.create_serverless_cache(&request).await,
             "CreateServerlessCacheSnapshot" => self.create_serverless_cache_snapshot(&request),
-            "CreateSnapshot" => self.create_snapshot(&request),
+            "CreateSnapshot" => self.create_snapshot(&request).await,
             "CreateUser" => self.create_user(&request),
             "CreateUserGroup" => self.create_user_group(&request),
             "DecreaseReplicaCount" => self.decrease_replica_count(&request),
@@ -918,7 +918,7 @@ impl ElastiCacheService {
             parse_query_list_param(request, "PreferredOutpostArns", "PreferredOutpostArn");
         let tags = parse_tags(request)?;
 
-        let (preferred_availability_zone, arn) = {
+        let (preferred_availability_zone, arn, rdb_path) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
             if !state.begin_cache_cluster_creation(&cache_cluster_id) {
@@ -960,6 +960,22 @@ impl ElastiCacheService {
                 }
             }
 
+            let rdb_path = if let Some(ref snap_name) = snapshot_name {
+                match state.snapshots.get(snap_name) {
+                    Some(snap) => snap.rdb_path.clone(),
+                    None => {
+                        state.cancel_cache_cluster_creation(&cache_cluster_id);
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "SnapshotNotFoundFault",
+                            format!("Snapshot {snap_name} not found."),
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
+
             let preferred_availability_zone =
                 optional_query_param(request, "PreferredAvailabilityZone")
                     .unwrap_or_else(|| format!("{}a", state.region));
@@ -967,7 +983,7 @@ impl ElastiCacheService {
                 "arn:aws:elasticache:{}:{}:cluster:{}",
                 state.region, state.account_id, cache_cluster_id
             );
-            (preferred_availability_zone, arn)
+            (preferred_availability_zone, arn, rdb_path)
         };
 
         let runtime = self.runtime.as_ref().ok_or_else(|| {
@@ -986,7 +1002,9 @@ impl ElastiCacheService {
         let runtime_result = if engine == ENGINE_MEMCACHED {
             runtime.ensure_memcached(&cache_cluster_id).await
         } else {
-            runtime.ensure_redis(&cache_cluster_id).await
+            runtime
+                .ensure_redis(&cache_cluster_id, rdb_path.as_deref())
+                .await
         };
         let running = match runtime_result {
             Ok(r) => r,
@@ -1297,7 +1315,7 @@ impl ElastiCacheService {
         .unwrap_or(true);
         let tags = parse_tags(request)?;
         // Reserve the ID under a write lock before starting the container.
-        {
+        let rdb_path = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
             if !state.begin_replication_group_creation(&replication_group_id) {
@@ -1317,7 +1335,23 @@ impl ElastiCacheService {
                     ));
                 }
             }
-        }
+
+            if let Some(ref snap_name) = snapshot_name {
+                match state.snapshots.get(snap_name) {
+                    Some(snap) => snap.rdb_path.clone(),
+                    None => {
+                        state.cancel_replication_group_creation(&replication_group_id);
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "SnapshotNotFoundFault",
+                            format!("Snapshot {snap_name} not found."),
+                        ));
+                    }
+                }
+            } else {
+                None
+            }
+        };
 
         let runtime = self.runtime.as_ref().ok_or_else(|| {
             self.state
@@ -1332,7 +1366,10 @@ impl ElastiCacheService {
             )
         })?;
 
-        let running = match runtime.ensure_redis(&replication_group_id).await {
+        let running = match runtime
+            .ensure_redis(&replication_group_id, rdb_path.as_deref())
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 self.state
@@ -1820,7 +1857,7 @@ impl ElastiCacheService {
             )
         })?;
 
-        let running = match runtime.ensure_redis(&serverless_cache_name).await {
+        let running = match runtime.ensure_redis(&serverless_cache_name, None).await {
             Ok(r) => r,
             Err(e) => {
                 self.state
@@ -2239,7 +2276,7 @@ impl ElastiCacheService {
         ))
     }
 
-    fn create_snapshot(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn create_snapshot(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let snapshot_name = required_query_param(request, "SnapshotName")?;
         let replication_group_id = optional_query_param(request, "ReplicationGroupId");
         let cache_cluster_id = optional_query_param(request, "CacheClusterId");
@@ -2253,81 +2290,105 @@ impl ElastiCacheService {
             ));
         }
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
+        let (mut snapshot, arn, group_id) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
 
-        if state.snapshots.contains_key(&snapshot_name) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "SnapshotAlreadyExistsFault",
-                format!("Snapshot {snapshot_name} already exists."),
-            ));
+            if state.snapshots.contains_key(&snapshot_name) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "SnapshotAlreadyExistsFault",
+                    format!("Snapshot {snapshot_name} already exists."),
+                ));
+            }
+
+            // Resolve the replication group: either directly by ID or via CacheClusterId
+            let group_id = if let Some(ref rg_id) = replication_group_id {
+                rg_id.clone()
+            } else {
+                let cluster_id = cache_cluster_id.as_ref().unwrap();
+                if let Some(cluster) = state.cache_clusters.get(cluster_id) {
+                    if let Some(group_id) = cluster.replication_group_id.clone() {
+                        group_id
+                    } else {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterCombination",
+                            format!(
+                                "CacheCluster {cluster_id} is not associated with a replication group."
+                            ),
+                        ));
+                    }
+                } else {
+                    // CacheClusterId may also map to a member cluster like "rg-001", find parent group
+                    state
+                        .replication_groups
+                        .values()
+                        .find(|g| g.member_clusters.contains(cluster_id))
+                        .map(|g| g.replication_group_id.clone())
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "CacheClusterNotFound",
+                                format!("CacheCluster {cluster_id} not found."),
+                            )
+                        })?
+                }
+            };
+
+            let group = state.replication_groups.get(&group_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ReplicationGroupNotFoundFault",
+                    format!("ReplicationGroup {group_id} not found."),
+                )
+            })?;
+
+            let arn = format!(
+                "arn:aws:elasticache:{}:{}:snapshot:{}",
+                state.region, state.account_id, snapshot_name
+            );
+
+            let snapshot = CacheSnapshot {
+                snapshot_name: snapshot_name.clone(),
+                replication_group_id: group.replication_group_id.clone(),
+                replication_group_description: group.description.clone(),
+                snapshot_status: "available".to_string(),
+                cache_node_type: group.cache_node_type.clone(),
+                engine: group.engine.clone(),
+                engine_version: group.engine_version.clone(),
+                num_cache_clusters: group.num_cache_clusters,
+                arn: arn.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                snapshot_source: "manual".to_string(),
+                rdb_path: None,
+            };
+            (snapshot, arn, group_id)
+        };
+
+        if let Some(ref runtime) = self.runtime {
+            let tmp_path = format!(
+                "/tmp/fakecloud-ec-{}-{}.rdb",
+                snapshot_name,
+                std::process::id()
+            );
+            match runtime.dump_rdb(&group_id, &tmp_path).await {
+                Ok(()) => {
+                    snapshot.rdb_path = Some(tmp_path);
+                }
+                Err(err) => {
+                    tracing::warn!("Failed to dump RDB for snapshot {}: {}", snapshot_name, err);
+                }
+            }
         }
 
-        // Resolve the replication group: either directly by ID or via CacheClusterId
-        let group_id = if let Some(ref rg_id) = replication_group_id {
-            rg_id.clone()
-        } else {
-            let cluster_id = cache_cluster_id.as_ref().unwrap();
-            if let Some(cluster) = state.cache_clusters.get(cluster_id) {
-                if let Some(group_id) = cluster.replication_group_id.clone() {
-                    group_id
-                } else {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidParameterCombination",
-                        format!(
-                            "CacheCluster {cluster_id} is not associated with a replication group."
-                        ),
-                    ));
-                }
-            } else {
-                // CacheClusterId may also map to a member cluster like "rg-001", find parent group
-                state
-                    .replication_groups
-                    .values()
-                    .find(|g| g.member_clusters.contains(cluster_id))
-                    .map(|g| g.replication_group_id.clone())
-                    .ok_or_else(|| {
-                        AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "CacheClusterNotFound",
-                            format!("CacheCluster {cluster_id} not found."),
-                        )
-                    })?
-            }
-        };
-
-        let group = state.replication_groups.get(&group_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ReplicationGroupNotFoundFault",
-                format!("ReplicationGroup {group_id} not found."),
-            )
-        })?;
-
-        let arn = format!(
-            "arn:aws:elasticache:{}:{}:snapshot:{}",
-            state.region, state.account_id, snapshot_name
-        );
-
-        let snapshot = CacheSnapshot {
-            snapshot_name: snapshot_name.clone(),
-            replication_group_id: group.replication_group_id.clone(),
-            replication_group_description: group.description.clone(),
-            snapshot_status: "available".to_string(),
-            cache_node_type: group.cache_node_type.clone(),
-            engine: group.engine.clone(),
-            engine_version: group.engine_version.clone(),
-            num_cache_clusters: group.num_cache_clusters,
-            arn: arn.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            snapshot_source: "manual".to_string(),
-        };
-
         let xml = snapshot_xml(&snapshot);
-        state.tags.insert(arn, Vec::new());
-        state.snapshots.insert(snapshot_name, snapshot);
+        {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
+            state.tags.insert(arn, Vec::new());
+            state.snapshots.insert(snapshot_name, snapshot);
+        }
 
         Ok(AwsResponse::xml(
             StatusCode::OK,

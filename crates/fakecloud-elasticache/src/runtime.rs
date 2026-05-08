@@ -59,9 +59,16 @@ impl ElastiCacheRuntime {
     pub async fn ensure_redis(
         &self,
         resource_id: &str,
+        rdb_path: Option<&str>,
     ) -> Result<RunningCacheContainer, RuntimeError> {
-        self.spawn_container(resource_id, "redis:7-alpine", 6379, CacheEngineKind::Redis)
-            .await
+        self.spawn_container(
+            resource_id,
+            "redis:7-alpine",
+            6379,
+            CacheEngineKind::Redis,
+            rdb_path,
+        )
+        .await
     }
 
     pub async fn ensure_memcached(
@@ -73,6 +80,7 @@ impl ElastiCacheRuntime {
             "memcached:1.6-alpine",
             11211,
             CacheEngineKind::Memcached,
+            None,
         )
         .await
     }
@@ -83,20 +91,27 @@ impl ElastiCacheRuntime {
         image: &str,
         container_port: u16,
         engine: CacheEngineKind,
+        rdb_path: Option<&str>,
     ) -> Result<RunningCacheContainer, RuntimeError> {
         self.stop_container(resource_id).await;
 
+        let mut args: Vec<String> = vec![
+            "create".to_string(),
+            "-p".to_string(),
+            format!(":{container_port}"),
+            "--label".to_string(),
+            format!("fakecloud-elasticache={resource_id}"),
+            "--label".to_string(),
+            format!("fakecloud-instance={}", self.instance_id),
+        ];
+        if let Some(path) = rdb_path {
+            args.push("-v".to_string());
+            args.push(format!("{path}:/data/dump.rdb"));
+        }
+        args.push(image.to_string());
+
         let output = tokio::process::Command::new(&self.cli)
-            .args([
-                "create",
-                "-p",
-                &format!(":{container_port}"),
-                "--label",
-                &format!("fakecloud-elasticache={resource_id}"),
-                "--label",
-                &format!("fakecloud-instance={}", self.instance_id),
-                image,
-            ])
+            .args(&args)
             .output()
             .await
             .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
@@ -178,6 +193,45 @@ impl ElastiCacheRuntime {
         if !output.status.success() {
             return Err(RuntimeError::ContainerStartFailed(
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Trigger `SAVE` inside a running Redis container and copy the
+    /// resulting `dump.rdb` out to `dest_path`.
+    pub async fn dump_rdb(&self, resource_id: &str, dest_path: &str) -> Result<(), RuntimeError> {
+        let container_id = {
+            let containers = self.containers.read();
+            containers
+                .get(resource_id)
+                .map(|c| c.container_id.clone())
+                .ok_or(RuntimeError::Unavailable)?
+        };
+
+        let save_output = tokio::process::Command::new(&self.cli)
+            .args(["exec", &container_id, "redis-cli", "SAVE"])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        if !save_output.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(
+                String::from_utf8_lossy(&save_output.stderr)
+                    .trim()
+                    .to_string(),
+            ));
+        }
+
+        let cp_output = tokio::process::Command::new(&self.cli)
+            .args(["cp", &format!("{container_id}:/data/dump.rdb"), dest_path])
+            .output()
+            .await
+            .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
+        if !cp_output.status.success() {
+            return Err(RuntimeError::ContainerStartFailed(
+                String::from_utf8_lossy(&cp_output.stderr)
+                    .trim()
+                    .to_string(),
             ));
         }
         Ok(())

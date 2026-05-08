@@ -1058,8 +1058,8 @@ async fn delete_cache_cluster_removes_cluster_from_replication_group() {
     assert_eq!(group.num_cache_clusters, 1);
 }
 
-#[test]
-fn create_snapshot_rejects_standalone_cache_cluster_id() {
+#[tokio::test]
+async fn create_snapshot_rejects_standalone_cache_cluster_id() {
     let service = service_with_cache_cluster("standalone");
     let req = request(
         "CreateSnapshot",
@@ -1068,7 +1068,7 @@ fn create_snapshot_rejects_standalone_cache_cluster_id() {
             ("CacheClusterId", "standalone"),
         ],
     );
-    assert!(service.create_snapshot(&req).is_err());
+    assert!(service.create_snapshot(&req).await.is_err());
 }
 
 fn service_with_replication_group(group_id: &str, num_clusters: i32) -> ElastiCacheService {
@@ -2276,8 +2276,8 @@ fn test_failover_not_found() {
 
 // Snapshot tests
 
-#[test]
-fn create_snapshot_returns_snapshot_xml() {
+#[tokio::test]
+async fn create_snapshot_returns_snapshot_xml() {
     let service = service_with_replication_group("snap-rg", 1);
     let req = request(
         "CreateSnapshot",
@@ -2286,7 +2286,7 @@ fn create_snapshot_returns_snapshot_xml() {
             ("ReplicationGroupId", "snap-rg"),
         ],
     );
-    let resp = service.create_snapshot(&req).unwrap();
+    let resp = service.create_snapshot(&req).await.unwrap();
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
     assert!(body.contains("<SnapshotName>my-snap</SnapshotName>"));
     assert!(body.contains("<ReplicationGroupId>snap-rg</ReplicationGroupId>"));
@@ -2296,8 +2296,8 @@ fn create_snapshot_returns_snapshot_xml() {
     assert!(body.contains("<CreateSnapshotResponse"));
 }
 
-#[test]
-fn create_snapshot_via_cache_cluster_id() {
+#[tokio::test]
+async fn create_snapshot_via_cache_cluster_id() {
     let service = service_with_replication_group("cc-rg", 2);
     let req = request(
         "CreateSnapshot",
@@ -2306,20 +2306,20 @@ fn create_snapshot_via_cache_cluster_id() {
             ("CacheClusterId", "cc-rg-001"),
         ],
     );
-    let resp = service.create_snapshot(&req).unwrap();
+    let resp = service.create_snapshot(&req).await.unwrap();
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
     assert!(body.contains("<ReplicationGroupId>cc-rg</ReplicationGroupId>"));
 }
 
-#[test]
-fn create_snapshot_rejects_missing_group_and_cluster() {
+#[tokio::test]
+async fn create_snapshot_rejects_missing_group_and_cluster() {
     let service = service_with_replication_group("rg", 1);
     let req = request("CreateSnapshot", &[("SnapshotName", "bad-snap")]);
-    assert!(service.create_snapshot(&req).is_err());
+    assert!(service.create_snapshot(&req).await.is_err());
 }
 
-#[test]
-fn create_snapshot_rejects_duplicate_name() {
+#[tokio::test]
+async fn create_snapshot_rejects_duplicate_name() {
     let service = service_with_replication_group("dup-rg", 1);
     let req = request(
         "CreateSnapshot",
@@ -2328,12 +2328,12 @@ fn create_snapshot_rejects_duplicate_name() {
             ("ReplicationGroupId", "dup-rg"),
         ],
     );
-    service.create_snapshot(&req).unwrap();
-    assert!(service.create_snapshot(&req).is_err());
+    service.create_snapshot(&req).await.unwrap();
+    assert!(service.create_snapshot(&req).await.is_err());
 }
 
-#[test]
-fn create_snapshot_rejects_nonexistent_group() {
+#[tokio::test]
+async fn create_snapshot_rejects_nonexistent_group() {
     let shared = std::sync::Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
     ));
@@ -2345,18 +2345,18 @@ fn create_snapshot_rejects_nonexistent_group() {
             ("ReplicationGroupId", "no-such-rg"),
         ],
     );
-    assert!(service.create_snapshot(&req).is_err());
+    assert!(service.create_snapshot(&req).await.is_err());
 }
 
-#[test]
-fn create_snapshot_rejects_missing_name() {
+#[tokio::test]
+async fn create_snapshot_rejects_missing_name() {
     let service = service_with_replication_group("rg", 1);
     let req = request("CreateSnapshot", &[("ReplicationGroupId", "rg")]);
-    assert!(service.create_snapshot(&req).is_err());
+    assert!(service.create_snapshot(&req).await.is_err());
 }
 
-#[test]
-fn create_snapshot_registers_arn_for_tags() {
+#[tokio::test]
+async fn create_snapshot_registers_arn_for_tags() {
     let service = service_with_replication_group("tag-rg", 1);
     let req = request(
         "CreateSnapshot",
@@ -2365,7 +2365,7 @@ fn create_snapshot_registers_arn_for_tags() {
             ("ReplicationGroupId", "tag-rg"),
         ],
     );
-    service.create_snapshot(&req).unwrap();
+    service.create_snapshot(&req).await.unwrap();
 
     let __a = service.state.read();
     let state = __a.default_ref();
@@ -2373,15 +2373,15 @@ fn create_snapshot_registers_arn_for_tags() {
     assert!(state.tags.contains_key(&arn));
 }
 
-#[test]
-fn describe_snapshots_returns_all() {
+#[tokio::test]
+async fn describe_snapshots_returns_all() {
     let service = service_with_replication_group("desc-rg", 1);
     for name in &["snap-a", "snap-b"] {
         let req = request(
             "CreateSnapshot",
             &[("SnapshotName", name), ("ReplicationGroupId", "desc-rg")],
         );
-        service.create_snapshot(&req).unwrap();
+        service.create_snapshot(&req).await.unwrap();
     }
     let req = request("DescribeSnapshots", &[]);
     let resp = service.describe_snapshots(&req).unwrap();
@@ -2391,15 +2391,15 @@ fn describe_snapshots_returns_all() {
     assert!(body.contains("<DescribeSnapshotsResponse"));
 }
 
-#[test]
-fn describe_snapshots_filters_by_name() {
+#[tokio::test]
+async fn describe_snapshots_filters_by_name() {
     let service = service_with_replication_group("filt-rg", 1);
     for name in &["snap-1", "snap-2"] {
         let req = request(
             "CreateSnapshot",
             &[("SnapshotName", name), ("ReplicationGroupId", "filt-rg")],
         );
-        service.create_snapshot(&req).unwrap();
+        service.create_snapshot(&req).await.unwrap();
     }
     let req = request("DescribeSnapshots", &[("SnapshotName", "snap-1")]);
     let resp = service.describe_snapshots(&req).unwrap();
@@ -2408,8 +2408,8 @@ fn describe_snapshots_filters_by_name() {
     assert!(!body.contains("<SnapshotName>snap-2</SnapshotName>"));
 }
 
-#[test]
-fn describe_snapshots_filters_by_replication_group() {
+#[tokio::test]
+async fn describe_snapshots_filters_by_replication_group() {
     let service = service_with_replication_group("rg-a", 1);
     let req = request(
         "CreateSnapshot",
@@ -2418,7 +2418,7 @@ fn describe_snapshots_filters_by_replication_group() {
             ("ReplicationGroupId", "rg-a"),
         ],
     );
-    service.create_snapshot(&req).unwrap();
+    service.create_snapshot(&req).await.unwrap();
 
     let req = request("DescribeSnapshots", &[("ReplicationGroupId", "rg-a")]);
     let resp = service.describe_snapshots(&req).unwrap();
@@ -2442,8 +2442,8 @@ fn describe_snapshots_not_found_by_name() {
     assert!(service.describe_snapshots(&req).is_err());
 }
 
-#[test]
-fn delete_snapshot_removes_and_returns_deleting() {
+#[tokio::test]
+async fn delete_snapshot_removes_and_returns_deleting() {
     let service = service_with_replication_group("del-rg", 1);
     let req = request(
         "CreateSnapshot",
@@ -2452,7 +2452,7 @@ fn delete_snapshot_removes_and_returns_deleting() {
             ("ReplicationGroupId", "del-rg"),
         ],
     );
-    service.create_snapshot(&req).unwrap();
+    service.create_snapshot(&req).await.unwrap();
 
     let req = request("DeleteSnapshot", &[("SnapshotName", "del-snap")]);
     let resp = service.delete_snapshot(&req).unwrap();
@@ -2469,8 +2469,8 @@ fn delete_snapshot_removes_and_returns_deleting() {
         .contains_key("del-snap"));
 }
 
-#[test]
-fn delete_snapshot_cleans_up_tags() {
+#[tokio::test]
+async fn delete_snapshot_cleans_up_tags() {
     let service = service_with_replication_group("tag-del-rg", 1);
     let req = request(
         "CreateSnapshot",
@@ -2479,7 +2479,7 @@ fn delete_snapshot_cleans_up_tags() {
             ("ReplicationGroupId", "tag-del-rg"),
         ],
     );
-    service.create_snapshot(&req).unwrap();
+    service.create_snapshot(&req).await.unwrap();
 
     let arn = "arn:aws:elasticache:us-east-1:123456789012:snapshot:tag-del-snap".to_string();
     assert!(service.state.read().default_ref().tags.contains_key(&arn));
@@ -2513,6 +2513,7 @@ fn snapshot_xml_contains_all_fields() {
         arn: "arn:aws:elasticache:us-east-1:123:snapshot:test-snap".to_string(),
         created_at: "2024-01-01T00:00:00Z".to_string(),
         snapshot_source: "manual".to_string(),
+        rdb_path: None,
     };
     let xml = snapshot_xml(&snap);
     assert!(xml.contains("<SnapshotName>test-snap</SnapshotName>"));
@@ -4559,4 +4560,132 @@ fn create_cache_cluster_through_handler_persists_tags_and_extended_fields() {
         cluster.transit_encryption_mode.as_deref(),
         Some("preferred")
     );
+}
+
+// ── snapshot restore paths ──
+
+#[tokio::test]
+async fn create_cache_cluster_with_missing_snapshot_errors() {
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let svc = ElastiCacheService::new(shared);
+    let req = request(
+        "CreateCacheCluster",
+        &[
+            ("CacheClusterId", "cc-restore"),
+            ("SnapshotName", "no-such-snap"),
+        ],
+    );
+    let err = match svc.create_cache_cluster(&req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected error"),
+    };
+    assert_eq!(err.code(), "SnapshotNotFoundFault");
+}
+
+#[tokio::test]
+async fn create_replication_group_with_missing_snapshot_errors() {
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let svc = ElastiCacheService::new(shared);
+    let req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "rg-restore"),
+            ("ReplicationGroupDescription", "desc"),
+            ("SnapshotName", "no-such-snap"),
+        ],
+    );
+    let err = match svc.create_replication_group(&req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected error"),
+    };
+    assert_eq!(err.code(), "SnapshotNotFoundFault");
+}
+
+#[tokio::test]
+async fn create_cache_cluster_with_existing_snapshot_skips_to_runtime() {
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let svc = ElastiCacheService::new(shared);
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("123456789012");
+        state.snapshots.insert(
+            "my-snap".to_string(),
+            crate::state::CacheSnapshot {
+                snapshot_name: "my-snap".to_string(),
+                replication_group_id: "rg-1".to_string(),
+                replication_group_description: "desc".to_string(),
+                snapshot_status: "available".to_string(),
+                cache_node_type: "cache.t3.micro".to_string(),
+                engine: "redis".to_string(),
+                engine_version: "7.1".to_string(),
+                num_cache_clusters: 1,
+                arn: "arn:aws:elasticache:us-east-1:123456789012:snapshot:my-snap".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                snapshot_source: "manual".to_string(),
+                rdb_path: Some("/tmp/fake.rdb".to_string()),
+            },
+        );
+    }
+    let req = request(
+        "CreateCacheCluster",
+        &[
+            ("CacheClusterId", "cc-restore"),
+            ("SnapshotName", "my-snap"),
+        ],
+    );
+    let err = match svc.create_cache_cluster(&req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected error"),
+    };
+    assert_eq!(err.code(), "InvalidParameterValue");
+    assert_eq!(err.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn create_replication_group_with_existing_snapshot_skips_to_runtime() {
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let svc = ElastiCacheService::new(shared);
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("123456789012");
+        state.snapshots.insert(
+            "my-snap".to_string(),
+            crate::state::CacheSnapshot {
+                snapshot_name: "my-snap".to_string(),
+                replication_group_id: "rg-1".to_string(),
+                replication_group_description: "desc".to_string(),
+                snapshot_status: "available".to_string(),
+                cache_node_type: "cache.t3.micro".to_string(),
+                engine: "redis".to_string(),
+                engine_version: "7.1".to_string(),
+                num_cache_clusters: 1,
+                arn: "arn:aws:elasticache:us-east-1:123456789012:snapshot:my-snap".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                snapshot_source: "manual".to_string(),
+                rdb_path: Some("/tmp/fake.rdb".to_string()),
+            },
+        );
+    }
+    let req = request(
+        "CreateReplicationGroup",
+        &[
+            ("ReplicationGroupId", "rg-restore"),
+            ("ReplicationGroupDescription", "desc"),
+            ("SnapshotName", "my-snap"),
+        ],
+    );
+    let err = match svc.create_replication_group(&req).await {
+        Err(e) => e,
+        Ok(_) => panic!("expected error"),
+    };
+    assert_eq!(err.code(), "InvalidParameterValue");
+    assert_eq!(err.status(), http::StatusCode::SERVICE_UNAVAILABLE);
 }
