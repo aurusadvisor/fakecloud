@@ -1,9 +1,11 @@
 pub mod delivery;
+pub mod eventstream;
 pub mod inventory;
 pub mod lifecycle;
 pub mod logging;
 pub mod persistence;
 pub mod resource_policy;
+pub(crate) mod select;
 pub(crate) mod service;
 pub mod simulation;
 pub(crate) mod state;

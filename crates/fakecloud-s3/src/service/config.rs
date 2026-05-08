@@ -2035,15 +2035,28 @@ impl S3Service {
     pub(super) fn select_object_content(
         &self,
         account_id: &str,
-        _req: &AwsRequest,
+        req: &AwsRequest,
         bucket: &str,
         key: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // SelectObjectContent normally returns an EventStream of
-        // RecordsEvent / EndEvent frames. We can't easily produce real
-        // EventStream binary frames here, but the SDK only requires a 200
-        // with the right content-type; the parser will then receive an
-        // empty event stream which is decoded as zero records.
+        let body_str = std::str::from_utf8(&req.body).unwrap_or("");
+        let request: crate::select::SelectRequest =
+            quick_xml::de::from_str(body_str).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MalformedXML",
+                    format!("Invalid SelectObjectContent request: {e}"),
+                )
+            })?;
+
+        if request.ExpressionType != "SQL" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidExpressionType",
+                "Only SQL expressions are supported",
+            ));
+        }
+
         let accts = self.state.read();
         let empty = crate::state::S3State::new(account_id, "us-east-1");
         let state = accts.get(account_id).unwrap_or(&empty);
@@ -2051,14 +2064,93 @@ impl S3Service {
             .buckets
             .get(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
-        if !b.objects.contains_key(key) {
-            return Err(AwsServiceError::aws_error(
+        let obj = b.objects.get(key).ok_or_else(|| {
+            AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchKey",
                 format!("Key {key} does not exist."),
+            )
+        })?;
+
+        let object_bytes = state.read_body(&obj.body).map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ServiceException",
+                format!("Failed to read object body: {e}"),
+            )
+        })?;
+
+        let query = crate::select::parse_sql(&request.Expression).map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidExpression",
+                format!("Failed to parse SQL expression: {e}"),
+            )
+        })?;
+
+        if !query.from.eq_ignore_ascii_case("s3object") {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidExpression",
+                "Only FROM s3object is supported",
             ));
         }
-        let body = Bytes::new();
+
+        // Parse input
+        let (headers, rows) = if let Some(csv_input) = request.InputSerialization.CSV {
+            let has_header = csv_input.file_header_info.as_deref() == Some("USE");
+            let field_delimiter = csv_input
+                .field_delimiter
+                .as_deref()
+                .and_then(|s| s.chars().next())
+                .unwrap_or(',');
+            let record_delimiter = csv_input
+                .record_delimiter
+                .as_deref()
+                .and_then(|s| s.chars().next())
+                .unwrap_or('\n');
+            crate::select::parse_csv(&object_bytes, has_header, field_delimiter, record_delimiter)
+        } else if request.InputSerialization.JSON.is_some() {
+            crate::select::parse_json_lines(&object_bytes)
+        } else {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidRequest",
+                "Only CSV and JSON input are supported",
+            ));
+        };
+
+        // Evaluate query
+        let result_rows = crate::select::evaluate_query(&query, &headers, &rows);
+
+        // Format output
+        let output_bytes = if let Some(csv_output) = request.OutputSerialization.CSV {
+            let fd = csv_output.field_delimiter.as_deref().unwrap_or(",");
+            let rd = csv_output.record_delimiter.as_deref().unwrap_or("\n");
+            crate::select::format_csv(&result_rows, fd, rd)
+        } else if request.OutputSerialization.JSON.is_some() {
+            crate::select::format_json_lines(&result_rows, &headers)
+        } else {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidRequest",
+                "Only CSV and JSON output are supported",
+            ));
+        };
+
+        // Build eventstream response
+        let mut body = Vec::new();
+        body.extend(crate::eventstream::records_event_frame(&output_bytes));
+        let bytes_scanned = object_bytes.len() as u64;
+        let bytes_processed = output_bytes.len() as u64;
+        let bytes_returned = output_bytes.len() as u64;
+        body.extend(crate::eventstream::stats_event_frame(
+            bytes_scanned,
+            bytes_processed,
+            bytes_returned,
+        ));
+        body.extend(crate::eventstream::end_event_frame());
+
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: "application/octet-stream".to_string(),

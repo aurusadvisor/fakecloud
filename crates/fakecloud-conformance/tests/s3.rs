@@ -1970,7 +1970,7 @@ async fn s3_select_object_content() {
         .send()
         .await
         .unwrap();
-    client
+    let resp = client
         .select_object_content()
         .bucket("select-bkt")
         .key("data.csv")
@@ -1989,6 +1989,30 @@ async fn s3_select_object_content() {
         .send()
         .await
         .unwrap();
+
+    let mut stream = resp.payload;
+    let mut records = Vec::new();
+    let mut got_end = false;
+    while let Some(event) = stream.recv().await {
+        match event {
+            Ok(aws_sdk_s3::types::SelectObjectContentEventStream::Records(rec)) => {
+                if let Some(payload) = rec.payload() {
+                    records.extend_from_slice(payload.as_ref());
+                }
+            }
+            Ok(aws_sdk_s3::types::SelectObjectContentEventStream::End(_)) => {
+                got_end = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(got_end, "expected End event in SelectObjectContent stream");
+    assert!(
+        !records.is_empty(),
+        "expected records in SelectObjectContent response"
+    );
+    assert_eq!(String::from_utf8_lossy(&records), "1,2\n");
 }
 
 #[test_action("s3", "UpdateObjectEncryption", checksum = "6cdb3788")]

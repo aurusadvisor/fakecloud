@@ -30,6 +30,7 @@ sha2 = { workspace = true }
 crc32c = { workspace = true }
 crc32fast = { workspace = true }
 crc64fast-nvme = { workspace = true }
+quick-xml = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
