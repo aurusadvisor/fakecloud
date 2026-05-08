@@ -1006,7 +1006,7 @@ async fn write_map_results_to_s3(
 
 /// Apply ItemBatcher configuration to group items into batches.
 fn apply_item_batcher(items: &[Value], batcher: &Value, _effective_input: &Value) -> Vec<Value> {
-    let max_per_batch = batcher["MaxItemsPerBatch"].as_u64().unwrap_or(1) as usize;
+    let max_per_batch = batcher["MaxItemsPerBatch"].as_u64().unwrap_or(u64::MAX) as usize;
     let max_bytes = batcher["MaxInputBytesPerBatch"].as_u64().unwrap_or(0) as usize;
     let batch_input = batcher.get("BatchInput").cloned();
 
