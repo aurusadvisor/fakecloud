@@ -2798,17 +2798,18 @@ async fn redis_acls_supported(addr: &str) -> bool {
 
 /// Probe a Redis/Valkey container to check whether it supports CONFIG
 /// commands including CONFIG SET.  Stripped-down builds may lack CONFIG
-/// support, and some hardened images allow GET but not SET.
+/// support, and some hardened images allow GET but not SET.  The probe uses
+/// `tcp-keepalive` (default 300) rather than `maxmemory-policy` so it does
+/// not mutate the value the test later asserts.
 async fn redis_config_supported(addr: &str) -> bool {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Step 1: CONFIG SET tcp-keepalive 301 (value different from default 300).
     let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await else {
         return false;
     };
-    // Try CONFIG SET with a harmless parameter to verify full support.
     if stream
-        .write_all(
-            b"*4\r\n$6\r\nCONFIG\r\n$3\r\nSET\r\n$14\r\nmaxmemory-policy\r\n$10\r\nnoeviction\r\n",
-        )
+        .write_all(b"*4\r\n$6\r\nCONFIG\r\n$3\r\nSET\r\n$14\r\ntcp-keepalive\r\n$3\r\n301\r\n")
         .await
         .is_err()
     {
@@ -2822,12 +2823,13 @@ async fn redis_config_supported(addr: &str) -> bool {
     if response.contains("unknown command") || response.contains("ERR") {
         return false;
     }
-    // Verify the change stuck.
+
+    // Step 2: CONFIG GET tcp-keepalive — verify the value actually changed.
     let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await else {
         return false;
     };
     if stream
-        .write_all(b"*3\r\n$6\r\nCONFIG\r\n$3\r\nGET\r\n$14\r\nmaxmemory-policy\r\n")
+        .write_all(b"*3\r\n$6\r\nCONFIG\r\n$3\r\nGET\r\n$14\r\ntcp-keepalive\r\n")
         .await
         .is_err()
     {
@@ -2838,7 +2840,19 @@ async fn redis_config_supported(addr: &str) -> bool {
         return false;
     };
     let response = String::from_utf8_lossy(&buf[..n]);
-    response.contains("noeviction")
+    let works = response.contains("301");
+
+    // Step 3: restore default so the probe is non-destructive.
+    if works {
+        if let Ok(mut s) = tokio::net::TcpStream::connect(addr).await {
+            let _ = s
+                .write_all(
+                    b"*4\r\n$6\r\nCONFIG\r\n$3\r\nSET\r\n$14\r\ntcp-keepalive\r\n$3\r\n300\r\n",
+                )
+                .await;
+        }
+    }
+    works
 }
 
 #[tokio::test]
