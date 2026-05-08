@@ -890,7 +890,6 @@ impl AthenaService {
 impl AthenaService {
     fn start_query_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let query = require_str(&body, "QueryString")?;
         let work_group = body
             .get("WorkGroup")
             .and_then(Value::as_str)
@@ -908,6 +907,27 @@ impl AthenaService {
             .and_then(|c| c.get("OutputLocation"))
             .and_then(Value::as_str)
             .map(str::to_owned);
+
+        // Resolve query string from NamedQueryId or QueryString.
+        let mut query =
+            if let Some(named_query_id) = body.get("NamedQueryId").and_then(Value::as_str) {
+                let state = self.state.read();
+                let account = state
+                    .accounts
+                    .get(&req.account_id)
+                    .ok_or_else(|| invalid_request("Account not found"))?;
+                let nq = account.named_queries.get(named_query_id).ok_or_else(|| {
+                    invalid_request(format!("NamedQuery {named_query_id} not found"))
+                })?;
+                nq.query_string.clone()
+            } else {
+                require_str(&body, "QueryString")?
+            };
+
+        // Apply ExecutionParameters substitution.
+        if let Some(params) = body.get("ExecutionParameters").and_then(Value::as_array) {
+            query = substitute_parameters(&query, params)?;
+        }
 
         // Workgroup existence check before kicking off SQL execution so we
         // surface the same error users hit on real Athena.
@@ -1917,6 +1937,42 @@ fn require_str(body: &Value, field: &str) -> Result<String, AwsServiceError> {
         .ok_or_else(|| invalid_request(format!("{field} is required")))
 }
 
+/// Replace `?` placeholders in a query string with the provided parameter
+/// values, quoted safely for SQL parsing.
+fn substitute_parameters(query: &str, params: &[Value]) -> Result<String, AwsServiceError> {
+    let mut result = String::with_capacity(query.len());
+    let mut param_iter = params.iter().filter_map(Value::as_str);
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            // Skip inside string literals so we don't replace ? in strings.
+            result.push('\'');
+            while let Some(ch) = chars.next() {
+                result.push(ch);
+                if ch == '\'' {
+                    // Handle escaped quotes ('').
+                    if chars.peek() == Some(&'\'') {
+                        result.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else if c == '?' {
+            let p = param_iter
+                .next()
+                .ok_or_else(|| invalid_request("More placeholders than ExecutionParameters"))?;
+            let escaped = p.replace('\'', "''");
+            result.push('\'');
+            result.push_str(&escaped);
+            result.push('\'');
+        } else {
+            result.push(c);
+        }
+    }
+    Ok(result)
+}
+
 fn invalid_request(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidRequestException", msg)
 }
@@ -2286,4 +2342,161 @@ fn capacity_reservation_json(cr: &CapacityReservation) -> Value {
         );
     }
     obj
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fakecloud_core::service::AwsRequest;
+    use parking_lot::Mutex;
+
+    fn req(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "athena".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-req-id".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            body_stream: Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: "".to_string(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn parse_json(resp: &AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    #[test]
+    fn substitute_parameters_replaces_placeholders() {
+        let out = substitute_parameters(
+            "SELECT * FROM t WHERE id = ? AND name = ?",
+            &[json!("42"), json!("Alice")],
+        )
+        .unwrap();
+        assert_eq!(out, "SELECT * FROM t WHERE id = '42' AND name = 'Alice'");
+    }
+
+    #[test]
+    fn substitute_parameters_skips_placeholders_in_string_literals() {
+        let out = substitute_parameters(
+            "SELECT * FROM t WHERE name = 'foo?bar' AND id = ?",
+            &[json!("7")],
+        )
+        .unwrap();
+        assert_eq!(out, "SELECT * FROM t WHERE name = 'foo?bar' AND id = '7'");
+    }
+
+    #[test]
+    fn substitute_parameters_errors_on_too_few_params() {
+        let err =
+            substitute_parameters("SELECT * WHERE a = ? AND b = ?", &[json!("1")]).unwrap_err();
+        assert!(err
+            .message()
+            .contains("More placeholders than ExecutionParameters"));
+    }
+
+    #[test]
+    fn substitute_parameters_escapes_quotes() {
+        let out = substitute_parameters("SELECT * WHERE name = ?", &[json!("O'Brien")]).unwrap();
+        assert_eq!(out, "SELECT * WHERE name = 'O''Brien'");
+    }
+
+    #[test]
+    fn start_query_execution_with_named_query_id() {
+        let svc = AthenaService::new(SharedAthenaState::default());
+        let create_resp = svc
+            .create_named_query(&req(
+                "CreateNamedQuery",
+                json!({
+                    "Name": "my-query",
+                    "Database": "default",
+                    "QueryString": "SELECT 1 AS id",
+                    "WorkGroup": "primary"
+                }),
+            ))
+            .unwrap();
+        let nq_id = parse_json(&create_resp)
+            .get("NamedQueryId")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let exec_resp = svc
+            .start_query_execution(&req(
+                "StartQueryExecution",
+                json!({ "NamedQueryId": nq_id }),
+            ))
+            .unwrap();
+        let body = parse_json(&exec_resp);
+        assert!(body.get("QueryExecutionId").is_some());
+
+        let qe_id = body.get("QueryExecutionId").unwrap().as_str().unwrap();
+        let qe_resp = svc
+            .get_query_execution(&req(
+                "GetQueryExecution",
+                json!({ "QueryExecutionId": qe_id }),
+            ))
+            .unwrap();
+        let qe = parse_json(&qe_resp).get("QueryExecution").unwrap().clone();
+        assert_eq!(qe.get("Query").unwrap(), "SELECT 1 AS id");
+    }
+
+    #[test]
+    fn start_query_execution_with_execution_parameters() {
+        let svc = AthenaService::new(SharedAthenaState::default());
+        let exec_resp = svc
+            .start_query_execution(&req(
+                "StartQueryExecution",
+                json!({
+                    "QueryString": "SELECT ? AS id, ? AS name",
+                    "ExecutionParameters": ["42", "Alice"]
+                }),
+            ))
+            .unwrap();
+        let body = parse_json(&exec_resp);
+        let qe_id = body.get("QueryExecutionId").unwrap().as_str().unwrap();
+        let qe_resp = svc
+            .get_query_execution(&req(
+                "GetQueryExecution",
+                json!({ "QueryExecutionId": qe_id }),
+            ))
+            .unwrap();
+        let qe = parse_json(&qe_resp).get("QueryExecution").unwrap().clone();
+        assert_eq!(
+            qe.get("Query").unwrap(),
+            "SELECT '42' AS id, 'Alice' AS name"
+        );
+    }
+
+    #[test]
+    fn start_query_execution_missing_named_query_errors() {
+        let svc = AthenaService::new(SharedAthenaState::default());
+        svc.create_named_query(&req(
+            "CreateNamedQuery",
+            json!({
+                "Name": "seed",
+                "Database": "default",
+                "QueryString": "SELECT 1",
+                "WorkGroup": "primary"
+            }),
+        ))
+        .unwrap();
+        match svc.start_query_execution(&req(
+            "StartQueryExecution",
+            json!({ "NamedQueryId": "nope" }),
+        )) {
+            Ok(_) => panic!("expected error"),
+            Err(err) => assert!(err.message().contains("NamedQuery nope not found")),
+        }
+    }
 }
