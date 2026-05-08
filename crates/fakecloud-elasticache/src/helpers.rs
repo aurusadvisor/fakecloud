@@ -775,16 +775,18 @@ pub(crate) fn cache_cluster_xml(cluster: &CacheCluster, show_cache_node_info: bo
             .collect();
         format!("<LogDeliveryConfigurations>{entries}</LogDeliveryConfigurations>")
     };
-    let configuration_endpoint_xml =
-        if cluster.replication_group_id.is_some() && !cluster.endpoint_address.is_empty() {
-            format!(
+    let configuration_endpoint_xml = if (cluster.replication_group_id.is_some()
+        || cluster.engine == "memcached")
+        && !cluster.endpoint_address.is_empty()
+    {
+        format!(
             "<ConfigurationEndpoint><Address>{}</Address><Port>{}</Port></ConfigurationEndpoint>",
             xml_escape(&cluster.endpoint_address),
             cluster.endpoint_port
         )
-        } else {
-            String::new()
-        };
+    } else {
+        String::new()
+    };
 
     let preferred_maintenance_window_xml = cluster
         .preferred_maintenance_window

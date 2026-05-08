@@ -1484,8 +1484,8 @@ fn disassociate_global_replication_group_accepts_current_primary_as_noop() {
     assert!(body.contains("<DisassociateGlobalReplicationGroupResponse"));
 }
 
-#[test]
-fn modify_replication_group_updates_description() {
+#[tokio::test]
+async fn modify_replication_group_updates_description() {
     let service = service_with_replication_group("my-rg", 1);
     let req = request(
         "ModifyReplicationGroup",
@@ -1494,14 +1494,14 @@ fn modify_replication_group_updates_description() {
             ("ReplicationGroupDescription", "Updated description"),
         ],
     );
-    let resp = service.modify_replication_group(&req).unwrap();
+    let resp = service.modify_replication_group(&req).await.unwrap();
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
     assert!(body.contains("<Description>Updated description</Description>"));
     assert!(body.contains("<ModifyReplicationGroupResponse"));
 }
 
-#[test]
-fn modify_replication_group_updates_multiple_fields() {
+#[tokio::test]
+async fn modify_replication_group_updates_multiple_fields() {
     let service = service_with_replication_group("my-rg", 1);
     let req = request(
         "ModifyReplicationGroup",
@@ -1513,7 +1513,7 @@ fn modify_replication_group_updates_multiple_fields() {
             ("SnapshotWindow", "02:00-06:00"),
         ],
     );
-    let resp = service.modify_replication_group(&req).unwrap();
+    let resp = service.modify_replication_group(&req).await.unwrap();
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
     assert!(body.contains("<CacheNodeType>cache.m5.large</CacheNodeType>"));
     assert!(body.contains("<AutomaticFailover>enabled</AutomaticFailover>"));
@@ -1521,8 +1521,8 @@ fn modify_replication_group_updates_multiple_fields() {
     assert!(body.contains("<SnapshotWindow>02:00-06:00</SnapshotWindow>"));
 }
 
-#[test]
-fn modify_replication_group_not_found() {
+#[tokio::test]
+async fn modify_replication_group_not_found() {
     let shared = std::sync::Arc::new(parking_lot::RwLock::new(
         fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
     ));
@@ -1531,11 +1531,11 @@ fn modify_replication_group_not_found() {
         "ModifyReplicationGroup",
         &[("ReplicationGroupId", "nonexistent")],
     );
-    assert!(service.modify_replication_group(&req).is_err());
+    assert!(service.modify_replication_group(&req).await.is_err());
 }
 
-#[test]
-fn modify_replication_group_updates_auth_token_with_set() {
+#[tokio::test]
+async fn modify_replication_group_updates_auth_token_with_set() {
     let service = service_with_replication_group("rg-auth", 1);
     {
         let mut a = service.state.write();
@@ -1555,7 +1555,7 @@ fn modify_replication_group_updates_auth_token_with_set() {
             ("AuthTokenUpdateStrategy", "SET"),
         ],
     );
-    let resp = service.modify_replication_group(&req).unwrap();
+    let resp = service.modify_replication_group(&req).await.unwrap();
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
     // Token is never echoed back in the XML payload.
     assert!(!body.contains("<AuthToken>"));
@@ -1567,8 +1567,8 @@ fn modify_replication_group_updates_auth_token_with_set() {
     assert!(g.auth_token_enabled);
 }
 
-#[test]
-fn modify_replication_group_delete_auth_token_strategy_clears_token() {
+#[tokio::test]
+async fn modify_replication_group_delete_auth_token_strategy_clears_token() {
     let service = service_with_replication_group("rg-del", 1);
     {
         let mut a = service.state.write();
@@ -1587,7 +1587,7 @@ fn modify_replication_group_delete_auth_token_strategy_clears_token() {
             ("AuthTokenUpdateStrategy", "DELETE"),
         ],
     );
-    service.modify_replication_group(&req).unwrap();
+    service.modify_replication_group(&req).await.unwrap();
 
     let a = service.state.read();
     let g = a.default_ref().replication_groups.get("rg-del").unwrap();
@@ -1595,8 +1595,8 @@ fn modify_replication_group_delete_auth_token_strategy_clears_token() {
     assert!(!g.auth_token_enabled);
 }
 
-#[test]
-fn modify_replication_group_remove_user_groups_clears_list() {
+#[tokio::test]
+async fn modify_replication_group_remove_user_groups_clears_list() {
     let service = service_with_replication_group("rg-ug", 1);
     {
         let mut a = service.state.write();
@@ -1610,15 +1610,15 @@ fn modify_replication_group_remove_user_groups_clears_list() {
             ("RemoveUserGroups", "true"),
         ],
     );
-    service.modify_replication_group(&req).unwrap();
+    service.modify_replication_group(&req).await.unwrap();
 
     let a = service.state.read();
     let g = a.default_ref().replication_groups.get("rg-ug").unwrap();
     assert!(g.user_group_ids.is_empty());
 }
 
-#[test]
-fn modify_replication_group_persists_log_delivery_changes() {
+#[tokio::test]
+async fn modify_replication_group_persists_log_delivery_changes() {
     let service = service_with_replication_group("rg-log", 1);
     {
         let mut a = service.state.write();
@@ -1673,7 +1673,7 @@ fn modify_replication_group_persists_log_delivery_changes() {
             ),
         ],
     );
-    service.modify_replication_group(&req).unwrap();
+    service.modify_replication_group(&req).await.unwrap();
 
     let describe = request(
         "DescribeReplicationGroups",
@@ -1690,8 +1690,8 @@ fn modify_replication_group_persists_log_delivery_changes() {
     assert_eq!(g.log_delivery_configurations.len(), 2);
 }
 
-#[test]
-fn modify_replication_group_persists_multi_az_and_network_fields() {
+#[tokio::test]
+async fn modify_replication_group_persists_multi_az_and_network_fields() {
     let service = service_with_replication_group("rg-net", 1);
     let req = request(
         "ModifyReplicationGroup",
@@ -1702,7 +1702,7 @@ fn modify_replication_group_persists_multi_az_and_network_fields() {
             ("NetworkType", "dual_stack"),
         ],
     );
-    service.modify_replication_group(&req).unwrap();
+    service.modify_replication_group(&req).await.unwrap();
 
     let describe = request(
         "DescribeReplicationGroups",
@@ -1715,8 +1715,8 @@ fn modify_replication_group_persists_multi_az_and_network_fields() {
     assert!(body.contains("<NetworkType>dual_stack</NetworkType>"));
 }
 
-#[test]
-fn modify_replication_group_persists_snapshot_retention_and_window() {
+#[tokio::test]
+async fn modify_replication_group_persists_snapshot_retention_and_window() {
     let service = service_with_replication_group("rg-snap", 1);
     let req = request(
         "ModifyReplicationGroup",
@@ -1726,7 +1726,7 @@ fn modify_replication_group_persists_snapshot_retention_and_window() {
             ("SnapshotWindow", "01:00-03:00"),
         ],
     );
-    service.modify_replication_group(&req).unwrap();
+    service.modify_replication_group(&req).await.unwrap();
 
     let describe = request(
         "DescribeReplicationGroups",
@@ -1738,8 +1738,8 @@ fn modify_replication_group_persists_snapshot_retention_and_window() {
     assert!(body.contains("<SnapshotWindow>01:00-03:00</SnapshotWindow>"));
 }
 
-#[test]
-fn modify_replication_group_persists_notification_topic_attrs() {
+#[tokio::test]
+async fn modify_replication_group_persists_notification_topic_attrs() {
     let service = service_with_replication_group("rg-notif", 1);
     let topic_arn = "arn:aws:sns:us-east-1:123456789012:elasticache-events";
     let req = request(
@@ -1750,7 +1750,7 @@ fn modify_replication_group_persists_notification_topic_attrs() {
             ("NotificationTopicStatus", "inactive"),
         ],
     );
-    service.modify_replication_group(&req).unwrap();
+    service.modify_replication_group(&req).await.unwrap();
 
     let describe = request(
         "DescribeReplicationGroups",
@@ -3629,8 +3629,8 @@ fn delete_unknown_security_group_errors() {
     assert_eq!(err.code(), "CacheSecurityGroupNotFound");
 }
 
-#[test]
-fn cache_parameter_group_full_lifecycle_unit() {
+#[tokio::test]
+async fn cache_parameter_group_full_lifecycle_unit() {
     let svc = fresh_service();
     let create = request(
         "CreateCacheParameterGroup",
@@ -3653,7 +3653,7 @@ fn cache_parameter_group_full_lifecycle_unit() {
             ("ParameterNameValues.member.1.ParameterValue", "allkeys-lru"),
         ],
     );
-    svc.modify_cache_parameter_group(&modify).unwrap();
+    svc.modify_cache_parameter_group(&modify).await.unwrap();
 
     let describe = request(
         "DescribeCacheParameters",
@@ -3832,22 +3832,22 @@ async fn reboot_cache_cluster_marks_rebooting_when_no_runtime() {
     );
 }
 
-#[test]
-fn modify_unknown_user_errors() {
+#[tokio::test]
+async fn modify_unknown_user_errors() {
     let svc = fresh_service();
     let req = request("ModifyUser", &[("UserId", "ghost")]);
-    let err = match svc.modify_user(&req) {
+    let err = match svc.modify_user(&req).await {
         Err(e) => e,
         Ok(_) => panic!("expected error"),
     };
     assert_eq!(err.code(), "UserNotFound");
 }
 
-#[test]
-fn modify_unknown_user_group_errors() {
+#[tokio::test]
+async fn modify_unknown_user_group_errors() {
     let svc = fresh_service();
     let req = request("ModifyUserGroup", &[("UserGroupId", "ghost")]);
-    let err = match svc.modify_user_group(&req) {
+    let err = match svc.modify_user_group(&req).await {
         Err(e) => e,
         Ok(_) => panic!("expected error"),
     };
