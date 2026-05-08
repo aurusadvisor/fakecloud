@@ -1295,6 +1295,97 @@ pub(crate) fn fail_execution(
     }
 }
 
+/// Deliver execution history events to CloudWatch Logs when the state
+/// machine has a logging configuration.
+pub(crate) fn deliver_execution_logs(
+    state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    delivery: Option<&Arc<DeliveryBus>>,
+    logging_configuration: Option<&Value>,
+) {
+    let config = match logging_configuration {
+        Some(c) => c,
+        None => return,
+    };
+
+    let level = config["level"].as_str().unwrap_or("OFF");
+    if level == "OFF" {
+        return;
+    }
+
+    let destinations = config["destinations"].as_array();
+    let log_group_arn = destinations.and_then(|d| {
+        d.iter()
+            .find_map(|dest| dest["cloudWatchLogsLogGroup"]["logGroupArn"].as_str())
+    });
+
+    let log_group_arn = match log_group_arn {
+        Some(a) => a,
+        None => return,
+    };
+
+    // Parse log group ARN: arn:aws:logs:region:account-id:log-group:group-name
+    let parts: Vec<&str> = log_group_arn.split(':').collect();
+    if parts.len() < 6 {
+        return;
+    }
+    let log_account_id = parts[4];
+    let log_group_name = parts
+        .last()
+        .map_or("", |v| v)
+        .trim_start_matches("log-group:")
+        .to_string();
+    let log_group_name = log_group_name.trim_end_matches(":*");
+
+    let account_id = account_id_from_arn(execution_arn).to_string();
+    let accounts = state.read();
+    let s = match accounts.get(&account_id) {
+        Some(st) => st,
+        None => return,
+    };
+    let exec = match s.executions.get(execution_arn) {
+        Some(e) => e,
+        None => return,
+    };
+
+    let _now = Utc::now().timestamp_millis();
+    let stream_name = exec.name.clone();
+
+    let include_data = config["includeExecutionData"].as_bool().unwrap_or(false);
+
+    let events: Vec<(i64, String)> = exec
+        .history_events
+        .iter()
+        .filter_map(|ev| {
+            // Skip non-error events when level is ERROR unless it's a terminal failure.
+            if level == "ERROR"
+                && !matches!(
+                    ev.event_type.as_str(),
+                    "ExecutionFailed" | "TaskFailed" | "StateFailed"
+                )
+            {
+                return None;
+            }
+            let mut detail = json!({
+                "id": ev.id,
+                "type": ev.event_type,
+                "timestamp": ev.timestamp.timestamp_millis(),
+                "previousEventId": ev.previous_event_id,
+            });
+            if include_data {
+                detail["details"] = ev.details.clone();
+            }
+            Some((ev.timestamp.timestamp_millis(), detail.to_string()))
+        })
+        .collect();
+
+    drop(accounts);
+
+    if let Some(d) = delivery {
+        d.put_log_events(log_account_id, log_group_name, &stream_name, &events);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

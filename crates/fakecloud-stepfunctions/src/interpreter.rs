@@ -17,6 +17,7 @@ use crate::state::{ExecutionStatus, HistoryEvent, SharedStepFunctionsState};
 
 /// Execute a state machine definition with the given input.
 /// Updates the execution record in shared state as it progresses.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_state_machine(
     state: SharedStepFunctionsState,
     execution_arn: String,
@@ -25,6 +26,7 @@ pub async fn execute_state_machine(
     delivery: Option<Arc<DeliveryBus>>,
     dynamodb_state: Option<SharedDynamoDbState>,
     registry: Option<SharedServiceRegistry>,
+    logging_configuration: Option<Value>,
 ) {
     let def: Value = match serde_json::from_str(&definition) {
         Ok(v) => v,
@@ -108,6 +110,14 @@ pub async fn execute_state_machine(
             fail_execution(&state, &execution_arn, "States.Runtime", &msg);
         }
     }
+
+    // Deliver execution history to CloudWatch Logs when logging is configured.
+    deliver_execution_logs(
+        &state,
+        &execution_arn,
+        delivery.as_ref(),
+        logging_configuration.as_ref(),
+    );
 }
 
 type StatesResult<'a> = std::pin::Pin<
