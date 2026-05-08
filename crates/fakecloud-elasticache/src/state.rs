@@ -404,6 +404,9 @@ pub struct CacheSnapshot {
     pub arn: String,
     pub created_at: String,
     pub snapshot_source: String,
+    /// Path to the dumped RDB file on the local disk, if the runtime was
+    /// available at snapshot-create time.
+    pub rdb_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -1243,6 +1246,7 @@ mod tests {
                 arn: "arn:aws:elasticache:us-east-1:123456789012:snapshot:my-snapshot".to_string(),
                 created_at: "2024-01-01T00:00:00Z".to_string(),
                 snapshot_source: "manual".to_string(),
+                rdb_path: None,
             },
         );
         assert_eq!(state.snapshots.len(), 1);
