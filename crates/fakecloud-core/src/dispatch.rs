@@ -136,11 +136,46 @@ pub async fn dispatch(
         let first_seg = parts.uri.path().split('/').nth(1);
         if matches!(
             first_seg,
-            Some("agents" | "knowledgebases" | "flows" | "prompts" | "tags")
+            Some(
+                "agents"
+                    | "knowledgebases"
+                    | "flows"
+                    | "prompts"
+                    | "tags"
+                    | "retrieveAndGenerate"
+                    | "retrieveAndGenerateStream"
+                    | "optimize-prompt"
+                    | "sessions"
+                    | "invocations"
+                    | "generate-query"
+                    | "rerank"
+            )
         ) {
-            protocol::DetectedRequest {
-                service: "bedrock-agent".to_string(),
-                ..detected
+            // Further disambiguate runtime vs control plane for agents/flows paths
+            let segs: Vec<&str> = parts.uri.path().split('/').collect();
+            let is_runtime = matches!(
+                segs.as_slice(),
+                ["", "agents", _, "agentAliases", _, ..]  // InvokeAgent
+                    | ["", "flows", _, "aliases", _]   // InvokeFlow
+                    | ["", "knowledgebases", _, "retrieve"] // Retrieve
+                    | ["", "retrieveAndGenerate"]
+                    | ["", "retrieveAndGenerateStream"]
+                    | ["", "optimize-prompt"]
+                    | ["", "sessions", ..]
+                    | ["", "invocations", ..]
+                    | ["", "generate-query"]
+                    | ["", "rerank"]
+            );
+            if is_runtime {
+                protocol::DetectedRequest {
+                    service: "bedrock-agent-runtime".to_string(),
+                    ..detected
+                }
+            } else {
+                protocol::DetectedRequest {
+                    service: "bedrock-agent".to_string(),
+                    ..detected
+                }
             }
         } else {
             detected

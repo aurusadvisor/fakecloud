@@ -29,6 +29,7 @@ const REST_JSON_SERVICES: &[&str] = &[
     "apigateway",
     "bedrock",
     "bedrock-agent",
+    "bedrock-agent-runtime",
     "scheduler",
 ];
 
