@@ -2162,14 +2162,92 @@ impl S3Service {
 
     pub(super) fn write_get_object_response(
         &self,
-        _account_id: &str,
-        _req: &AwsRequest,
+        account_id: &str,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // Object Lambda WriteGetObjectResponse is the back-channel a
-        // Lambda function uses to deliver its rewritten payload to the
-        // requesting client. fakecloud doesn't run Object Lambda; ack the
-        // call so SDKs don't error out, and rely on integration tests for
-        // any real exercise.
+        let route = req
+            .headers
+            .get("x-amz-request-route")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequest",
+                    "x-amz-request-route header is required",
+                )
+            })?;
+
+        let token = req
+            .headers
+            .get("x-amz-request-token")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequest",
+                    "x-amz-request-token header is required",
+                )
+            })?;
+
+        let fwd_status = req
+            .headers
+            .get("x-amz-fwd-status")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok());
+
+        let fwd_error_message = req
+            .headers
+            .get("x-amz-fwd-error-message")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let content_type = req
+            .headers
+            .get("x-amz-fwd-header-Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let encryption = req
+            .headers
+            .get("x-amz-server-side-encryption")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let kms_key_id = req
+            .headers
+            .get("x-amz-server-side-encryption-aws-kms-key-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let mut metadata = std::collections::BTreeMap::new();
+        for (name, value) in &req.headers {
+            if name.as_str().starts_with("x-amz-meta-") {
+                if let Ok(v) = value.to_str() {
+                    let key = name.as_str()["x-amz-meta-".len()..].to_string();
+                    metadata.insert(key, v.to_string());
+                }
+            }
+        }
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        state.object_lambda_responses.insert(
+            token.clone(),
+            crate::state::ObjectLambdaResponse {
+                route,
+                token,
+                body: req.body.to_vec(),
+                content_type,
+                fwd_status,
+                fwd_error_message,
+                metadata,
+                encryption,
+                kms_key_id,
+            },
+        );
+
         Ok(empty_response(StatusCode::OK))
     }
 }
@@ -2346,4 +2424,116 @@ fn list_named_config(
         entries = entries.join(""),
     );
     Ok(s3_xml(StatusCode::OK, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use fakecloud_core::delivery::DeliveryBus;
+    use fakecloud_core::service::{AwsRequest, AwsServiceError, RequestBodyStream};
+    use http::{HeaderMap, Method, StatusCode};
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_service() -> S3Service {
+        let state: crate::SharedS3State = Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        S3Service::new(state, Arc::new(DeliveryBus::new()))
+    }
+
+    fn make_request(headers: HeaderMap, body: Bytes) -> AwsRequest {
+        let stream_body = RequestBodyStream::from(body.clone());
+        AwsRequest {
+            service: "s3".to_string(),
+            action: "WriteGetObjectResponse".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test-req-id".to_string(),
+            headers,
+            query_params: HashMap::new(),
+            body,
+            body_stream: Mutex::new(Some(stream_body)),
+            path_segments: vec!["WriteGetObjectResponse".to_string()],
+            raw_path: "/WriteGetObjectResponse".to_string(),
+            raw_query: "".to_string(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn assert_aws_err(
+        result: Result<AwsResponse, AwsServiceError>,
+        expect_code: &str,
+    ) -> AwsServiceError {
+        let err = match result {
+            Ok(_) => panic!("expected error, got Ok response"),
+            Err(e) => e,
+        };
+        match &err {
+            AwsServiceError::AwsError { code, .. } => {
+                assert_eq!(code, expect_code, "unexpected error code");
+            }
+            other => panic!("expected AwsError, got {other:?}"),
+        }
+        err
+    }
+
+    #[test]
+    fn write_get_object_response_stores_body_and_headers() {
+        let svc = make_service();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-amz-request-route", "route-1".parse().unwrap());
+        headers.insert("x-amz-request-token", "token-1".parse().unwrap());
+        headers.insert(
+            "x-amz-fwd-header-Content-Type",
+            "text/plain".parse().unwrap(),
+        );
+        headers.insert("x-amz-meta-custom", "value".parse().unwrap());
+
+        let req = make_request(headers, Bytes::from_static(b"hello object lambda"));
+        let resp = svc.write_get_object_response("123456789012", &req).unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let accounts = svc.state.read();
+        let state = accounts.get("123456789012").unwrap();
+        let stored = state.object_lambda_responses.get("token-1").unwrap();
+        assert_eq!(stored.route, "route-1");
+        assert_eq!(stored.token, "token-1");
+        assert_eq!(stored.body, b"hello object lambda");
+        assert_eq!(stored.content_type, Some("text/plain".to_string()));
+        assert_eq!(stored.metadata.get("custom"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn write_get_object_response_missing_route_rejected() {
+        let svc = make_service();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-amz-request-token", "token-2".parse().unwrap());
+
+        let req = make_request(headers, Bytes::new());
+        let err = assert_aws_err(
+            svc.write_get_object_response("123456789012", &req),
+            "BadRequest",
+        );
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn write_get_object_response_missing_token_rejected() {
+        let svc = make_service();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-amz-request-route", "route-3".parse().unwrap());
+
+        let req = make_request(headers, Bytes::new());
+        let err = assert_aws_err(
+            svc.write_get_object_response("123456789012", &req),
+            "BadRequest",
+        );
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
 }
