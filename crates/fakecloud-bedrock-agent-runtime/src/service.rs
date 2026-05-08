@@ -183,7 +183,7 @@ impl BedrockAgentRuntimeService {
         {
             params.push(("flowIdentifier".to_string(), segs[1].clone()));
             params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
-            params.push(("executionIdentifier".to_string(), segs[5].clone()));
+            params.push(("executionId".to_string(), segs[5].clone()));
             return Some(("GetFlowExecution", params));
         }
         // StartFlowExecution: POST /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions
@@ -207,7 +207,7 @@ impl BedrockAgentRuntimeService {
         {
             params.push(("flowIdentifier".to_string(), segs[1].clone()));
             params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
-            params.push(("executionIdentifier".to_string(), segs[5].clone()));
+            params.push(("executionId".to_string(), segs[5].clone()));
             return Some(("StopFlowExecution", params));
         }
         // ListFlowExecutionEvents: GET /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions/{executionIdentifier}/events
@@ -220,7 +220,7 @@ impl BedrockAgentRuntimeService {
         {
             params.push(("flowIdentifier".to_string(), segs[1].clone()));
             params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
-            params.push(("executionIdentifier".to_string(), segs[5].clone()));
+            params.push(("executionId".to_string(), segs[5].clone()));
             return Some(("ListFlowExecutionEvents", params));
         }
         // GetExecutionFlowSnapshot: GET /flows/{flowIdentifier}/aliases/{flowAliasIdentifier}/executions/{executionIdentifier}/flowsnapshot
@@ -233,7 +233,7 @@ impl BedrockAgentRuntimeService {
         {
             params.push(("flowIdentifier".to_string(), segs[1].clone()));
             params.push(("flowAliasIdentifier".to_string(), segs[3].clone()));
-            params.push(("executionIdentifier".to_string(), segs[5].clone()));
+            params.push(("executionId".to_string(), segs[5].clone()));
             return Some(("GetExecutionFlowSnapshot", params));
         }
 
