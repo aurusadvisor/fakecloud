@@ -2453,8 +2453,6 @@ async fn elasticache_create_cache_cluster_round_trips_extended_fields() {
         .ip_discovery(aws_sdk_elasticache::types::IpDiscovery::Ipv4)
         .outpost_mode(aws_sdk_elasticache::types::OutpostMode::SingleOutpost)
         .preferred_outpost_arn("arn:aws:outposts:us-east-1:123456789012:outpost/op-abc")
-        .snapshot_name("seed-snap")
-        .snapshot_arns("arn:aws:s3:::my-bucket/seed.rdb")
         .snapshot_retention_limit(7)
         .snapshot_window("03:00-05:00")
         .tags(
