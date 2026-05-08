@@ -1970,7 +1970,7 @@ async fn s3_select_object_content() {
         .send()
         .await
         .unwrap();
-    client
+    let resp = client
         .select_object_content()
         .bucket("select-bkt")
         .key("data.csv")
@@ -1978,7 +1978,11 @@ async fn s3_select_object_content() {
         .expression_type(aws_sdk_s3::types::ExpressionType::Sql)
         .input_serialization(
             aws_sdk_s3::types::InputSerialization::builder()
-                .csv(aws_sdk_s3::types::CsvInput::builder().build())
+                .csv(
+                    aws_sdk_s3::types::CsvInput::builder()
+                        .file_header_info(aws_sdk_s3::types::FileHeaderInfo::Use)
+                        .build(),
+                )
                 .build(),
         )
         .output_serialization(
@@ -1989,6 +1993,35 @@ async fn s3_select_object_content() {
         .send()
         .await
         .unwrap();
+
+    let mut stream = resp.payload;
+    let mut records = Vec::new();
+    let mut got_end = false;
+    loop {
+        match stream.recv().await {
+            Ok(Some(event)) => match event {
+                aws_sdk_s3::types::SelectObjectContentEventStream::Records(rec) => {
+                    if let Some(payload) = rec.payload() {
+                        records.extend_from_slice(payload.as_ref());
+                    }
+                }
+                aws_sdk_s3::types::SelectObjectContentEventStream::Stats(_) => {}
+                aws_sdk_s3::types::SelectObjectContentEventStream::End(_) => {
+                    got_end = true;
+                    break;
+                }
+                other => panic!("unexpected SelectObjectContent event: {other:?}"),
+            },
+            Ok(None) => break,
+            Err(e) => panic!("SelectObjectContent stream error: {e:?}"),
+        }
+    }
+    assert!(got_end, "expected End event in SelectObjectContent stream");
+    assert!(
+        !records.is_empty(),
+        "expected records in SelectObjectContent response"
+    );
+    assert_eq!(String::from_utf8_lossy(&records), "1,2\n");
 }
 
 #[test_action("s3", "UpdateObjectEncryption", checksum = "6cdb3788")]

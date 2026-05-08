@@ -30,7 +30,12 @@ sha2 = { workspace = true }
 crc32c = { workspace = true }
 crc32fast = { workspace = true }
 crc64fast-nvme = { workspace = true }
+quick-xml = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+aws-smithy-eventstream = "0.60"
+aws-smithy-http = "0.63"
+bytes = { workspace = true }
+bytes-utils = "0.1"
