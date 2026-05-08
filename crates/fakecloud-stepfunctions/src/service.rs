@@ -208,7 +208,7 @@ impl AwsService for StepFunctionsService {
             "ListMapRuns" => self.list_map_runs(&req),
             "UpdateMapRun" => self.update_map_run(&req),
             "RedriveExecution" => self.redrive_execution(&req),
-            "StartSyncExecution" => self.start_sync_execution(&req),
+            "StartSyncExecution" => self.start_sync_execution(&req).await,
             "TestState" => self.test_state(&req),
             "ValidateStateMachineDefinition" => self.validate_state_machine_definition(&req),
             _ => Err(AwsServiceError::action_not_implemented(
@@ -1286,7 +1286,7 @@ impl StepFunctionsService {
         })))
     }
 
-    fn start_sync_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn start_sync_execution(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let sm_arn = body["stateMachineArn"]
             .as_str()
@@ -1300,41 +1300,91 @@ impl StepFunctionsService {
                 "Execution input is not valid JSON.",
             ));
         }
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let sm = state
-            .state_machines
-            .get(&sm_arn)
-            .ok_or_else(|| state_machine_not_found(&sm_arn))?;
-        if sm.machine_type != crate::state::StateMachineType::Express {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "StateMachineTypeNotSupported",
-                "StartSyncExecution is only supported for EXPRESS state machines.",
-            ));
+        let (exec_arn, definition) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            let sm = state
+                .state_machines
+                .get(&sm_arn)
+                .ok_or_else(|| state_machine_not_found(&sm_arn))?;
+            if sm.machine_type != crate::state::StateMachineType::Express {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "StateMachineTypeNotSupported",
+                    "StartSyncExecution is only supported for EXPRESS state machines.",
+                ));
+            }
+            let now = chrono::Utc::now();
+            let exec_name = format!("sync-{}", now.timestamp_millis());
+            let exec_arn = format!(
+                "arn:aws:states:{}:{}:express:{}:{}",
+                state.region, state.account_id, sm.name, exec_name
+            );
+            let execution = Execution {
+                execution_arn: exec_arn.clone(),
+                state_machine_arn: sm_arn.clone(),
+                state_machine_name: sm.name.clone(),
+                name: exec_name.clone(),
+                status: ExecutionStatus::Running,
+                input: Some(input.clone()),
+                output: None,
+                start_date: now,
+                stop_date: None,
+                error: None,
+                cause: None,
+                history_events: vec![],
+            };
+            state.executions.insert(exec_arn.clone(), execution);
+            (exec_arn, sm.definition.clone())
+        };
+
+        interpreter::execute_state_machine(
+            self.state.clone(),
+            exec_arn.clone(),
+            definition,
+            Some(input),
+            self.delivery.clone(),
+            self.dynamodb_state.clone(),
+            self.registry.clone(),
+        )
+        .await;
+
+        let accounts = self.state.read();
+        let state = accounts.get(&req.account_id).unwrap();
+        let exec = state
+            .executions
+            .get(&exec_arn)
+            .ok_or_else(|| execution_not_found(&exec_arn))?;
+
+        let mut resp = json!({
+            "executionArn": exec.execution_arn,
+            "stateMachineArn": exec.state_machine_arn,
+            "name": exec.name,
+            "startDate": exec.start_date.timestamp(),
+            "stopDate": exec.stop_date.map(|d| d.timestamp()),
+            "status": exec.status.as_str(),
+            "input": exec.input.as_deref().unwrap_or("{}"),
+        });
+
+        if let Some(ref output) = exec.output {
+            resp["output"] = json!(output);
         }
-        let now = chrono::Utc::now();
-        let exec_arn = format!(
-            "arn:aws:states:{}:{}:express:{}:sync-{}",
-            state.region,
-            state.account_id,
-            sm.name,
-            now.timestamp_millis()
-        );
-        Ok(AwsResponse::ok_json(json!({
-            "executionArn": exec_arn,
-            "stateMachineArn": sm_arn,
-            "name": "sync",
-            "startDate": now.timestamp(),
-            "stopDate": now.timestamp(),
-            "status": "SUCCEEDED",
-            "input": input,
-            "output": "{}",
-            "billingDetails": {
-                "billedMemoryUsedInMB": 64,
-                "billedDurationInMilliseconds": 1,
-            },
-        })))
+        if let Some(ref error) = exec.error {
+            resp["error"] = json!(error);
+        }
+        if let Some(ref cause) = exec.cause {
+            resp["cause"] = json!(cause);
+        }
+
+        let duration_ms = exec
+            .stop_date
+            .map_or(0, |stop| (stop - exec.start_date).num_milliseconds());
+        resp["billingDetails"] = json!({
+            "billedMemoryUsedInMB": 64,
+            "billedDurationInMilliseconds": duration_ms.max(0),
+        });
+
+        Ok(AwsResponse::ok_json(resp))
     }
 
     fn test_state(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -2431,5 +2481,82 @@ mod tests {
         assert!(is_mutating_action("StartExecution"));
         assert!(!is_mutating_action("DescribeStateMachine"));
         assert!(!is_mutating_action("ListStateMachines"));
+    }
+
+    // ── StartSyncExecution ──
+
+    fn create_express_sm(svc: &StepFunctionsService, name: &str) -> String {
+        let body = json!({
+            "name": name,
+            "definition": VALID_DEF,
+            "roleArn": "arn:aws:iam::123456789012:role/test",
+            "type": "EXPRESS",
+        });
+        let req = make_request("CreateStateMachine", &body.to_string());
+        let resp = svc.create_state_machine(&req).unwrap();
+        let b = body_json(&resp);
+        b["stateMachineArn"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn start_sync_execution_basic() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_express_sm(&svc, "sync-sm");
+
+        let body = json!({
+            "stateMachineArn": arn,
+            "input": r#"{"key":"value"}"#,
+        });
+        let req = make_request("StartSyncExecution", &body.to_string());
+        let resp = svc.start_sync_execution(&req).await.unwrap();
+        let b = body_json(&resp);
+        assert!(b["executionArn"]
+            .as_str()
+            .unwrap()
+            .contains("express:sync-sm"));
+        assert_eq!(b["stateMachineArn"], arn);
+        assert_eq!(b["status"], "SUCCEEDED");
+        assert!(b["startDate"].as_i64().is_some());
+        assert!(b["stopDate"].as_i64().is_some());
+        assert!(b["output"].as_str().is_some());
+        assert!(b["billingDetails"]["billedDurationInMilliseconds"]
+            .as_i64()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn start_sync_execution_not_express() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_sm(&svc, "std-sm");
+
+        let body = json!({"stateMachineArn": arn});
+        let req = make_request("StartSyncExecution", &body.to_string());
+        let err = expect_err(svc.start_sync_execution(&req).await);
+        assert!(err.to_string().contains("StateMachineTypeNotSupported"));
+    }
+
+    #[tokio::test]
+    async fn start_sync_execution_sm_not_found() {
+        let svc = StepFunctionsService::new(make_state());
+        let body = json!({
+            "stateMachineArn": "arn:aws:states:us-east-1:123456789012:stateMachine:nope",
+        });
+        let req = make_request("StartSyncExecution", &body.to_string());
+        let err = expect_err(svc.start_sync_execution(&req).await);
+        assert!(err.to_string().contains("StateMachineDoesNotExist"));
+    }
+
+    #[tokio::test]
+    async fn start_sync_execution_invalid_input() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_express_sm(&svc, "bad-input-sync");
+
+        let body = json!({
+            "stateMachineArn": arn,
+            "input": "not json",
+        });
+        let req = make_request("StartSyncExecution", &body.to_string());
+        let err = expect_err(svc.start_sync_execution(&req).await);
+        assert!(err.to_string().contains("InvalidExecutionInput"));
     }
 }
