@@ -30,6 +30,7 @@ pub(crate) struct ResetState {
     pub apigatewayv1: fakecloud_apigateway::SharedApiGatewayState,
     pub apigatewayv2: fakecloud_apigatewayv2::SharedApiGatewayV2State,
     pub bedrock: fakecloud_bedrock::SharedBedrockState,
+    pub bedrock_agent: fakecloud_bedrock_agent::SharedBedrockAgentState,
     pub cloudfront: fakecloud_cloudfront::SharedCloudFrontState,
     pub route53: fakecloud_route53::SharedRoute53State,
     pub acm: fakecloud_acm::SharedAcmState,
@@ -157,6 +158,9 @@ impl ResetState {
             }
             "bedrock" | "bedrock-runtime" => {
                 self.bedrock.write().reset();
+            }
+            "bedrock-agent" => {
+                self.bedrock_agent.write().reset();
             }
             "cloudfront" => {
                 *self.cloudfront.write() = fakecloud_cloudfront::CloudFrontAccounts::new();
@@ -359,6 +363,10 @@ impl ResetState {
                     state.reset();
                 }
             }
+            "bedrock-agent" => {
+                let mut state = self.bedrock_agent.write();
+                state.accounts.remove(account_id);
+            }
             "cloudfront" => {
                 // CloudFront is a global service in AWS; per-account resets
                 // simply drop that account's distribution / invalidation /
@@ -466,6 +474,7 @@ impl ResetState {
         self.apigatewayv1.write().reset();
         self.apigatewayv2.write().reset();
         self.bedrock.write().reset();
+        self.bedrock_agent.write().reset();
         *self.cloudfront.write() = fakecloud_cloudfront::CloudFrontAccounts::new();
         *self.route53.write() = fakecloud_route53::Route53Accounts::new();
         *self.acm.write() = fakecloud_acm::AcmAccounts::new();
@@ -813,6 +822,9 @@ mod tests {
                     "us-east-1",
                     "http://localhost:4566",
                 ),
+            )),
+            bedrock_agent: Arc::new(parking_lot::RwLock::new(
+                fakecloud_bedrock_agent::BedrockAgentAccounts::new(),
             )),
             cloudfront: Arc::new(parking_lot::RwLock::new(
                 fakecloud_cloudfront::CloudFrontAccounts::new(),

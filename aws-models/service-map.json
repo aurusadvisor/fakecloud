@@ -79,6 +79,10 @@
         "repo_dir": "bedrock",
         "service_name": "bedrock"
     },
+    "bedrock-agent": {
+        "repo_dir": "bedrock-agent",
+        "service_name": "bedrock-agent"
+    },
     "bedrock-runtime": {
         "repo_dir": "bedrock-runtime",
         "service_name": "bedrock-runtime"

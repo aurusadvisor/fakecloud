@@ -51,6 +51,7 @@ fakecloud-scheduler = { workspace = true }
 fakecloud-apigateway = { workspace = true }
 fakecloud-apigatewayv2 = { workspace = true }
 fakecloud-bedrock = { workspace = true }
+fakecloud-bedrock-agent = { workspace = true }
 fakecloud-sdk = { workspace = true }
 fakecloud-persistence = { workspace = true }
 axum = { workspace = true }

@@ -37,6 +37,7 @@ sdk-clients = [
     "dep:aws-sdk-apigateway",
     "dep:aws-sdk-apigatewayv2",
     "dep:aws-sdk-bedrock",
+    "dep:aws-sdk-bedrockagent",
     "dep:aws-sdk-bedrockruntime",
     "dep:aws-sdk-scheduler",
     "dep:aws-sdk-ecr",
@@ -87,6 +88,7 @@ aws-sdk-sfn = { version = "1", optional = true }
 aws-sdk-apigateway = { version = "1", optional = true }
 aws-sdk-apigatewayv2 = { version = "1", optional = true }
 aws-sdk-bedrock = { version = "1", optional = true }
+aws-sdk-bedrockagent = { version = "1", optional = true }
 aws-sdk-bedrockruntime = { version = "1", optional = true }
 aws-sdk-scheduler = { version = "1", optional = true }
 aws-sdk-ecr = { version = "1", optional = true }
