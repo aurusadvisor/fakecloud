@@ -2504,8 +2504,9 @@ mod tests {
     use parking_lot::RwLock;
     use serde_json::json;
 
-    use crate::service::AthenaService;
+    use crate::service::{substitute_parameters, AthenaService};
     use crate::state::AthenaAccounts;
+    use crate::SharedAthenaState;
 
     fn test_service() -> (AthenaService, SharedGlueState) {
         let glue = Arc::new(RwLock::new(GlueAccounts::new()));

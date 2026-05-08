@@ -780,6 +780,10 @@ impl TestServer {
         aws_sdk_bedrock::Client::new(&self.aws_config().await)
     }
 
+    pub async fn bedrock_agent_client(&self) -> aws_sdk_bedrockagent::Client {
+        aws_sdk_bedrockagent::Client::new(&self.aws_config().await)
+    }
+
     pub async fn bedrock_runtime_client(&self) -> aws_sdk_bedrockruntime::Client {
         aws_sdk_bedrockruntime::Client::new(&self.aws_config().await)
     }

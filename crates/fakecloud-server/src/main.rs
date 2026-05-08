@@ -39,6 +39,7 @@ use sqs_lambda_poller::SqsLambdaPoller;
 use fakecloud_apigateway::{ApiGatewayFacade, ApiGatewayService};
 use fakecloud_apigatewayv2::ApiGatewayV2Service;
 use fakecloud_bedrock::BedrockService;
+use fakecloud_bedrock_agent::BedrockAgentService;
 use fakecloud_cloudformation::CloudFormationService;
 use fakecloud_cloudfront::CloudFrontService;
 use fakecloud_cognito::CognitoService;
@@ -377,6 +378,10 @@ async fn main() {
         ),
     ));
 
+    let bedrock_agent_state: fakecloud_bedrock_agent::SharedBedrockAgentState = Arc::new(
+        parking_lot::RwLock::new(fakecloud_bedrock_agent::BedrockAgentAccounts::new()),
+    );
+
     // Organizations state is a global singleton (one org per fakecloud
     // process) — not wrapped in MultiAccountState because an AWS org is
     // a cross-account construct. `None` until CreateOrganization runs.
@@ -680,6 +685,7 @@ async fn main() {
         apigatewayv1: apigatewayv1_state.clone(),
         apigatewayv2: apigatewayv2_state.clone(),
         bedrock: bedrock_state.clone(),
+        bedrock_agent: bedrock_agent_state.clone(),
         organizations: organizations_state.clone(),
         container_runtime: container_runtime.clone(),
         rds_runtime: rds_runtime.clone(),
@@ -2476,6 +2482,7 @@ async fn main() {
         bedrock_service = bedrock_service.with_snapshot_store(store);
     }
     registry.register(Arc::new(bedrock_service));
+    registry.register(Arc::new(BedrockAgentService::new(bedrock_agent_state)));
 
     let scheduler_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

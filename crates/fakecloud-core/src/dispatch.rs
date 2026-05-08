@@ -129,6 +129,26 @@ pub async fn dispatch(
         }
     };
 
+    // Bedrock-agent and bedrock-runtime both send `bedrock` in the SigV4
+    // credential scope, but bedrock-agent has its own service handler.
+    // Disambiguate based on the request path.
+    let detected = if detected.service == "bedrock" {
+        let first_seg = parts.uri.path().split('/').nth(1);
+        if matches!(
+            first_seg,
+            Some("agents" | "knowledgebases" | "flows" | "prompts" | "tags")
+        ) {
+            protocol::DetectedRequest {
+                service: "bedrock-agent".to_string(),
+                ..detected
+            }
+        } else {
+            detected
+        }
+    } else {
+        detected
+    };
+
     // Look up service
     let service = match registry.get(&detected.service) {
         Some(s) => s,
