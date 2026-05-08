@@ -522,6 +522,22 @@ impl AthenaService {
         if !account.data_catalogs.contains_key(&catalog) {
             return Err(invalid_request(format!("DataCatalog {catalog} not found")));
         }
+        // Resolve via Glue for the default catalog.
+        if catalog == "AwsDataCatalog" {
+            if let Some(ref glue) = self.glue {
+                let glue_state = glue.read();
+                if let Some(acct) = glue_state.get(&req.account_id) {
+                    if let Some(dbs) = acct.dbs_in(&req.region) {
+                        if let Some(db) = dbs.get(&database) {
+                            return Ok(AwsResponse::ok_json(json!({
+                                "Database": glue_database_json(db),
+                            })));
+                        }
+                    }
+                }
+                return Err(invalid_request(format!("Database {database} not found")));
+            }
+        }
         Ok(AwsResponse::ok_json(json!({
             "Database": {
                 "Name": database,
@@ -539,6 +555,17 @@ impl AthenaService {
         if !account.data_catalogs.contains_key(&catalog) {
             return Err(invalid_request(format!("DataCatalog {catalog} not found")));
         }
+        if catalog == "AwsDataCatalog" {
+            if let Some(ref glue) = self.glue {
+                let glue_state = glue.read();
+                let list: Vec<Value> = glue_state
+                    .get(&req.account_id)
+                    .and_then(|a| a.dbs_in(&req.region))
+                    .map(|dbs| dbs.values().map(glue_database_json).collect())
+                    .unwrap_or_default();
+                return Ok(AwsResponse::ok_json(json!({ "DatabaseList": list })));
+            }
+        }
         Ok(AwsResponse::ok_json(json!({
             "DatabaseList": [{"Name": "default", "Description": "default database"}],
         })))
@@ -553,6 +580,25 @@ impl AthenaService {
         let account = account_mut(&mut state, &req.account_id);
         if !account.data_catalogs.contains_key(&catalog) {
             return Err(invalid_request(format!("DataCatalog {catalog} not found")));
+        }
+        if catalog == "AwsDataCatalog" {
+            if let Some(ref glue) = self.glue {
+                let glue_state = glue.read();
+                if let Some(acct) = glue_state.get(&req.account_id) {
+                    if let Some(dbs) = acct.dbs_in(&req.region) {
+                        if let Some(db) = dbs.get(&database) {
+                            if let Some(tbl) = db.tables.get(&table) {
+                                return Ok(AwsResponse::ok_json(json!({
+                                    "TableMetadata": glue_table_metadata_json(tbl),
+                                })));
+                            }
+                        }
+                    }
+                }
+                return Err(invalid_request(format!(
+                    "Table {database}.{table} not found"
+                )));
+            }
         }
         Ok(AwsResponse::ok_json(json!({
             "TableMetadata": {
@@ -569,10 +615,33 @@ impl AthenaService {
         let body = req.json_body();
         let catalog = require_str(&body, "CatalogName")?;
         let database = require_str(&body, "DatabaseName")?;
+        let expression = body
+            .get("Expression")
+            .and_then(Value::as_str)
+            .unwrap_or("*")
+            .to_string();
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         if !account.data_catalogs.contains_key(&catalog) {
             return Err(invalid_request(format!("DataCatalog {catalog} not found")));
+        }
+        if catalog == "AwsDataCatalog" {
+            if let Some(ref glue) = self.glue {
+                let glue_state = glue.read();
+                let list: Vec<Value> = glue_state
+                    .get(&req.account_id)
+                    .and_then(|a| a.dbs_in(&req.region))
+                    .and_then(|dbs| dbs.get(&database))
+                    .map(|db| {
+                        db.tables
+                            .values()
+                            .filter(|t| match_table_expression(&t.name, &expression))
+                            .map(glue_table_metadata_json)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                return Ok(AwsResponse::ok_json(json!({ "TableMetadataList": list })));
+            }
         }
         Ok(AwsResponse::ok_json(json!({
             "TableMetadataList": [{
@@ -2344,34 +2413,206 @@ fn capacity_reservation_json(cr: &CapacityReservation) -> Value {
     obj
 }
 
+// ─── Glue -> Athena helpers ────────────────────────────────────────
+
+fn glue_database_json(db: &fakecloud_glue::Database) -> Value {
+    let mut obj = json!({
+        "Name": db.name,
+        "Description": db.description.as_deref().unwrap_or(""),
+        "Parameters": db.parameters,
+    });
+    if let Some(uri) = &db.location_uri {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("LocationUri".to_string(), Value::String(uri.clone()));
+    }
+    obj
+}
+
+fn glue_table_metadata_json(tbl: &fakecloud_glue::Table) -> Value {
+    let columns: Vec<Value> = tbl
+        .storage_descriptor
+        .as_ref()
+        .map(|s| {
+            s.columns
+                .iter()
+                .map(|c| {
+                    let mut col = json!({
+                        "Name": c.name,
+                        "Type": c.column_type,
+                    });
+                    if let Some(comment) = &c.comment {
+                        col.as_object_mut()
+                            .unwrap()
+                            .insert("Comment".to_string(), Value::String(comment.clone()));
+                    }
+                    col
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let partition_keys: Vec<Value> = tbl
+        .partition_keys
+        .iter()
+        .map(|c| {
+            let mut col = json!({
+                "Name": c.name,
+                "Type": c.column_type,
+            });
+            if let Some(comment) = &c.comment {
+                col.as_object_mut()
+                    .unwrap()
+                    .insert("Comment".to_string(), Value::String(comment.clone()));
+            }
+            col
+        })
+        .collect();
+
+    let mut obj = json!({
+        "Name": tbl.name,
+        "TableType": tbl.table_type.as_deref().unwrap_or("EXTERNAL_TABLE"),
+        "Columns": columns,
+        "PartitionKeys": partition_keys,
+    });
+
+    let params = &tbl.parameters;
+    if !params.is_empty() {
+        obj.as_object_mut().unwrap().insert(
+            "Parameters".to_string(),
+            serde_json::to_value(params).unwrap(),
+        );
+    }
+    obj
+}
+
+fn match_table_expression(name: &str, expression: &str) -> bool {
+    if expression == "*" {
+        return true;
+    }
+    // Support `*` wildcards inside the expression.
+    let regex_str = expression
+        .replace('.', "\\.")
+        .replace('*', ".*")
+        .replace('?', ".");
+    regex::Regex::new(&format!("^{regex_str}$")).is_ok_and(|re| re.is_match(name))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use fakecloud_core::service::AwsRequest;
-    use parking_lot::Mutex;
+    use std::sync::Arc;
 
-    fn req(action: &str, body: Value) -> AwsRequest {
-        AwsRequest {
-            service: "athena".to_string(),
-            action: action.to_string(),
-            region: "us-east-1".to_string(),
-            account_id: "123456789012".to_string(),
-            request_id: "test-req-id".to_string(),
-            headers: http::HeaderMap::new(),
-            query_params: std::collections::HashMap::new(),
-            body: serde_json::to_vec(&body).unwrap().into(),
-            body_stream: Mutex::new(None),
-            path_segments: vec![],
-            raw_path: "/".to_string(),
-            raw_query: "".to_string(),
-            method: http::Method::POST,
-            is_query_protocol: false,
-            access_key_id: None,
-            principal: None,
+    use chrono::Utc;
+    use fakecloud_core::service::AwsRequest;
+    use fakecloud_glue::state::Column;
+    use fakecloud_glue::{Database, GlueAccounts, SharedGlueState, StorageDescriptor, Table};
+    use parking_lot::RwLock;
+    use serde_json::json;
+
+    use crate::service::AthenaService;
+    use crate::state::AthenaAccounts;
+
+    fn test_service() -> (AthenaService, SharedGlueState) {
+        let glue = Arc::new(RwLock::new(GlueAccounts::new()));
+        let svc = AthenaService::new(Arc::new(RwLock::new(AthenaAccounts::new())))
+            .with_glue(Arc::clone(&glue));
+        (svc, glue)
+    }
+
+    fn seed_glue_db(glue: &SharedGlueState, account_id: &str, region: &str, db: Database) {
+        let mut g = glue.write();
+        let acct = g.get_or_create(account_id, region);
+        let dbs = acct.dbs_in_mut(region);
+        dbs.insert(db.name.clone(), db);
+    }
+
+    fn seed_glue_table(
+        glue: &SharedGlueState,
+        account_id: &str,
+        region: &str,
+        db_name: &str,
+        table: Table,
+    ) {
+        let mut g = glue.write();
+        let acct = g.get_or_create(account_id, region);
+        let dbs = acct.dbs_in_mut(region);
+        let db = dbs.get_mut(db_name).unwrap();
+        db.tables.insert(table.name.clone(), table);
+    }
+
+    fn make_db(name: &str) -> Database {
+        Database {
+            name: name.to_string(),
+            description: Some(format!("db {name}")),
+            location_uri: Some(format!("s3://bucket/{name}")),
+            parameters: std::collections::BTreeMap::new(),
+            created_at: Utc::now(),
+            catalog_id: "123456789012".to_string(),
+            tables: std::collections::BTreeMap::new(),
         }
     }
 
-    fn parse_json(resp: &AwsResponse) -> Value {
+    fn make_table(name: &str, db_name: &str) -> Table {
+        Table {
+            name: name.to_string(),
+            database_name: db_name.to_string(),
+            description: Some(format!("table {name}")),
+            owner: None,
+            create_time: Utc::now(),
+            update_time: Utc::now(),
+            last_access_time: None,
+            retention: 0,
+            storage_descriptor: Some(StorageDescriptor {
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        column_type: "int".to_string(),
+                        comment: Some("pk".to_string()),
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        column_type: "string".to_string(),
+                        comment: None,
+                    },
+                ],
+                location: Some("s3://bucket/data/".to_string()),
+                input_format: None,
+                output_format: None,
+                compressed: None,
+                serde_info: None,
+                parameters: std::collections::BTreeMap::new(),
+            }),
+            partition_keys: vec![],
+            view_original_text: None,
+            view_expanded_text: None,
+            table_type: Some("EXTERNAL_TABLE".to_string()),
+            parameters: std::collections::BTreeMap::new(),
+            partitions: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn req(action: &str, body: serde_json::Value) -> AwsRequest {
+        AwsRequest {
+            service: "athena".to_string(),
+            action: action.to_string(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            query_params: Default::default(),
+            headers: Default::default(),
+            account_id: "123456789012".to_string(),
+            region: "us-east-1".to_string(),
+            request_id: "req-1".to_string(),
+            principal: None,
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+        }
+    }
+
+    fn parse_json(resp: &fakecloud_core::service::AwsResponse) -> serde_json::Value {
         serde_json::from_slice(resp.body.expect_bytes()).unwrap()
     }
 
@@ -2479,6 +2720,49 @@ mod tests {
     }
 
     #[test]
+    fn list_databases_reads_glue() {
+        let (svc, glue) = test_service();
+        seed_glue_db(&glue, "123456789012", "us-east-1", make_db("sales"));
+        seed_glue_db(&glue, "123456789012", "us-east-1", make_db("inventory"));
+
+        let resp = svc
+            .list_databases(&req(
+                "ListDatabases",
+                json!({ "CatalogName": "AwsDataCatalog" }),
+            ))
+            .unwrap();
+        let body = parse_json(&resp);
+        let list = body.get("DatabaseList").unwrap().as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        let names: Vec<String> = list
+            .iter()
+            .map(|d| d.get("Name").unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"sales".to_string()));
+        assert!(names.contains(&"inventory".to_string()));
+    }
+
+    #[test]
+    fn get_database_reads_glue() {
+        let (svc, glue) = test_service();
+        seed_glue_db(&glue, "123456789012", "us-east-1", make_db("sales"));
+
+        let resp = svc
+            .get_database(&req(
+                "GetDatabase",
+                json!({ "CatalogName": "AwsDataCatalog", "DatabaseName": "sales" }),
+            ))
+            .unwrap();
+        let body = parse_json(&resp);
+        let db = body.get("Database").unwrap();
+        assert_eq!(db.get("Name").unwrap(), "sales");
+        assert_eq!(
+            db.get("LocationUri").unwrap().as_str().unwrap(),
+            "s3://bucket/sales"
+        );
+    }
+
+    #[test]
     fn start_query_execution_missing_named_query_errors() {
         let svc = AthenaService::new(SharedAthenaState::default());
         svc.create_named_query(&req(
@@ -2498,5 +2782,113 @@ mod tests {
             Ok(_) => panic!("expected error"),
             Err(err) => assert!(err.message().contains("NamedQuery nope not found")),
         }
+    }
+
+    #[test]
+    fn get_database_missing_in_glue_errors() {
+        let (svc, glue) = test_service();
+        seed_glue_db(&glue, "123456789012", "us-east-1", make_db("sales"));
+
+        let err = match svc.get_database(&req(
+            "GetDatabase",
+            json!({ "CatalogName": "AwsDataCatalog", "DatabaseName": "missing" }),
+        )) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert!(err.message().contains("Database missing not found"));
+    }
+
+    #[test]
+    fn list_table_metadata_reads_glue() {
+        let (svc, glue) = test_service();
+        seed_glue_db(&glue, "123456789012", "us-east-1", make_db("sales"));
+        seed_glue_table(
+            &glue,
+            "123456789012",
+            "us-east-1",
+            "sales",
+            make_table("orders", "sales"),
+        );
+        seed_glue_table(
+            &glue,
+            "123456789012",
+            "us-east-1",
+            "sales",
+            make_table("returns", "sales"),
+        );
+
+        let resp = svc
+            .list_table_metadata(&req(
+                "ListTableMetadata",
+                json!({ "CatalogName": "AwsDataCatalog", "DatabaseName": "sales" }),
+            ))
+            .unwrap();
+        let body = parse_json(&resp);
+        let list = body.get("TableMetadataList").unwrap().as_array().unwrap();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn get_table_metadata_reads_glue() {
+        let (svc, glue) = test_service();
+        seed_glue_db(&glue, "123456789012", "us-east-1", make_db("sales"));
+        seed_glue_table(
+            &glue,
+            "123456789012",
+            "us-east-1",
+            "sales",
+            make_table("orders", "sales"),
+        );
+
+        let resp = svc
+            .get_table_metadata(&req(
+                "GetTableMetadata",
+                json!({
+                    "CatalogName": "AwsDataCatalog",
+                    "DatabaseName": "sales",
+                    "TableName": "orders"
+                }),
+            ))
+            .unwrap();
+        let body = parse_json(&resp);
+        let meta = body.get("TableMetadata").unwrap();
+        assert_eq!(meta.get("Name").unwrap(), "orders");
+        let cols = meta.get("Columns").unwrap().as_array().unwrap();
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0].get("Name").unwrap(), "id");
+        assert_eq!(cols[0].get("Type").unwrap(), "int");
+    }
+
+    #[test]
+    fn get_table_metadata_missing_errors() {
+        let (svc, glue) = test_service();
+        seed_glue_db(&glue, "123456789012", "us-east-1", make_db("sales"));
+
+        let err = match svc.get_table_metadata(&req(
+            "GetTableMetadata",
+            json!({
+                "CatalogName": "AwsDataCatalog",
+                "DatabaseName": "sales",
+                "TableName": "missing"
+            }),
+        )) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert!(err.message().contains("Table sales.missing not found"));
+    }
+
+    #[test]
+    fn match_table_expression_wildcard() {
+        use super::match_table_expression;
+        assert!(match_table_expression("orders", "*"));
+        assert!(match_table_expression("orders", "ord.*"));
+        assert!(!match_table_expression("orders", "ret.*"));
+        assert!(match_table_expression("orders", "ord.rs"));
+        assert!(!match_table_expression("orders", "ord.r"));
+        // Exact expression must match the name, not every name.
+        assert!(match_table_expression("orders", "orders"));
+        assert!(!match_table_expression("orders", "sales"));
     }
 }

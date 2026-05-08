@@ -2939,6 +2939,7 @@ dependencies = [
  "fakecloud-s3",
  "http 1.4.0",
  "parking_lot",
+ "regex",
  "serde",
  "serde_json",
  "sqlparser",
