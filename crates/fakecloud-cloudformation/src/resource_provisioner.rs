@@ -10246,6 +10246,7 @@ impl ResourceProvisioner {
             propagate_tags,
             capacity_provider_strategy,
             availability_zone_rebalancing,
+            volume_configurations: Vec::new(),
         };
         state.services.insert(key.clone(), service);
         if let Some(c) = state.clusters.get_mut(&cluster_name) {

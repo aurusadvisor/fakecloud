@@ -78,6 +78,22 @@ impl EcsService {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let propagate_tags = opt_str(&body, "propagateTags").map(String::from);
+        let _enable_ecs_managed_tags = body
+            .get("enableECSManagedTags")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let _capacity_provider_strategy: Vec<Value> = body
+            .get("capacityProviderStrategy")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let volume_configurations: Vec<Value> = body
+            .get("volumeConfigurations")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let _availability_zone_rebalancing =
+            opt_str(&body, "availabilityZoneRebalancing").map(String::from);
         let mut tags = parse_tags(&body);
 
         // PassRole trust check on any role overrides supplied via the
@@ -269,6 +285,7 @@ impl EcsService {
                 protection: None,
                 enable_execute_command,
                 attachments: Vec::new(),
+                volume_configurations: volume_configurations.clone(),
             };
             state.tasks.insert(task_id.clone(), task.clone());
             if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
@@ -655,6 +672,7 @@ mod multi_container_tests {
             protection: None,
             enable_execute_command: false,
             attachments: Vec::new(),
+            volume_configurations: Vec::new(),
         };
         for name in ["app", "sidecar"] {
             task.containers.push(Container {
@@ -912,6 +930,7 @@ mod port_mapping_tests {
             protection: None,
             enable_execute_command: false,
             attachments: Vec::new(),
+            volume_configurations: Vec::new(),
         };
         task.last_status = "PENDING".into();
         acct.tasks.insert("abc".into(), task);
