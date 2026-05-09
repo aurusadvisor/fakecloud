@@ -389,6 +389,13 @@ pub async fn handle(
             )
             .await
         }
+        "AWS" => {
+            let uri = integration
+                .uri
+                .as_deref()
+                .ok_or_else(|| bad_gateway("AWS integration missing uri"))?;
+            aws_direct_integration(req, uri, service).await
+        }
         other => Err(bad_gateway(format!(
             "Integration type '{other}' not supported in fakecloud's data plane",
         ))),
@@ -1208,6 +1215,70 @@ async fn mock_response(
     })
 }
 
+/// Dispatch an `AWS` direct service integration to the corresponding
+/// fakecloud service handler. The integration URI follows the API Gateway
+/// format: `arn:aws:apigateway:{region}:{service}:action/{Action}` or
+/// `arn:aws:apigateway:{region}:{service}:path/{path}`.
+async fn aws_direct_integration(
+    req: &AwsRequest,
+    uri: &str,
+    service: &ApiGatewayService,
+) -> Result<AwsResponse, AwsServiceError> {
+    let registry = service.registry().ok_or_else(|| {
+        bad_gateway("AWS direct integration not available: service registry not wired")
+    })?;
+    let registry = registry.get().ok_or_else(|| {
+        bad_gateway("AWS direct integration not available: service registry not yet populated")
+    })?;
+
+    let parts: Vec<&str> = uri.split(':').collect();
+    if parts.len() < 6 || parts[0] != "arn" || parts[1] != "aws" || parts[2] != "apigateway" {
+        return Err(bad_gateway(format!(
+            "AWS integration uri not in expected ARN format: {uri}"
+        )));
+    }
+    let target_service = parts[4];
+    let action_or_path = parts[5];
+
+    let target = registry.get(target_service).ok_or_else(|| {
+        bad_gateway(format!(
+            "AWS integration target service '{target_service}' not registered"
+        ))
+    })?;
+
+    let mut dispatch_req = AwsRequest {
+        service: target_service.to_string(),
+        action: req.action.clone(),
+        region: req.region.clone(),
+        account_id: req.account_id.clone(),
+        request_id: uuid::Uuid::new_v4().to_string(),
+        headers: req.headers.clone(),
+        query_params: req.query_params.clone(),
+        body: req.body.clone(),
+        body_stream: parking_lot::Mutex::new(None),
+        path_segments: req.path_segments.clone(),
+        raw_path: req.raw_path.clone(),
+        raw_query: req.raw_query.clone(),
+        method: req.method.clone(),
+        is_query_protocol: false,
+        access_key_id: req.access_key_id.clone(),
+        principal: req.principal.clone(),
+    };
+
+    if let Some(action) = action_or_path.strip_prefix("action/") {
+        dispatch_req.action = action.to_string();
+    } else if let Some(path) = action_or_path.strip_prefix("path/") {
+        dispatch_req.raw_path = format!("/{path}");
+        dispatch_req.path_segments = path.split('/').map(|s| s.to_string()).collect();
+    } else {
+        return Err(bad_gateway(format!(
+            "AWS integration uri must contain action/ or path/ segment: {uri}"
+        )));
+    }
+
+    target.handle(dispatch_req).await
+}
+
 // ── Usage plan throttle + quota ──
 
 /// In-memory throttle + quota state. Buckets are keyed by
@@ -1715,10 +1786,12 @@ mod tests {
         Method as StateMethod, Resource as StateResource, RestApi, SharedApiGatewayState,
         Stage as StateStage,
     };
+    use async_trait::async_trait;
     use bytes::Bytes;
     use chrono::Utc;
     use fakecloud_core::delivery::{CognitoJwtVerifier, DeliveryBus, LambdaDelivery};
     use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::service::AwsService;
     use http::HeaderMap;
     use std::collections::HashMap;
     use std::pin::Pin;
@@ -3081,5 +3154,91 @@ mod tests {
             .expect("$default model should validate");
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(lambda.invocation_count(BACKEND_ARN), 1);
+    }
+
+    // ── AWS direct integration tests ──
+
+    struct StubAwsService {
+        name: String,
+        last_request: parking_lot::Mutex<Option<AwsRequest>>,
+    }
+
+    #[async_trait]
+    impl AwsService for StubAwsService {
+        fn service_name(&self) -> &str {
+            &self.name
+        }
+        fn supported_actions(&self) -> &[&str] {
+            &["PutItem"]
+        }
+        async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+            *self.last_request.lock() = Some(request);
+            Ok(AwsResponse::ok_json(serde_json::json!({"ok": true})))
+        }
+    }
+
+    #[tokio::test]
+    async fn aws_direct_integration_dispatches_action_to_service() {
+        let stub = Arc::new(StubAwsService {
+            name: "dynamodb".to_string(),
+            last_request: parking_lot::Mutex::new(None),
+        });
+        let mut registry = fakecloud_core::registry::ServiceRegistry::new();
+        registry.register(stub.clone());
+        let registry_arc = Arc::new(registry);
+        let registry_handle = Arc::new(std::sync::OnceLock::new());
+        let _ = registry_handle.set(registry_arc);
+
+        let state = build_state("NONE", None);
+        let service = ApiGatewayService::new(state).with_registry(registry_handle);
+
+        let mut req = make_request(HeaderMap::new());
+        req.body = bytes::Bytes::from(r#"{"TableName":"t","Item":{"id":{"S":"1"}}}"#);
+
+        let resp = aws_direct_integration(
+            &req,
+            "arn:aws:apigateway:us-east-1:dynamodb:action/PutItem",
+            &service,
+        )
+        .await
+        .expect("dispatch must succeed");
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let locked = stub.last_request.lock();
+        let dispatched = locked.as_ref().expect("stub must have received a request");
+        assert_eq!(dispatched.action, "PutItem");
+        assert_eq!(dispatched.service, "dynamodb");
+        assert_eq!(dispatched.account_id, TEST_ACCOUNT);
+        assert_eq!(dispatched.region, TEST_REGION);
+    }
+
+    #[tokio::test]
+    async fn aws_direct_integration_path_prefix_routes_to_raw_path() {
+        let stub = Arc::new(StubAwsService {
+            name: "sqs".to_string(),
+            last_request: parking_lot::Mutex::new(None),
+        });
+        let mut registry = fakecloud_core::registry::ServiceRegistry::new();
+        registry.register(stub.clone());
+        let registry_arc = Arc::new(registry);
+        let registry_handle = Arc::new(std::sync::OnceLock::new());
+        let _ = registry_handle.set(registry_arc);
+
+        let state = build_state("NONE", None);
+        let service = ApiGatewayService::new(state).with_registry(registry_handle);
+
+        let mut req = make_request(HeaderMap::new());
+        req.method = Method::POST;
+        req.body = bytes::Bytes::from("Action=SendMessage&QueueUrl=http://q");
+
+        let resp = aws_direct_integration(&req, "arn:aws:apigateway:us-east-1:sqs:path/", &service)
+            .await
+            .expect("dispatch must succeed");
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let locked = stub.last_request.lock();
+        let dispatched = locked.as_ref().expect("stub must have received a request");
+        assert_eq!(dispatched.raw_path, "/");
+        assert_eq!(dispatched.path_segments, vec![""]); // path/ splits to [""]
     }
 }
