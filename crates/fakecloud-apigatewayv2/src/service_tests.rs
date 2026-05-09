@@ -2439,3 +2439,226 @@ async fn execute_api_aws_proxy_unsupported_arn_returns_not_implemented() {
         msg
     );
 }
+
+// ─── Access log tests ────────────────────────────────────────────────
+
+#[derive(Default)]
+#[allow(clippy::type_complexity)]
+struct MockCloudwatchLogsDelivery {
+    events: parking_lot::Mutex<Vec<(String, String, String, Vec<(i64, String)>)>>,
+}
+
+impl fakecloud_core::delivery::CloudwatchLogsDelivery for MockCloudwatchLogsDelivery {
+    fn put_log_events(
+        &self,
+        account_id: &str,
+        log_group_name: &str,
+        log_stream_name: &str,
+        events: &[(i64, String)],
+    ) {
+        self.events.lock().push((
+            account_id.to_string(),
+            log_group_name.to_string(),
+            log_stream_name.to_string(),
+            events.to_vec(),
+        ));
+    }
+}
+
+fn make_svc_with_access_logs(mock: Arc<MockCloudwatchLogsDelivery>) -> ApiGatewayV2Service {
+    let state = make_state();
+    let delivery =
+        Arc::new(fakecloud_core::delivery::DeliveryBus::new().with_cloudwatch_logs(mock));
+    ApiGatewayV2Service::new(state).with_delivery(delivery)
+}
+
+#[tokio::test]
+async fn execute_api_emits_access_log_when_configured() {
+    let mock = Arc::new(MockCloudwatchLogsDelivery::default());
+    let svc = make_svc_with_access_logs(mock.clone());
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({
+        "stageName": "prod",
+        "accessLogSettings": {
+            "destinationArn": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/access-logs",
+        },
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, "/prod/pets", "");
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let events = mock.events.lock();
+    assert_eq!(events.len(), 1, "expected exactly one access log event");
+    let (account_id, log_group, log_stream, log_events) = &events[0];
+    assert_eq!(account_id, "123456789012");
+    assert_eq!(log_group, "/aws/apigateway/access-logs");
+    assert_eq!(log_stream, &format!("{api_id}/prod"));
+    assert_eq!(log_events.len(), 1);
+    let log_line = &log_events[0].1;
+    assert!(log_line.contains("\"requestId\":\"test-id\""));
+    assert!(log_line.contains("\"httpMethod\":\"GET\""));
+    assert!(log_line.contains("\"status\":\"200\""));
+}
+
+#[tokio::test]
+async fn execute_api_no_access_log_when_not_configured() {
+    let mock = Arc::new(MockCloudwatchLogsDelivery::default());
+    let svc = make_svc_with_access_logs(mock.clone());
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, "/prod/pets", "");
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let events = mock.events.lock();
+    assert!(events.is_empty(), "expected no access log events");
+}
+
+#[tokio::test]
+async fn execute_api_access_log_honors_custom_format() {
+    let mock = Arc::new(MockCloudwatchLogsDelivery::default());
+    let svc = make_svc_with_access_logs(mock.clone());
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let custom_format = "$context.apiId $context.stage $context.status";
+    let body = serde_json::json!({
+        "stageName": "prod",
+        "accessLogSettings": {
+            "destinationArn": "arn:aws:logs:us-east-1:123456789012:log-group:my-logs:*",
+            "format": custom_format,
+        },
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, "/prod/pets", "");
+    svc.handle(req).await.unwrap();
+
+    let events = mock.events.lock();
+    assert_eq!(events.len(), 1);
+    let log_line = &events[0].3[0].1;
+    let expected = format!("{api_id} prod 200");
+    assert_eq!(log_line, &expected);
+}
+
+#[tokio::test]
+async fn execute_api_access_log_emitted_on_error_paths() {
+    let mock = Arc::new(MockCloudwatchLogsDelivery::default());
+    let svc = make_svc_with_access_logs(mock.clone());
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "stageName": "prod",
+        "accessLogSettings": {
+            "destinationArn": "arn:aws:logs:us-east-1:123456789012:log-group:err-logs",
+        },
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // No route configured - should 404 and still log
+    let req = make_request(Method::GET, "/prod/unknown", "");
+    let err = match svc.handle(req).await {
+        Ok(_) => panic!("expected error"),
+        Err(e) => e,
+    };
+    assert_eq!(err.status(), StatusCode::NOT_FOUND);
+
+    let events = mock.events.lock();
+    assert_eq!(events.len(), 1);
+    let log_line = &events[0].3[0].1;
+    assert!(log_line.contains("\"status\":\"404\""));
+}

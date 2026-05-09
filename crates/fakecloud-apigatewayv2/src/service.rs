@@ -1272,6 +1272,18 @@ impl ApiGatewayV2Service {
                 .collect::<BTreeMap<String, String>>()
         });
 
+        let access_log_settings = body.get("accessLogSettings").and_then(|v| {
+            if v.is_null() {
+                return None;
+            }
+            let destination_arn = v.get("destinationArn")?.as_str()?.to_string();
+            let format = v.get("format").and_then(|f| f.as_str().map(String::from));
+            Some(crate::state::AccessLogSettings {
+                destination_arn,
+                format,
+            })
+        });
+
         let created_date = chrono::Utc::now();
 
         let stage = Stage {
@@ -1283,6 +1295,7 @@ impl ApiGatewayV2Service {
             last_updated_date: None,
             web_acl_arn: None,
             stage_variables,
+            access_log_settings,
         };
 
         let mut accounts = self.state.write();
@@ -1463,6 +1476,20 @@ impl ApiGatewayV2Service {
                 }
             }
             stage.stage_variables = Some(map);
+        }
+
+        if let Some(settings) = body.get("accessLogSettings") {
+            if settings.is_null() {
+                stage.access_log_settings = None;
+            } else if let Some(arn) = settings["destinationArn"].as_str() {
+                let format = settings["format"].as_str().map(String::from);
+                stage.access_log_settings = Some(crate::state::AccessLogSettings {
+                    destination_arn: arn.to_string(),
+                    format,
+                });
+            }
+            // If accessLogSettings is present but destinationArn is missing,
+            // preserve the existing settings (Cubic finding).
         }
 
         stage.last_updated_date = Some(chrono::Utc::now());
@@ -1968,244 +1995,252 @@ impl ApiGatewayV2Service {
         &self,
         mut req: AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // Try custom domain resolution first.
-        let (api_id, stage_name, stage_vars) = {
-            let accounts = self.state.read();
-            let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
-            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let mut api_id = String::new();
+        let mut stage_name = String::new();
+        let mut resource_path = String::new();
+        let mut matched_route_key = String::new();
 
-            if let Some((api_id, stage_name, new_segs, new_raw_path)) =
-                resolve_custom_domain(&req, state)
-            {
-                req.path_segments = new_segs;
-                req.raw_path = new_raw_path;
-                let stage_vars = state
-                    .stages
-                    .get(&api_id)
-                    .and_then(|stages| stages.get(&stage_name))
-                    .and_then(|s| s.stage_variables.clone())
-                    .unwrap_or_default();
-                (api_id, stage_name, stage_vars)
-            } else {
-                // Execute API format: /{stage}/{path...}
-                if req.path_segments.is_empty() {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::NOT_FOUND,
-                        "NotFoundException",
-                        "Stage not specified",
-                    ));
+        let result: Result<AwsResponse, AwsServiceError> = async {
+            // Try custom domain resolution first.
+            let (a, s, stage_vars) = {
+                let accounts = self.state.read();
+                let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
+                let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+                if let Some((a, s, new_segs, new_raw_path)) = resolve_custom_domain(&req, state) {
+                    req.path_segments = new_segs;
+                    req.raw_path = new_raw_path;
+                    let stage_vars = state
+                        .stages
+                        .get(&a)
+                        .and_then(|stages| stages.get(&s))
+                        .and_then(|st| st.stage_variables.clone())
+                        .unwrap_or_default();
+                    (a, s, stage_vars)
+                } else {
+                    // Execute API format: /{stage}/{path...}
+                    if req.path_segments.is_empty() {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "NotFoundException",
+                            "Stage not specified",
+                        ));
+                    }
+                    let s = req.path_segments[0].clone();
+                    // Strip the stage segment so route matching uses the resource path.
+                    req.path_segments.remove(0);
+                    let stage_vars = state
+                        .stages
+                        .iter()
+                        .find_map(|(_, stages)| stages.get(&s))
+                        .and_then(|st| st.stage_variables.clone())
+                        .unwrap_or_default();
+                    // Find which API has this stage (sort by API ID for deterministic resolution)
+                    let mut stage_entries: Vec<_> = state
+                        .stages
+                        .iter()
+                        .filter_map(|(api_id, stages)| {
+                            stages.get(&s).map(|stage| (api_id.clone(), stage.clone()))
+                        })
+                        .collect();
+                    stage_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                    let (a, _) = stage_entries.into_iter().next().ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "NotFoundException",
+                            format!("Stage not found: {}", s),
+                        )
+                    })?;
+                    (a, s, stage_vars)
                 }
-                let stage_name = req.path_segments[0].clone();
-                // Strip the stage segment so route matching uses the resource path.
-                req.path_segments.remove(0);
-                let stage_vars = state
-                    .stages
-                    .iter()
-                    .find_map(|(_, stages)| stages.get(&stage_name))
-                    .and_then(|s| s.stage_variables.clone())
+            };
+
+            api_id = a;
+            stage_name = s;
+
+            resource_path = if req.path_segments.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}", req.path_segments.join("/"))
+            };
+
+            let (routes, cors_config) = {
+                let accounts = self.state.read();
+                let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
+                let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+                let routes = state
+                    .routes
+                    .get(&api_id)
+                    .map(|r| r.values().cloned().collect())
                     .unwrap_or_default();
-                // Find which API has this stage (sort by API ID for deterministic resolution)
-                let mut stage_entries: Vec<_> = state
-                    .stages
-                    .iter()
-                    .filter_map(|(api_id, stages)| {
-                        stages
-                            .get(&stage_name)
-                            .map(|stage| (api_id.clone(), stage.clone()))
-                    })
-                    .collect();
-                stage_entries.sort_by(|a, b| a.0.cmp(&b.0));
-                let (api_id, _) = stage_entries.into_iter().next().ok_or_else(|| {
+
+                let cors_config = state
+                    .apis
+                    .get(&api_id)
+                    .and_then(|api| api.cors_configuration.clone());
+
+                (routes, cors_config)
+            };
+
+            // Handle CORS preflight requests
+            if let Some(ref cors_cfg) = cors_config {
+                if cors::is_preflight_request(&req) {
+                    return Ok(cors::handle_preflight(cors_cfg, &req));
+                }
+            }
+
+            // WAFv2 inspection: when the matched stage's ARN is associated
+            // with a WebACL and the service was wired with WAF state,
+            // evaluate the request before route match / authorizer /
+            // integration. Block / Captcha / Challenge short-circuit;
+            // Count is recorded but lets the request continue.
+            if let Some(resp) = self.evaluate_waf(&req, &api_id, &stage_name) {
+                return Ok(resp);
+            }
+
+            // Match the request against routes
+            let router = Router::new(routes);
+            let route_match = router
+                .match_route(req.method.as_str(), &resource_path)
+                .ok_or_else(|| {
                     AwsServiceError::aws_error(
                         StatusCode::NOT_FOUND,
                         "NotFoundException",
-                        format!("Stage not found: {}", stage_name),
+                        format!("No route matches: {} {}", req.method, resource_path),
                     )
                 })?;
-                (api_id, stage_name, stage_vars)
-            }
-        };
 
-        let resource_path = if req.path_segments.is_empty() {
-            "/".to_string()
-        } else {
-            format!("/{}", req.path_segments.join("/"))
-        };
+            matched_route_key = route_match.route.route_key.clone();
 
-        let (routes, cors_config) = {
-            let accounts = self.state.read();
-            let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
-            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            // Authorizer enforcement
+            let authorizer_info = self
+                .enforce_authorizer(&req, &api_id, &route_match.route)
+                .await?;
 
-            let routes = state
-                .routes
-                .get(&api_id)
-                .map(|r| r.values().cloned().collect())
-                .unwrap_or_default();
-
-            let cors_config = state
-                .apis
-                .get(&api_id)
-                .and_then(|api| api.cors_configuration.clone());
-
-            (routes, cors_config)
-        };
-
-        // Handle CORS preflight requests
-        if let Some(ref cors_cfg) = cors_config {
-            if cors::is_preflight_request(&req) {
-                return Ok(cors::handle_preflight(cors_cfg, &req));
-            }
-        }
-
-        // WAFv2 inspection: when the matched stage's ARN is associated
-        // with a WebACL and the service was wired with WAF state,
-        // evaluate the request before route match / authorizer /
-        // integration. Block / Captcha / Challenge short-circuit;
-        // Count is recorded but lets the request continue.
-        if let Some(resp) = self.evaluate_waf(&req, &api_id, &stage_name) {
-            self.record_request(
-                &req,
-                &api_id,
-                &stage_name,
-                &resource_path,
-                resp.status.as_u16(),
-            );
-            return Ok(resp);
-        }
-
-        // Match the request against routes
-        let router = Router::new(routes);
-        let route_match = router
-            .match_route(req.method.as_str(), &resource_path)
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "NotFoundException",
-                    format!("No route matches: {} {}", req.method, resource_path),
-                )
-            })?;
-
-        // Authorizer enforcement
-        let authorizer_info = self
-            .enforce_authorizer(&req, &api_id, &route_match.route)
-            .await?;
-
-        // Get the integration for this route
-        let integration_id = route_match
-            .route
-            .target
-            .as_ref()
-            .and_then(|target| target.strip_prefix("integrations/"))
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "InternalError",
-                    "Route has no integration",
-                )
-            })?;
-
-        let mut integration = {
-            let accounts = self.state.read();
-            let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
-            let state = accounts.get(&req.account_id).unwrap_or(&empty);
-            state
-                .integrations
-                .get(&api_id)
-                .and_then(|integrations| integrations.get(integration_id))
+            // Get the integration for this route
+            let integration_id = route_match
+                .route
+                .target
+                .as_ref()
+                .and_then(|target| target.strip_prefix("integrations/"))
                 .ok_or_else(|| {
                     AwsServiceError::aws_error(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "InternalError",
-                        format!("Integration not found: {}", integration_id),
-                    )
-                })?
-                .clone()
-        };
-
-        // Substitute stage variables into the integration URI before dispatch.
-        if let Some(ref uri) = integration.integration_uri {
-            let substituted = substitute_stage_variables(uri, &stage_vars);
-            if substituted != *uri {
-                integration.integration_uri = Some(substituted);
-            }
-        }
-
-        // Handle based on integration type
-        let mut response = match integration.integration_type.as_str() {
-            "AWS_PROXY" => {
-                let delivery = self.delivery.as_ref().ok_or_else(|| {
-                    AwsServiceError::aws_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "InternalError",
-                        "Lambda delivery not configured",
+                        "Route has no integration",
                     )
                 })?;
 
-                let integration_uri = integration.integration_uri.as_ref().ok_or_else(|| {
-                    AwsServiceError::aws_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "InternalError",
-                        "Integration has no URI",
-                    )
-                })?;
+            let mut integration = {
+                let accounts = self.state.read();
+                let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
+                let state = accounts.get(&req.account_id).unwrap_or(&empty);
+                state
+                    .integrations
+                    .get(&api_id)
+                    .and_then(|integrations| integrations.get(integration_id))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "InternalError",
+                            format!("Integration not found: {}", integration_id),
+                        )
+                    })?
+                    .clone()
+            };
 
-                if is_lambda_arn(integration_uri) {
-                    let event = lambda_proxy::construct_event(
-                        &req,
-                        &route_match.route.route_key,
-                        &stage_name,
-                        route_match.path_parameters,
-                        authorizer_info,
-                    );
-                    lambda_proxy::invoke_lambda(delivery, integration_uri, event).await?
-                } else {
-                    dispatch_aws_service_integration(delivery, integration_uri, &req)?
+            // Substitute stage variables into the integration URI before dispatch.
+            if let Some(ref uri) = integration.integration_uri {
+                let substituted = substitute_stage_variables(uri, &stage_vars);
+                if substituted != *uri {
+                    integration.integration_uri = Some(substituted);
                 }
             }
-            "HTTP_PROXY" => {
-                // HTTP proxy integration
-                let target_url = integration.integration_uri.as_ref().ok_or_else(|| {
-                    AwsServiceError::aws_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "InternalError",
-                        "Integration has no URI",
-                    )
-                })?;
 
-                http_proxy::forward_request(target_url, &req, integration.timeout_in_millis).await?
+            // Handle based on integration type
+            let mut response = match integration.integration_type.as_str() {
+                "AWS_PROXY" => {
+                    let delivery = self.delivery.as_ref().ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "InternalError",
+                            "Lambda delivery not configured",
+                        )
+                    })?;
+
+                    let integration_uri =
+                        integration.integration_uri.as_ref().ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "InternalError",
+                                "Integration has no URI",
+                            )
+                        })?;
+
+                    if is_lambda_arn(integration_uri) {
+                        let event = lambda_proxy::construct_event(
+                            &req,
+                            &route_match.route.route_key,
+                            &stage_name,
+                            route_match.path_parameters,
+                            authorizer_info,
+                        );
+                        lambda_proxy::invoke_lambda(delivery, integration_uri, event).await?
+                    } else {
+                        dispatch_aws_service_integration(delivery, integration_uri, &req)?
+                    }
+                }
+                "HTTP_PROXY" => {
+                    // HTTP proxy integration
+                    let target_url = integration.integration_uri.as_ref().ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "InternalError",
+                            "Integration has no URI",
+                        )
+                    })?;
+
+                    http_proxy::forward_request(target_url, &req, integration.timeout_in_millis)
+                        .await?
+                }
+                "MOCK" => {
+                    // Mock integration
+                    mock::create_mock_response()
+                }
+                _ => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_IMPLEMENTED,
+                        "NotImplemented",
+                        format!(
+                            "Integration type not supported: {}",
+                            integration.integration_type
+                        ),
+                    ));
+                }
+            };
+
+            // Add CORS headers if CORS is configured
+            if let Some(ref cors_cfg) = cors_config {
+                response = cors::add_cors_headers(response, cors_cfg);
             }
-            "MOCK" => {
-                // Mock integration
-                mock::create_mock_response()
-            }
-            _ => {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::NOT_IMPLEMENTED,
-                    "NotImplemented",
-                    format!(
-                        "Integration type not supported: {}",
-                        integration.integration_type
-                    ),
-                ));
-            }
+
+            Ok(response)
+        }
+        .await;
+
+        let status_code = match &result {
+            Ok(resp) => resp.status.as_u16(),
+            Err(err) => err.status().as_u16(),
         };
 
-        // Add CORS headers if CORS is configured
-        if let Some(ref cors_cfg) = cors_config {
-            response = cors::add_cors_headers(response, cors_cfg);
+        if !api_id.is_empty() {
+            self.record_request(&req, &api_id, &stage_name, &resource_path, status_code);
         }
 
-        // Record this request to history
-        self.record_request(
-            &req,
-            &api_id,
-            &stage_name,
-            &resource_path,
-            response.status.as_u16(),
-        );
+        self.emit_access_log(&req, &api_id, &stage_name, &matched_route_key, status_code);
 
-        Ok(response)
+        result
     }
 
     /// Enforce the authorizer configured on a route. Returns an
@@ -2616,6 +2651,108 @@ impl ApiGatewayV2Service {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         state.request_history.push(request_record);
+    }
+
+    fn emit_access_log(
+        &self,
+        req: &AwsRequest,
+        api_id: &str,
+        stage: &str,
+        route_key: &str,
+        status_code: u16,
+    ) {
+        let Some(delivery) = self.delivery.as_ref() else {
+            return;
+        };
+
+        let access_log_settings = {
+            let accounts = self.state.read();
+            let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            state
+                .stages
+                .get(api_id)
+                .and_then(|stages| stages.get(stage))
+                .and_then(|s| s.access_log_settings.clone())
+        };
+
+        let Some(settings) = access_log_settings else {
+            return;
+        };
+
+        let log_group_name = settings
+            .destination_arn
+            .split(":log-group:")
+            .nth(1)
+            .map(|s| {
+                if let Some(prefix) = s.strip_suffix(":*") {
+                    prefix.to_string()
+                } else {
+                    s.to_string()
+                }
+            });
+
+        let Some(log_group_name) = log_group_name else {
+            return;
+        };
+
+        let request_time = chrono::Utc::now()
+            .format("%d/%b/%Y:%H:%M:%S %z")
+            .to_string();
+        let source_ip = req
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next().map(str::trim))
+            .unwrap_or("-")
+            .to_string();
+
+        let format = settings.format.as_deref().unwrap_or(
+            r#"{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength"}"#,
+        );
+
+        // Token-aware single-pass substitution to avoid overlapping corruption.
+        let mut log_line = String::new();
+        let mut rest = format;
+        while let Some(pos) = rest.find("$context.") {
+            log_line.push_str(&rest[..pos]);
+            rest = &rest[pos..];
+            let end = rest[9..]
+                .find(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
+                .map(|i| i + 9)
+                .unwrap_or(rest.len());
+            let token = &rest[..end];
+            let value = match token {
+                "$context.requestId" => req.request_id.as_str(),
+                "$context.apiId" => api_id,
+                "$context.stage" => stage,
+                "$context.identity.sourceIp" => &source_ip,
+                "$context.requestTime" => &request_time,
+                "$context.httpMethod" => req.method.as_str(),
+                "$context.routeKey" => route_key,
+                "$context.status" => {
+                    log_line.push_str(&status_code.to_string());
+                    rest = &rest[end..];
+                    continue;
+                }
+                "$context.protocol" => "HTTP/1.1",
+                "$context.responseLength" => "0",
+                _ => token,
+            };
+            log_line.push_str(value);
+            rest = &rest[end..];
+        }
+        log_line.push_str(rest);
+
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let log_stream_name = format!("{}/{}", api_id, stage);
+
+        delivery.put_log_events(
+            &req.account_id,
+            &log_group_name,
+            &log_stream_name,
+            &[(timestamp, log_line)],
+        );
     }
 }
 
