@@ -2980,6 +2980,7 @@ async fn main() {
                 let ss = ses_inbound_state.clone();
                 let s3_for_inbound = s3_introspection_state.clone();
                 let s3_store_for_inbound = s3_store_for_inbound.clone();
+                let kms_hook_for_inbound = kms_hook_for_services.clone();
                 let delivery_for_inbound = {
                     let mut bus = DeliveryBus::new();
                     let sns_fanout_bus = {
@@ -2999,9 +3000,11 @@ async fn main() {
                     if let Some(ref ld) = lambda_delivery {
                         bus = bus.with_lambda(ld.clone());
                     }
+                    bus = bus.with_kms_hook(kms_hook_for_inbound);
                     Arc::new(bus)
                 };
                 let ses_state_for_inbound_actions = ses_inbound_state.clone();
+                let region_for_inbound = cli.region.clone();
                 move |axum::Json(body): axum::Json<types::InboundEmailRequest>| async move {
                     let (message_id, matched_rules, actions) =
                         fakecloud_ses::v1::evaluate_inbound_email(
@@ -3043,6 +3046,7 @@ async fn main() {
                             fakecloud_ses::ReceiptAction::S3 {
                                 bucket_name,
                                 object_key_prefix,
+                                kms_key_arn,
                                 ..
                             } => {
                                 let prefix = object_key_prefix.as_deref().unwrap_or("");
@@ -3051,14 +3055,53 @@ async fn main() {
                                 let data = bytes::Bytes::from(augmented_body.clone());
                                 let size = data.len() as u64;
                                 let etag = format!("\"{:x}\"", md5::Md5::digest(&data));
+
+                                // Encrypt via KMS when KmsKeyArn is configured.
+                                let (body_bytes, sse_algorithm, sse_kms_key_id) =
+                                    if let Some(kms_key) = kms_key_arn {
+                                        let account_id = ss.read().default_account_id().to_string();
+                                        let mut ctx = std::collections::HashMap::new();
+                                        ctx.insert(
+                                            "aws:s3:arn".to_string(),
+                                            fakecloud_aws::arn::Arn::s3(bucket_name).to_string(),
+                                        );
+                                        match delivery_for_inbound.kms_encrypt(
+                                            &account_id,
+                                            &region_for_inbound,
+                                            kms_key,
+                                            &data,
+                                            "s3.amazonaws.com",
+                                            ctx,
+                                        ) {
+                                            Ok(envelope) => {
+                                                let enc_bytes =
+                                                    bytes::Bytes::from(envelope.into_bytes());
+                                                (enc_bytes, Some("aws:kms".to_string()), Some(kms_key.clone()))
+                                            }
+                                            Err(err) => {
+                                                tracing::warn!(
+                                                    bucket = %bucket_name,
+                                                    key = %key,
+                                                    error = %err,
+                                                    "SES inbound: KMS encrypt failed, storing plaintext"
+                                                );
+                                                (data.clone(), None, None)
+                                            }
+                                        }
+                                    } else {
+                                        (data.clone(), None, None)
+                                    };
+
                                 let obj = fakecloud_s3::S3Object {
                                     key: key.clone(),
-                                    body: fakecloud_persistence::BodyRef::Memory(data.clone()),
+                                    body: fakecloud_persistence::BodyRef::Memory(body_bytes.clone()),
                                     content_type: "text/plain".to_string(),
                                     etag: etag.clone(),
                                     size,
                                     last_modified: now,
                                     storage_class: "STANDARD".to_string(),
+                                    sse_algorithm,
+                                    sse_kms_key_id,
                                     ..Default::default()
                                 };
                                 let mut mas = s3_for_inbound.write();
@@ -3067,6 +3110,7 @@ async fn main() {
                                     tracing::info!(
                                         bucket = %bucket_name,
                                         key = %key,
+                                        kms = kms_key_arn.is_some(),
                                         "SES inbound: stored email in S3"
                                     );
                                     let meta =
@@ -3077,7 +3121,7 @@ async fn main() {
                                         bucket_name,
                                         &key,
                                         None,
-                                        fakecloud_persistence::BodySource::Bytes(data),
+                                        fakecloud_persistence::BodySource::Bytes(body_bytes),
                                         &meta,
                                     ) {
                                         tracing::error!(
@@ -3151,34 +3195,64 @@ async fn main() {
                                     }]
                                 });
                                 let payload = ses_event.to_string();
-                                let delivery = delivery_for_inbound.clone();
                                 let function_arn = function_arn.clone();
                                 tracing::info!(
                                     function_arn = %function_arn,
+                                    invocation_type = ?invocation_type,
                                     "SES inbound: invoking Lambda"
                                 );
-                                tokio::spawn(async move {
-                                    match delivery.invoke_lambda(&function_arn, &payload).await {
+                                if invocation_type.as_deref() == Some("RequestResponse") {
+                                    // Synchronous invocation — await result inline
+                                    // so the caller can observe success/failure.
+                                    match delivery_for_inbound
+                                        .invoke_lambda(&function_arn, &payload)
+                                        .await
+                                    {
                                         Some(Ok(_)) => {
                                             tracing::info!(
                                                 function_arn = %function_arn,
-                                                "SES inbound: Lambda invocation succeeded"
+                                                "SES inbound: Lambda RequestResponse succeeded"
                                             );
                                         }
                                         Some(Err(e)) => {
                                             tracing::error!(
                                                 function_arn = %function_arn,
                                                 error = %e,
-                                                "SES inbound: Lambda invocation failed"
+                                                "SES inbound: Lambda RequestResponse failed"
                                             );
                                         }
                                         None => {
                                             tracing::warn!(
-                                                "SES inbound: no container runtime available for Lambda invocation"
+                                                "SES inbound: no container runtime available for Lambda RequestResponse"
                                             );
                                         }
                                     }
-                                });
+                                } else {
+                                    // Fire-and-forget (Event / DryRun).
+                                    let delivery = delivery_for_inbound.clone();
+                                    tokio::spawn(async move {
+                                        match delivery.invoke_lambda(&function_arn, &payload).await {
+                                            Some(Ok(_)) => {
+                                                tracing::info!(
+                                                    function_arn = %function_arn,
+                                                    "SES inbound: Lambda invocation succeeded"
+                                                );
+                                            }
+                                            Some(Err(e)) => {
+                                                tracing::error!(
+                                                    function_arn = %function_arn,
+                                                    error = %e,
+                                                    "SES inbound: Lambda invocation failed"
+                                                );
+                                            }
+                                            None => {
+                                                tracing::warn!(
+                                                    "SES inbound: no container runtime available for Lambda invocation"
+                                                );
+                                            }
+                                        }
+                                    });
+                                }
                             }
                             fakecloud_ses::ReceiptAction::Bounce {
                                 smtp_reply_code,
@@ -3264,6 +3338,36 @@ async fn main() {
                                     );
                                 }
                             }
+                            fakecloud_ses::ReceiptAction::Workmail {
+                                organization_arn,
+                                topic_arn,
+                            } => {
+                                tracing::info!(
+                                    organization_arn = %organization_arn,
+                                    "SES inbound: Workmail action recorded"
+                                );
+                                if let Some(topic) = topic_arn {
+                                    let notification = serde_json::json!({
+                                        "notificationType": "Received",
+                                        "mail": {
+                                            "messageId": message_id,
+                                            "source": body.from,
+                                            "destination": body.to,
+                                            "commonHeaders": {
+                                                "from": [&body.from],
+                                                "to": &body.to,
+                                                "subject": &body.subject,
+                                            }
+                                        },
+                                        "content": &augmented_body,
+                                    });
+                                    delivery_for_inbound.publish_to_sns(
+                                        topic,
+                                        &notification.to_string(),
+                                        Some(&body.subject),
+                                    );
+                                }
+                            }
                             // AddHeader is processed inline above
                             fakecloud_ses::ReceiptAction::AddHeader { .. } => {}
                         }
@@ -3282,6 +3386,9 @@ async fn main() {
                                     "AddHeader"
                                 }
                                 fakecloud_ses::ReceiptAction::Stop { .. } => "Stop",
+                                fakecloud_ses::ReceiptAction::Workmail { .. } => {
+                                    "Workmail"
+                                }
                             }
                             .to_string(),
                         })
