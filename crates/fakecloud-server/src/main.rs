@@ -584,7 +584,16 @@ async fn main() {
             Arc::new(DeliveryBus::new().with_sqs(sqs_delivery.clone())),
         ),
     );
-    let ecs_delivery_bus = Arc::new(DeliveryBus::new().with_eventbridge(eb_delivery_for_ecs));
+    let elbv2_state: fakecloud_elbv2::SharedElbv2State = Arc::new(parking_lot::RwLock::new(
+        fakecloud_elbv2::Elbv2Accounts::new(),
+    ));
+    let ecs_delivery_bus = Arc::new(
+        DeliveryBus::new()
+            .with_eventbridge(eb_delivery_for_ecs)
+            .with_elbv2_target_registration(Arc::new(Elbv2TargetRegistrationImpl {
+                state: elbv2_state.clone(),
+            })),
+    );
     ecs_runtime = fakecloud_ecs::runtime::EcsRuntime::new(bound_addr.port())
         .map(|rt| {
             rt.with_delivery_bus(ecs_delivery_bus.clone())
@@ -650,10 +659,6 @@ async fn main() {
 
     let glue_state: fakecloud_glue::SharedGlueState =
         Arc::new(parking_lot::RwLock::new(fakecloud_glue::GlueAccounts::new()));
-
-    let elbv2_state: fakecloud_elbv2::SharedElbv2State = Arc::new(parking_lot::RwLock::new(
-        fakecloud_elbv2::Elbv2Accounts::new(),
-    ));
 
     // Clone state for reset endpoint before moving into services
     let reset_state = ResetState {
@@ -6678,6 +6683,58 @@ impl fakecloud_core::delivery::SesSendEmailDispatcher for SesSendEmailDispatcher
             timestamp: chrono::Utc::now(),
         });
         Ok(())
+    }
+}
+
+/// ELBv2 target registration/deregistration from ECS runtime.
+struct Elbv2TargetRegistrationImpl {
+    state: fakecloud_elbv2::SharedElbv2State,
+}
+
+impl fakecloud_core::delivery::Elbv2TargetRegistration for Elbv2TargetRegistrationImpl {
+    fn register_targets(
+        &self,
+        account_id: &str,
+        target_group_arn: &str,
+        targets: Vec<(String, Option<i64>)>,
+    ) {
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(account_id);
+        let Some(tg) = st.target_groups.get_mut(target_group_arn) else {
+            return;
+        };
+        for (id, port) in targets {
+            tg.targets.retain(|t| t.id != id);
+            tg.targets.push(fakecloud_elbv2::state::TargetDescription {
+                id,
+                port: port.map(|p| p as i32),
+                availability_zone: None,
+                health: fakecloud_elbv2::state::TargetHealth {
+                    state: "initial".into(),
+                    reason: None,
+                    description: None,
+                },
+                consecutive_success: 0,
+                consecutive_failure: 0,
+                last_probe_at: None,
+            });
+        }
+    }
+
+    fn deregister_targets(
+        &self,
+        account_id: &str,
+        target_group_arn: &str,
+        targets: Vec<(String, Option<i64>)>,
+    ) {
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(account_id);
+        let Some(tg) = st.target_groups.get_mut(target_group_arn) else {
+            return;
+        };
+        for (id, _port) in targets {
+            tg.targets.retain(|t| t.id != id);
+        }
     }
 }
 

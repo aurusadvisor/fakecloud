@@ -27,6 +27,8 @@ pub struct DeliveryBus {
     ses_dispatcher: Option<Arc<dyn SesSendEmailDispatcher>>,
     /// Run an ECS task on a cluster (cross-service universal target).
     ecs_task_runner: Option<Arc<dyn EcsTaskRunner>>,
+    /// Register/deregister ELBv2 targets from ECS runtime.
+    elbv2_target_registration: Option<Arc<dyn Elbv2TargetRegistration>>,
     /// Publish CloudWatch metric data points (CloudWatch Logs metric
     /// filters extract these on PutLogEvents).
     cloudwatch_metrics: Option<Arc<dyn CloudwatchDelivery>>,
@@ -258,6 +260,24 @@ pub trait EcsTaskRunner: Send + Sync {
     ) -> Result<(), String>;
 }
 
+/// Register/deregister targets with ELBv2 target groups from outside
+/// the elbv2 crate. Used by ECS runtime when tasks with load balancers
+/// reach RUNNING or STOPPED.
+pub trait Elbv2TargetRegistration: Send + Sync {
+    fn register_targets(
+        &self,
+        account_id: &str,
+        target_group_arn: &str,
+        targets: Vec<(String, Option<i64>)>,
+    );
+    fn deregister_targets(
+        &self,
+        account_id: &str,
+        target_group_arn: &str,
+        targets: Vec<(String, Option<i64>)>,
+    );
+}
+
 /// Publish CloudWatch metric data points from outside the cloudwatch
 /// crate. Used by CloudWatch Logs metric filters when an incoming log
 /// event matches their pattern.
@@ -369,6 +389,7 @@ impl DeliveryBus {
             firehose_sender: None,
             ses_dispatcher: None,
             ecs_task_runner: None,
+            elbv2_target_registration: None,
             cloudwatch_metrics: None,
             cloudwatch_logs: None,
             cognito_jwt_verifier: None,
@@ -505,6 +526,37 @@ impl DeliveryBus {
     pub fn with_ecs_task_runner(mut self, runner: Arc<dyn EcsTaskRunner>) -> Self {
         self.ecs_task_runner = Some(runner);
         self
+    }
+
+    pub fn with_elbv2_target_registration(mut self, reg: Arc<dyn Elbv2TargetRegistration>) -> Self {
+        self.elbv2_target_registration = Some(reg);
+        self
+    }
+
+    /// Register targets with an ELBv2 target group. Silently no-ops when
+    /// no ELBv2 target registration hook is wired.
+    pub fn register_elbv2_targets(
+        &self,
+        account_id: &str,
+        target_group_arn: &str,
+        targets: Vec<(String, Option<i64>)>,
+    ) {
+        if let Some(ref reg) = self.elbv2_target_registration {
+            reg.register_targets(account_id, target_group_arn, targets);
+        }
+    }
+
+    /// Deregister targets from an ELBv2 target group. Silently no-ops
+    /// when no ELBv2 target registration hook is wired.
+    pub fn deregister_elbv2_targets(
+        &self,
+        account_id: &str,
+        target_group_arn: &str,
+        targets: Vec<(String, Option<i64>)>,
+    ) {
+        if let Some(ref reg) = self.elbv2_target_registration {
+            reg.deregister_targets(account_id, target_group_arn, targets);
+        }
     }
 
     /// Send an email via SES. Returns `Err` when no SES dispatcher is
