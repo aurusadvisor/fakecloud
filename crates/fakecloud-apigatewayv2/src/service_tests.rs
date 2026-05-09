@@ -1717,3 +1717,217 @@ async fn execute_api_lambda_authorizer_no_identity_source_returns_401() {
     let err = expect_err(svc.handle(req).await);
     assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_optional_identity_source() {
+    // REQUEST authorizer with no identitySource configured still invokes Lambda.
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({
+        "isAuthorized": true,
+        "context": {"role": "admin"}
+    })
+    .to_string()
+    .into_bytes()));
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "name": "lambda-auth",
+        "authorizerType": "REQUEST",
+        "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:authorizer/invocations"
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let auth_id = body_json(&resp)["authorizerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+        "authorizerId": auth_id
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // No identity sources configured -> request proceeds to Lambda and is allowed.
+    let req = make_request(Method::GET, "/prod/pets", "");
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_partial_identity_source_returns_401() {
+    // Two identity sources configured, only one present -> 401.
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({"isAuthorized": true})
+        .to_string()
+        .into_bytes()));
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "name": "lambda-auth",
+        "authorizerType": "REQUEST",
+        "identitySource": ["$request.header.Authorization", "$request.header.X-Custom"],
+        "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:authorizer/invocations"
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let auth_id = body_json(&resp)["authorizerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+        "authorizerId": auth_id
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Only Authorization header present, missing X-Custom -> 401.
+    let mut req = make_request(Method::GET, "/prod/pets", "");
+    req.headers
+        .insert("Authorization", "Bearer tok".parse().unwrap());
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn execute_api_lambda_authorizer_malformed_policy_no_resource() {
+    // Policy statement missing Resource field should default to Deny.
+    let svc = make_svc_with_lambda(Ok(serde_json::json!({
+        "principalId": "user-1",
+        "policyDocument": {
+            "Statement": [{"Effect": "Allow"}]
+        }
+    })
+    .to_string()
+    .into_bytes()));
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "name": "lambda-auth",
+        "authorizerType": "REQUEST",
+        "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:authorizer/invocations"
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let auth_id = body_json(&resp)["authorizerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+        "authorizerId": auth_id
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, "/prod/pets", "");
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), StatusCode::FORBIDDEN);
+}
+
+#[test]
+fn build_method_arn_includes_method_and_no_double_slash() {
+    let req = make_request(Method::GET, "/prod/pets", "");
+    let arn = build_method_arn(&req, "abc123");
+    assert_eq!(
+        arn,
+        "arn:aws:execute-api:us-east-1:123456789012:abc123/prod/GET/pets"
+    );
+
+    // Empty path after stage should not produce trailing slash.
+    let req2 = make_request(Method::GET, "/prod", "");
+    let arn2 = build_method_arn(&req2, "abc123");
+    assert_eq!(
+        arn2,
+        "arn:aws:execute-api:us-east-1:123456789012:abc123/prod/GET/"
+    );
+}

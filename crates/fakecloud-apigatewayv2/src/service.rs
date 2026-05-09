@@ -2316,27 +2316,18 @@ impl ApiGatewayV2Service {
         api_id: &str,
         authorizer: &Authorizer,
     ) -> Result<Option<AuthorizerInfo>, AwsServiceError> {
-        let identity_sources = authorizer.identity_source.as_ref().ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::UNAUTHORIZED,
-                "UnauthorizedException",
-                "Authorizer has no identity source",
-            )
-        })?;
-
-        // Collect all configured identity-source values (headers, query strings).
-        let mut identity_values = Vec::new();
-        for source in identity_sources {
-            if let Some(val) = extract_identity_source_value(req, source) {
-                identity_values.push(val);
+        // Identity sources are optional for REQUEST authorizers.
+        // When configured, every listed source must be present.
+        if let Some(sources) = &authorizer.identity_source {
+            for source in sources {
+                if extract_identity_source_value(req, source).is_none() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::UNAUTHORIZED,
+                        "UnauthorizedException",
+                        "Missing required identity source",
+                    ));
+                }
             }
-        }
-        if identity_values.is_empty() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::UNAUTHORIZED,
-                "UnauthorizedException",
-                "Missing required identity source",
-            ));
         }
 
         let auth_uri = authorizer.authorizer_uri.as_deref().ok_or_else(|| {
@@ -2647,15 +2638,28 @@ fn extract_lambda_arn(uri: &str) -> Option<String> {
 }
 
 /// Build the method ARN used in Lambda-authorizer policy documents.
+/// AWS format: `arn:aws:execute-api:<region>:<account-id>:<api-id>/<stage>/<method>/<path>`.
 fn build_method_arn(req: &AwsRequest, api_id: &str) -> String {
     let stage = req
         .path_segments
         .first()
         .map(|s| s.as_str())
         .unwrap_or("$default");
+    let path = req
+        .path_segments
+        .iter()
+        .skip(1)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("/");
     format!(
-        "arn:aws:execute-api:{}:{}:{}/{}/{}",
-        req.region, req.account_id, api_id, stage, req.raw_path
+        "arn:aws:execute-api:{}:{}:{}/{}/{}/{}",
+        req.region,
+        req.account_id,
+        api_id,
+        stage,
+        req.method.as_str(),
+        path
     )
 }
 
@@ -2679,7 +2683,7 @@ fn parse_policy_effect(response: &serde_json::Value, method_arn: &str) -> crate:
                 .iter()
                 .filter_map(|v| v.as_str())
                 .any(|s| arn_matches(s, method_arn)),
-            _ => true,
+            _ => false,
         };
         if !matches {
             continue;
