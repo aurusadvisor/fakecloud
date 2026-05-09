@@ -5012,6 +5012,101 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/ecs/v4/{task_id}",
+            axum::routing::get({
+                let ec = ecs_introspection_state.clone();
+                move |axum::extract::Path(task_id): axum::extract::Path<String>| {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        for (_, state) in accounts.iter() {
+                            if let Some(t) = state.tasks.get(&task_id) {
+                                let body = serde_json::json!({
+                                    "Cluster": t.cluster_name,
+                                    "TaskARN": t.task_arn,
+                                    "Family": t.family,
+                                    "Revision": t.revision,
+                                    "DesiredStatus": t.desired_status,
+                                    "KnownStatus": t.last_status,
+                                    "Limits": {
+                                        "CPU": t.cpu.as_ref().and_then(|c| c.parse::<f64>().ok()),
+                                        "Memory": t.memory.as_ref().and_then(|m| m.parse::<i64>().ok()),
+                                    },
+                                    "PullStartedAt": t.pull_started_at.map(|d| d.to_rfc3339()),
+                                    "PullStoppedAt": t.pull_stopped_at.map(|d| d.to_rfc3339()),
+                                    "CreatedAt": t.created_at.to_rfc3339(),
+                                    "StartedAt": t.started_at.map(|d| d.to_rfc3339()),
+                                    "StoppedAt": t.stopped_at.map(|d| d.to_rfc3339()),
+                                    "AvailabilityZone": "us-east-1a",
+                                    "Containers": t.containers.iter().map(|c| serde_json::json!({
+                                        "DockerId": c.runtime_id,
+                                        "Name": c.name,
+                                        "DockerName": c.runtime_id.as_ref().map(|id| format!("ecs-{}", id)),
+                                        "Image": c.image,
+                                        "ImageID": c.image_digest,
+                                        "Ports": c.network_bindings,
+                                        "Labels": {},
+                                        "DesiredStatus": c.last_status,
+                                        "KnownStatus": c.last_status,
+                                        "ExitCode": c.exit_code,
+                                        "Health": {
+                                            "status": c.health_status.as_deref().unwrap_or("UNKNOWN"),
+                                        },
+                                    })).collect::<Vec<_>>(),
+                                });
+                                return (axum::http::StatusCode::OK, axum::Json(body));
+                            }
+                        }
+                        (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "task not found"})),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
+            "/_fakecloud/ecs/v3/{task_id}",
+            axum::routing::get({
+                let ec = ecs_introspection_state.clone();
+                move |axum::extract::Path(task_id): axum::extract::Path<String>| {
+                    let ec = ec.clone();
+                    async move {
+                        let accounts = ec.read();
+                        for (_, state) in accounts.iter() {
+                            if let Some(t) = state.tasks.get(&task_id) {
+                                let body = serde_json::json!({
+                                    "Cluster": t.cluster_name,
+                                    "TaskARN": t.task_arn,
+                                    "Family": t.family,
+                                    "Revision": t.revision,
+                                    "DesiredStatus": t.desired_status,
+                                    "KnownStatus": t.last_status,
+                                    "Containers": t.containers.iter().map(|c| serde_json::json!({
+                                        "DockerId": c.runtime_id,
+                                        "Name": c.name,
+                                        "DockerName": c.runtime_id.as_ref().map(|id| format!("ecs-{}", id)),
+                                        "Image": c.image,
+                                        "ImageID": c.image_digest,
+                                        "Ports": c.network_bindings,
+                                        "Labels": {},
+                                        "DesiredStatus": c.last_status,
+                                        "KnownStatus": c.last_status,
+                                        "ExitCode": c.exit_code,
+                                    })).collect::<Vec<_>>(),
+                                });
+                                return (axum::http::StatusCode::OK, axum::Json(body));
+                            }
+                        }
+                        (
+                            axum::http::StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "task not found"})),
+                        )
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/ecs/tasks/{task_id}/force-stop",
             axum::routing::post({
                 let ec = ecs_introspection_state.clone();
