@@ -7,6 +7,15 @@ use std::collections::HashMap;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
+/// Authorizer result to inject into the v2.0 request context.
+pub enum AuthorizerInfo {
+    /// JWT claims returned by a Cognito/JWT authorizer.
+    Jwt { claims: serde_json::Value },
+    /// Lambda authorizer context (already shaped as the `authorizer`
+    /// object that should appear under `requestContext`).
+    Lambda { context: serde_json::Value },
+}
+
 /// Constructs a Lambda proxy integration event in v2.0 format.
 /// https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
 pub fn construct_event(
@@ -14,7 +23,7 @@ pub fn construct_event(
     route_key: &str,
     stage: &str,
     path_parameters: HashMap<String, String>,
-    authorizer_claims: Option<serde_json::Value>,
+    authorizer: Option<AuthorizerInfo>,
 ) -> serde_json::Value {
     let (is_base64_encoded, body) = encode_body(req);
 
@@ -63,15 +72,22 @@ pub fn construct_event(
         json!(chrono::Utc::now().timestamp_millis()),
     );
 
-    if let Some(claims) = authorizer_claims {
-        let mut jwt = serde_json::Map::new();
-        jwt.insert("claims".to_string(), claims);
-        let mut authorizer = serde_json::Map::new();
-        authorizer.insert("jwt".to_string(), serde_json::Value::Object(jwt));
-        request_context.insert(
-            "authorizer".to_string(),
-            serde_json::Value::Object(authorizer),
-        );
+    if let Some(auth) = authorizer {
+        match auth {
+            AuthorizerInfo::Jwt { claims } => {
+                let mut jwt = serde_json::Map::new();
+                jwt.insert("claims".to_string(), claims);
+                let mut authorizer = serde_json::Map::new();
+                authorizer.insert("jwt".to_string(), serde_json::Value::Object(jwt));
+                request_context.insert(
+                    "authorizer".to_string(),
+                    serde_json::Value::Object(authorizer),
+                );
+            }
+            AuthorizerInfo::Lambda { context } => {
+                request_context.insert("authorizer".to_string(), context);
+            }
+        }
     }
 
     json!({
@@ -295,12 +311,41 @@ mod tests {
             "POST /pets",
             "prod",
             path_params,
-            Some(claims.clone()),
+            Some(AuthorizerInfo::Jwt {
+                claims: claims.clone(),
+            }),
         );
 
         assert_eq!(
             event["requestContext"]["authorizer"]["jwt"]["claims"],
             claims
+        );
+    }
+
+    #[test]
+    fn test_construct_event_with_lambda_authorizer_context() {
+        let req = create_test_request();
+        let path_params = HashMap::new();
+        let ctx = json!({"principalId": "lambda-user", "role": "admin"});
+
+        let event = construct_event(
+            &req,
+            "POST /pets",
+            "prod",
+            path_params,
+            Some(AuthorizerInfo::Lambda {
+                context: ctx.clone(),
+            }),
+        );
+
+        assert_eq!(
+            event["requestContext"]["authorizer"]["principalId"],
+            "lambda-user"
+        );
+        assert_eq!(event["requestContext"]["authorizer"]["role"], "admin");
+        assert!(
+            event["requestContext"]["authorizer"]["jwt"].is_null(),
+            "jwt should be absent for Lambda authorizer"
         );
     }
 

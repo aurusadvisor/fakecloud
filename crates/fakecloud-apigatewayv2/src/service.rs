@@ -14,6 +14,7 @@ use crate::state::{
     Integration, Route, SharedApiGatewayV2State, Stage, APIGATEWAYV2_SNAPSHOT_SCHEMA_VERSION,
 };
 use crate::{cors, http_proxy, lambda_proxy, mock, router::Router};
+use lambda_proxy::AuthorizerInfo;
 
 const SUPPORTED: &[&str] = &[
     "CreateApi",
@@ -2036,7 +2037,7 @@ impl ApiGatewayV2Service {
             })?;
 
         // Authorizer enforcement
-        let authorizer_claims = self
+        let authorizer_info = self
             .enforce_authorizer(&req, &api_id, &route_match.route)
             .await?;
 
@@ -2097,7 +2098,7 @@ impl ApiGatewayV2Service {
                     &route_match.route.route_key,
                     stage_name,
                     route_match.path_parameters,
-                    authorizer_claims.clone(),
+                    authorizer_info,
                 );
 
                 lambda_proxy::invoke_lambda(delivery, function_arn, event).await?
@@ -2147,15 +2148,15 @@ impl ApiGatewayV2Service {
         Ok(response)
     }
 
-    /// Enforce the authorizer configured on a route. Returns the decoded
-    /// JWT claims when a JWT authorizer succeeds, or `None` when the route
+    /// Enforce the authorizer configured on a route. Returns an
+    /// `AuthorizerInfo` when validation succeeds, or `None` when the route
     /// has no authorizer. Propagates `401 Unauthorized` on failure.
     async fn enforce_authorizer(
         &self,
         req: &AwsRequest,
         api_id: &str,
         route: &Route,
-    ) -> Result<Option<serde_json::Value>, AwsServiceError> {
+    ) -> Result<Option<AuthorizerInfo>, AwsServiceError> {
         let authorizer_id = match &route.authorizer_id {
             Some(id) => id,
             None => return Ok(None),
@@ -2182,6 +2183,10 @@ impl ApiGatewayV2Service {
 
         match authorizer.authorizer_type.as_str() {
             "JWT" => self.enforce_jwt_authorizer(req, &authorizer).await,
+            "REQUEST" => {
+                self.enforce_lambda_authorizer(req, api_id, &authorizer)
+                    .await
+            }
             _ => Err(AwsServiceError::aws_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "InternalError",
@@ -2198,7 +2203,7 @@ impl ApiGatewayV2Service {
         &self,
         req: &AwsRequest,
         authorizer: &Authorizer,
-    ) -> Result<Option<serde_json::Value>, AwsServiceError> {
+    ) -> Result<Option<AuthorizerInfo>, AwsServiceError> {
         let identity_sources = authorizer.identity_source.as_ref().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::UNAUTHORIZED,
@@ -2300,7 +2305,170 @@ impl ApiGatewayV2Service {
             }
         }
 
-        Ok(Some(claims))
+        Ok(Some(AuthorizerInfo::Jwt { claims }))
+    }
+
+    /// Invoke a Lambda authorizer (REQUEST type) and interpret the
+    /// response. Supports both IAM-policy and simple-response formats.
+    async fn enforce_lambda_authorizer(
+        &self,
+        req: &AwsRequest,
+        api_id: &str,
+        authorizer: &Authorizer,
+    ) -> Result<Option<AuthorizerInfo>, AwsServiceError> {
+        // Identity sources are optional for REQUEST authorizers.
+        // When configured, every listed source must be present.
+        if let Some(sources) = &authorizer.identity_source {
+            for source in sources {
+                if extract_identity_source_value(req, source)
+                    .map(|v| v.is_empty())
+                    .unwrap_or(true)
+                {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::UNAUTHORIZED,
+                        "UnauthorizedException",
+                        "Missing required identity source",
+                    ));
+                }
+            }
+        }
+
+        let auth_uri = authorizer.authorizer_uri.as_deref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                "Authorizer is missing authorizerUri; cannot invoke Lambda",
+            )
+        })?;
+        let function_arn = extract_lambda_arn(auth_uri).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                "authorizerUri must reference a Lambda function ARN",
+            )
+        })?;
+
+        let method_arn = build_method_arn(req, api_id);
+
+        let mut headers = serde_json::Map::new();
+        for (k, v) in req.headers.iter() {
+            if let Ok(s) = v.to_str() {
+                headers.insert(
+                    k.as_str().to_string(),
+                    serde_json::Value::String(s.to_string()),
+                );
+            }
+        }
+        let mut query = serde_json::Map::new();
+        for (k, v) in &req.query_params {
+            query.insert(k.clone(), serde_json::Value::String(v.clone()));
+        }
+
+        let event = json!({
+            "type": "REQUEST",
+            "methodArn": method_arn,
+            "resource": req.raw_path,
+            "path": req.raw_path,
+            "httpMethod": req.method.as_str(),
+            "headers": headers,
+            "queryStringParameters": query,
+            "requestContext": {
+                "apiId": api_id,
+                "stage": req.path_segments.first().map(|s| s.as_str()).unwrap_or("$default"),
+                "path": req.raw_path,
+                "httpMethod": req.method.as_str(),
+            },
+        });
+
+        let delivery = self.delivery.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                "Lambda delivery not configured",
+            )
+        })?;
+        let response_bytes = delivery
+            .invoke_lambda(&function_arn, &event.to_string())
+            .await
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Lambda delivery not configured",
+                )
+            })?
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "ForbiddenException",
+                    format!("Authorizer Lambda failed: {e}"),
+                )
+            })?;
+        let response: serde_json::Value = serde_json::from_slice(&response_bytes).map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::FORBIDDEN,
+                "ForbiddenException",
+                format!("Authorizer returned invalid JSON: {e}"),
+            )
+        })?;
+
+        // v2 simple response: { "isAuthorized": true/false, "context": {...} }
+        if let Some(is_authorized) = response.get("isAuthorized").and_then(|v| v.as_bool()) {
+            if !is_authorized {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "ForbiddenException",
+                    "User is not authorized to access this resource",
+                ));
+            }
+            let mut ctx = response
+                .get("context")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()))
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            ctx.insert(
+                "principalId".to_string(),
+                response
+                    .get("principalId")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::Value::String("user".to_string())),
+            );
+            return Ok(Some(AuthorizerInfo::Lambda {
+                context: serde_json::Value::Object(ctx),
+            }));
+        }
+
+        // IAM-policy format (same as v1 TOKEN/REQUEST)
+        let effect = parse_policy_effect(&response, &method_arn);
+        let principal_id = response
+            .get("principalId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("user")
+            .to_string();
+        let context = response
+            .get("context")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+
+        match effect {
+            crate::state::AuthEffect::Allow => {
+                let mut ctx = context.as_object().cloned().unwrap_or_default();
+                ctx.insert(
+                    "principalId".to_string(),
+                    serde_json::Value::String(principal_id),
+                );
+                Ok(Some(AuthorizerInfo::Lambda {
+                    context: serde_json::Value::Object(ctx),
+                }))
+            }
+            crate::state::AuthEffect::Deny => Err(AwsServiceError::aws_error(
+                StatusCode::FORBIDDEN,
+                "ForbiddenException",
+                "User is not authorized to access this resource",
+            )),
+        }
     }
 
     /// Build the resource ARN that callers use when associating a
@@ -2461,6 +2629,120 @@ fn issuer_to_pool_arn(account_id: &str, region: &str, issuer: &str) -> Option<St
         "arn:aws:cognito-idp:{}:{}:userpool/{}",
         region, account_id, pool_id
     ))
+}
+
+/// Pull a Lambda function ARN out of an `authorizerUri` value.
+fn extract_lambda_arn(uri: &str) -> Option<String> {
+    // Expected: arn:aws:apigateway:<region>:lambda:path/2015-03-31/functions/<arn>/invocations
+    let suffix = uri.strip_prefix("arn:aws:apigateway:")?;
+    let rest = suffix.split_once("lambda:path/2015-03-31/functions/")?.1;
+    let arn = rest.strip_suffix("/invocations")?;
+    Some(arn.to_string())
+}
+
+/// Build the method ARN used in Lambda-authorizer policy documents.
+/// AWS format: `arn:aws:execute-api:<region>:<account-id>:<api-id>/<stage>/<method>/<path>`.
+fn build_method_arn(req: &AwsRequest, api_id: &str) -> String {
+    let stage = req
+        .path_segments
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("$default");
+    let path = req
+        .path_segments
+        .iter()
+        .skip(1)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("/");
+    format!(
+        "arn:aws:execute-api:{}:{}:{}/{}/{}/{}",
+        req.region,
+        req.account_id,
+        api_id,
+        stage,
+        req.method.as_str(),
+        path
+    )
+}
+
+/// Walk `policyDocument.Statement` and resolve to a single Allow/Deny
+/// effect. Multiple matching Allow statements collapse to Allow; any
+/// Deny short-circuits to Deny.
+fn parse_policy_effect(response: &serde_json::Value, method_arn: &str) -> crate::state::AuthEffect {
+    let Some(stmts) = response
+        .get("policyDocument")
+        .and_then(|p| p.get("Statement"))
+        .and_then(|s| s.as_array())
+    else {
+        return crate::state::AuthEffect::Deny;
+    };
+    let mut allow = false;
+    for stmt in stmts {
+        let effect = stmt.get("Effect").and_then(|v| v.as_str()).unwrap_or("");
+        let matches = match stmt.get("Resource") {
+            Some(serde_json::Value::String(s)) => arn_matches(s, method_arn),
+            Some(serde_json::Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|s| arn_matches(s, method_arn)),
+            _ => false,
+        };
+        if !matches {
+            continue;
+        }
+        match effect {
+            "Deny" => return crate::state::AuthEffect::Deny,
+            "Allow" => allow = true,
+            _ => {}
+        }
+    }
+    if allow {
+        crate::state::AuthEffect::Allow
+    } else {
+        crate::state::AuthEffect::Deny
+    }
+}
+
+/// Glob-match a policy resource expression (`arn:...:*` etc) against a
+/// concrete method ARN. `*` matches any sequence inside a single
+/// segment; `?` matches a single character.
+fn arn_matches(pattern: &str, target: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    let mut p_chars = pattern.chars().peekable();
+    let mut t_chars = target.chars().peekable();
+    loop {
+        match (p_chars.peek().copied(), t_chars.peek().copied()) {
+            (None, None) => return true,
+            (Some('*'), _) => {
+                p_chars.next();
+                // Try matching * against 0, 1, 2, ... chars in target.
+                // Simple recursive backtracking (patterns are tiny).
+                let rest_p: String = p_chars.collect();
+                let mut rest_t: String = t_chars.collect();
+                loop {
+                    if arn_matches(&rest_p, &rest_t) {
+                        return true;
+                    }
+                    if rest_t.is_empty() {
+                        return false;
+                    }
+                    rest_t.remove(0);
+                }
+            }
+            (Some('?'), Some(_)) => {
+                p_chars.next();
+                t_chars.next();
+            }
+            (Some(pc), Some(tc)) if pc == tc => {
+                p_chars.next();
+                t_chars.next();
+            }
+            _ => return false,
+        }
+    }
 }
 
 #[path = "service_helpers.rs"]
