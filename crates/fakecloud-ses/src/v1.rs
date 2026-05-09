@@ -44,6 +44,7 @@ pub const V1_ACTIONS: &[&str] = &[
     "SendRawEmail",
     "SendTemplatedEmail",
     "SendBulkTemplatedEmail",
+    "SendBounce",
     // Templates
     "CreateTemplate",
     "GetTemplate",

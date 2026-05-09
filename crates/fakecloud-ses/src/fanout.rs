@@ -25,6 +25,10 @@ const COMPLAINT_ADDR: &str = "complaint@simulator.amazonses.com";
 #[cfg(test)]
 const SUCCESS_ADDR: &str = "success@simulator.amazonses.com";
 const SUPPRESSION_ADDR: &str = "suppressionlist@simulator.amazonses.com";
+const OOTO_ADDR: &str = "ooto@simulator.amazonses.com";
+const SOFTBOUNCE_ADDR: &str = "softbounce@simulator.amazonses.com";
+const FORWARDING_ADDR: &str = "forwarding@simulator.amazonses.com";
+const TRANSIENT_BOUNCE_ADDR: &str = "transient-bounce@simulator.amazonses.com";
 
 /// The event types we generate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +131,10 @@ pub fn classify_recipients(recipients: &[String]) -> (Vec<SesEventType>, bool) {
     let has_bounce = recipients.iter().any(|r| r == BOUNCE_ADDR);
     let has_complaint = recipients.iter().any(|r| r == COMPLAINT_ADDR);
     let has_suppression = recipients.iter().any(|r| r == SUPPRESSION_ADDR);
+    let has_ooto = recipients.iter().any(|r| r == OOTO_ADDR);
+    let has_softbounce = recipients.iter().any(|r| r == SOFTBOUNCE_ADDR);
+    let has_forwarding = recipients.iter().any(|r| r == FORWARDING_ADDR);
+    let has_transient_bounce = recipients.iter().any(|r| r == TRANSIENT_BOUNCE_ADDR);
     // success@simulator is the default behavior, no special handling needed
 
     if has_bounce {
@@ -140,6 +148,19 @@ pub fn classify_recipients(recipients: &[String]) -> (Vec<SesEventType>, bool) {
         events.push(SesEventType::Send);
         events.push(SesEventType::Bounce);
         suppress = true;
+    } else if has_ooto {
+        events.push(SesEventType::Send);
+        events.push(SesEventType::Delivery);
+        events.push(SesEventType::Complaint);
+    } else if has_softbounce {
+        events.push(SesEventType::Send);
+        events.push(SesEventType::Bounce);
+    } else if has_forwarding {
+        events.push(SesEventType::Send);
+        events.push(SesEventType::Delivery);
+    } else if has_transient_bounce {
+        events.push(SesEventType::Send);
+        events.push(SesEventType::Bounce);
     } else {
         // Normal send or success@simulator
         events.push(SesEventType::Send);
