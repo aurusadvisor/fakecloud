@@ -223,6 +223,20 @@ impl EcsRuntime {
                     ),
                 ));
             }
+            env.push((
+                "ECS_CONTAINER_METADATA_URI".into(),
+                format!(
+                    "http://host.docker.internal:{}/_fakecloud/ecs/v3/{}",
+                    self.server_port, task_id
+                ),
+            ));
+            env.push((
+                "ECS_CONTAINER_METADATA_URI_V4".into(),
+                format!(
+                    "http://host.docker.internal:{}/_fakecloud/ecs/v4/{}",
+                    self.server_port, task_id
+                ),
+            ));
             resolved_plans.push(ResolvedContainerPlan { plan, env });
         }
 
