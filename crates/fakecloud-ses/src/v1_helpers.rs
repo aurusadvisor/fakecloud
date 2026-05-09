@@ -379,6 +379,7 @@ pub(crate) fn parse_action(
         .or_else(|| parse_bounce_action(params, prefix))
         .or_else(|| parse_add_header_action(params, prefix))
         .or_else(|| parse_stop_action(params, prefix))
+        .or_else(|| parse_workmail_action(params, prefix))
 }
 
 pub(crate) fn parse_s3_action(
@@ -470,6 +471,19 @@ pub(crate) fn parse_stop_action(
         scope: scope.clone(),
         topic_arn: params
             .get(&format!("{prefix}.StopAction.TopicArn"))
+            .cloned(),
+    })
+}
+
+pub(crate) fn parse_workmail_action(
+    params: &HashMap<String, String>,
+    prefix: &str,
+) -> Option<ReceiptAction> {
+    let org_arn = params.get(&format!("{prefix}.WorkmailAction.OrganizationArn"))?;
+    Some(ReceiptAction::Workmail {
+        organization_arn: org_arn.clone(),
+        topic_arn: params
+            .get(&format!("{prefix}.WorkmailAction.TopicArn"))
             .cloned(),
     })
 }
@@ -612,6 +626,20 @@ pub(crate) fn receipt_action_xml(action: &ReceiptAction) -> String {
                 xml.push_str(&format!("<TopicArn>{}</TopicArn>", xml_escape(t)));
             }
             xml.push_str("</StopAction>");
+        }
+        ReceiptAction::Workmail {
+            organization_arn,
+            topic_arn,
+        } => {
+            xml.push_str("<WorkmailAction>");
+            xml.push_str(&format!(
+                "<OrganizationArn>{}</OrganizationArn>",
+                xml_escape(organization_arn)
+            ));
+            if let Some(t) = topic_arn {
+                xml.push_str(&format!("<TopicArn>{}</TopicArn>", xml_escape(t)));
+            }
+            xml.push_str("</WorkmailAction>");
         }
     }
     xml
@@ -2580,5 +2608,6 @@ pub(crate) fn action_type_name(action: &ReceiptAction) -> &'static str {
         ReceiptAction::Bounce { .. } => "Bounce",
         ReceiptAction::AddHeader { .. } => "AddHeader",
         ReceiptAction::Stop { .. } => "Stop",
+        ReceiptAction::Workmail { .. } => "Workmail",
     }
 }

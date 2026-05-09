@@ -308,6 +308,10 @@ pub enum ReceiptAction {
         scope: String,
         topic_arn: Option<String>,
     },
+    Workmail {
+        organization_arn: String,
+        topic_arn: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

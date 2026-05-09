@@ -37,6 +37,9 @@ pub struct DeliveryBus {
     /// Used by API Gateway v1's `COGNITO_USER_POOLS` authorizer to
     /// validate signature/expiry/audience and extract claims.
     cognito_jwt_verifier: Option<Arc<dyn CognitoJwtVerifier>>,
+    /// Encrypt/decrypt via KMS for cross-service SSE (S3 SSE-KMS, SES
+    /// S3Action KmsKeyArn, etc.).
+    kms_hook: Option<Arc<dyn KmsHook>>,
 }
 
 /// Message attribute for SQS delivery from SNS.
@@ -369,12 +372,62 @@ impl DeliveryBus {
             cloudwatch_metrics: None,
             cloudwatch_logs: None,
             cognito_jwt_verifier: None,
+            kms_hook: None,
         }
     }
 
     pub fn with_cognito_jwt_verifier(mut self, verifier: Arc<dyn CognitoJwtVerifier>) -> Self {
         self.cognito_jwt_verifier = Some(verifier);
         self
+    }
+
+    pub fn with_kms_hook(mut self, hook: Arc<dyn KmsHook>) -> Self {
+        self.kms_hook = Some(hook);
+        self
+    }
+
+    /// Encrypt plaintext with the supplied KMS key. Returns Err when no
+    /// KMS hook is wired or the encryption fails.
+    pub fn kms_encrypt(
+        &self,
+        account_id: &str,
+        region: &str,
+        key_id: &str,
+        plaintext: &[u8],
+        service_principal: &str,
+        encryption_context: std::collections::HashMap<String, String>,
+    ) -> Result<String, String> {
+        match self.kms_hook {
+            Some(ref h) => h.encrypt(
+                account_id,
+                region,
+                key_id,
+                plaintext,
+                service_principal,
+                encryption_context,
+            ),
+            None => Err("KMS hook not configured".to_string()),
+        }
+    }
+
+    /// Decrypt a KMS ciphertext blob. Returns Err when no KMS hook is
+    /// wired or the decryption fails.
+    pub fn kms_decrypt(
+        &self,
+        account_id: &str,
+        ciphertext_b64: &str,
+        service_principal: &str,
+        encryption_context: std::collections::HashMap<String, String>,
+    ) -> Result<Vec<u8>, String> {
+        match self.kms_hook {
+            Some(ref h) => h.decrypt(
+                account_id,
+                ciphertext_b64,
+                service_principal,
+                encryption_context,
+            ),
+            None => Err("KMS hook not configured".to_string()),
+        }
     }
 
     /// Verify a Cognito JWT against a user pool. Returns `Err` when no
