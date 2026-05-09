@@ -1134,9 +1134,9 @@ async fn apply_response_template(
         let body_str = String::from_utf8_lossy(backend_resp.body.expect_bytes()).to_string();
         let body_json: Value = serde_json::from_str(&body_str).unwrap_or(Value::Null);
         vtl_ctx.set("input", json!({"body": body_str, "json": body_json}));
-        crate::vtl::render(template, vtl_ctx)
+        crate::vtl::render(template, vtl_ctx).into_bytes()
     } else {
-        body_str(&backend_resp)
+        backend_resp.body.expect_bytes().to_vec()
     };
     Ok(AwsResponse {
         status: backend_resp.status,
@@ -1160,20 +1160,30 @@ async fn mock_response(
 ) -> Result<AwsResponse, AwsServiceError> {
     let method = integration.http_method.as_str();
     // Default to 200 when no explicit status code is configured.
-    let status_code = "200";
-    let key = response_key(api_id, resource_path, method, status_code);
+    let default_status = "200";
+    let key = response_key(api_id, resource_path, method, default_status);
     let accounts = service.state_handle().read();
     let state = accounts.get(&req.account_id);
-    let resp_record = state.and_then(|st| st.integration_responses.get(&key));
+    // Try the 200 response first; if absent scan for any integration
+    // response registered for this method and use its configured status.
+    let resp_record = state.and_then(|st| {
+        st.integration_responses.get(&key).or_else(|| {
+            let prefix = format!("{api_id}/{resource_path}/{method}/");
+            st.integration_responses
+                .iter()
+                .find(|(k, _)| k.starts_with(&prefix))
+                .map(|(_, v)| v)
+        })
+    });
     let (status, resp_templates) = if let Some(record) = resp_record {
         let status = record
             .get("statusCode")
             .and_then(|v| v.as_str())
-            .unwrap_or(status_code);
+            .unwrap_or(default_status);
         let templates = record.get("responseTemplates").and_then(|v| v.as_object());
         (status, templates)
     } else {
-        (status_code, None)
+        (default_status, None)
     };
     let status = status
         .parse::<u16>()
@@ -1196,10 +1206,6 @@ async fn mock_response(
         headers: http::HeaderMap::new(),
         body: bytes::Bytes::from(body).into(),
     })
-}
-
-fn body_str(resp: &AwsResponse) -> String {
-    String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
 }
 
 // ── Usage plan throttle + quota ──

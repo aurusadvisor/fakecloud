@@ -855,10 +855,12 @@ pub fn build_context(
     let util = json!({"_type": "util"});
     ctx.set("util", util);
 
-    // Stage variables
-    for (k, v) in stage_vars.iter() {
-        ctx.set(k, v.clone().into());
-    }
+    // $stageVariables
+    let sv: serde_json::Map<String, serde_json::Value> = stage_vars
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone().into()))
+        .collect();
+    ctx.set("stageVariables", serde_json::Value::Object(sv));
 
     ctx
 }
