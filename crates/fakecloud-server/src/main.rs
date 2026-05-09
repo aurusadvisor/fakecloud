@@ -2413,6 +2413,7 @@ async fn main() {
     let apigw_v1_registry_handle = Arc::new(std::sync::OnceLock::new());
     let mut apigw_v1_service = ApiGatewayService::new(apigatewayv1_state.clone())
         .with_waf(wafv2_state.clone(), wafv2_rate_limiter.clone())
+        .with_elbv2(elbv2_state.clone())
         .with_registry(apigw_v1_registry_handle.clone());
     {
         let cognito_jwt_verifier: Arc<dyn fakecloud_core::delivery::CognitoJwtVerifier> = Arc::new(
