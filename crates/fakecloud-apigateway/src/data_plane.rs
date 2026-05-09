@@ -1327,11 +1327,21 @@ fn enforce_request_validator(
             }
             let present = if let Some(name) = param_key.strip_prefix("method.request.querystring.")
             {
-                req.query_params.contains_key(name)
+                req.query_params
+                    .get(name)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
             } else if let Some(name) = param_key.strip_prefix("method.request.path.") {
-                path_params.contains_key(name)
+                path_params
+                    .get(name)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
             } else if let Some(name) = param_key.strip_prefix("method.request.header.") {
-                req.headers.contains_key(name)
+                req.headers
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false)
             } else {
                 // Unknown parameter source — skip.
                 true
@@ -1360,12 +1370,13 @@ fn enforce_request_validator(
 
         let model_name = match request_models.get(normalized) {
             Some(name) => name,
-            None => {
-                return Err(bad_request(format!(
-                    "Request body does not match model schema for content type {}",
-                    normalized
-                )));
-            }
+            None => match request_models.get("$default") {
+                Some(name) => name,
+                None => {
+                    // No model for this content type and no $default — skip body validation.
+                    return Ok(());
+                }
+            },
         };
 
         let model = state
@@ -2777,7 +2788,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_model_for_content_type_returns_400() {
+    async fn missing_model_for_content_type_skips_validation() {
         let state = build_state("NONE", None);
         {
             let mut accounts = state.write();
@@ -2790,17 +2801,100 @@ mod tests {
         }
         install_validator_and_model(&state, "val1", false, true);
         let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
         let service = build_service(state, lambda.clone(), None);
         let mut req = make_request(HeaderMap::new());
         req.body = bytes::Bytes::from(r#"{}"#);
+        let resp = handle(&service, &req)
+            .await
+            .expect("missing model skips validation");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 1);
+    }
+
+    #[tokio::test]
+    async fn blank_required_query_parameter_returns_400() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                m.request_parameters
+                    .insert("method.request.querystring.name".to_string(), true);
+            }
+        }
+        install_validator_and_model(&state, "val1", true, false);
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let mut req = make_request(HeaderMap::new());
+        req.query_params.insert("name".to_string(), "".to_string());
         let err = match handle(&service, &req).await {
             Err(e) => e,
-            Ok(_) => panic!("missing model must 400"),
+            Ok(_) => panic!("blank query param must 400"),
         };
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
-        assert!(err
-            .message()
-            .contains("Request body does not match model schema for content type"));
+        assert!(err.message().contains("Missing required request parameter"));
         assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
+    async fn blank_required_header_returns_400() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                m.request_parameters
+                    .insert("method.request.header.X-Required".to_string(), true);
+            }
+        }
+        install_validator_and_model(&state, "val1", true, false);
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Required", "".parse().unwrap());
+        let err = match handle(&service, &make_request(headers)).await {
+            Err(e) => e,
+            Ok(_) => panic!("blank header must 400"),
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("Missing required request parameter"));
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[tokio::test]
+    async fn default_model_used_when_no_exact_match() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let mkey = format!("{TEST_API_ID}/{RES_ID}/GET");
+            if let Some(m) = st.methods.get_mut(&mkey) {
+                m.request_validator_id = Some("val1".to_string());
+                m.request_models
+                    .insert("$default".to_string(), "ItemModel".to_string());
+            }
+        }
+        install_validator_and_model(&state, "val1", false, true);
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(
+            BACKEND_ARN,
+            serde_json::json!({"statusCode": 200, "body": "ok"}),
+        );
+        let service = build_service(state, lambda.clone(), None);
+        let mut req = make_request(HeaderMap::new());
+        req.body = bytes::Bytes::from(r#"{"name": "hello", "count": 42}"#);
+        let resp = handle(&service, &req)
+            .await
+            .expect("$default model should validate");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 1);
     }
 }

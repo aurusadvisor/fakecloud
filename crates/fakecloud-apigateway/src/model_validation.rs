@@ -269,10 +269,16 @@ fn check_format(fmt: &str, s: &str) -> bool {
         )
         .map(|re| re.is_match(s))
         .unwrap_or(true),
-        "ipv4" => Regex::new(r"^(\d{1,3}\.){3}\d{1,3}$")
-            .map(|re| re.is_match(s))
-            .unwrap_or(true),
-        "ipv6" => s.contains(':'),
+        "ipv4" => Regex::new(
+            r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$",
+        )
+        .map(|re| re.is_match(s))
+        .unwrap_or(true),
+        "ipv6" => Regex::new(
+            r"^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$",
+        )
+        .map(|re| re.is_match(s))
+        .unwrap_or(true),
         _ => true,
     }
 }
@@ -365,5 +371,38 @@ mod tests {
         assert!(validate(&schema, &json!({"name": "test"})).is_ok());
         let err = validate(&schema, &json!({"name": "test", "extra": 1})).unwrap_err();
         assert!(err.message.contains("Additional property not allowed"));
+    }
+
+    #[test]
+    fn format_ipv4_accepts_valid() {
+        let schema = json!({"type": "string", "format": "ipv4"});
+        assert!(validate(&schema, &json!("192.168.1.1")).is_ok());
+        assert!(validate(&schema, &json!("0.0.0.0")).is_ok());
+        assert!(validate(&schema, &json!("255.255.255.255")).is_ok());
+    }
+
+    #[test]
+    fn format_ipv4_rejects_invalid() {
+        let schema = json!({"type": "string", "format": "ipv4"});
+        assert!(validate(&schema, &json!("999.999.999.999")).is_err());
+        assert!(validate(&schema, &json!("256.1.1.1")).is_err());
+        assert!(validate(&schema, &json!("192.168.1")).is_err());
+        assert!(validate(&schema, &json!("not-an-ip")).is_err());
+    }
+
+    #[test]
+    fn format_ipv6_accepts_valid() {
+        let schema = json!({"type": "string", "format": "ipv6"});
+        assert!(validate(&schema, &json!("2001:0db8:85a3:0000:0000:8a2e:0370:7334")).is_ok());
+        assert!(validate(&schema, &json!("::1")).is_ok());
+        assert!(validate(&schema, &json!("fe80::1")).is_ok());
+    }
+
+    #[test]
+    fn format_ipv6_rejects_invalid() {
+        let schema = json!({"type": "string", "format": "ipv6"});
+        assert!(validate(&schema, &json!("not-an-ip")).is_err());
+        assert!(validate(&schema, &json!("192.168.1.1")).is_err());
+        assert!(validate(&schema, &json!(":::")).is_err());
     }
 }
