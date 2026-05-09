@@ -1167,3 +1167,195 @@ async fn get_route_not_found() {
     let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/routes/ghost"), "");
     assert!(svc.handle(req).await.is_err());
 }
+
+// ── JWT authorizer enforcement ──
+
+#[test]
+fn extract_identity_source_value_header() {
+    let mut req = make_request(Method::GET, "/prod/pets", "");
+    req.headers
+        .insert("Authorization", "Bearer tok".parse().unwrap());
+    assert_eq!(
+        super::extract_identity_source_value(&req, "$request.header.Authorization"),
+        Some("Bearer tok".to_string())
+    );
+}
+
+#[test]
+fn extract_identity_source_value_querystring() {
+    let mut req = make_request(Method::GET, "/prod/pets", "");
+    req.query_params
+        .insert("token".to_string(), "abc".to_string());
+    assert_eq!(
+        super::extract_identity_source_value(&req, "$request.querystring.token"),
+        Some("abc".to_string())
+    );
+}
+
+#[test]
+fn extract_identity_source_value_unknown_prefix() {
+    let req = make_request(Method::GET, "/prod/pets", "");
+    assert_eq!(
+        super::extract_identity_source_value(&req, "$request.body.action"),
+        None
+    );
+}
+
+#[test]
+fn issuer_to_pool_arn_parses_cognito_url() {
+    let arn = super::issuer_to_pool_arn(
+        "123456789012",
+        "us-east-1",
+        "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123",
+    );
+    assert_eq!(
+        arn,
+        Some("arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_abc123".to_string())
+    );
+}
+
+#[test]
+fn issuer_to_pool_arn_bad_format_returns_none() {
+    assert_eq!(
+        super::issuer_to_pool_arn("123456789012", "us-east-1", "not-a-url"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn execute_api_jwt_authorizer_no_token_returns_401() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    // Create JWT authorizer
+    let body = serde_json::json!({
+        "name": "jwt-auth",
+        "authorizerType": "JWT",
+        "identitySource": ["$request.header.Authorization"],
+        "jwtConfiguration": {
+            "audience": ["my-client-id"],
+            "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123"
+        }
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let auth_id = body_json(&resp)["authorizerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create integration
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create route with authorizer
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+        "authorizerId": auth_id
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Create stage
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Execute without token -> 401
+    let req = make_request(Method::GET, "/prod/pets", "");
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn execute_api_jwt_authorizer_no_delivery_returns_500() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    // Create JWT authorizer
+    let body = serde_json::json!({
+        "name": "jwt-auth",
+        "authorizerType": "JWT",
+        "identitySource": ["$request.header.Authorization"],
+        "jwtConfiguration": {
+            "audience": ["my-client-id"],
+            "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123"
+        }
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/authorizers"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let auth_id = body_json(&resp)["authorizerId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create integration
+    let body = serde_json::json!({"integrationType": "MOCK"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let integration_id = body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create route with authorizer
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "target": format!("integrations/{integration_id}"),
+        "authorizerId": auth_id
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Create stage
+    let body = serde_json::json!({"stageName": "prod"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Execute with token but no delivery -> 500
+    let mut req = make_request(Method::GET, "/prod/pets", "");
+    req.headers
+        .insert("Authorization", "Bearer dummy".parse().unwrap());
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}

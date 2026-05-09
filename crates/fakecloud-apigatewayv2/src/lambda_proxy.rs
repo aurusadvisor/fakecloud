@@ -14,6 +14,7 @@ pub fn construct_event(
     route_key: &str,
     stage: &str,
     path_parameters: HashMap<String, String>,
+    authorizer_claims: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let (is_base64_encoded, body) = encode_body(req);
 
@@ -42,26 +43,44 @@ pub fn construct_event(
         })
         .collect();
 
+    let mut request_context = serde_json::Map::new();
+    request_context.insert(
+        "http".to_string(),
+        json!({
+            "method": req.method.as_str(),
+            "path": req.raw_path,
+            "sourceIp": "127.0.0.1"
+        }),
+    );
+    request_context.insert("routeKey".to_string(), json!(route_key));
+    request_context.insert("stage".to_string(), json!(stage));
+    request_context.insert("requestId".to_string(), json!(&req.request_id));
+    request_context.insert("accountId".to_string(), json!(&req.account_id));
+    request_context.insert("domainName".to_string(), json!("localhost"));
+    request_context.insert("time".to_string(), json!(chrono::Utc::now().to_rfc3339()));
+    request_context.insert(
+        "timeEpoch".to_string(),
+        json!(chrono::Utc::now().timestamp_millis()),
+    );
+
+    if let Some(claims) = authorizer_claims {
+        let mut jwt = serde_json::Map::new();
+        jwt.insert("claims".to_string(), claims);
+        let mut authorizer = serde_json::Map::new();
+        authorizer.insert("jwt".to_string(), serde_json::Value::Object(jwt));
+        request_context.insert(
+            "authorizer".to_string(),
+            serde_json::Value::Object(authorizer),
+        );
+    }
+
     json!({
         "version": "2.0",
         "routeKey": route_key,
         "rawPath": req.raw_path,
         "rawQueryString": raw_query_string,
         "headers": headers,
-        "requestContext": {
-            "http": {
-                "method": req.method.as_str(),
-                "path": req.raw_path,
-                "sourceIp": "127.0.0.1"
-            },
-            "routeKey": route_key,
-            "stage": stage,
-            "requestId": &req.request_id,
-            "accountId": &req.account_id,
-            "domainName": "localhost",
-            "time": chrono::Utc::now().to_rfc3339(),
-            "timeEpoch": chrono::Utc::now().timestamp_millis()
-        },
+        "requestContext": serde_json::Value::Object(request_context),
         "pathParameters": path_parameters,
         "queryStringParameters": query_string_parameters,
         "body": body,
@@ -252,7 +271,7 @@ mod tests {
         let req = create_test_request();
         let path_params = HashMap::from([("id".to_string(), "123".to_string())]);
 
-        let event = construct_event(&req, "POST /pets/{id}", "prod", path_params);
+        let event = construct_event(&req, "POST /pets/{id}", "prod", path_params, None);
 
         assert_eq!(event["version"], "2.0");
         assert_eq!(event["routeKey"], "POST /pets/{id}");
@@ -263,6 +282,36 @@ mod tests {
         assert_eq!(event["queryStringParameters"]["filter"], "available");
         assert_eq!(event["body"], r#"{"name":"Fluffy"}"#);
         assert_eq!(event["isBase64Encoded"], false);
+    }
+
+    #[test]
+    fn test_construct_event_with_authorizer_claims() {
+        let req = create_test_request();
+        let path_params = HashMap::new();
+        let claims = json!({"sub": "user-123", "aud": "my-client"});
+
+        let event = construct_event(
+            &req,
+            "POST /pets",
+            "prod",
+            path_params,
+            Some(claims.clone()),
+        );
+
+        assert_eq!(
+            event["requestContext"]["authorizer"]["jwt"]["claims"],
+            claims
+        );
+    }
+
+    #[test]
+    fn test_construct_event_without_authorizer_omits_field() {
+        let req = create_test_request();
+        let event = construct_event(&req, "POST /pets", "prod", HashMap::new(), None);
+        assert!(
+            event["requestContext"]["authorizer"].is_null(),
+            "authorizer should be absent when None"
+        );
     }
 
     #[test]
@@ -347,7 +396,7 @@ mod tests {
             access_key_id: None,
             principal: None,
         };
-        let event = construct_event(&req, "POST /img", "prod", HashMap::new());
+        let event = construct_event(&req, "POST /img", "prod", HashMap::new(), None);
         assert_eq!(event["isBase64Encoded"], true);
     }
 
@@ -371,7 +420,7 @@ mod tests {
             access_key_id: None,
             principal: None,
         };
-        let event = construct_event(&req, "GET /noop", "prod", HashMap::new());
+        let event = construct_event(&req, "GET /noop", "prod", HashMap::new(), None);
         assert_eq!(event["isBase64Encoded"], false);
         assert!(event["body"].is_null());
     }

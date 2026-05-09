@@ -2035,6 +2035,11 @@ impl ApiGatewayV2Service {
                 )
             })?;
 
+        // Authorizer enforcement
+        let authorizer_claims = self
+            .enforce_authorizer(&req, &api_id, &route_match.route)
+            .await?;
+
         // Get the integration for this route
         let integration_id = route_match
             .route
@@ -2092,6 +2097,7 @@ impl ApiGatewayV2Service {
                     &route_match.route.route_key,
                     stage_name,
                     route_match.path_parameters,
+                    authorizer_claims.clone(),
                 );
 
                 lambda_proxy::invoke_lambda(delivery, function_arn, event).await?
@@ -2139,6 +2145,151 @@ impl ApiGatewayV2Service {
         );
 
         Ok(response)
+    }
+
+    /// Enforce the authorizer configured on a route. Returns the decoded
+    /// JWT claims when a JWT authorizer succeeds, or `None` when the route
+    /// has no authorizer. Propagates `401 Unauthorized` on failure.
+    async fn enforce_authorizer(
+        &self,
+        req: &AwsRequest,
+        api_id: &str,
+        route: &Route,
+    ) -> Result<Option<serde_json::Value>, AwsServiceError> {
+        let authorizer_id = match &route.authorizer_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        let authorizer = {
+            let accounts = self.state.read();
+            let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            state
+                .authorizers
+                .get(api_id)
+                .and_then(|a| a.get(authorizer_id))
+                .cloned()
+        };
+
+        let Some(authorizer) = authorizer else {
+            return Ok(None);
+        };
+
+        match authorizer.authorizer_type.as_str() {
+            "JWT" => self.enforce_jwt_authorizer(req, &authorizer).await,
+            _ => Ok(None),
+        }
+    }
+
+    /// Validate a JWT token against the configured issuer and audience.
+    async fn enforce_jwt_authorizer(
+        &self,
+        req: &AwsRequest,
+        authorizer: &Authorizer,
+    ) -> Result<Option<serde_json::Value>, AwsServiceError> {
+        let identity_sources = authorizer.identity_source.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::UNAUTHORIZED,
+                "UnauthorizedException",
+                "Authorizer has no identity source",
+            )
+        })?;
+
+        let token_value = identity_sources
+            .iter()
+            .find_map(|source| extract_identity_source_value(req, source))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::UNAUTHORIZED,
+                    "UnauthorizedException",
+                    "Missing required JWT",
+                )
+            })?;
+
+        let token = token_value
+            .strip_prefix("Bearer ")
+            .or_else(|| token_value.strip_prefix("bearer "))
+            .unwrap_or(&token_value)
+            .trim();
+
+        if token.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::UNAUTHORIZED,
+                "UnauthorizedException",
+                "Empty Authorization header",
+            ));
+        }
+
+        let jwt_config = authorizer.jwt_configuration.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                "JWT authorizer has no configuration",
+            )
+        })?;
+
+        let issuer = jwt_config.issuer.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                "JWT authorizer has no issuer",
+            )
+        })?;
+
+        let delivery = self.delivery.as_ref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                "JWT verifier not configured",
+            )
+        })?;
+
+        let pool_arn =
+            issuer_to_pool_arn(&req.account_id, &req.region, issuer).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    "Invalid JWT issuer format",
+                )
+            })?;
+
+        let claims = delivery
+            .verify_cognito_jwt(&req.account_id, &pool_arn, token)
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::UNAUTHORIZED,
+                    "UnauthorizedException",
+                    format!("Invalid JWT: {e}"),
+                )
+            })?;
+
+        // Validate audience
+        if let Some(audiences) = &jwt_config.audience {
+            let token_aud = claims.get("aud").and_then(|v| v.as_str());
+            let token_aud_array = claims.get("aud").and_then(|v| v.as_array());
+            let matches = token_aud
+                .map(|a| audiences.contains(&a.to_string()))
+                .unwrap_or(false)
+                || token_aud_array
+                    .map(|arr| {
+                        arr.iter().any(|v| {
+                            v.as_str()
+                                .map(|s| audiences.contains(&s.to_string()))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
+            if !matches {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::UNAUTHORIZED,
+                    "UnauthorizedException",
+                    "Invalid audience",
+                ));
+            }
+        }
+
+        Ok(Some(claims))
     }
 
     /// Build the resource ARN that callers use when associating a
@@ -2274,6 +2425,31 @@ fn decision_to_response(decision: fakecloud_wafv2::Decision) -> Option<AwsRespon
     let mut resp = AwsResponse::json_value(status, body);
     resp.content_type = "application/json".to_string();
     Some(resp)
+}
+
+/// Parse an API Gateway v2 identity-source expression and extract
+/// the corresponding value from the request.
+fn extract_identity_source_value(req: &AwsRequest, source: &str) -> Option<String> {
+    if let Some(header_name) = source.strip_prefix("$request.header.") {
+        req.headers
+            .get(header_name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    } else if let Some(param_name) = source.strip_prefix("$request.querystring.") {
+        req.query_params.get(param_name).cloned()
+    } else {
+        None
+    }
+}
+
+/// Map a Cognito issuer URL (`https://cognito-idp.<region>.amazonaws.com/<pool-id>`)
+/// to the corresponding user-pool ARN.
+fn issuer_to_pool_arn(account_id: &str, region: &str, issuer: &str) -> Option<String> {
+    let pool_id = issuer.rsplit_once('/')?.1;
+    Some(format!(
+        "arn:aws:cognito-idp:{}:{}:userpool/{}",
+        region, account_id, pool_id
+    ))
 }
 
 #[path = "service_helpers.rs"]
