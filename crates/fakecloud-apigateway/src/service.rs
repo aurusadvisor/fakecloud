@@ -380,5 +380,5 @@ mod service_vpc_links_etc;
 mod service_extras;
 
 #[path = "helpers.rs"]
-mod helpers;
+pub(crate) mod helpers;
 pub(crate) use helpers::*;
