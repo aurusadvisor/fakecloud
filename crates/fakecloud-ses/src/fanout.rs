@@ -1,6 +1,7 @@
 //! SES event fanout: publishes send/delivery/bounce/complaint events
 //! to configured event destinations (SNS topics, EventBridge buses).
 
+use base64::Engine;
 use chrono::Utc;
 use serde_json::json;
 use std::sync::Arc;
@@ -14,6 +15,8 @@ use crate::state::{EventDestination, SentEmail, SharedSesState, SuppressedDestin
 pub struct SesDeliveryContext {
     pub ses_state: SharedSesState,
     pub delivery_bus: Arc<DeliveryBus>,
+    pub account_id: String,
+    pub region: String,
 }
 
 /// Mailbox simulator addresses.
@@ -255,6 +258,60 @@ fn deliver_event(
                 &detail,
                 "default",
             );
+        }
+
+        // Kinesis / Firehose destination
+        if let Some(ref kf) = dest.kinesis_firehose_destination {
+            let event_json = event.to_string();
+            if let Some(ds_arn) = kf.get("DeliveryStreamARN").and_then(|v| v.as_str()) {
+                tracing::info!(
+                    delivery_stream_arn = %ds_arn,
+                    event_type = ?event_type,
+                    "SES event fanout -> Firehose"
+                );
+                ctx.delivery_bus
+                    .put_record_to_firehose(ds_arn, event_json.as_bytes());
+            }
+            if let Some(stream_arn) = kf.get("StreamARN").and_then(|v| v.as_str()) {
+                tracing::info!(
+                    stream_arn = %stream_arn,
+                    event_type = ?event_type,
+                    "SES event fanout -> Kinesis"
+                );
+                let data_b64 = base64::engine::general_purpose::STANDARD.encode(&event_json);
+                let partition_key = event["mail"]["messageId"].as_str().unwrap_or("default");
+                ctx.delivery_bus
+                    .put_record_to_kinesis(stream_arn, &data_b64, partition_key);
+            }
+        }
+
+        // CloudWatch destination
+        if let Some(ref cw) = dest.cloud_watch_destination {
+            if let Some(dims) = cw.get("DimensionConfigurations").and_then(|v| v.as_array()) {
+                for dim_cfg in dims {
+                    let dim_name = dim_cfg["DimensionName"].as_str().unwrap_or("EventType");
+                    let dim_value = dim_cfg["DefaultDimensionValue"]
+                        .as_str()
+                        .unwrap_or(event_type.as_str());
+                    let mut dimensions = std::collections::BTreeMap::new();
+                    dimensions.insert(dim_name.to_string(), dim_value.to_string());
+                    tracing::info!(
+                        dimension = %dim_name,
+                        event_type = ?event_type,
+                        "SES event fanout -> CloudWatch"
+                    );
+                    ctx.delivery_bus.put_cloudwatch_metric(
+                        &ctx.account_id,
+                        &ctx.region,
+                        "AWS/SES2",
+                        event_type.as_str(),
+                        1.0,
+                        Some("Count"),
+                        dimensions,
+                        Utc::now().timestamp_millis(),
+                    );
+                }
+            }
         }
     }
 }
@@ -720,5 +777,61 @@ mod tests {
         assert!(none.is_empty());
         let missing = get_matching_destinations(&state, "unknown", SesEventType::Send);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn deliver_event_kinesis_firehose_cloudwatch_no_panic() {
+        let state = shared_state();
+        state.write().default_mut().event_destinations.insert(
+            "cs".to_string(),
+            vec![EventDestination {
+                name: "multi-dest".to_string(),
+                enabled: true,
+                matching_event_types: vec!["SEND".to_string()],
+                kinesis_firehose_destination: Some(serde_json::json!({
+                    "DeliveryStreamARN": "arn:aws:firehose:us-east-1:123456789012:deliverystream/my-stream",
+                    "StreamARN": "arn:aws:kinesis:us-east-1:123456789012:stream/my-kinesis"
+                })),
+                cloud_watch_destination: Some(serde_json::json!({
+                    "DimensionConfigurations": [
+                        {
+                            "DimensionName": "EventType",
+                            "DimensionValueSource": "MESSAGE_TAG",
+                            "DefaultDimensionValue": "Send"
+                        }
+                    ]
+                })),
+                sns_destination: None,
+                event_bridge_destination: None,
+                pinpoint_destination: None,
+            }],
+        );
+        let ctx = SesDeliveryContext {
+            ses_state: state,
+            delivery_bus: Arc::new(DeliveryBus::new()),
+            account_id: "123456789012".to_string(),
+            region: "us-east-1".to_string(),
+        };
+        let event = build_ses_event(
+            SesEventType::Send,
+            &SentEmail {
+                message_id: "msg-1".to_string(),
+                from: "sender@example.com".to_string(),
+                to: vec!["recipient@example.com".to_string()],
+                cc: vec![],
+                bcc: vec![],
+                subject: None,
+                html_body: None,
+                text_body: None,
+                raw_data: None,
+                template_name: None,
+                template_data: None,
+                dkim_signature: None,
+                headers: Vec::new(),
+                timestamp: Utc::now(),
+            },
+        );
+        // No senders wired — must not panic.
+        deliver_event(&ctx, &event, SesEventType::Send, "cs");
     }
 }

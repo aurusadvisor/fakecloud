@@ -619,6 +619,14 @@ impl DeliveryBus {
         self
     }
 
+    /// Put a record to a Kinesis Data Stream identified by ARN.
+    /// Silently no-ops when no Kinesis sender is wired.
+    pub fn put_record_to_kinesis(&self, stream_arn: &str, data: &str, partition_key: &str) {
+        if let Some(ref sender) = self.kinesis_sender {
+            sender.put_record(stream_arn, data, partition_key);
+        }
+    }
+
     pub fn with_stepfunctions(mut self, starter: Arc<dyn StepFunctionsDelivery>) -> Self {
         self.stepfunctions_starter = Some(starter);
         self

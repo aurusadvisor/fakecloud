@@ -499,7 +499,7 @@ async fn main() {
         DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
             .with_sns(sns_delivery.clone())
-            .with_kinesis(kinesis_delivery_for_eb)
+            .with_kinesis(kinesis_delivery_for_eb.clone())
             .with_stepfunctions(sfn_delivery_for_eb),
     );
 
@@ -563,8 +563,8 @@ async fn main() {
         .with_sqs(sqs_delivery.clone())
         .with_kinesis(kinesis_delivery)
         .with_s3(s3_delivery_for_logs)
-        .with_firehose(firehose_delivery_for_logs)
-        .with_cloudwatch_metrics(cloudwatch_delivery_for_logs);
+        .with_firehose(firehose_delivery_for_logs.clone())
+        .with_cloudwatch_metrics(cloudwatch_delivery_for_logs.clone());
     if let Some(ref ld) = lambda_delivery {
         delivery_for_logs = delivery_for_logs.with_lambda(ld.clone());
     }
@@ -1616,11 +1616,16 @@ async fn main() {
     let delivery_for_ses = Arc::new(
         DeliveryBus::new()
             .with_sns(sns_delivery_for_ses)
-            .with_eventbridge(eb_delivery_for_ses),
+            .with_eventbridge(eb_delivery_for_ses)
+            .with_kinesis(kinesis_delivery_for_eb.clone())
+            .with_firehose(firehose_delivery_for_logs.clone())
+            .with_cloudwatch_metrics(cloudwatch_delivery_for_logs.clone()),
     );
     let ses_delivery_ctx = fakecloud_ses::fanout::SesDeliveryContext {
         ses_state: ses_state.clone(),
         delivery_bus: delivery_for_ses,
+        account_id: cli.account_id.clone(),
+        region: cli.region.clone(),
     };
     let ses_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
