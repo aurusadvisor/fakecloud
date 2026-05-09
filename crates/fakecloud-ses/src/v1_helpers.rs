@@ -39,6 +39,7 @@ pub fn handle_v1_action(
         "SendRawEmail" => send_raw_email(state, req),
         "SendTemplatedEmail" => send_templated_email(state, req),
         "SendBulkTemplatedEmail" => send_bulk_templated_email(state, req),
+        "SendBounce" => send_bounce(state, req),
         // Templates
         "CreateTemplate" => create_template(state, req),
         "GetTemplate" => get_template(state, req),
@@ -1627,6 +1628,91 @@ pub(crate) fn send_bulk_destination(
         .sent_emails
         .push(sent);
     message_id
+}
+
+pub(crate) fn send_bounce(
+    state: &SharedSesState,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let bounce_sender = required_param(&req.query_params, "BounceSender")?;
+    let original_message_id = required_param(&req.query_params, "OriginalMessageId")?;
+
+    let mut recipients: Vec<String> = Vec::new();
+    let mut recipient_xml = String::new();
+    for i in 1.. {
+        let prefix = format!("BouncedRecipientInfoList.member.{i}");
+        let recipient = match req.query_params.get(&format!("{prefix}.Recipient")) {
+            Some(r) => r.clone(),
+            None => break,
+        };
+        recipients.push(recipient.clone());
+        let bounce_type = req
+            .query_params
+            .get(&format!("{prefix}.BounceType"))
+            .map(|s| s.as_str())
+            .unwrap_or("ContentRejected");
+        let action = req
+            .query_params
+            .get(&format!("{prefix}.RecipientDsnFields.Action"))
+            .cloned()
+            .unwrap_or_else(|| "failed".to_string());
+        let status = req
+            .query_params
+            .get(&format!("{prefix}.RecipientDsnFields.Status"))
+            .cloned()
+            .unwrap_or_else(|| "5.1.1".to_string());
+        let diagnostic = req
+            .query_params
+            .get(&format!("{prefix}.RecipientDsnFields.DiagnosticCode"))
+            .cloned()
+            .unwrap_or_else(|| "smtp; 550 5.1.1 user unknown".to_string());
+        recipient_xml.push_str(&format!(
+            "<member>\
+             <Recipient>{recipient}</Recipient>\
+             <StatusCode>{status}</StatusCode>\
+             <Action>{action}</Action>\
+             <DiagnosticCode>{diagnostic}</DiagnosticCode>\
+             <BounceType>{bounce_type}</BounceType>\
+             </member>"
+        ));
+    }
+    if recipients.is_empty() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "MissingParameter",
+            "BouncedRecipientInfoList is required",
+        ));
+    }
+
+    let bounce_message_id = format!(
+        "{:016x}{:016x}-{:08x}-{:04x}",
+        rand_u64(),
+        rand_u64(),
+        rand_u32(),
+        rand_u16(),
+    );
+
+    let bounce = crate::state::SentBounce {
+        bounce_message_id: bounce_message_id.clone(),
+        original_message_id: original_message_id.to_string(),
+        bounce_sender: bounce_sender.to_string(),
+        bounced_recipients: recipients,
+        timestamp: Utc::now(),
+    };
+    state
+        .write()
+        .get_or_create(&req.account_id)
+        .bounces
+        .push(bounce);
+
+    let inner = format!(
+        "<MessageId>{bounce_message_id}</MessageId>\
+         <BouncedRecipientInfoList>{recipient_xml}</BouncedRecipientInfoList>"
+    );
+    Ok(AwsResponse::xml(
+        StatusCode::OK,
+        query_response_xml("SendBounce", SES_NS, &inner, &req.request_id),
+    ))
 }
 
 pub(crate) fn create_template(

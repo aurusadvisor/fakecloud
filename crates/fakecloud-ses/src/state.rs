@@ -105,6 +105,15 @@ pub struct SentEmail {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentBounce {
+    pub bounce_message_id: String,
+    pub original_message_id: String,
+    pub bounce_sender: String,
+    pub bounced_recipients: Vec<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContactList {
     pub contact_list_name: String,
     pub description: Option<String>,
@@ -350,6 +359,8 @@ pub struct SesState {
     pub templates: BTreeMap<String, EmailTemplate>,
     #[serde(default, skip_serializing)]
     pub sent_emails: Vec<SentEmail>,
+    #[serde(default, skip_serializing)]
+    pub bounces: Vec<SentBounce>,
     pub contact_lists: BTreeMap<String, ContactList>,
     pub contacts: BTreeMap<String, BTreeMap<String, Contact>>,
     /// Tags keyed by resource ARN, value is key→value tag map.
@@ -464,6 +475,7 @@ impl SesState {
             configuration_sets: BTreeMap::new(),
             templates: BTreeMap::new(),
             sent_emails: Vec::new(),
+            bounces: Vec::new(),
             contact_lists: BTreeMap::new(),
             contacts: BTreeMap::new(),
             tags: BTreeMap::new(),

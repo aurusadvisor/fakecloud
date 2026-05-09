@@ -1711,3 +1711,92 @@ fn send_email_v1_skips_suppressed_recipient() {
         Ok(_) => panic!("expected MessageRejected"),
     }
 }
+
+// ── X9: SendBounce + simulator addresses ──
+
+#[test]
+fn test_send_bounce_v1() {
+    let state = make_state();
+    let req = make_v1_request(
+        "SendBounce",
+        vec![
+            ("BounceSender", "bounce@example.com"),
+            ("OriginalMessageId", "msg-123"),
+            (
+                "BouncedRecipientInfoList.member.1.Recipient",
+                "bad@example.com",
+            ),
+            (
+                "BouncedRecipientInfoList.member.2.Recipient",
+                "unknown@example.com",
+            ),
+        ],
+    );
+    let resp = handle_v1_action(&state, &req).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<MessageId>"));
+    assert!(body.contains("<BouncedRecipientInfoList>"));
+    assert!(body.contains("<Recipient>bad@example.com</Recipient>"));
+    assert!(body.contains("<Recipient>unknown@example.com</Recipient>"));
+    assert!(body.contains("<BounceType>ContentRejected</BounceType>"));
+
+    let accounts = state.read();
+    let st = accounts.get("123456789012").unwrap();
+    assert_eq!(st.bounces.len(), 1);
+    assert_eq!(st.bounces[0].original_message_id, "msg-123");
+    assert_eq!(st.bounces[0].bounce_sender, "bounce@example.com");
+    assert_eq!(st.bounces[0].bounced_recipients.len(), 2);
+}
+
+#[test]
+fn test_send_bounce_v1_custom_dsn_fields() {
+    let state = make_state();
+    let req = make_v1_request(
+        "SendBounce",
+        vec![
+            ("BounceSender", "postmaster@example.com"),
+            ("OriginalMessageId", "abc-def"),
+            (
+                "BouncedRecipientInfoList.member.1.Recipient",
+                "user@example.com",
+            ),
+            (
+                "BouncedRecipientInfoList.member.1.BounceType",
+                "DoesNotExist",
+            ),
+            (
+                "BouncedRecipientInfoList.member.1.RecipientDsnFields.Action",
+                "failed",
+            ),
+            (
+                "BouncedRecipientInfoList.member.1.RecipientDsnFields.Status",
+                "5.1.1",
+            ),
+            (
+                "BouncedRecipientInfoList.member.1.RecipientDsnFields.DiagnosticCode",
+                "No such user",
+            ),
+        ],
+    );
+    let resp = handle_v1_action(&state, &req).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<BounceType>DoesNotExist</BounceType>"));
+    assert!(body.contains("<StatusCode>5.1.1</StatusCode>"));
+    assert!(body.contains("<DiagnosticCode>No such user</DiagnosticCode>"));
+}
+
+#[test]
+fn test_send_bounce_v1_missing_recipient() {
+    let state = make_state();
+    let req = make_v1_request(
+        "SendBounce",
+        vec![
+            ("BounceSender", "bounce@example.com"),
+            ("OriginalMessageId", "msg-123"),
+        ],
+    );
+    match handle_v1_action(&state, &req) {
+        Err(e) => assert_eq!(e.code(), "MissingParameter"),
+        Ok(_) => panic!("expected MissingParameter"),
+    }
+}
