@@ -2922,6 +2922,7 @@ dependencies = [
  "fakecloud-wafv2",
  "http 1.4.0",
  "parking_lot",
+ "percent-encoding",
  "regex",
  "reqwest",
  "serde",
