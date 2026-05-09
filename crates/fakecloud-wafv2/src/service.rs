@@ -1566,13 +1566,14 @@ impl Wafv2Service {
         let lock_token = require_str(&body, "LockToken")?;
         fakecloud_core::validation::validate_string_length("LockToken", &lock_token, 1, 36)?;
         let _scope = require_scope(&body)?;
-        let recommended_version = require_str(&body, "RecommendedVersion")?;
-        fakecloud_core::validation::validate_string_length(
-            "RecommendedVersion",
-            &recommended_version,
-            1,
-            64,
-        )?;
+        if let Some(recommended_version) = body.get("RecommendedVersion").and_then(Value::as_str) {
+            fakecloud_core::validation::validate_string_length(
+                "RecommendedVersion",
+                recommended_version,
+                1,
+                64,
+            )?;
+        }
         Ok(AwsResponse::ok_json(json!({
             "NextLockToken": synth_uuid(),
         })))
