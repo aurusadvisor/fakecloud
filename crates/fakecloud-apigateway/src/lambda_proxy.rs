@@ -146,7 +146,7 @@ fn is_binary_media_type(content_type: &str, binary_media_types: &[String]) -> bo
     let ct = content_type.to_lowercase();
     for pattern in binary_media_types {
         let p = pattern.to_lowercase();
-        if p == ct {
+        if p == ct || p == "*/*" {
             return true;
         }
         if p.ends_with("/*") {
